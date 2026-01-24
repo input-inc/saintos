@@ -38,6 +38,10 @@
   <exec_depend>builtin_interfaces</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 
+  <!-- Optional: micro-ROS agent for microcontroller node support -->
+  <!-- Install separately: apt install ros-humble-micro-ros-agent -->
+  <!-- Or build from source for non-Ubuntu platforms -->
+
   <!-- Message generation dependencies -->
   <member_of_group>rosidl_interface_packages</member_of_group>
   <depend>rosidl_default_runtime</depend>
