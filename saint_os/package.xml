@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>saint_os</name>
+  <version>0.5.0</version>
+  <description>
+    SAINT.OS - System for Articulated Intelligence and Navigation Tasks
+    A ROS2-based operating system for track-based robots with articulated arms and head.
+  </description>
+
+  <maintainer email="maintainer@example.com">SAINT.OS Team</maintainer>
+  <license>MIT</license>
+
+  <url type="website">https://github.com/OpenSAINT/SaintOS</url>
+  <url type="repository">https://github.com/OpenSAINT/SaintOS</url>
+
+  <author email="author@example.com">SAINT.OS Team</author>
+
+  <!-- Build tool dependencies -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <!-- Build dependencies -->
+  <build_depend>rclpy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>builtin_interfaces</build_depend>
+
+  <!-- Execution dependencies -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+
+  <!-- Message generation dependencies -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <depend>rosidl_default_runtime</depend>
+
+  <!-- Test dependencies -->
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

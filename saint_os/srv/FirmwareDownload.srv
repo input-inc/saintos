@@ -1,0 +1,10 @@
+# FirmwareDownload.srv
+# Download firmware update
+
+string node_id              # Node identifier
+string target_version       # Version to download (empty for latest)
+---
+bool success                # Download successful
+string download_url         # URL to download firmware
+string checksum_sha256      # SHA256 checksum for verification
+string error_message        # Error message if failed

@@ -1,0 +1,12 @@
+# Package-specific ignores
+
+# Generated message/service Python files (created by colcon build)
+saint_os/
+
+# Firmware images (built artifacts)
+firmware/current/*.img
+firmware/current/*.sha256
+firmware/archive/
+
+# Local configuration overrides
+config/*.local.yaml

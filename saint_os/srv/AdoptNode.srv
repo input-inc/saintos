@@ -1,0 +1,11 @@
+# AdoptNode.srv
+# Adopt an unadopted node
+
+string node_id              # Node identifier
+string role                 # "head", "arms", "tracks", "console"
+string instance             # Optional: "left", "right" for arms
+string display_name         # User-friendly name
+---
+bool success                # Adoption successful
+string message              # Status message
+string assigned_topic_prefix # e.g., "/saint/head" or "/saint/arms/left"

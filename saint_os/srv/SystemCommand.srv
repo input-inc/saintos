@@ -1,0 +1,9 @@
+# SystemCommand.srv
+# System-wide commands
+
+string command              # "shutdown", "reboot", "estop", "estop_release"
+string target               # Node ID or "all" for system-wide
+string[] parameters         # Additional parameters
+---
+bool success                # Command executed
+string message              # Status message

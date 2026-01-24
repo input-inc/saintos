@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAINT.OS Administration</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <header class="header">
+            <h1>SAINT.OS</h1>
+            <div class="status-indicator" id="connection-status">
+                <span class="status-dot"></span>
+                <span class="status-text">Connecting...</span>
+            </div>
+        </header>
+
+        <nav class="nav">
+            <a href="#dashboard" class="nav-link active" data-page="dashboard">Dashboard</a>
+            <a href="#nodes" class="nav-link" data-page="nodes">Nodes</a>
+            <a href="#routes" class="nav-link" data-page="routes">Routes</a>
+            <a href="#inputs" class="nav-link" data-page="inputs">Inputs</a>
+            <a href="#settings" class="nav-link" data-page="settings">Settings</a>
+            <a href="#logs" class="nav-link" data-page="logs">Logs</a>
+        </nav>
+
+        <main class="main">
+            <!-- Dashboard Page -->
+            <section id="page-dashboard" class="page active">
+                <h2>Dashboard</h2>
+
+                <div class="dashboard-grid">
+                    <div class="card">
+                        <h3>System Status</h3>
+                        <div id="system-status">
+                            <p><strong>Server:</strong> <span id="server-status">Loading...</span></p>
+                            <p><strong>Uptime:</strong> <span id="server-uptime">--</span></p>
+                            <p><strong>CPU:</strong> <span id="server-cpu">--%</span></p>
+                            <p><strong>Memory:</strong> <span id="server-memory">--%</span></p>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3>Activity Log</h3>
+                        <div id="activity-log" class="log-container">
+                            <p class="log-entry">Waiting for connection...</p>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3>Nodes</h3>
+                        <div id="nodes-summary">
+                            <p>Loading...</p>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3>Inputs</h3>
+                        <div id="inputs-summary">
+                            <p>Loading...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="quick-actions">
+                    <button class="btn" id="btn-scan-nodes">Scan for Nodes</button>
+                    <button class="btn btn-danger" id="btn-estop">E-Stop All</button>
+                    <button class="btn" id="btn-view-logs">View Logs</button>
+                </div>
+            </section>
+
+            <!-- Nodes Page -->
+            <section id="page-nodes" class="page">
+                <h2>Nodes</h2>
+                <div id="nodes-content">
+                    <h3>Adopted Nodes</h3>
+                    <div id="adopted-nodes" class="nodes-list">
+                        <p>Loading...</p>
+                    </div>
+
+                    <h3>Unadopted Nodes</h3>
+                    <div id="unadopted-nodes" class="nodes-list">
+                        <p>Loading...</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Routes Page -->
+            <section id="page-routes" class="page">
+                <h2>Routes</h2>
+                <div id="routes-content">
+                    <p>Route configuration coming soon...</p>
+                </div>
+            </section>
+
+            <!-- Inputs Page -->
+            <section id="page-inputs" class="page">
+                <h2>Inputs</h2>
+                <div id="inputs-content">
+                    <h3>WebSocket Clients</h3>
+                    <div id="ws-clients"></div>
+
+                    <h3>LiveLink Sources</h3>
+                    <div id="livelink-sources"></div>
+
+                    <h3>RC Receiver</h3>
+                    <div id="rc-status"></div>
+                </div>
+            </section>
+
+            <!-- Settings Page -->
+            <section id="page-settings" class="page">
+                <h2>Settings</h2>
+                <div id="settings-content">
+                    <p>Settings page coming soon...</p>
+                </div>
+            </section>
+
+            <!-- Logs Page -->
+            <section id="page-logs" class="page">
+                <h2>System Logs</h2>
+                <div id="logs-content">
+                    <div class="log-filters">
+                        <select id="log-level">
+                            <option value="all">All Levels</option>
+                            <option value="debug">Debug</option>
+                            <option value="info">Info</option>
+                            <option value="warn">Warning</option>
+                            <option value="error">Error</option>
+                        </select>
+                        <input type="text" id="log-search" placeholder="Search logs...">
+                    </div>
+                    <div id="log-entries" class="log-container full-height">
+                        <p>Loading logs...</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <span>SAINT.OS v<span id="version">0.5.0</span></span>
+            <span id="server-name">--</span>
+        </footer>
+    </div>
+
+    <script src="js/websocket.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

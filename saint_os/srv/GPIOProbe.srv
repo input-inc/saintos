@@ -1,0 +1,8 @@
+# GPIOProbe.srv
+# Probe GPIO status on a node
+
+string node_id              # Node identifier
+---
+bool success                # Probe successful
+saint_os/NodeGPIOStatus gpio_status  # Full GPIO status
+string error_message        # Error message if failed

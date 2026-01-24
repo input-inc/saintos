@@ -1,0 +1,87 @@
+# SAINT.OS Server Configuration
+# ================================
+
+# Server identification
+server_name: "SAINT-01"
+server_version: "0.5.0"
+
+# Network configuration
+network:
+  # Web administration interface
+  web_port: 80
+
+  # WebSocket server for client connections
+  websocket_port: 9090
+
+  # Internal network (Ethernet to nodes)
+  internal:
+    interface: "eth0"
+    subnet: "192.168.10.0/24"
+    server_ip: "192.168.10.1"
+    dhcp_range_start: "192.168.10.10"
+    dhcp_range_end: "192.168.10.254"
+
+  # External network (WiFi for clients)
+  external:
+    interface: "wlan0"
+    # IP assigned via DHCP from external network
+
+# LiveLink configuration
+livelink:
+  enabled: true
+  discovery_port: 54321
+  data_port: 54322
+  broadcast_name: "SAINT-01"
+
+# RC Receiver configuration
+rc_receiver:
+  enabled: false
+  protocol: "sbus"  # pwm, ppm, sbus, ibus, crsf
+
+  # UART settings (for SBUS/IBUS/CRSF)
+  uart:
+    device: "/dev/ttyAMA0"
+    baud_rate: 100000
+    inverted: true  # SBUS requires inversion
+
+  # GPIO settings (for PWM/PPM)
+  gpio:
+    ppm_pin: 18
+    pwm_pins: [12, 13, 19, 26]
+
+  # Failsafe behavior
+  failsafe:
+    timeout_ms: 500
+    action: "hold"  # hold, neutral, estop, passthrough
+
+# Router configuration
+router:
+  default_priority:
+    safety: 1000
+    rc: 300
+    websocket: 200
+    livelink: 100
+    autonomous: 50
+
+  blending:
+    mode: "priority"  # priority, blend, additive
+    blend_time_ms: 200
+    source_timeout_ms: 500
+
+# Firmware management
+firmware:
+  storage_path: "/var/lib/saint/firmware"
+  auto_update_check: true
+  update_check_interval_hours: 24
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARN, ERROR
+  file: "/var/log/saint/server.log"
+  max_size_mb: 100
+  backup_count: 5
+
+# Authentication (optional)
+auth:
+  enabled: false
+  token: ""  # Set to enable token-based auth

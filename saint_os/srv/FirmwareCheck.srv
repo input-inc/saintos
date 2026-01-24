@@ -1,0 +1,10 @@
+# FirmwareCheck.srv
+# Check for firmware updates
+
+string node_id              # Node identifier
+string current_version      # Current firmware version
+---
+bool update_available       # Update is available
+string latest_version       # Latest available version
+uint64 firmware_size        # Size in bytes
+string changelog            # Version changelog

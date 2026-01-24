@@ -1,0 +1,8 @@
+# ResetNode.srv
+# Reset a node to unadopted state
+
+string node_id              # Node identifier
+bool factory_reset          # Also clear firmware (re-download on boot)
+---
+bool success                # Reset successful
+string message              # Status message
