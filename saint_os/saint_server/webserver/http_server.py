@@ -57,7 +57,7 @@ class WebServer:
 
         # Serve static files
         if os.path.isdir(self.web_root):
-            self.app.router.add_static('/', self.web_root, show_index=False)
+            self.app.router.add_static('/', self.web_root, show_index=False, follow_symlinks=True)
             self.log('info', f'Serving static files from: {self.web_root}')
         else:
             self.log('warn', f'Web root directory not found: {self.web_root}')
