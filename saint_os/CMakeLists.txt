@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.14...3.30)
 project(saint_os)
 
 # Default to C++17
@@ -63,6 +63,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
     std_msgs
     geometry_msgs
     sensor_msgs
+    nav_msgs
     builtin_interfaces
 )
 
@@ -107,6 +108,7 @@ install(DIRECTORY
 
 install(PROGRAMS
   scripts/build_firmware.py
+  scripts/saint_server
   DESTINATION lib/${PROJECT_NAME}
 )
 

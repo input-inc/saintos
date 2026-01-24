@@ -80,6 +80,10 @@ conda install ros-humble-desktop -y
 
 # Install colcon build tools
 conda install colcon-common-extensions -y
+
+# IMPORTANT: Install compatible CMake version
+# CMake 3.27+ removed legacy Python finding modules that RoboStack packages depend on
+conda install "cmake>=3.16,<3.27" -y
 ```
 
 ##### 3. Activate and Verify
@@ -89,7 +93,8 @@ conda install colcon-common-extensions -y
 conda activate ros2_env
 
 # Verify installation
-ros2 --version
+ros2 doctor --report  # Note: 'ros2 --version' is not supported
+which ros2
 colcon --help
 ```
 
@@ -193,9 +198,9 @@ docker run -it --rm \
 # For Conda: activate environment first
 conda activate ros2_env
 
-# Verify ROS2
-ros2 --version
-ros2 topic list
+# Verify ROS2 is installed
+which ros2
+ros2 pkg list | head -10  # List some installed packages
 
 # Verify colcon
 colcon --help
@@ -329,12 +334,14 @@ cd SaintOS/source
 # Activate your ROS2 Conda environment
 conda activate ros2_env
 
-# Build using the build script
-./saint_os/scripts/build.sh
+# Build using colcon directly (recommended for macOS)
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# Or using the Python script
-python3 saint_os/scripts/build.py
+# Source the workspace after building
+source install/setup.zsh  # or setup.bash
 ```
+
+**Note:** If the build script fails on macOS, use `colcon build` directly as shown above.
 
 #### Linux
 
@@ -409,17 +416,21 @@ If you prefer to build manually:
 # Navigate to workspace (parent of saint_os)
 cd SaintOS/source
 
-# Source ROS2
+# Source ROS2 (Linux)
 source /opt/ros/humble/setup.bash
 
-# Install Python dependencies
-pip install -e saint_os/.[dev]
+# Or for macOS with Conda/RoboStack
+conda activate ros2_env
+
+# Install Python dependencies (optional)
+pip install websockets aiohttp pyyaml numpy
 
 # Build with colcon
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # Source the built workspace
-source install/setup.bash
+source install/setup.bash   # Linux/bash
+source install/setup.zsh    # macOS/zsh
 
 # Run tests (optional)
 colcon test
@@ -433,8 +444,12 @@ colcon test-result --verbose
 After building, you can run the SAINT.OS server:
 
 ```bash
+# For macOS with Conda, activate environment first
+conda activate ros2_env
+
 # Source the workspace
-source install/setup.bash
+source install/setup.bash   # Linux/bash
+source install/setup.zsh    # macOS/zsh
 
 # Run the server
 ros2 run saint_os saint_server
@@ -568,7 +583,7 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 #### macOS Apple Silicon: Architecture issues
 
-If you encounter architecture-related issues on M1/M2 Macs:
+If you encounter architecture-related issues on M1/M2/M3/M4 Macs:
 
 ```bash
 # Ensure you're using native ARM Python
@@ -576,6 +591,39 @@ arch -arm64 python3 -m pip install <package>
 
 # Or run the build under Rosetta if needed
 arch -x86_64 ./saint_os/scripts/build.sh
+```
+
+#### macOS: CMake cannot find Python
+
+If you see errors like `Could NOT find Python (missing: Python_EXECUTABLE...)` or
+`Could not find a package configuration file provided by "PythonInterp"`:
+
+This is caused by CMake 3.27+ removing legacy Python finding modules (CMP0148) that
+RoboStack's ROS2 packages still depend on.
+
+**Solution:** Install CMake version 3.26 or earlier:
+
+```bash
+conda activate ros2_env
+conda install "cmake>=3.16,<3.27" -y
+```
+
+Then clean and rebuild:
+
+```bash
+rm -rf build install log
+colcon build --symlink-install
+```
+
+#### macOS: Missing ROS2 message headers
+
+If you see errors like `fatal error: 'nav_msgs/msg/...' file not found`:
+
+The package dependencies may not be properly linked. Try a clean build:
+
+```bash
+rm -rf build install log
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
 
 ### Getting Help
@@ -603,4 +651,5 @@ After successful installation:
 |-----------|---------|
 | SAINT.OS | 0.5.0 |
 | ROS2 | Humble (recommended) |
-| Python | 3.10+ |
+| Python | 3.10+ (3.11 recommended) |
+| CMake | 3.16 - 3.26 (macOS RoboStack) |
