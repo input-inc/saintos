@@ -19,6 +19,7 @@ setup(
         'aiohttp>=3.8.0',
         'pyyaml>=6.0',
         'numpy>=1.21.0',
+        'psutil>=5.9.0',
     ],
     extras_require={
         'dev': [
