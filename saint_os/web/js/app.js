@@ -81,6 +81,7 @@ class SaintApp {
 
         document.getElementById('btn-view-logs')?.addEventListener('click', () => {
             this.showPage('logs');
+            window.location.hash = 'logs';
         });
 
         // Log filters
@@ -95,12 +96,20 @@ class SaintApp {
     showPage(pageId) {
         // Update navigation
         document.querySelectorAll('.nav-link').forEach(link => {
-            link.classList.toggle('active', link.dataset.page === pageId);
+            if (link.dataset.page === pageId) {
+                link.classList.add('active');
+            } else {
+                link.classList.remove('active');
+            }
         });
 
         // Show page
         document.querySelectorAll('.page').forEach(page => {
-            page.classList.toggle('active', page.id === `page-${pageId}`);
+            if (page.id === `page-${pageId}`) {
+                page.classList.add('active');
+            } else {
+                page.classList.remove('active');
+            }
         });
 
         this.currentPage = pageId;
@@ -164,12 +173,12 @@ class SaintApp {
         const statusText = document.querySelector('.status-text');
 
         if (connected) {
-            statusDot.classList.add('online');
-            statusDot.classList.remove('offline');
+            statusDot.classList.remove('bg-amber-500', 'bg-red-500', 'animate-pulse-dot');
+            statusDot.classList.add('bg-emerald-500');
             statusText.textContent = 'Connected';
         } else {
-            statusDot.classList.remove('online');
-            statusDot.classList.add('offline');
+            statusDot.classList.remove('bg-emerald-500', 'bg-amber-500');
+            statusDot.classList.add('bg-red-500', 'animate-pulse-dot');
             statusText.textContent = 'Disconnected';
         }
     }
@@ -191,16 +200,31 @@ class SaintApp {
         const status = this.systemStatus;
         if (!status) return;
 
-        document.getElementById('server-status').textContent =
-            status.server_online ? 'Online' : 'Offline';
+        // Update status badge
+        const statusBadge = document.getElementById('server-status');
+        if (status.server_online) {
+            statusBadge.textContent = 'Online';
+            statusBadge.className = 'px-2 py-1 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400';
+        } else {
+            statusBadge.textContent = 'Offline';
+            statusBadge.className = 'px-2 py-1 text-xs font-medium rounded-full bg-red-500/20 text-red-400';
+        }
+
+        // Update values
         document.getElementById('server-uptime').textContent =
             this.formatUptime(status.uptime_seconds);
-        document.getElementById('server-cpu').textContent =
-            `${status.cpu_usage?.toFixed(1) || '--'}%`;
-        document.getElementById('server-memory').textContent =
-            `${status.memory_usage?.toFixed(1) || '--'}%`;
         document.getElementById('server-name').textContent =
             status.server_name || '--';
+
+        // Update CPU with progress bar
+        const cpuValue = status.cpu_usage?.toFixed(1) || '0';
+        document.getElementById('server-cpu').textContent = `${cpuValue}%`;
+        document.getElementById('cpu-bar').style.width = `${cpuValue}%`;
+
+        // Update Memory with progress bar
+        const memValue = status.memory_usage?.toFixed(1) || '0';
+        document.getElementById('server-memory').textContent = `${memValue}%`;
+        document.getElementById('memory-bar').style.width = `${memValue}%`;
     }
 
     /**
@@ -227,11 +251,19 @@ class SaintApp {
      */
     addActivityLogEntry(message) {
         const logContainer = document.getElementById('activity-log');
-        const entry = document.createElement('p');
-        entry.className = `log-entry ${message.level || 'info'}`;
+        const entry = document.createElement('div');
+
+        const level = message.level || 'info';
+        entry.className = `log-entry ${level}`;
 
         const time = new Date().toLocaleTimeString();
-        entry.textContent = `${time} ${message.text || message.message}`;
+        entry.innerHTML = `<span class="text-slate-500">${time}</span> ${message.text || message.message}`;
+
+        // Remove "waiting" message if it exists
+        const waiting = logContainer.querySelector('.text-slate-500:not(.log-entry span)');
+        if (waiting && waiting.textContent.includes('Waiting')) {
+            waiting.remove();
+        }
 
         logContainer.insertBefore(entry, logContainer.firstChild);
 
@@ -272,16 +304,38 @@ class SaintApp {
         const adopted = this.nodes.adopted;
         const unadopted = this.nodes.unadopted;
 
-        let html = `<p><strong>Adopted:</strong> ${adopted.length}</p>`;
-        html += `<p><strong>Unadopted:</strong> ${unadopted.length}</p>`;
+        let html = `
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                    <span class="text-slate-300">Adopted</span>
+                </div>
+                <span class="text-xl font-bold text-white">${adopted.length}</span>
+            </div>
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-amber-500"></span>
+                    <span class="text-slate-300">Unadopted</span>
+                </div>
+                <span class="text-xl font-bold text-white">${unadopted.length}</span>
+            </div>
+        `;
 
         if (adopted.length > 0) {
-            html += '<ul>';
-            for (const node of adopted.slice(0, 5)) {
-                const status = node.online ? '●' : '○';
-                html += `<li>${status} ${node.display_name || node.node_id} (${node.role})</li>`;
+            html += '<div class="mt-4 pt-4 border-t border-slate-700 space-y-2">';
+            for (const node of adopted.slice(0, 3)) {
+                const statusColor = node.online ? 'bg-emerald-500' : 'bg-slate-500';
+                html += `
+                    <div class="flex items-center justify-between text-sm">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full ${statusColor}"></span>
+                            <span class="text-slate-200">${node.display_name || node.node_id}</span>
+                        </div>
+                        <span class="text-slate-400">${node.role}</span>
+                    </div>
+                `;
             }
-            html += '</ul>';
+            html += '</div>';
         }
 
         container.innerHTML = html;
@@ -315,18 +369,27 @@ class SaintApp {
         // Adopted nodes
         const adoptedContainer = document.getElementById('adopted-nodes');
         if (this.nodes.adopted.length === 0) {
-            adoptedContainer.innerHTML = '<p>No adopted nodes</p>';
+            adoptedContainer.innerHTML = '<p class="text-slate-400 col-span-full">No adopted nodes</p>';
         } else {
             adoptedContainer.innerHTML = this.nodes.adopted.map(node => `
-                <div class="node-item">
-                    <div class="node-status">
-                        <span class="status-dot ${node.online ? 'online' : 'offline'}"></span>
-                        <strong>${node.display_name || node.node_id}</strong>
-                        <span>(${node.role})</span>
+                <div class="node-card">
+                    <div class="flex items-start justify-between mb-3">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full ${node.online ? 'bg-emerald-500' : 'bg-slate-500'}"></span>
+                            <span class="font-medium text-white">${node.display_name || node.node_id}</span>
+                        </div>
+                        <span class="px-2 py-0.5 text-xs rounded-full bg-cyan-500/20 text-cyan-400">${node.role}</span>
                     </div>
-                    <div>
-                        <button class="btn" onclick="app.viewNode('${node.node_id}')">View</button>
-                        <button class="btn" onclick="app.resetNode('${node.node_id}')">Reset</button>
+                    <div class="text-sm text-slate-400 mb-3">
+                        <p>${node.hardware_model || 'Unknown hardware'}</p>
+                    </div>
+                    <div class="flex items-center gap-2 pt-3 border-t border-slate-700">
+                        <button class="btn-sm bg-slate-700 hover:bg-slate-600 text-slate-200" onclick="app.viewNode('${node.node_id}')">
+                            View
+                        </button>
+                        <button class="btn-sm bg-slate-700 hover:bg-red-600 text-slate-200" onclick="app.resetNode('${node.node_id}')">
+                            Reset
+                        </button>
                     </div>
                 </div>
             `).join('');
@@ -335,17 +398,25 @@ class SaintApp {
         // Unadopted nodes
         const unadoptedContainer = document.getElementById('unadopted-nodes');
         if (this.nodes.unadopted.length === 0) {
-            unadoptedContainer.innerHTML = '<p>No unadopted nodes found</p>';
+            unadoptedContainer.innerHTML = '<p class="text-slate-400 col-span-full">No unadopted nodes found</p>';
         } else {
             unadoptedContainer.innerHTML = this.nodes.unadopted.map(node => `
-                <div class="node-item">
-                    <div class="node-status">
-                        <span class="status-dot online"></span>
-                        <strong>${node.node_id}</strong>
-                        <span>${node.hardware_model || 'Unknown'}</span>
+                <div class="node-card border-amber-500/30">
+                    <div class="flex items-start justify-between mb-3">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>
+                            <span class="font-medium text-white">${node.node_id}</span>
+                        </div>
+                        <span class="px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400">New</span>
                     </div>
-                    <div>
-                        <button class="btn" onclick="app.adoptNode('${node.node_id}')">Adopt</button>
+                    <div class="text-sm text-slate-400 mb-3 space-y-1">
+                        <p>${node.hardware_model || 'Unknown hardware'}</p>
+                        <p class="font-mono text-xs">${node.ip_address || '--'}</p>
+                    </div>
+                    <div class="flex items-center gap-2 pt-3 border-t border-slate-700">
+                        <button class="btn-sm bg-cyan-600 hover:bg-cyan-500 text-white flex-1" onclick="app.adoptNode('${node.node_id}')">
+                            Adopt Node
+                        </button>
                     </div>
                 </div>
             `).join('');
@@ -401,6 +472,7 @@ class SaintApp {
      */
     viewNode(nodeId) {
         console.log('View node:', nodeId);
+        this.addActivityLogEntry({ text: `Viewing node ${nodeId}`, level: 'info' });
         // TODO: Implement node detail view
     }
 
@@ -415,7 +487,7 @@ class SaintApp {
         const ws = window.saintWS;
 
         try {
-            await ws.management('reset_node', { node_id: nodeId, factory_reset: false });
+            await ws.management('reset_node', { node_id: nodeId, factory_reset: true });
             this.addActivityLogEntry({ text: `Node ${nodeId} reset`, level: 'info' });
             await this.loadNodesData();
         } catch (error) {
@@ -428,9 +500,14 @@ class SaintApp {
      * Adopt a node.
      */
     async adoptNode(nodeId) {
-        // TODO: Show adoption dialog with role selection
-        const role = prompt('Enter role (head, arms, tracks, console):');
+        const roles = ['head', 'arms', 'tracks', 'console'];
+        const role = prompt(`Enter role for node ${nodeId}:\n\nAvailable roles: ${roles.join(', ')}`);
         if (!role) return;
+
+        if (!roles.includes(role)) {
+            alert(`Invalid role. Please use one of: ${roles.join(', ')}`);
+            return;
+        }
 
         const ws = window.saintWS;
 
@@ -449,6 +526,7 @@ class SaintApp {
      */
     filterLogs(level) {
         // TODO: Implement log filtering
+        console.log('Filter logs by:', level);
     }
 }
 
