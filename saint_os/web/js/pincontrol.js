@@ -107,13 +107,25 @@ class PinControlManager {
      * @param {Array} pins - Array of pin configs from node pin_config
      */
     renderControls(container, pins) {
-        if (!container) return;
+        if (!container) {
+            console.warn('PinControlManager: No container provided');
+            return;
+        }
+
+        console.log('PinControlManager: Rendering controls for', pins?.length || 0, 'pins', pins);
 
         if (!pins || pins.length === 0) {
             container.innerHTML = `
-                <p class="text-slate-400 text-sm">
-                    No pins configured. Go to Pin Configuration to assign pins.
-                </p>
+                <div class="flex flex-col items-center justify-center py-8 text-center">
+                    <svg class="w-12 h-12 text-slate-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
+                    </svg>
+                    <h3 class="text-lg font-medium text-slate-300 mb-2">No Pins Configured</h3>
+                    <p class="text-slate-500 text-sm mb-4">Configure pins in the Pin Config tab to control them here.</p>
+                    <button onclick="app.switchNodeTab('pinconfig')" class="btn-secondary text-sm">
+                        Go to Pin Config
+                    </button>
+                </div>
             `;
             return;
         }

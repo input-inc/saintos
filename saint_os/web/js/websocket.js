@@ -41,11 +41,25 @@ class SaintWebSocket {
 
     /**
      * Send a message to the server.
+     * Can be called as send(type, action, params) or send({type, action, params})
      */
-    send(type, action, params = {}) {
+    send(typeOrMessage, action, params = {}) {
         if (!this.connected) {
             console.warn('Not connected, cannot send message');
             return Promise.reject(new Error('Not connected'));
+        }
+
+        // Support both calling conventions
+        let type, messageParams;
+        if (typeof typeOrMessage === 'object') {
+            // Called as send({type, action, params})
+            type = typeOrMessage.type;
+            action = typeOrMessage.action;
+            messageParams = typeOrMessage.params || {};
+        } else {
+            // Called as send(type, action, params)
+            type = typeOrMessage;
+            messageParams = params;
         }
 
         const id = `req_${++this.requestId}`;
@@ -53,7 +67,7 @@ class SaintWebSocket {
             id,
             type,
             action,
-            params
+            params: messageParams
         };
 
         return new Promise((resolve, reject) => {
@@ -97,6 +111,13 @@ class SaintWebSocket {
      */
     subscribe(topics, rateHz = 10) {
         return this.send('subscribe', 'subscribe', { topics, rate_hz: rateHz });
+    }
+
+    /**
+     * Unsubscribe from topics.
+     */
+    unsubscribe(topics) {
+        return this.send('subscribe', 'unsubscribe', { topics });
     }
 
     /**

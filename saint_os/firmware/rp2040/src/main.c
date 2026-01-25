@@ -283,6 +283,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"ip\":\"%d.%d.%d.%d\","
         "\"hw\":\"%s\","
         "\"fw\":\"%s\","
+        "\"fw_build\":\"%s\","
         "\"state\":\"%s\","
         "\"uptime\":%lu"
         "}",
@@ -293,7 +294,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         g_node.static_ip[0], g_node.static_ip[1],
         g_node.static_ip[2], g_node.static_ip[3],
         HARDWARE_MODEL,
-        FIRMWARE_VERSION_STRING,
+        FIRMWARE_VERSION_FULL,
+        FIRMWARE_BUILD_TIMESTAMP,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000
     );
@@ -560,7 +562,7 @@ int main(void)
 
     printf("\n");
     printf("========================================\n");
-    printf("SAINT.OS Node Firmware v%s\n", FIRMWARE_VERSION_STRING);
+    printf("SAINT.OS Node Firmware v%s (built %s)\n", FIRMWARE_VERSION_FULL, FIRMWARE_BUILD_TIMESTAMP);
     printf("Hardware: %s\n", HARDWARE_MODEL);
     printf("========================================\n");
 

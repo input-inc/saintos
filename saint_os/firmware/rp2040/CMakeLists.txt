@@ -39,8 +39,31 @@ pico_sdk_init()
 
 # Firmware version
 set(FIRMWARE_VERSION_MAJOR 1)
-set(FIRMWARE_VERSION_MINOR 0)
+set(FIRMWARE_VERSION_MINOR 1)
 set(FIRMWARE_VERSION_PATCH 0)
+
+# Build timestamp
+string(TIMESTAMP FIRMWARE_BUILD_DATE "%Y-%m-%d")
+string(TIMESTAMP FIRMWARE_BUILD_TIME "%H:%M:%S")
+
+# Git hash (if in a git repo)
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE FIRMWARE_GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT FIRMWARE_GIT_HASH)
+    set(FIRMWARE_GIT_HASH "unknown")
+endif()
+
+# Version suffix (includes git hash for simulation/dev builds)
+if(SIMULATION)
+    set(FIRMWARE_VERSION_SUFFIX "-${FIRMWARE_GIT_HASH}")
+else()
+    set(FIRMWARE_VERSION_SUFFIX "")
+endif()
 
 # Build option for Renode simulation (uses UART instead of USB)
 option(SIMULATION "Build for Renode simulation with UART output" OFF)

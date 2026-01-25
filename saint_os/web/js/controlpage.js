@@ -38,12 +38,15 @@ class ControlPage {
      * Load data when page becomes active.
      */
     async load() {
+        console.log('ControlPage: Loading...');
+
         if (!this.container) {
             this.container = document.getElementById('control-nodes-container');
         }
 
         const ws = window.saintWS;
         if (!ws.connected) {
+            console.warn('ControlPage: Not connected to server');
             this.container.innerHTML = `
                 <div class="card">
                     <p class="text-slate-400 text-sm">Not connected to server.</p>
@@ -54,12 +57,14 @@ class ControlPage {
 
         try {
             // Get adopted nodes
+            console.log('ControlPage: Fetching adopted nodes...');
             const result = await ws.management('list_adopted');
+            console.log('ControlPage: Got nodes:', result);
             this.nodes = result.nodes || [];
 
             this.render();
         } catch (e) {
-            console.error('Failed to load control page:', e);
+            console.error('ControlPage: Failed to load:', e);
             this.container.innerHTML = `
                 <div class="card">
                     <p class="text-red-400 text-sm">Failed to load nodes: ${e.message}</p>

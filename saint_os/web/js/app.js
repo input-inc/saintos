@@ -635,7 +635,12 @@ class SaintApp {
      * Load pin controls for the State tab.
      */
     async loadStateTabControls() {
-        if (!this.currentNodeId || !this.currentNodeInfo) return;
+        console.log('Loading State tab controls for node:', this.currentNodeId);
+
+        if (!this.currentNodeId || !this.currentNodeInfo) {
+            console.warn('No current node selected');
+            return;
+        }
 
         // Set node for pin control manager
         if (typeof pinControlManager !== 'undefined') {
@@ -644,9 +649,11 @@ class SaintApp {
             // Get configured pins from node info
             const ws = window.saintWS;
             try {
+                console.log('Fetching pin config for', this.currentNodeId);
                 const configResult = await ws.management('get_pin_config', {
                     node_id: this.currentNodeId
                 });
+                console.log('Pin config result:', configResult);
 
                 // Convert config to pins array
                 const pins = [];
@@ -661,6 +668,7 @@ class SaintApp {
                         }
                     }
                 }
+                console.log('Extracted pins:', pins);
 
                 // Render controls
                 const container = document.getElementById('pin-controls-container');
@@ -675,8 +683,18 @@ class SaintApp {
                 // Setup quick action buttons
                 this.setupQuickActionButtons(pins);
             } catch (e) {
-                console.warn('Failed to load pin config:', e);
+                console.error('Failed to load pin config:', e);
+                const container = document.getElementById('pin-controls-container');
+                if (container) {
+                    container.innerHTML = `
+                        <div class="p-4 bg-red-900/20 border border-red-800/50 rounded-lg">
+                            <p class="text-red-400">Failed to load pin configuration: ${e.message}</p>
+                        </div>
+                    `;
+                }
             }
+        } else {
+            console.warn('pinControlManager not defined');
         }
     }
 
