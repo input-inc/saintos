@@ -1,0 +1,219 @@
+// RP2040 Platform Description for Renode 1.16
+// Without PIO support (PIO has compatibility issues with Renode 1.16)
+
+bootrom0: Memory.MappedMemory @ sysbus 0x00000000
+    size: 0x4000
+
+flash0: Memory.MappedMemory @ sysbus 0x10000000
+    size: 0x200000
+
+flash0_al1: Memory.MemoryAlias @ sysbus 0x13000000
+    address: 0x10000000
+    size: 0x200000
+
+
+sram0: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x42000
+
+
+usbram: Memory.MappedMemory @ sysbus 0x50100000
+    size: 0x1000
+
+cpu0: CPU.CortexM @ sysbus
+    cpuType: "cortex-m0+"
+    id: 0
+    nvic: nvic0
+
+cpu1: CPU.CortexM @ sysbus
+    cpuType: "cortex-m0+"
+    id: 1
+    nvic: nvic1
+    init:
+        IsHalted false
+
+nvic0: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration {
+        address: 0xe000e000;
+        cpu: cpu0
+    }
+    systickFrequency: 125000000
+    -> cpu0@0
+
+nvic1: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration {
+    address: 0xe000e000;
+    cpu: cpu1
+    }
+    systickFrequency: 125000000
+    -> cpu1@0
+
+uart0: UART.RP2040Uart @ sysbus 0x40034000
+    address: 0x40034000
+
+uart0:
+    IRQ ->nvic0@20
+    DMATransmitRequest -> dma@20
+    DMAReceiveRequest -> dma@21
+
+uart1: UART.RP2040Uart @ sysbus 0x40038000
+    address: 0x40038000
+
+uart1:
+    IRQ ->nvic0@21
+    DMATransmitRequest -> dma@22
+    DMAReceiveRequest -> dma@23
+
+// PIO disabled for Renode 1.16 compatibility
+
+// raspberrypi,rp2040 overlay
+
+sysbus:
+    init:
+        ApplySVD @https://dl.antmicro.com/projects/renode/svd/RP2040.svd.gz
+        Tag <0x4000C008 4> "RESET_DONE" 0xFFFFFFFF
+        Tag <0x40024004 4> "XOSC_STATUS" 0xFFFFFFFF
+        Tag <0x40028000 4> "PLL_SYS_CS" 0xFFFFFFFF
+        Tag <0x4002C000 4> "PLL_USB_CS" 0xFFFFFFFF
+// cortex-m overlay
+
+dwt: Miscellaneous.DWT @ sysbus 0xE0001000
+    // according to 4.7.2 RP2040 Datasheet is 1MHz
+    frequency: 1000000
+
+timer: Timers.RP2040Timer @  sysbus 0x40054000
+    address: 0x40054000
+    IRQ0 -> nvic0@0
+    IRQ1 -> nvic0@1
+    IRQ2 -> nvic0@2
+    IRQ3 -> nvic0@3
+
+pll: Miscellaneous.RP2040PLL @ sysbus 0x40028000 {
+    address: 0x40028000
+}
+
+pll_usb: Miscellaneous.RP2040PLL @ sysbus 0x4002c000 {
+    address: 0x4002c000
+}
+
+clocks: Miscellaneous.RP2040Clocks @ sysbus 0x40008000 {
+    xosc: xosc;
+    rosc: rosc;
+    pll: pll;
+    pllusb: pll_usb;
+    nvic0: nvic0;
+    nvic1: nvic1;
+    address: 0x40008000;
+    gpio: gpio
+}
+
+clocks:
+    IRQ -> nvic0@17
+
+gpio: GPIOPort.RP2040GPIO @ sysbus 0x40014000 {
+    numberOfPins: 30;
+    numberOfCores: 2;
+    address: 0x40014000
+}
+
+gpio:
+    IRQ0 -> nvic0@13
+    IRQ1 -> nvic1@13
+
+
+gpio_qspi: GPIOPort.RP2040GPIO @ sysbus 0x40018000 {
+    numberOfPins: 6;
+    numberOfCores: 2;
+    address: 0x40018000
+}
+
+poweron: Miscellaneous.PowerOnInput @ sysbus
+
+sio: Miscellaneous.RP2040SIO @ sysbus 0xd0000000 {
+    gpio: gpio;
+    gpioQspi: gpio_qspi;
+    address: 0xd0000000
+}
+sio:
+    Core0IRQ -> nvic0@15
+    Core1IRQ -> nvic1@16
+
+spi0: SPI.PL022 @ sysbus 0x4003c000 {
+    gpio: gpio;
+    id: 0;
+    clocks: clocks;
+    address: 0x4003c000
+}
+
+spi1: SPI.PL022 @ sysbus 0x40040000 {
+    gpio: gpio;
+    id: 1;
+    clocks: clocks;
+    address: 0x40040000
+}
+
+xosc: Miscellaneous.RP2040XOSC @ sysbus 0x40024000 {
+    frequency: 12000000;
+    address: 0x40024000
+}
+
+rosc: Miscellaneous.RP2040ROSC @ sysbus 0x40060000 {
+    address: 0x40060000
+}
+
+pads: GPIOPort.RP2040Pads @ sysbus 0x4001c000 {
+    gpio: gpio;
+    address: 0x4001c000
+}
+
+qspi_pads: GPIOPort.RP2040QspiPads @ sysbus 0x40020000 {
+    gpio: gpio_qspi;
+    address: 0x40020000
+}
+
+xip_flash: SPI.W25QXX @ xip_ssi {
+    underlyingMemory: flash0
+}
+
+xip_ssi: SPI.RP2040XIPSSI @ sysbus 0x18000000
+    address: 0x18000000
+    clocks: clocks
+    chipSelect: xip_flash
+    DmaTransmitDreq -> dma@38
+    DmaStreamDreq -> dma@39
+
+adc: Analog.RP2040ADC @ sysbus 0x4004c000 {
+    address: 0x4004c000;
+    clocks: clocks;
+    pads: pads
+}
+adc:
+    DMARequest -> dma@36
+
+gpio_qspi:
+    1 -> xip_flash@0
+
+dma: DMA.RPDMA @ sysbus 0x50000000 {
+    numberOfChannels: 12;
+    address: 0x50000000
+}
+
+watchdog: Timers.RP2040Watchdog @ sysbus 0x40058000 {
+    address: 0x40058000;
+    clocks: clocks
+}
+
+i2c0: I2C.RP2040I2C @ sysbus 0x40044000 {
+    clocks: clocks
+}
+
+psm: Miscellaneous.PSM @ sysbus 0x40010000 {
+    address: 0x40010000
+}
+
+// UDP Bridge for network simulation (not present on real RP2040)
+// This provides direct UDP connectivity to the host network
+udp_bridge: Network.UDPBridge @ sysbus 0x50300000
+
+// Persistent Storage for simulation (not present on real RP2040)
+// This provides file-backed storage for node configuration
+// The nodeId parameter is configured in the RESC script
+persistent_storage: Storage.PersistentStorage @ sysbus 0x50400000
+    nodeId: "default"

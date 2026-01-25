@@ -1,0 +1,57 @@
+# SAINT.OS Node Simulation Script - Network Mode
+#
+# This simulation uses UDP networking to communicate with the micro-ROS agent.
+# Multiple instances can run simultaneously with different node IDs.
+#
+# Usage:
+#   renode run_saint_node.resc
+#
+# Then start the micro-ROS agent:
+#   ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
+#
+# For multiple nodes, launch additional Renode instances with different ports:
+#   $node_udp_port=9998
+#   include @run_saint_node.resc
+
+$machine_name?="saint_node"
+$platform_file?=$ORIGIN/boards/adafruit_feather_rp2040.repl
+$node_udp_port?=9999
+
+include $ORIGIN/boards/initialize_adafruit_feather.resc
+
+# Load the SAINT node firmware
+$global.FIRMWARE?=@/Users/hackman/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/rp2040/build/saint_node.elf
+
+sysbus LoadELF $global.FIRMWARE
+
+# Set vector table to bootrom - it handles jump to flash
+sysbus.cpu0 VectorTableOffset 0x00000000
+sysbus.cpu1 VectorTableOffset 0x00000000
+
+# Show UART0 for debug output
+showAnalyzer sysbus.uart0
+
+logLevel 3 sysbus.uart0
+
+echo "=============================================="
+echo "SAINT.OS Node Network Simulation Ready"
+echo "=============================================="
+echo ""
+echo "Network Configuration:"
+echo "  UDP Bridge: Enabled at 0x50300000"
+echo "  Local Port: $node_udp_port (configurable)"
+echo "  Agent: 192.168.1.10:8888 (default)"
+echo ""
+echo "To connect micro-ROS agent:"
+echo "  ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888"
+echo ""
+echo "For multiple nodes, start additional Renode instances:"
+echo "  $node_udp_port=9998"
+echo "  include @run_saint_node.resc"
+echo ""
+echo "Commands:"
+echo "  start              - Start simulation"
+echo "  pause              - Pause simulation"
+echo "  sysbus.led State   - Check LED state"
+echo "  quit               - Exit Renode"
+echo ""

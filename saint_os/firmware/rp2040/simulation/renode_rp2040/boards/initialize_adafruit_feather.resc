@@ -1,0 +1,6 @@
+$machine_name?="saint_node"
+$platform_file?=$ORIGIN/adafruit_feather_rp2040.repl
+
+include $ORIGIN/../cores/initialize_peripherals_simple.resc
+machine LoadPlatformDescription $platform_file
+sysbus LoadELF $ORIGIN/../bootroms/rp2040/b2.elf

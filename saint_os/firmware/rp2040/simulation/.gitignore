@@ -1,0 +1,8 @@
+# Node manager runtime files
+nodes.json
+node_storage/
+nodes/*.resc
+
+# Keep the directories but ignore contents
+!nodes/.gitkeep
+!node_storage/.gitkeep

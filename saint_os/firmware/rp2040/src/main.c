@@ -26,8 +26,38 @@
 #include <std_msgs/msg/int32.h>
 
 #include "saint_node.h"
-#include "transport_w5500.h"
 #include "version.h"
+
+// Transport selection based on build mode
+#ifdef SIMULATION
+#include "transport_udp_bridge.h"
+#define TRANSPORT_INIT()       transport_udp_bridge_init()
+#define TRANSPORT_CONNECT()    transport_udp_bridge_connect()
+#define TRANSPORT_CONNECTED()  transport_udp_bridge_is_connected()
+#define TRANSPORT_OPEN         transport_udp_bridge_open
+#define TRANSPORT_CLOSE        transport_udp_bridge_close
+#define TRANSPORT_WRITE        transport_udp_bridge_write
+#define TRANSPORT_READ         transport_udp_bridge_read
+#define TRANSPORT_FRAMED       false  // UDP doesn't need framing
+#define TRANSPORT_NAME         "UDP Bridge (Simulation)"
+#define TRANSPORT_SET_AGENT(ip, port) transport_udp_bridge_set_agent(ip, port)
+#define TRANSPORT_GET_IP(ip)   transport_udp_bridge_get_ip(ip)
+#define TRANSPORT_SET_IP(ip)   transport_udp_bridge_set_ip(ip)
+#else
+#include "transport_w5500.h"
+#define TRANSPORT_INIT()       transport_w5500_init()
+#define TRANSPORT_CONNECT()    transport_w5500_connect()
+#define TRANSPORT_CONNECTED()  transport_w5500_is_connected()
+#define TRANSPORT_OPEN         transport_w5500_open
+#define TRANSPORT_CLOSE        transport_w5500_close
+#define TRANSPORT_WRITE        transport_w5500_write
+#define TRANSPORT_READ         transport_w5500_read
+#define TRANSPORT_FRAMED       false  // UDP doesn't need framing
+#define TRANSPORT_NAME         "W5500 Ethernet (UDP)"
+#define TRANSPORT_SET_AGENT(ip, port) transport_w5500_set_agent(ip, port)
+#define TRANSPORT_GET_IP(ip)   transport_w5500_get_ip(ip)
+#define TRANSPORT_GET_MAC(mac) transport_w5500_get_mac(mac)
+#endif
 
 // =============================================================================
 // Global Variables
@@ -226,12 +256,12 @@ int main(void)
     snprintf(g_node.node_id, sizeof(g_node.node_id), "rp2040_%s", unique_id);
     printf("Node ID: %s\n", g_node.node_id);
 
-    // Initialize ethernet transport
-    printf("Initializing ethernet...\n");
+    // Initialize transport
+    printf("Initializing transport: %s\n", TRANSPORT_NAME);
     led_set_state(NODE_STATE_CONNECTING);
 
-    if (!transport_w5500_init()) {
-        printf("ERROR: Ethernet initialization failed!\n");
+    if (!TRANSPORT_INIT()) {
+        printf("ERROR: Transport initialization failed!\n");
         node_set_state(NODE_STATE_ERROR);
         led_set_state(NODE_STATE_ERROR);
         while (1) {
@@ -240,16 +270,35 @@ int main(void)
         }
     }
 
+#ifdef SIMULATION
+    // In simulation mode, generate fake MAC address from unique ID
+    char uid[16];
+    hardware_get_unique_id(uid, sizeof(uid));
+    g_node.mac_address[0] = 0x02;  // Locally administered
+    for (int i = 0; i < 5 && uid[i*2]; i++) {
+        char hex[3] = {uid[i*2], uid[i*2+1], 0};
+        g_node.mac_address[i+1] = (uint8_t)strtol(hex, NULL, 16);
+    }
+    // Set simulation IP (can be configured via environment or defaults)
+    // Each node should have a unique IP in the simulation
+    g_node.static_ip[0] = 192;
+    g_node.static_ip[1] = 168;
+    g_node.static_ip[2] = 1;
+    g_node.static_ip[3] = 100;  // Will be unique per node instance
+    TRANSPORT_SET_IP(g_node.static_ip);
+#else
     // Get MAC address from W5500
-    transport_w5500_get_mac(g_node.mac_address);
+    TRANSPORT_GET_MAC(g_node.mac_address);
+#endif
+
     printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
            g_node.mac_address[0], g_node.mac_address[1],
            g_node.mac_address[2], g_node.mac_address[3],
            g_node.mac_address[4], g_node.mac_address[5]);
 
-    // Connect to network
-    if (!transport_w5500_connect()) {
-        printf("ERROR: Network connection failed!\n");
+    // Connect transport
+    if (!TRANSPORT_CONNECT()) {
+        printf("ERROR: Transport connection failed!\n");
         node_set_state(NODE_STATE_ERROR);
         led_set_state(NODE_STATE_ERROR);
         while (1) {
@@ -258,14 +307,17 @@ int main(void)
         }
     }
 
-    // Get IP address
-    transport_w5500_get_ip(g_node.static_ip);
+#ifndef SIMULATION
+    // Get IP address from W5500 (DHCP or static)
+    TRANSPORT_GET_IP(g_node.static_ip);
+#endif
+
     printf("IP: %d.%d.%d.%d\n",
            g_node.static_ip[0], g_node.static_ip[1],
            g_node.static_ip[2], g_node.static_ip[3]);
 
     // Set agent address from config
-    transport_w5500_set_agent(g_node.server_ip, g_node.server_port);
+    TRANSPORT_SET_AGENT(g_node.server_ip, g_node.server_port);
     printf("Agent: %d.%d.%d.%d:%d\n",
            g_node.server_ip[0], g_node.server_ip[1],
            g_node.server_ip[2], g_node.server_ip[3],
@@ -273,12 +325,12 @@ int main(void)
 
     // Set micro-ROS custom transport
     rmw_uros_set_custom_transport(
-        false,  // Not framed (UDP doesn't need framing)
-        NULL,   // No transport args
-        transport_w5500_open,
-        transport_w5500_close,
-        transport_w5500_write,
-        transport_w5500_read
+        TRANSPORT_FRAMED,  // Framing depends on transport type
+        NULL,              // No transport args
+        TRANSPORT_OPEN,
+        TRANSPORT_CLOSE,
+        TRANSPORT_WRITE,
+        TRANSPORT_READ
     );
 
     // Initialize micro-ROS

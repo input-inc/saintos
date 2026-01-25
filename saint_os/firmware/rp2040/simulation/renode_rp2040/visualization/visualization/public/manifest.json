@@ -1,0 +1,9 @@
+{
+  "short_name": "RP2040 Simulation",
+  "name": "Renode RP2040 Simulation",
+  "icons": [],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#ffffff"
+}

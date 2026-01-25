@@ -1,0 +1,19 @@
+# Build directories
+build/
+build_hardware/
+build_simulation/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled binaries (except bootrom)
+*.elf
+*.uf2
+*.bin
+*.hex
+*.map
+*.dis
+!simulation/renode_rp2040/bootroms/**/*.elf

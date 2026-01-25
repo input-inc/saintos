@@ -128,6 +128,7 @@ const char* node_state_to_string(node_state_t state);
 const char* node_role_to_string(node_role_t role);
 bool node_adopt(node_role_t role, const char* display_name);
 bool node_reset(bool factory_reset);
+bool node_save_config(void);
 
 // hardware.c
 void hardware_init(void);

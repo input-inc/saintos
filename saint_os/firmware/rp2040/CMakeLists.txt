@@ -24,6 +24,9 @@ set(FIRMWARE_VERSION_MAJOR 1)
 set(FIRMWARE_VERSION_MINOR 0)
 set(FIRMWARE_VERSION_PATCH 0)
 
+# Build option for Renode simulation (uses UART instead of USB)
+option(SIMULATION "Build for Renode simulation with UART output" OFF)
+
 # Configure version header
 configure_file(
     ${CMAKE_SOURCE_DIR}/include/version.h.in
@@ -58,14 +61,24 @@ target_link_libraries(w5500_driver
 # Main Executable
 # =============================================================================
 
-add_executable(saint_node
+# Common source files
+set(SAINT_NODE_SOURCES
     src/main.c
     src/node_state.c
     src/hardware.c
     src/led_status.c
     src/pico_clock.c
-    transport/transport_w5500.c
+    src/flash_storage.c
 )
+
+# Add transport based on build mode
+if(SIMULATION)
+    list(APPEND SAINT_NODE_SOURCES transport/transport_udp_bridge.c)
+else()
+    list(APPEND SAINT_NODE_SOURCES transport/transport_w5500.c)
+endif()
+
+add_executable(saint_node ${SAINT_NODE_SOURCES})
 
 target_include_directories(saint_node PUBLIC
     ${CMAKE_SOURCE_DIR}/include
@@ -77,6 +90,7 @@ target_include_directories(saint_node PUBLIC
 # Pico SDK Libraries
 # =============================================================================
 
+# Base libraries
 target_link_libraries(saint_node
     pico_stdlib
     pico_unique_id
@@ -85,13 +99,30 @@ target_link_libraries(saint_node
     hardware_adc
     hardware_pwm
     hardware_pio
-    w5500_driver
+    hardware_flash
+    hardware_sync
     microros
 )
 
-# Enable USB serial output
-pico_enable_stdio_usb(saint_node 1)
-pico_enable_stdio_uart(saint_node 0)
+# Add W5500 driver only for hardware builds
+if(NOT SIMULATION)
+    target_link_libraries(saint_node w5500_driver)
+endif()
+
+# Configure stdio output and defines based on build target
+if(SIMULATION)
+    # Renode simulation: use UART (USB not emulated)
+    pico_enable_stdio_usb(saint_node 0)
+    pico_enable_stdio_uart(saint_node 1)
+    # Define SIMULATION for conditional compilation in source
+    target_compile_definitions(saint_node PRIVATE SIMULATION=1)
+    message(STATUS "Build mode: SIMULATION (UART output, serial transport)")
+else()
+    # Real hardware: use USB serial
+    pico_enable_stdio_usb(saint_node 1)
+    pico_enable_stdio_uart(saint_node 0)
+    message(STATUS "Build mode: HARDWARE (USB output, W5500 transport)")
+endif()
 
 # Disable CRLF conversion for micro-ROS compatibility
 add_compile_definitions(PICO_UART_ENABLE_CRLF_SUPPORT=0)

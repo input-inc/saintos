@@ -1,0 +1,24 @@
+// Adafruit Feather RP2040 with Ethernet FeatherWing (W5500)
+// Board definition for SAINT.OS node simulation
+
+using "../cores/rp2040_simple.repl"
+
+// Onboard NeoPixel LED is on GPIO16 (directly connected, no external LED)
+// For simulation purposes, we'll use a standard LED model
+
+led: Miscellaneous.LED @ gpio 13
+    invert: true
+
+gpio:
+    // LED on GPIO13 (Feather RP2040 red LED)
+    13 -> led@0
+
+// W5500 Ethernet FeatherWing connections:
+// SPI1: SCK=GP10, MOSI=GP11, MISO=GP12
+// CS: GP9
+// INT: GP24 (directly connect for interrupts)
+// RST: GP25
+
+// Note: W5500 chip emulation is not available in Renode.
+// For testing, we stub the SPI responses.
+// The firmware will initialize but network operations won't work.
