@@ -3,6 +3,9 @@
  *
  * Runs on Adafruit Feather RP2040 with Ethernet FeatherWing.
  * Implements a micro-ROS node that communicates with the SAINT.OS server.
+ *
+ * NOTE: This version uses standard ROS2 messages (std_msgs/String) for
+ * initial testing. Custom SAINT.OS messages require rebuilding libmicroros.
  */
 
 #include <stdio.h>
@@ -18,14 +21,13 @@
 
 #include <rmw_microros/rmw_microros.h>
 
+// Standard message types (available in prebuilt libmicroros)
+#include <std_msgs/msg/string.h>
+#include <std_msgs/msg/int32.h>
+
 #include "saint_node.h"
 #include "transport_w5500.h"
 #include "version.h"
-
-// SAINT.OS message types
-#include <saint_os/msg/node_announcement.h>
-#include <saint_os/srv/adopt_node.h>
-#include <saint_os/srv/reset_node.h>
 
 // =============================================================================
 // Global Variables
@@ -43,89 +45,60 @@ static rclc_executor_t executor;
 // Publishers
 static rcl_publisher_t announcement_pub;
 
-// Services
-static rcl_service_t adopt_service;
-static rcl_service_t reset_service;
+// Timers
+static rcl_timer_t announce_timer;
 
-// Service request/response buffers
-static saint_os__srv__AdoptNode_Request adopt_request;
-static saint_os__srv__AdoptNode_Response adopt_response;
-static saint_os__srv__ResetNode_Request reset_request;
-static saint_os__srv__ResetNode_Response reset_response;
+// Message buffers
+static std_msgs__msg__String announcement_msg;
+static char announcement_buffer[256];
 
 // =============================================================================
-// Service Callbacks
+// Timer Callbacks
 // =============================================================================
 
 /**
- * Handle adopt node service request.
+ * Timer callback for node announcements.
+ * Publishes node info when in unadopted state.
  */
-static void adopt_service_callback(const void* request, void* response)
+static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
 {
-    const saint_os__srv__AdoptNode_Request* req =
-        (const saint_os__srv__AdoptNode_Request*)request;
-    saint_os__srv__AdoptNode_Response* res =
-        (saint_os__srv__AdoptNode_Response*)response;
+    (void)last_call_time;
 
-    printf("[ADOPT] Role: %s, Name: %s\n",
-           req->role.data, req->display_name.data);
-
-    // Parse role
-    node_role_t role = NODE_ROLE_NONE;
-    if (strcmp(req->role.data, "head") == 0) {
-        role = NODE_ROLE_HEAD;
-    } else if (strcmp(req->role.data, "arms_left") == 0) {
-        role = NODE_ROLE_ARMS_LEFT;
-    } else if (strcmp(req->role.data, "arms_right") == 0) {
-        role = NODE_ROLE_ARMS_RIGHT;
-    } else if (strcmp(req->role.data, "tracks") == 0) {
-        role = NODE_ROLE_TRACKS;
-    } else if (strcmp(req->role.data, "console") == 0) {
-        role = NODE_ROLE_CONSOLE;
+    if (timer == NULL || g_node.state != NODE_STATE_UNADOPTED) {
+        return;
     }
 
-    if (role != NODE_ROLE_NONE) {
-        res->success = node_adopt(role, req->display_name.data);
-        if (res->success) {
-            snprintf(res->message.data, res->message.capacity,
-                     "Adopted as %s", req->role.data);
-        } else {
-            snprintf(res->message.data, res->message.capacity,
-                     "Adoption failed");
-        }
-    } else {
-        res->success = false;
-        snprintf(res->message.data, res->message.capacity,
-                 "Unknown role: %s", req->role.data);
+    // Build announcement JSON string
+    snprintf(announcement_buffer, sizeof(announcement_buffer),
+        "{"
+        "\"node_id\":\"%s\","
+        "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+        "\"ip\":\"%d.%d.%d.%d\","
+        "\"hw\":\"%s\","
+        "\"fw\":\"%s\","
+        "\"state\":\"%s\","
+        "\"uptime\":%lu"
+        "}",
+        g_node.node_id,
+        g_node.mac_address[0], g_node.mac_address[1],
+        g_node.mac_address[2], g_node.mac_address[3],
+        g_node.mac_address[4], g_node.mac_address[5],
+        g_node.static_ip[0], g_node.static_ip[1],
+        g_node.static_ip[2], g_node.static_ip[3],
+        HARDWARE_MODEL,
+        FIRMWARE_VERSION_STRING,
+        node_state_to_string(g_node.state),
+        g_node.uptime_ms / 1000
+    );
+
+    announcement_msg.data.data = announcement_buffer;
+    announcement_msg.data.size = strlen(announcement_buffer);
+    announcement_msg.data.capacity = sizeof(announcement_buffer);
+
+    rcl_ret_t ret = rcl_publish(&announcement_pub, &announcement_msg, NULL);
+    if (ret != RCL_RET_OK) {
+        printf("Announce publish failed: %d\n", ret);
     }
-
-    res->message.size = strlen(res->message.data);
-}
-
-/**
- * Handle reset node service request.
- */
-static void reset_service_callback(const void* request, void* response)
-{
-    const saint_os__srv__ResetNode_Request* req =
-        (const saint_os__srv__ResetNode_Request*)request;
-    saint_os__srv__ResetNode_Response* res =
-        (saint_os__srv__ResetNode_Response*)response;
-
-    printf("[RESET] Factory reset: %s\n",
-           req->factory_reset ? "yes" : "no");
-
-    res->success = node_reset(req->factory_reset);
-
-    if (res->success) {
-        snprintf(res->message.data, res->message.capacity,
-                 "Node reset successfully");
-    } else {
-        snprintf(res->message.data, res->message.capacity,
-                 "Reset failed");
-    }
-
-    res->message.size = strlen(res->message.data);
 }
 
 // =============================================================================
@@ -141,7 +114,7 @@ static bool init_micro_ros(void)
 
     allocator = rcl_get_default_allocator();
 
-    // Initialize support
+    // Initialize support with custom transport
     rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator);
     if (ret != RCL_RET_OK) {
         printf("Failed to initialize support: %d\n", ret);
@@ -152,6 +125,11 @@ static bool init_micro_ros(void)
     char node_name[64];
     snprintf(node_name, sizeof(node_name), "saint_node_%s", g_node.node_id);
 
+    // Replace any invalid characters in node name
+    for (char* p = node_name; *p; p++) {
+        if (*p == '-' || *p == ':') *p = '_';
+    }
+
     ret = rclc_node_init_default(&ros_node, node_name, "saint", &support);
     if (ret != RCL_RET_OK) {
         printf("Failed to create node: %d\n", ret);
@@ -160,75 +138,41 @@ static bool init_micro_ros(void)
 
     printf("Created ROS2 node: %s\n", node_name);
 
-    // Create announcement publisher
+    // Create announcement publisher (using String for initial testing)
     ret = rclc_publisher_init_default(
         &announcement_pub,
         &ros_node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(saint_os, msg, NodeAnnouncement),
-        "/saint/nodes/unadopted"
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+        "/saint/nodes/announce"
     );
     if (ret != RCL_RET_OK) {
-        printf("Failed to create announcement publisher: %d\n", ret);
+        printf("Failed to create publisher: %d\n", ret);
         return false;
     }
 
-    // Create adopt service
-    char adopt_service_name[128];
-    snprintf(adopt_service_name, sizeof(adopt_service_name),
-             "/saint/node/%s/adopt", g_node.node_id);
-
-    ret = rclc_service_init_default(
-        &adopt_service,
-        &ros_node,
-        ROSIDL_GET_SRV_TYPE_SUPPORT(saint_os, srv, AdoptNode),
-        adopt_service_name
+    // Create announcement timer (1 second interval)
+    ret = rclc_timer_init_default(
+        &announce_timer,
+        &support,
+        RCL_MS_TO_NS(ANNOUNCE_INTERVAL_MS),
+        announce_timer_callback
     );
     if (ret != RCL_RET_OK) {
-        printf("Failed to create adopt service: %d\n", ret);
+        printf("Failed to create timer: %d\n", ret);
         return false;
     }
 
-    // Create reset service
-    char reset_service_name[128];
-    snprintf(reset_service_name, sizeof(reset_service_name),
-             "/saint/node/%s/reset", g_node.node_id);
-
-    ret = rclc_service_init_default(
-        &reset_service,
-        &ros_node,
-        ROSIDL_GET_SRV_TYPE_SUPPORT(saint_os, srv, ResetNode),
-        reset_service_name
-    );
-    if (ret != RCL_RET_OK) {
-        printf("Failed to create reset service: %d\n", ret);
-        return false;
-    }
-
-    // Initialize executor
-    ret = rclc_executor_init(&executor, &support.context, 2, &allocator);
+    // Initialize executor with 1 timer
+    ret = rclc_executor_init(&executor, &support.context, 1, &allocator);
     if (ret != RCL_RET_OK) {
         printf("Failed to create executor: %d\n", ret);
         return false;
     }
 
-    // Add services to executor
-    ret = rclc_executor_add_service(
-        &executor, &adopt_service,
-        &adopt_request, &adopt_response,
-        adopt_service_callback
-    );
+    // Add timer to executor
+    ret = rclc_executor_add_timer(&executor, &announce_timer);
     if (ret != RCL_RET_OK) {
-        printf("Failed to add adopt service: %d\n", ret);
-        return false;
-    }
-
-    ret = rclc_executor_add_service(
-        &executor, &reset_service,
-        &reset_request, &reset_response,
-        reset_service_callback
-    );
-    if (ret != RCL_RET_OK) {
-        printf("Failed to add reset service: %d\n", ret);
+        printf("Failed to add timer: %d\n", ret);
         return false;
     }
 
@@ -237,54 +181,15 @@ static bool init_micro_ros(void)
 }
 
 /**
- * Publish node announcement.
+ * Clean up micro-ROS resources.
  */
-static void publish_announcement(void)
+static void cleanup_micro_ros(void)
 {
-    saint_os__msg__NodeAnnouncement msg;
-
-    // Initialize message
-    saint_os__msg__NodeAnnouncement__init(&msg);
-
-    // Fill in node information
-    snprintf(msg.node_id.data, msg.node_id.capacity, "%s", g_node.node_id);
-    msg.node_id.size = strlen(msg.node_id.data);
-
-    snprintf(msg.mac_address.data, msg.mac_address.capacity,
-             "%02X:%02X:%02X:%02X:%02X:%02X",
-             g_node.mac_address[0], g_node.mac_address[1],
-             g_node.mac_address[2], g_node.mac_address[3],
-             g_node.mac_address[4], g_node.mac_address[5]);
-    msg.mac_address.size = strlen(msg.mac_address.data);
-
-    snprintf(msg.hardware_model.data, msg.hardware_model.capacity,
-             "%s", HARDWARE_MODEL);
-    msg.hardware_model.size = strlen(msg.hardware_model.data);
-
-    snprintf(msg.firmware_version.data, msg.firmware_version.capacity,
-             "%s", FIRMWARE_VERSION_STRING);
-    msg.firmware_version.size = strlen(msg.firmware_version.data);
-
-    snprintf(msg.ip_address.data, msg.ip_address.capacity,
-             "%d.%d.%d.%d",
-             g_node.static_ip[0], g_node.static_ip[1],
-             g_node.static_ip[2], g_node.static_ip[3]);
-    msg.ip_address.size = strlen(msg.ip_address.data);
-
-    msg.hardware_ram_mb = 0;  // RP2040 has 264KB, report as 0 MB
-    msg.cpu_temp = hardware_get_cpu_temp();
-    msg.cpu_usage = 0.0f;  // TODO: implement
-    msg.memory_usage = 0.0f;  // TODO: implement
-    msg.uptime_seconds = g_node.uptime_ms / 1000;
-
-    // Publish
-    rcl_ret_t ret = rcl_publish(&announcement_pub, &msg, NULL);
-    if (ret != RCL_RET_OK) {
-        printf("Failed to publish announcement: %d\n", ret);
-    }
-
-    // Cleanup
-    saint_os__msg__NodeAnnouncement__fini(&msg);
+    rcl_publisher_fini(&announcement_pub, &ros_node);
+    rcl_timer_fini(&announce_timer);
+    rclc_executor_fini(&executor);
+    rcl_node_fini(&ros_node);
+    rclc_support_fini(&support);
 }
 
 // =============================================================================
@@ -318,7 +223,7 @@ int main(void)
     // Get unique ID for node identification
     char unique_id[32];
     hardware_get_unique_id(unique_id, sizeof(unique_id));
-    snprintf(g_node.node_id, sizeof(g_node.node_id), "rp2040-%s", unique_id);
+    snprintf(g_node.node_id, sizeof(g_node.node_id), "rp2040_%s", unique_id);
     printf("Node ID: %s\n", g_node.node_id);
 
     // Initialize ethernet transport
@@ -359,10 +264,17 @@ int main(void)
            g_node.static_ip[0], g_node.static_ip[1],
            g_node.static_ip[2], g_node.static_ip[3]);
 
-    // Set micro-ROS transport
+    // Set agent address from config
+    transport_w5500_set_agent(g_node.server_ip, g_node.server_port);
+    printf("Agent: %d.%d.%d.%d:%d\n",
+           g_node.server_ip[0], g_node.server_ip[1],
+           g_node.server_ip[2], g_node.server_ip[3],
+           g_node.server_port);
+
+    // Set micro-ROS custom transport
     rmw_uros_set_custom_transport(
-        false,  // Not using serial/stream transport
-        NULL,   // No transport args needed
+        false,  // Not framed (UDP doesn't need framing)
+        NULL,   // No transport args
         transport_w5500_open,
         transport_w5500_close,
         transport_w5500_write,
@@ -388,8 +300,6 @@ int main(void)
     printf("========================================\n");
 
     // Main loop
-    uint32_t last_announce_time = 0;
-
     while (1) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
 
@@ -400,20 +310,15 @@ int main(void)
         // Update LED
         led_update();
 
-        // Spin micro-ROS executor (process callbacks)
+        // Spin micro-ROS executor (process timers and callbacks)
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
-
-        // Publish announcements when unadopted
-        if (g_node.state == NODE_STATE_UNADOPTED) {
-            if (now - last_announce_time >= ANNOUNCE_INTERVAL_MS) {
-                publish_announcement();
-                last_announce_time = now;
-            }
-        }
 
         // Small delay
         sleep_ms(10);
     }
+
+    // Cleanup (never reached)
+    cleanup_micro_ros();
 
     return 0;
 }

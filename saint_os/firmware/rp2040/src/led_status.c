@@ -10,6 +10,7 @@
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
+#include "hardware/clocks.h"
 
 #include "saint_node.h"
 
