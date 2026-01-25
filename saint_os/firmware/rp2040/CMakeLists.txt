@@ -3,10 +3,28 @@
 # Build with micro-ROS and Pico SDK for Adafruit Feather RP2040 + Ethernet FeatherWing
 #
 # Prerequisites:
-#   - Pico SDK (set PICO_SDK_PATH)
-#   - micro-ROS Pico SDK (set MICRO_ROS_PATH)
+#   - Pico SDK (set PICO_SDK_PATH or place in lib/pico-sdk)
+#   - micro-ROS Pico SDK (included in lib/micro_ros_raspberrypi_pico_sdk)
 
 cmake_minimum_required(VERSION 3.13)
+
+# Set PICO_SDK_PATH if not already set
+if(NOT DEFINED ENV{PICO_SDK_PATH})
+    if(EXISTS "${CMAKE_SOURCE_DIR}/lib/pico-sdk")
+        set(ENV{PICO_SDK_PATH} "${CMAKE_SOURCE_DIR}/lib/pico-sdk")
+    elseif(EXISTS "$ENV{HOME}/pico-sdk")
+        set(ENV{PICO_SDK_PATH} "$ENV{HOME}/pico-sdk")
+    endif()
+endif()
+
+# Set MICRO_ROS_PATH - prefer local lib directory
+if(EXISTS "${CMAKE_SOURCE_DIR}/lib/micro_ros_raspberrypi_pico_sdk")
+    set(MICRO_ROS_PATH "${CMAKE_SOURCE_DIR}/lib/micro_ros_raspberrypi_pico_sdk")
+elseif(DEFINED ENV{MICRO_ROS_PATH})
+    set(MICRO_ROS_PATH "$ENV{MICRO_ROS_PATH}")
+else()
+    message(FATAL_ERROR "micro-ROS SDK not found. Place it in lib/micro_ros_raspberrypi_pico_sdk or set MICRO_ROS_PATH")
+endif()
 
 # Initialize Pico SDK (must be before project())
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
@@ -38,7 +56,7 @@ configure_file(
 # =============================================================================
 
 # Link to prebuilt micro-ROS library
-link_directories($ENV{MICRO_ROS_PATH}/libmicroros)
+link_directories(${MICRO_ROS_PATH}/libmicroros)
 
 # =============================================================================
 # W5500 Ethernet Driver
@@ -69,6 +87,8 @@ set(SAINT_NODE_SOURCES
     src/led_status.c
     src/pico_clock.c
     src/flash_storage.c
+    src/pin_config.c
+    src/pin_control.c
 )
 
 # Add transport based on build mode
@@ -83,7 +103,7 @@ add_executable(saint_node ${SAINT_NODE_SOURCES})
 target_include_directories(saint_node PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_BINARY_DIR}/generated
-    $ENV{MICRO_ROS_PATH}/libmicroros/include
+    ${MICRO_ROS_PATH}/libmicroros/include
 )
 
 # =============================================================================
@@ -144,4 +164,4 @@ pico_add_extra_outputs(saint_node)
 message(STATUS "SAINT.OS Node Firmware v${FIRMWARE_VERSION_MAJOR}.${FIRMWARE_VERSION_MINOR}.${FIRMWARE_VERSION_PATCH}")
 message(STATUS "Target: Adafruit Feather RP2040 + Ethernet FeatherWing")
 message(STATUS "PICO_SDK_PATH: $ENV{PICO_SDK_PATH}")
-message(STATUS "MICRO_ROS_PATH: $ENV{MICRO_ROS_PATH}")
+message(STATUS "MICRO_ROS_PATH: ${MICRO_ROS_PATH}")

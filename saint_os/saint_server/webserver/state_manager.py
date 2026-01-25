@@ -4,28 +4,239 @@ SAINT.OS State Manager
 Manages system state and provides data for WebSocket clients.
 """
 
+import json
+import os
 import time
+import yaml
 import psutil
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Callable, Tuple
+
+# Timeout for considering a node offline (no announcements received)
+NODE_TIMEOUT_SECONDS = 5.0
+
+
+# =============================================================================
+# Pin Configuration Dataclasses
+# =============================================================================
+
+@dataclass
+class PinCapability:
+    """Capability of a single physical pin."""
+    gpio: int
+    name: str
+    capabilities: List[str] = field(default_factory=list)
+
+    def supports_mode(self, mode: str) -> bool:
+        """Check if pin supports the given mode."""
+        mode_map = {
+            'digital_in': 'digital_in',
+            'digital_out': 'digital_out',
+            'pwm': 'pwm',
+            'servo': 'pwm',  # Servo uses PWM
+            'adc': 'adc',
+            'i2c_sda': 'i2c_sda',
+            'i2c_scl': 'i2c_scl',
+            'uart_tx': 'uart_tx',
+            'uart_rx': 'uart_rx',
+        }
+        required_cap = mode_map.get(mode, mode)
+        return required_cap in self.capabilities
+
+
+@dataclass
+class PinConfiguration:
+    """Configuration for a single pin mapping."""
+    gpio: int
+    mode: str
+    logical_name: str
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        result = {
+            "mode": self.mode,
+            "logical_name": self.logical_name,
+        }
+        result.update(self.params)
+        return result
+
+
+@dataclass
+class NodeCapabilities:
+    """Complete pin capabilities for a node."""
+    node_id: str
+    pins: List[PinCapability] = field(default_factory=list)
+    reserved_pins: List[int] = field(default_factory=list)
+    last_updated: float = field(default_factory=time.time)
+
+    def get_pin(self, gpio: int) -> Optional[PinCapability]:
+        """Get capability for a specific GPIO."""
+        for pin in self.pins:
+            if pin.gpio == gpio:
+                return pin
+        return None
+
+    def get_pins_for_mode(self, mode: str) -> List[PinCapability]:
+        """Get all pins that support a given mode."""
+        return [pin for pin in self.pins if pin.supports_mode(mode)]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "node_id": self.node_id,
+            "pins": [
+                {
+                    "gpio": p.gpio,
+                    "name": p.name,
+                    "capabilities": p.capabilities,
+                }
+                for p in self.pins
+            ],
+            "reserved_pins": self.reserved_pins,
+        }
+
+
+@dataclass
+class NodePinConfig:
+    """Pin configuration state for a node."""
+    version: int = 0
+    pins: Dict[int, PinConfiguration] = field(default_factory=dict)  # gpio -> config
+    sync_status: str = "unknown"  # unknown, pending, synced, error
+    last_synced: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "version": self.version,
+            "pins": {str(gpio): cfg.to_dict() for gpio, cfg in self.pins.items()},
+            "sync_status": self.sync_status,
+            "last_synced": self.last_synced,
+        }
+
+    def to_firmware_json(self) -> Dict[str, Any]:
+        """Convert to JSON format expected by firmware."""
+        return {
+            "action": "configure",
+            "version": self.version,
+            "pins": {str(gpio): cfg.to_dict() for gpio, cfg in self.pins.items()},
+        }
+
+
+@dataclass
+class PinRuntimeState:
+    """Runtime state for a single pin."""
+    gpio: int
+    mode: str
+    logical_name: str = ""
+    desired_value: Optional[float] = None  # User-requested value (0-100 for PWM, 0-180 for servo, 0/1 for digital)
+    actual_value: Optional[float] = None   # Feedback from firmware
+    voltage: Optional[float] = None        # ADC voltage reading
+    last_updated: float = 0.0              # Timestamp of last actual value update
+
+    @property
+    def synced(self) -> bool:
+        """Check if desired and actual values are in sync."""
+        if self.desired_value is None:
+            return True
+        if self.actual_value is None:
+            return False
+        # Allow small tolerance for PWM/servo
+        tolerance = 1.0 if self.mode in ('pwm', 'servo') else 0.01
+        return abs(self.desired_value - self.actual_value) < tolerance
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        result = {
+            "gpio": self.gpio,
+            "mode": self.mode,
+            "logical_name": self.logical_name,
+            "synced": self.synced,
+        }
+        if self.desired_value is not None:
+            result["desired"] = self.desired_value
+        if self.actual_value is not None:
+            result["actual"] = self.actual_value
+        if self.voltage is not None:
+            result["voltage"] = self.voltage
+        result["last_updated"] = self.last_updated
+        return result
+
+
+@dataclass
+class NodeRuntimeState:
+    """Runtime state for all pins on a node."""
+    node_id: str
+    pins: Dict[int, PinRuntimeState] = field(default_factory=dict)  # gpio -> state
+    last_feedback: float = 0.0  # Timestamp of last state feedback from firmware
+
+    def get_pin(self, gpio: int) -> Optional[PinRuntimeState]:
+        """Get runtime state for a pin."""
+        return self.pins.get(gpio)
+
+    def set_pin_desired(self, gpio: int, value: float):
+        """Set desired value for a pin."""
+        if gpio in self.pins:
+            self.pins[gpio].desired_value = value
+
+    def update_from_firmware(self, pins_data: List[Dict[str, Any]]):
+        """Update actual values from firmware feedback."""
+        now = time.time()
+        self.last_feedback = now
+
+        for pin_data in pins_data:
+            gpio = pin_data.get('gpio')
+            if gpio is None:
+                continue
+
+            if gpio not in self.pins:
+                # Create new runtime state for this pin
+                self.pins[gpio] = PinRuntimeState(
+                    gpio=gpio,
+                    mode=pin_data.get('mode', 'unknown'),
+                    logical_name=pin_data.get('name', ''),
+                )
+
+            pin = self.pins[gpio]
+            pin.mode = pin_data.get('mode', pin.mode)
+            pin.logical_name = pin_data.get('name', pin.logical_name)
+            pin.actual_value = pin_data.get('value')
+            pin.voltage = pin_data.get('voltage')
+            pin.last_updated = now
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "node_id": self.node_id,
+            "pins": [pin.to_dict() for pin in self.pins.values()],
+            "last_feedback": self.last_feedback,
+            "stale": (time.time() - self.last_feedback) > 1.5 if self.last_feedback > 0 else True,
+        }
 
 
 @dataclass
 class NodeInfo:
     """Information about an adopted or unadopted node."""
     node_id: str
-    hardware_model: str = "Raspberry Pi 4 Model B"
+    hardware_model: str = "Unknown"
     mac_address: str = ""
     ip_address: str = ""
-    firmware_version: str = "1.0.0"
+    firmware_version: str = "0.0.0"
     online: bool = True
-    cpu_temp: float = 45.0
-    cpu_usage: float = 15.0
-    memory_usage: float = 35.0
+    cpu_temp: float = 0.0
+    cpu_usage: float = 0.0
+    memory_usage: float = 0.0
     uptime_seconds: int = 0
     # Adopted node specific
     display_name: str = ""
     role: str = ""
+    # Pin configuration
+    capabilities: Optional[NodeCapabilities] = None
+    pin_config: Optional[NodePinConfig] = None
+    # Runtime state
+    runtime_state: Optional[NodeRuntimeState] = None
+    # Tracking
+    last_seen: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -47,38 +258,186 @@ class SystemState:
 class StateManager:
     """Manages system state and provides data for clients."""
 
-    def __init__(self, server_name: str = "SAINT-01"):
+    MAX_LOG_ENTRIES = 500  # Keep last 500 log entries
+
+    def __init__(self, server_name: str = "SAINT-01", logger=None, config_dir: Optional[str] = None):
         self.state = SystemState(server_name=server_name)
-        self._init_mock_data()
+        self.logger = logger
+        self._activity_callback: Optional[Callable[[str, str], None]] = None
+        self._log_entries: List[Dict[str, Any]] = []  # Circular buffer for logs
 
-    def _init_mock_data(self):
-        """Initialize mock data for testing."""
-        # Add a mock adopted node
-        self.state.adopted_nodes["node_001"] = NodeInfo(
-            node_id="node_001",
-            display_name="Head Unit",
-            role="head",
-            hardware_model="Raspberry Pi 4 Model B",
-            mac_address="dc:a6:32:aa:bb:cc",
-            ip_address="192.168.10.11",
-            online=True,
-            cpu_usage=25.0,
-            memory_usage=42.0,
-            uptime_seconds=3600,
-        )
+        # Config directory for node YAML persistence
+        if config_dir is None:
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                config_dir = os.path.join(
+                    get_package_share_directory('saint_os'), 'config'
+                )
+            except Exception:
+                # Fallback for development
+                config_dir = os.path.join(
+                    os.path.dirname(__file__), '..', '..', 'config'
+                )
+        self.config_dir = os.path.abspath(config_dir)
+        self.nodes_config_dir = os.path.join(self.config_dir, 'nodes')
 
-        # Add a mock unadopted node
-        self.state.unadopted_nodes["node_002"] = NodeInfo(
-            node_id="node_002",
-            hardware_model="Raspberry Pi 4 Model B",
-            mac_address="dc:a6:32:dd:ee:ff",
-            ip_address="192.168.10.50",
-            firmware_version="1.0.0",
-            cpu_temp=48.5,
-            cpu_usage=10.0,
-            memory_usage=28.0,
-            uptime_seconds=120,
-        )
+        # Load adopted nodes from disk on startup
+        self.load_all_node_configs()
+
+    def set_activity_callback(self, callback: Callable[[str, str], None]):
+        """Set callback for activity logging. Callback takes (message, level)."""
+        self._activity_callback = callback
+
+    def _log_activity(self, message: str, level: str = "info"):
+        """Log an activity event."""
+        # Store in log buffer
+        entry = {
+            "time": time.time(),
+            "text": message,
+            "level": level,
+        }
+        self._log_entries.append(entry)
+
+        # Trim to max size
+        if len(self._log_entries) > self.MAX_LOG_ENTRIES:
+            self._log_entries = self._log_entries[-self.MAX_LOG_ENTRIES:]
+
+        # Broadcast to clients
+        if self._activity_callback:
+            self._activity_callback(message, level)
+
+        # Also log to ROS2 logger
+        if self.logger:
+            # Use explicit level mapping to avoid ROS2 logger issues
+            try:
+                if level == "debug":
+                    self.logger.debug(message)
+                elif level == "warn" or level == "warning":
+                    self.logger.warning(message)
+                elif level == "error":
+                    self.logger.error(message)
+                else:
+                    self.logger.info(message)
+            except ValueError:
+                # ROS2 logger can throw errors in certain callback contexts
+                pass
+
+    def get_logs(self, limit: int = 100, level: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get recent log entries.
+
+        Args:
+            limit: Maximum number of entries to return
+            level: Optional filter by log level
+
+        Returns:
+            List of log entries (newest first)
+        """
+        logs = self._log_entries
+        if level and level != 'all':
+            logs = [e for e in logs if e['level'] == level]
+        return list(reversed(logs[-limit:]))
+
+    def update_node_from_announcement(self, announcement_json: str) -> bool:
+        """
+        Update or add an unadopted node from a JSON announcement.
+
+        Expected JSON format:
+        {
+            "node_id": "rp2040_XXXX",
+            "mac": "02:XX:XX:XX:XX:XX",
+            "ip": "192.168.1.100",
+            "hw": "Adafruit Feather RP2040",
+            "fw": "0.5.0",
+            "state": "UNADOPTED",
+            "uptime": 120
+        }
+
+        Returns True if this is a new node, False if existing node updated.
+        """
+        try:
+            data = json.loads(announcement_json)
+        except json.JSONDecodeError as e:
+            if self.logger:
+                self.logger.warning(f"Invalid announcement JSON: {e}")
+            return False
+
+        node_id = data.get("node_id", "")
+        if not node_id:
+            return False
+
+        # Check if this node is already adopted (shouldn't announce, but handle it)
+        if node_id in self.state.adopted_nodes:
+            # Update last_seen for adopted nodes too
+            self.state.adopted_nodes[node_id].last_seen = time.time()
+            self.state.adopted_nodes[node_id].online = True
+            return False
+
+        is_new = node_id not in self.state.unadopted_nodes
+
+        # Create or update node info
+        if is_new:
+            node = NodeInfo(node_id=node_id)
+            self.state.unadopted_nodes[node_id] = node
+            self._log_activity(f"New node discovered: {node_id}", "info")
+        else:
+            node = self.state.unadopted_nodes[node_id]
+
+        # Update node info from announcement
+        node.mac_address = data.get("mac", node.mac_address)
+        node.ip_address = data.get("ip", node.ip_address)
+        node.hardware_model = data.get("hw", node.hardware_model)
+        node.firmware_version = data.get("fw", node.firmware_version)
+        node.uptime_seconds = data.get("uptime", node.uptime_seconds)
+        node.last_seen = time.time()
+        node.online = True
+
+        return is_new
+
+    def check_node_timeouts(self) -> List[str]:
+        """
+        Check for nodes that have timed out (stopped announcing).
+
+        Returns list of node_ids that went offline.
+        """
+        now = time.time()
+        timed_out = []
+
+        # Check unadopted nodes
+        for node_id, node in list(self.state.unadopted_nodes.items()):
+            if node.online and (now - node.last_seen) > NODE_TIMEOUT_SECONDS:
+                node.online = False
+                timed_out.append(node_id)
+                self._log_activity(f"Node offline: {node_id}", "warn")
+
+        # Check adopted nodes
+        for node_id, node in self.state.adopted_nodes.items():
+            if node.online and (now - node.last_seen) > NODE_TIMEOUT_SECONDS:
+                node.online = False
+                timed_out.append(node_id)
+                self._log_activity(
+                    f"Adopted node offline: {node.display_name or node_id}", "warn"
+                )
+
+        return timed_out
+
+    def remove_offline_unadopted_nodes(self, max_offline_seconds: float = 60.0) -> int:
+        """
+        Remove unadopted nodes that have been offline for too long.
+
+        Returns count of removed nodes.
+        """
+        now = time.time()
+        to_remove = []
+
+        for node_id, node in self.state.unadopted_nodes.items():
+            if not node.online and (now - node.last_seen) > max_offline_seconds:
+                to_remove.append(node_id)
+
+        for node_id in to_remove:
+            del self.state.unadopted_nodes[node_id]
+            self._log_activity(f"Removed stale node: {node_id}", "debug")
+
+        return len(to_remove)
 
     def get_system_status(self) -> Dict[str, Any]:
         """Get current system status for broadcasting."""
@@ -108,8 +467,9 @@ class StateManager:
 
     def get_adopted_nodes(self) -> List[Dict[str, Any]]:
         """Get list of adopted nodes."""
-        return [
-            {
+        result = []
+        for node in self.state.adopted_nodes.values():
+            node_data = {
                 "node_id": node.node_id,
                 "display_name": node.display_name,
                 "role": node.role,
@@ -118,9 +478,11 @@ class StateManager:
                 "cpu_usage": node.cpu_usage,
                 "memory_usage": node.memory_usage,
                 "uptime_seconds": node.uptime_seconds,
+                "has_capabilities": node.capabilities is not None,
+                "pin_config_status": node.pin_config.sync_status if node.pin_config else "unconfigured",
             }
-            for node in self.state.adopted_nodes.values()
-        ]
+            result.append(node_data)
+        return result
 
     def get_unadopted_nodes(self) -> List[Dict[str, Any]]:
         """Get list of unadopted nodes."""
@@ -135,6 +497,7 @@ class StateManager:
                 "cpu_usage": node.cpu_usage,
                 "memory_usage": node.memory_usage,
                 "uptime_seconds": node.uptime_seconds,
+                "online": node.online,
             }
             for node in self.state.unadopted_nodes.values()
         ]
@@ -150,6 +513,12 @@ class StateManager:
         node.online = True
 
         self.state.adopted_nodes[node_id] = node
+
+        # Load any existing configuration from disk
+        self._load_node_config(node_id)
+
+        # Save initial config
+        self._save_node_config(node_id)
 
         topic_prefix = f"/saint/{role}"
         return {
@@ -175,3 +544,502 @@ class StateManager:
     def set_client_count(self, count: int):
         """Update WebSocket client count."""
         self.state.websocket_client_count = count
+
+    # =========================================================================
+    # Pin Configuration Methods
+    # =========================================================================
+
+    def update_node_capabilities(self, node_id: str, capabilities_json: str) -> bool:
+        """
+        Update node capabilities from JSON received from firmware.
+
+        Expected JSON format:
+        {
+            "node_id": "rp2040_XXXX",
+            "pins": [
+                {"gpio": 5, "name": "D5", "capabilities": ["digital_in", "digital_out", "pwm"]},
+                ...
+            ],
+            "reserved_pins": [10, 11, 16, 18, 19, 20]
+        }
+        """
+        try:
+            data = json.loads(capabilities_json)
+        except json.JSONDecodeError as e:
+            if self.logger:
+                self.logger.warning(f"Invalid capabilities JSON: {e}")
+            return False
+
+        # Find the node (in adopted or unadopted)
+        node = self.state.adopted_nodes.get(node_id) or self.state.unadopted_nodes.get(node_id)
+        if not node:
+            if self.logger:
+                self.logger.warning(f"Node {node_id} not found for capabilities update")
+                self.logger.warning(f"Available adopted nodes: {list(self.state.adopted_nodes.keys())}")
+                self.logger.warning(f"Available unadopted nodes: {list(self.state.unadopted_nodes.keys())}")
+            return False
+
+        # Parse capabilities
+        pins = []
+        for pin_data in data.get('pins', []):
+            pins.append(PinCapability(
+                gpio=pin_data.get('gpio', 0),
+                name=pin_data.get('name', ''),
+                capabilities=pin_data.get('capabilities', []),
+            ))
+
+        node.capabilities = NodeCapabilities(
+            node_id=node_id,
+            pins=pins,
+            reserved_pins=data.get('reserved_pins', []),
+            last_updated=time.time(),
+        )
+
+        if self.logger:
+            self.logger.info(f"Stored {len(pins)} pin capabilities for node {node_id}")
+        self._log_activity(f"Updated capabilities for node {node_id} ({len(pins)} pins)", "info")
+        return True
+
+    def get_node_capabilities(self, node_id: str) -> Optional[Dict[str, Any]]:
+        """Get capabilities for a node."""
+        node = self.state.adopted_nodes.get(node_id) or self.state.unadopted_nodes.get(node_id)
+        if not node or not node.capabilities:
+            return None
+        return node.capabilities.to_dict()
+
+    def get_node_pin_config(self, node_id: str) -> Optional[Dict[str, Any]]:
+        """Get current pin configuration for a node."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return None
+
+        # Load from file if not in memory
+        if not node.pin_config:
+            self._load_node_config(node_id)
+
+        if node.pin_config:
+            return node.pin_config.to_dict()
+        return {"version": 0, "pins": {}, "sync_status": "unknown", "last_synced": None}
+
+    def save_node_pin_config(
+        self,
+        node_id: str,
+        pin_configs: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Save pin configuration for a node.
+
+        Args:
+            node_id: The node ID
+            pin_configs: Dict mapping GPIO (as string) to config dict
+                         e.g. {"5": {"mode": "pwm", "logical_name": "left_velocity"}}
+
+        Returns:
+            Result dict with success status and message
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return {"success": False, "message": f"Node {node_id} not found or not adopted"}
+
+        # Create or update pin config
+        if not node.pin_config:
+            node.pin_config = NodePinConfig()
+
+        # Update version
+        node.pin_config.version += 1
+
+        # Parse configurations
+        node.pin_config.pins.clear()
+        for gpio_str, config in pin_configs.items():
+            try:
+                gpio = int(gpio_str)
+            except ValueError:
+                continue
+
+            node.pin_config.pins[gpio] = PinConfiguration(
+                gpio=gpio,
+                mode=config.get('mode', 'unconfigured'),
+                logical_name=config.get('logical_name', ''),
+                params={k: v for k, v in config.items() if k not in ('mode', 'logical_name')},
+            )
+
+        node.pin_config.sync_status = "pending"
+
+        # Save to YAML file
+        self._save_node_config(node_id)
+
+        self._log_activity(f"Saved pin configuration for {node.display_name or node_id}", "info")
+        return {
+            "success": True,
+            "message": "Configuration saved",
+            "version": node.pin_config.version,
+        }
+
+    def mark_node_synced(self, node_id: str, success: bool = True):
+        """Mark node pin config as synced (or error)."""
+        node = self.state.adopted_nodes.get(node_id)
+        if node and node.pin_config:
+            node.pin_config.sync_status = "synced" if success else "error"
+            node.pin_config.last_synced = time.time() if success else None
+            self._save_node_config(node_id)
+
+    def get_firmware_config_json(self, node_id: str) -> Optional[str]:
+        """Get pin configuration in firmware JSON format."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.pin_config:
+            return None
+        return json.dumps(node.pin_config.to_firmware_json())
+
+    def validate_pin_config(
+        self,
+        node_id: str,
+        pin_configs: Dict[str, Dict[str, Any]],
+        role: str
+    ) -> Dict[str, Any]:
+        """
+        Validate pin configuration against role requirements and node capabilities.
+
+        Returns:
+            Dict with 'valid' bool and 'errors' list
+        """
+        errors = []
+        warnings = []
+
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return {"valid": False, "errors": ["Node not found"], "warnings": []}
+
+        capabilities = node.capabilities
+        if not capabilities:
+            warnings.append("Node capabilities not available - cannot validate pin compatibility")
+
+        # Load role definition
+        try:
+            from saint_server.roles import RoleManager
+            role_mgr = RoleManager(logger=self.logger)
+            role_def = role_mgr.get_role(role)
+        except Exception as e:
+            return {"valid": False, "errors": [f"Failed to load role: {e}"], "warnings": []}
+
+        if not role_def:
+            return {"valid": False, "errors": [f"Unknown role: {role}"], "warnings": []}
+
+        # Check required functions are mapped
+        assigned_functions = {
+            cfg.get('logical_name')
+            for cfg in pin_configs.values()
+            if cfg.get('logical_name')
+        }
+
+        for func in role_def.get_required_functions():
+            if func.name not in assigned_functions:
+                errors.append(f"Required function '{func.display_name}' is not assigned to any pin")
+
+        # Validate pin modes against capabilities
+        if capabilities:
+            for gpio_str, config in pin_configs.items():
+                try:
+                    gpio = int(gpio_str)
+                except ValueError:
+                    continue
+
+                pin_cap = capabilities.get_pin(gpio)
+                if not pin_cap:
+                    errors.append(f"GPIO {gpio} is not available on this node")
+                    continue
+
+                mode = config.get('mode', '')
+                if mode and not pin_cap.supports_mode(mode):
+                    errors.append(
+                        f"GPIO {gpio} ({pin_cap.name}) does not support mode '{mode}'"
+                    )
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    def _save_node_config(self, node_id: str):
+        """Save node configuration to YAML file."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return
+
+        # Ensure directory exists
+        os.makedirs(self.nodes_config_dir, exist_ok=True)
+
+        # Build config dict
+        config = {
+            "node_id": node.node_id,
+            "display_name": node.display_name,
+            "role": node.role,
+            "hardware_model": node.hardware_model,
+            "mac_address": node.mac_address,
+        }
+
+        if node.pin_config:
+            config["pin_config"] = {
+                "version": node.pin_config.version,
+                "sync_status": node.pin_config.sync_status,
+                "last_synced": node.pin_config.last_synced,
+                "pins": {
+                    str(gpio): {
+                        "mode": cfg.mode,
+                        "logical_name": cfg.logical_name,
+                        **cfg.params,
+                    }
+                    for gpio, cfg in node.pin_config.pins.items()
+                },
+            }
+
+        # Write YAML file
+        filepath = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
+        try:
+            with open(filepath, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to save node config: {e}")
+
+    def _load_node_config(self, node_id: str) -> bool:
+        """Load node configuration from YAML file."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return False
+
+        filepath = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
+        if not os.path.exists(filepath):
+            return False
+
+        try:
+            with open(filepath, 'r') as f:
+                config = yaml.safe_load(f)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to load node config: {e}")
+            return False
+
+        if not config:
+            return False
+
+        # Load pin configuration
+        pin_config_data = config.get('pin_config', {})
+        if pin_config_data:
+            node.pin_config = NodePinConfig(
+                version=pin_config_data.get('version', 0),
+                sync_status=pin_config_data.get('sync_status', 'unknown'),
+                last_synced=pin_config_data.get('last_synced'),
+            )
+
+            for gpio_str, cfg_data in pin_config_data.get('pins', {}).items():
+                try:
+                    gpio = int(gpio_str)
+                except ValueError:
+                    continue
+
+                params = {k: v for k, v in cfg_data.items()
+                          if k not in ('mode', 'logical_name')}
+
+                node.pin_config.pins[gpio] = PinConfiguration(
+                    gpio=gpio,
+                    mode=cfg_data.get('mode', 'unconfigured'),
+                    logical_name=cfg_data.get('logical_name', ''),
+                    params=params,
+                )
+
+        return True
+
+    def load_all_node_configs(self):
+        """Load all adopted nodes from disk on startup."""
+        if not os.path.isdir(self.nodes_config_dir):
+            return
+
+        for filename in os.listdir(self.nodes_config_dir):
+            if not filename.endswith('.yaml'):
+                continue
+
+            node_id = filename[:-5]  # Remove .yaml extension
+            filepath = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
+
+            try:
+                with open(filepath, 'r') as f:
+                    config = yaml.safe_load(f)
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Failed to load node config {filename}: {e}")
+                continue
+
+            if not config:
+                continue
+
+            # Create NodeInfo from saved config
+            node = NodeInfo(
+                node_id=config.get('node_id', node_id),
+                display_name=config.get('display_name', ''),
+                role=config.get('role', ''),
+                hardware_model=config.get('hardware_model', 'Unknown'),
+                mac_address=config.get('mac_address', ''),
+                online=False,  # Will be updated when node announces
+                last_seen=0,
+            )
+
+            # Add to adopted nodes
+            self.state.adopted_nodes[node_id] = node
+
+            # Load pin configuration
+            pin_config_data = config.get('pin_config', {})
+            if pin_config_data:
+                node.pin_config = NodePinConfig(
+                    version=pin_config_data.get('version', 0),
+                    sync_status=pin_config_data.get('sync_status', 'unknown'),
+                    last_synced=pin_config_data.get('last_synced'),
+                )
+
+                for gpio_str, cfg_data in pin_config_data.get('pins', {}).items():
+                    try:
+                        gpio = int(gpio_str)
+                    except ValueError:
+                        continue
+
+                    params = {k: v for k, v in cfg_data.items()
+                              if k not in ('mode', 'logical_name')}
+
+                    node.pin_config.pins[gpio] = PinConfiguration(
+                        gpio=gpio,
+                        mode=cfg_data.get('mode', 'unconfigured'),
+                        logical_name=cfg_data.get('logical_name', ''),
+                        params=params,
+                    )
+
+            if self.logger:
+                self.logger.info(f"Loaded adopted node from config: {node_id} ({node.role})")
+
+    # =========================================================================
+    # Runtime State Methods
+    # =========================================================================
+
+    def get_or_create_runtime_state(self, node_id: str) -> Optional[NodeRuntimeState]:
+        """Get or create runtime state for a node."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return None
+
+        if not node.runtime_state:
+            node.runtime_state = NodeRuntimeState(node_id=node_id)
+
+            # Initialize pins from pin_config if available
+            if node.pin_config:
+                for gpio, config in node.pin_config.pins.items():
+                    if config.mode and config.mode != 'unconfigured':
+                        node.runtime_state.pins[gpio] = PinRuntimeState(
+                            gpio=gpio,
+                            mode=config.mode,
+                            logical_name=config.logical_name,
+                        )
+
+        return node.runtime_state
+
+    def update_pin_desired(self, node_id: str, gpio: int, value: float) -> bool:
+        """
+        Update desired value for a pin.
+
+        Args:
+            node_id: The node ID
+            gpio: GPIO number
+            value: Desired value (interpretation depends on mode)
+
+        Returns:
+            True if update successful
+        """
+        runtime_state = self.get_or_create_runtime_state(node_id)
+        if not runtime_state:
+            return False
+
+        if gpio not in runtime_state.pins:
+            # Try to create from pin_config
+            node = self.state.adopted_nodes.get(node_id)
+            if node and node.pin_config and gpio in node.pin_config.pins:
+                config = node.pin_config.pins[gpio]
+                runtime_state.pins[gpio] = PinRuntimeState(
+                    gpio=gpio,
+                    mode=config.mode,
+                    logical_name=config.logical_name,
+                )
+            else:
+                return False
+
+        runtime_state.pins[gpio].desired_value = value
+        return True
+
+    def update_pin_actual(self, node_id: str, pins_data: List[Dict[str, Any]]) -> bool:
+        """
+        Update actual pin values from firmware feedback.
+
+        Args:
+            node_id: The node ID
+            pins_data: List of pin data from firmware
+
+        Returns:
+            True if update successful
+        """
+        runtime_state = self.get_or_create_runtime_state(node_id)
+        if not runtime_state:
+            return False
+
+        runtime_state.update_from_firmware(pins_data)
+        return True
+
+    def get_runtime_state(self, node_id: str) -> Optional[Dict[str, Any]]:
+        """Get runtime state for a node as a dictionary."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.runtime_state:
+            return None
+
+        return node.runtime_state.to_dict()
+
+    def get_controllable_pins(self, node_id: str) -> List[Dict[str, Any]]:
+        """
+        Get list of controllable pins for a node (PWM, servo, digital_out).
+
+        Returns list of pin info dicts with gpio, mode, logical_name.
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.pin_config:
+            return []
+
+        controllable_modes = {'pwm', 'servo', 'digital_out'}
+        result = []
+
+        for gpio, config in node.pin_config.pins.items():
+            if config.mode in controllable_modes:
+                result.append({
+                    'gpio': gpio,
+                    'mode': config.mode,
+                    'logical_name': config.logical_name,
+                })
+
+        return result
+
+    def get_readable_pins(self, node_id: str) -> List[Dict[str, Any]]:
+        """
+        Get list of readable pins for a node (digital_in, adc).
+
+        Returns list of pin info dicts with gpio, mode, logical_name.
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.pin_config:
+            return []
+
+        readable_modes = {'digital_in', 'adc'}
+        result = []
+
+        for gpio, config in node.pin_config.pins.items():
+            if config.mode in readable_modes:
+                result.append({
+                    'gpio': gpio,
+                    'mode': config.mode,
+                    'logical_name': config.logical_name,
+                })
+
+        return result
