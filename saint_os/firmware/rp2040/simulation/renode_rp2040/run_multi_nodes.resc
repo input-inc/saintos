@@ -12,7 +12,7 @@
 # To change the number of nodes, set $num_nodes before including this script
 
 $num_nodes?=3
-$firmware_path?=@/Users/hackman/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/rp2040/build/saint_node.elf
+$firmware_path?=@/Users/hackman/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/rp2040/build_sim/saint_node.elf
 
 path add $ORIGIN
 

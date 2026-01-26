@@ -9,6 +9,7 @@ class PinControlManager {
     constructor() {
         this.nodeId = null;
         this.runtimeState = null;
+        this.container = null;  // DOM container for this instance's controls
         this.controlThrottleMs = 50;  // Match server throttle
         this.lastSendTime = {};  // gpio -> timestamp
 
@@ -44,10 +45,10 @@ class PinControlManager {
      * Set the current node ID and subscribe to state updates.
      */
     async setNode(nodeId) {
-        if (this.nodeId === nodeId) return;
+        const isSameNode = (this.nodeId === nodeId);
 
-        // Unsubscribe from previous node
-        if (this.nodeId) {
+        // If changing to a different node, unsubscribe from previous
+        if (!isSameNode && this.nodeId) {
             try {
                 await window.saintWS.unsubscribe([`pin_state/${this.nodeId}`]);
             } catch (e) {
@@ -56,19 +57,23 @@ class PinControlManager {
         }
 
         this.nodeId = nodeId;
-        this.runtimeState = null;
 
-        if (!nodeId) return;
-
-        // Subscribe to state updates
-        try {
-            await window.saintWS.subscribe([`pin_state/${nodeId}`]);
-            console.log(`Subscribed to pin_state/${nodeId}`);
-        } catch (e) {
-            console.warn('Failed to subscribe to pin state:', e);
+        if (!nodeId) {
+            this.runtimeState = null;
+            return;
         }
 
-        // Request current runtime state
+        // Subscribe to state updates (only if new node)
+        if (!isSameNode) {
+            try {
+                await window.saintWS.subscribe([`pin_state/${nodeId}`]);
+                console.log(`Subscribed to pin_state/${nodeId}`);
+            } catch (e) {
+                console.warn('Failed to subscribe to pin state:', e);
+            }
+        }
+
+        // Always request current runtime state (even if same node - may have changed)
         await this.loadRuntimeState();
     }
 
@@ -85,8 +90,10 @@ class PinControlManager {
                 params: { node_id: this.nodeId }
             });
 
-            if (result.data) {
-                this.handleStateUpdate(result.data);
+            console.log('PinControlManager: loadRuntimeState result:', result);
+
+            if (result) {
+                this.handleStateUpdate(result);
             }
         } catch (e) {
             console.warn('Failed to load runtime state:', e);
@@ -97,6 +104,7 @@ class PinControlManager {
      * Handle state update from server.
      */
     handleStateUpdate(data) {
+        console.log('PinControlManager: handleStateUpdate:', data);
         this.runtimeState = data;
         this.updateUI();
     }
@@ -112,14 +120,15 @@ class PinControlManager {
             return;
         }
 
+        // Store container reference for scoped queries in updateUI
+        this.container = container;
+
         console.log('PinControlManager: Rendering controls for', pins?.length || 0, 'pins', pins);
 
         if (!pins || pins.length === 0) {
             container.innerHTML = `
                 <div class="flex flex-col items-center justify-center py-8 text-center">
-                    <svg class="w-12 h-12 text-slate-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
-                    </svg>
+                    <span class="material-icons text-slate-600 mb-4" style="font-size: 48px;">tune</span>
                     <h3 class="text-lg font-medium text-slate-300 mb-2">No Pins Configured</h3>
                     <p class="text-slate-500 text-sm mb-4">Configure pins in the Pin Config tab to control them here.</p>
                     <button onclick="app.switchNodeTab('pinconfig')" class="btn-secondary text-sm">
@@ -144,9 +153,7 @@ class PinControlManager {
             html += `
                 <div class="control-section mb-6">
                     <h4 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                        <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                        </svg>
+                        <span class="material-icons icon-sm text-cyan-400">bolt</span>
                         PWM Outputs
                     </h4>
                     <div class="space-y-3">
@@ -161,9 +168,7 @@ class PinControlManager {
             html += `
                 <div class="control-section mb-6">
                     <h4 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                        <svg class="w-4 h-4 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
-                        </svg>
+                        <span class="material-icons icon-sm text-violet-400">tune</span>
                         Servo Controls
                     </h4>
                     <div class="space-y-3">
@@ -178,9 +183,7 @@ class PinControlManager {
             html += `
                 <div class="control-section mb-6">
                     <h4 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                        <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/>
-                        </svg>
+                        <span class="material-icons icon-sm text-emerald-400">memory</span>
                         Digital Outputs
                     </h4>
                     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
@@ -195,10 +198,7 @@ class PinControlManager {
             html += `
                 <div class="control-section mb-6">
                     <h4 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                        <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
-                        </svg>
+                        <span class="material-icons icon-sm text-amber-400">visibility</span>
                         Digital Inputs
                     </h4>
                     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
@@ -213,9 +213,7 @@ class PinControlManager {
             html += `
                 <div class="control-section mb-6">
                     <h4 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                        <svg class="w-4 h-4 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-                        </svg>
+                        <span class="material-icons icon-sm text-rose-400">bar_chart</span>
                         Analog Inputs (ADC)
                     </h4>
                     <div class="space-y-3">
@@ -489,7 +487,10 @@ class PinControlManager {
     updateUI() {
         if (!this.runtimeState || !this.runtimeState.pins) return;
 
-        // Update stale indicator
+        // Use scoped container if available, otherwise fall back to document
+        const searchRoot = this.container || document;
+
+        // Update stale indicator (only in node detail page, not control page)
         const staleIndicator = document.getElementById('state-stale-indicator');
         if (staleIndicator) {
             if (this.runtimeState.stale) {
@@ -499,7 +500,7 @@ class PinControlManager {
             }
         }
 
-        // Update last update time
+        // Update last update time (only in node detail page)
         const lastUpdateEl = document.getElementById('state-last-update');
         if (lastUpdateEl && this.runtimeState.last_feedback) {
             const lastFeedback = this.runtimeState.last_feedback;
@@ -512,7 +513,8 @@ class PinControlManager {
         }
 
         for (const pin of this.runtimeState.pins) {
-            const item = document.querySelector(`.control-item[data-gpio="${pin.gpio}"]`);
+            // Use scoped search to find controls only within this instance's container
+            const item = searchRoot.querySelector(`.control-item[data-gpio="${pin.gpio}"]`);
             if (!item) continue;
 
             const mode = item.dataset.mode;
@@ -531,9 +533,12 @@ class PinControlManager {
                 }
             }
 
-            // Check for stale pin data (no update > 1.5s)
+            // Check for stale pin data (no firmware feedback > 2s)
+            // Only mark as stale if we have actual values - if only desired values,
+            // firmware may not support feedback (e.g., simulation mode)
             const pinAge = (Date.now() / 1000) - (pin.last_updated || 0);
-            const isStale = pinAge > 1.5;
+            const hasActualFeedback = pin.actual !== undefined;
+            const isStale = hasActualFeedback && pinAge > 2.0;
 
             if (isStale) {
                 item.classList.add('opacity-60');

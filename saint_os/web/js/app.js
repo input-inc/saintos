@@ -25,11 +25,15 @@ class SaintApp {
         // Show initial page based on URL hash
         const hash = window.location.hash.slice(1) || 'dashboard';
 
-        // Check for node detail URL (e.g., #node/rp2040_abc123)
+        // Check for special URL hashes
         if (hash.startsWith('node/')) {
+            // Node detail URL (e.g., #node/rp2040_abc123)
             const nodeId = hash.slice(5);
             this.currentNodeId = nodeId;
             this.showPage('node-detail');
+        } else if (hash === 'livelink') {
+            // LiveLink detail page
+            this.showPage('livelink-detail');
         } else {
             this.showPage(hash);
         }
@@ -125,12 +129,32 @@ class SaintApp {
         document.getElementById('btn-node-unadopt')?.addEventListener('click', () => {
             this.unadoptNode();
         });
+
+        // Firmware update button
+        document.getElementById('btn-firmware-update')?.addEventListener('click', () => {
+            this.updateFirmware();
+        });
+
+        // Firmware update badge (in overview tab) - click to go to Control tab
+        document.getElementById('node-firmware-update-badge')?.addEventListener('click', () => {
+            this.switchNodeTab('control');
+        });
     }
 
     /**
      * Show a page by ID.
      */
     showPage(pageId) {
+        console.log(`showPage called: ${pageId}`);
+
+        // Cleanup when leaving certain pages
+        if (this.currentPage === 'livelink-detail' && pageId !== 'livelink-detail') {
+            // Unsubscribe from blend shapes when leaving LiveLink detail
+            if (window.liveLinkManager) {
+                window.liveLinkManager.unsubscribe();
+            }
+        }
+
         // Update navigation
         document.querySelectorAll('.nav-link').forEach(link => {
             if (link.dataset.page === pageId) {
@@ -159,10 +183,15 @@ class SaintApp {
      * Load data for a specific page.
      */
     async loadPageData(pageId) {
+        console.log(`loadPageData called for: ${pageId}`);
         const ws = window.saintWS;
-        if (!ws.connected) return;
+        if (!ws || !ws.connected) {
+            console.warn(`loadPageData: WebSocket not connected, skipping ${pageId}`);
+            return;
+        }
 
         try {
+            console.log(`loadPageData: switching on pageId="${pageId}"`);
             switch (pageId) {
                 case 'dashboard':
                     await this.loadDashboardData();
@@ -179,12 +208,18 @@ class SaintApp {
                 case 'inputs':
                     await this.loadInputsData();
                     break;
+                case 'livelink-detail':
+                    await this.loadLiveLinkDetailData();
+                    break;
                 case 'logs':
                     await this.loadLogsData();
                     break;
                 case 'control':
+                    console.log('loadPageData: matched control case');
                     await this.loadControlPageData();
                     break;
+                default:
+                    console.log(`loadPageData: no match for "${pageId}"`);
             }
         } catch (error) {
             console.error(`Failed to load ${pageId} data:`, error);
@@ -195,8 +230,13 @@ class SaintApp {
      * Load control page data.
      */
     async loadControlPageData() {
-        if (typeof controlPage !== 'undefined') {
-            await controlPage.load();
+        console.log('loadControlPageData called, window.controlPage defined:', typeof window.controlPage !== 'undefined');
+        if (typeof window.controlPage !== 'undefined') {
+            console.log('Calling controlPage.load()...');
+            await window.controlPage.load();
+            console.log('controlPage.load() completed');
+        } else {
+            console.error('controlPage is undefined! Check if controlpage.js loaded correctly.');
         }
     }
 
@@ -242,6 +282,35 @@ class SaintApp {
         if (message.node === 'system') {
             this.systemStatus = message.data;
             this.updateSystemStatus();
+        } else if (message.node === 'nodes') {
+            // Update cached node data
+            const data = message.data;
+            if (data.adopted) {
+                this.nodes.adopted = data.adopted;
+            }
+            if (data.unadopted) {
+                this.nodes.unadopted = data.unadopted;
+            }
+            // Update UI based on current page
+            this.updateNodesUI();
+        }
+    }
+
+    /**
+     * Update nodes-related UI elements based on current page.
+     */
+    updateNodesUI() {
+        // Always update dashboard summary (it's in the sidebar)
+        this.updateNodesSummary();
+
+        // If on nodes page, refresh the list
+        if (this.currentPage === 'nodes') {
+            this.renderNodesList();
+        }
+
+        // If on control page and controlPage is loaded, update node status
+        if (this.currentPage === 'control' && typeof window.controlPage !== 'undefined') {
+            window.controlPage.updateNodeStatus(this.nodes.adopted);
         }
     }
 
@@ -474,6 +543,9 @@ class SaintApp {
                         <button class="btn-sm bg-slate-700 hover:bg-red-600 text-slate-200" onclick="app.resetNode('${node.node_id}')">
                             Reset
                         </button>
+                        <button class="btn-sm bg-slate-700 hover:bg-red-600 text-slate-400 hover:text-white" onclick="app.removeNode('${node.node_id}')" title="Remove node">
+                            <span class="material-icons icon-sm">delete</span>
+                        </button>
                     </div>
                 </div>
             `).join('');
@@ -513,6 +585,9 @@ class SaintApp {
                     </div>
                     <div class="flex items-center gap-2 pt-3 border-t border-slate-700">
                         ${adoptButton}
+                        <button class="btn-sm bg-slate-700 hover:bg-red-600 text-slate-400 hover:text-white" onclick="app.removeNode('${node.node_id}')" title="Remove node">
+                            <span class="material-icons icon-sm">delete</span>
+                        </button>
                     </div>
                 </div>
             `}).join('');
@@ -590,6 +665,7 @@ class SaintApp {
         document.getElementById('node-info-role').textContent = info.role || '--';
         document.getElementById('node-info-hardware').textContent = info.hardware_model || 'Unknown';
         document.getElementById('node-info-firmware').textContent = info.firmware_version || '--';
+        document.getElementById('node-info-firmware-build').textContent = info.firmware_build ? `Built: ${info.firmware_build}` : '';
         document.getElementById('node-info-ip').textContent = info.ip_address || '--';
         document.getElementById('node-info-uptime').textContent =
             info.uptime_seconds ? this.formatUptime(info.uptime_seconds) : '--';
@@ -599,6 +675,43 @@ class SaintApp {
         document.getElementById('node-stat-state').textContent = info.state || 'Unknown';
         document.getElementById('node-stat-lastseen').textContent =
             info.last_seen ? new Date(info.last_seen * 1000).toLocaleString() : '--';
+
+        // Update firmware update badge and button
+        this.updateFirmwareUpdateUI(info);
+    }
+
+    /**
+     * Update firmware update UI elements based on availability.
+     */
+    updateFirmwareUpdateUI(info) {
+        const badge = document.getElementById('node-firmware-update-badge');
+        const button = document.getElementById('btn-firmware-update');
+        const versionSpan = document.getElementById('firmware-update-version');
+
+        const updateAvailable = info.firmware_update_available === true;
+        const serverVersion = info.server_firmware_version;
+
+        // Update badge visibility
+        if (badge) {
+            if (updateAvailable && serverVersion) {
+                badge.classList.remove('hidden');
+                badge.textContent = `Update to ${serverVersion}`;
+            } else {
+                badge.classList.add('hidden');
+            }
+        }
+
+        // Update button visibility
+        if (button) {
+            if (updateAvailable && serverVersion) {
+                button.classList.remove('hidden');
+                if (versionSpan) {
+                    versionSpan.textContent = `(${info.firmware_version} -> ${serverVersion})`;
+                }
+            } else {
+                button.classList.add('hidden');
+            }
+        }
     }
 
     /**
@@ -748,7 +861,29 @@ class SaintApp {
      * Load inputs page data.
      */
     async loadInputsData() {
-        // TODO: Implement inputs loading
+        // Subscribe to LiveLink status updates
+        const ws = window.saintWS;
+        if (ws && ws.connected) {
+            await ws.subscribe(['livelink']);
+        }
+    }
+
+    /**
+     * Show LiveLink detail page.
+     */
+    showLiveLinkDetail() {
+        this.showPage('livelink-detail');
+        window.location.hash = 'livelink';
+    }
+
+    /**
+     * Load LiveLink detail page data.
+     */
+    async loadLiveLinkDetailData() {
+        // Subscribe to blend shapes for live visualization
+        if (window.liveLinkManager) {
+            await window.liveLinkManager.subscribe();
+        }
     }
 
     /**
@@ -953,6 +1088,109 @@ class SaintApp {
         } catch (error) {
             console.error('Unadopt failed:', error);
             this.addActivityLogEntry({ text: `Failed to unadopt node`, level: 'error' });
+        }
+    }
+
+    /**
+     * Update firmware on current node.
+     */
+    async updateFirmware() {
+        if (!this.currentNodeId) return;
+
+        const info = this.currentNodeInfo;
+        if (!info) return;
+
+        const serverVersion = info.server_firmware_version;
+        const currentVersion = info.firmware_version;
+
+        if (!confirm(
+            `Update firmware on ${info.display_name || this.currentNodeId}?\n\n` +
+            `Current version: ${currentVersion}\n` +
+            `New version: ${serverVersion}\n\n` +
+            `The node will restart during the update.`
+        )) {
+            return;
+        }
+
+        const ws = window.saintWS;
+        const button = document.getElementById('btn-firmware-update');
+
+        try {
+            // Disable button and show updating state
+            if (button) {
+                button.disabled = true;
+                button.classList.add('opacity-50', 'cursor-not-allowed');
+                const textSpan = button.querySelector('.update-text');
+                if (textSpan) {
+                    textSpan.textContent = 'Updating...';
+                }
+            }
+
+            const result = await ws.management('update_firmware', {
+                node_id: this.currentNodeId
+            });
+
+            if (result.message) {
+                this.addActivityLogEntry({
+                    text: `Firmware update initiated: ${currentVersion} -> ${serverVersion}`,
+                    level: 'info'
+                });
+
+                // Show success message
+                alert(
+                    `Firmware update initiated!\n\n` +
+                    `The node will restart and load the new firmware.\n` +
+                    `Version: ${currentVersion} -> ${serverVersion}`
+                );
+
+                // Hide the update button since update is in progress
+                if (button) {
+                    button.classList.add('hidden');
+                }
+
+                // Hide the badge
+                const badge = document.getElementById('node-firmware-update-badge');
+                if (badge) {
+                    badge.classList.add('hidden');
+                }
+            }
+        } catch (error) {
+            console.error('Firmware update failed:', error);
+            this.addActivityLogEntry({
+                text: `Firmware update failed: ${error.message}`,
+                level: 'error'
+            });
+            alert(`Firmware update failed: ${error.message}`);
+        } finally {
+            // Re-enable button
+            if (button) {
+                button.disabled = false;
+                button.classList.remove('opacity-50', 'cursor-not-allowed');
+                const textSpan = button.querySelector('.update-text');
+                if (textSpan) {
+                    textSpan.textContent = 'Update Firmware';
+                }
+            }
+        }
+    }
+
+    /**
+     * Remove a node completely from the server.
+     */
+    async removeNode(nodeId) {
+        if (!confirm(`Remove node ${nodeId}?\n\nThis will remove the node from the server. If the node is still running, it will reappear when it announces itself.`)) {
+            return;
+        }
+
+        const ws = window.saintWS;
+
+        try {
+            await ws.management('remove_node', { node_id: nodeId });
+            this.addActivityLogEntry({ text: `Node ${nodeId} removed`, level: 'info' });
+            await this.loadNodesData();
+        } catch (error) {
+            console.error('Remove failed:', error);
+            this.addActivityLogEntry({ text: `Failed to remove ${nodeId}`, level: 'error' });
         }
     }
 

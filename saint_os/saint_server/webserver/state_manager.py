@@ -6,6 +6,7 @@ Manages system state and provides data for WebSocket clients.
 
 import json
 import os
+import re
 import time
 import yaml
 import psutil
@@ -222,6 +223,7 @@ class NodeInfo:
     mac_address: str = ""
     ip_address: str = ""
     firmware_version: str = "0.0.0"
+    firmware_build: str = ""  # Build timestamp
     online: bool = True
     cpu_temp: float = 0.0
     cpu_usage: float = 0.0
@@ -365,28 +367,26 @@ class StateManager:
         if not node_id:
             return False
 
-        # Check if this node is already adopted (shouldn't announce, but handle it)
+        # Check if this node is already adopted
         if node_id in self.state.adopted_nodes:
-            # Update last_seen for adopted nodes too
-            self.state.adopted_nodes[node_id].last_seen = time.time()
-            self.state.adopted_nodes[node_id].online = True
-            return False
-
-        is_new = node_id not in self.state.unadopted_nodes
-
-        # Create or update node info
-        if is_new:
+            node = self.state.adopted_nodes[node_id]
+            is_new = False
+        elif node_id in self.state.unadopted_nodes:
+            node = self.state.unadopted_nodes[node_id]
+            is_new = False
+        else:
+            # New unadopted node
             node = NodeInfo(node_id=node_id)
             self.state.unadopted_nodes[node_id] = node
             self._log_activity(f"New node discovered: {node_id}", "info")
-        else:
-            node = self.state.unadopted_nodes[node_id]
+            is_new = True
 
-        # Update node info from announcement
+        # Update node info from announcement (for both adopted and unadopted)
         node.mac_address = data.get("mac", node.mac_address)
         node.ip_address = data.get("ip", node.ip_address)
         node.hardware_model = data.get("hw", node.hardware_model)
         node.firmware_version = data.get("fw", node.firmware_version)
+        node.firmware_build = data.get("fw_build", node.firmware_build)
         node.uptime_seconds = data.get("uptime", node.uptime_seconds)
         node.last_seen = time.time()
         node.online = True
@@ -468,18 +468,34 @@ class StateManager:
     def get_adopted_nodes(self) -> List[Dict[str, Any]]:
         """Get list of adopted nodes."""
         result = []
+        server_fw = self.get_server_firmware_info()
+        server_version_tuple = self._parse_version(server_fw.get("version", "0.0.0"))
+
         for node in self.state.adopted_nodes.values():
+            # Check if firmware update is available
+            node_version_tuple = self._parse_version(node.firmware_version or "0.0.0")
+            firmware_update_available = (
+                server_fw["available"] and
+                server_version_tuple > node_version_tuple
+            )
+
             node_data = {
                 "node_id": node.node_id,
                 "display_name": node.display_name,
                 "role": node.role,
                 "hardware_model": node.hardware_model,
+                "ip_address": node.ip_address,
+                "mac_address": node.mac_address,
+                "firmware_version": node.firmware_version,
+                "firmware_build": node.firmware_build,
                 "online": node.online,
                 "cpu_usage": node.cpu_usage,
                 "memory_usage": node.memory_usage,
                 "uptime_seconds": node.uptime_seconds,
                 "has_capabilities": node.capabilities is not None,
                 "pin_config_status": node.pin_config.sync_status if node.pin_config else "unconfigured",
+                "firmware_update_available": firmware_update_available,
+                "server_firmware_version": server_fw.get("version") if firmware_update_available else None,
             }
             result.append(node_data)
         return result
@@ -493,6 +509,7 @@ class StateManager:
                 "mac_address": node.mac_address,
                 "ip_address": node.ip_address,
                 "firmware_version": node.firmware_version,
+                "firmware_build": node.firmware_build,
                 "cpu_temp": node.cpu_temp,
                 "cpu_usage": node.cpu_usage,
                 "memory_usage": node.memory_usage,
@@ -540,6 +557,35 @@ class StateManager:
             return {"success": True, "message": "Node factory reset and unadopted"}
         else:
             return {"success": True, "message": "Node reset (soft reset)"}
+
+    def remove_node(self, node_id: str) -> Dict[str, Any]:
+        """Remove a node completely from the server (both adopted and unadopted)."""
+        removed_from = None
+
+        # Check adopted nodes
+        if node_id in self.state.adopted_nodes:
+            del self.state.adopted_nodes[node_id]
+            removed_from = "adopted"
+
+            # Also remove config file if it exists
+            config_path = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
+            if os.path.exists(config_path):
+                try:
+                    os.remove(config_path)
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"Failed to remove config file for {node_id}: {e}")
+
+        # Check unadopted nodes
+        elif node_id in self.state.unadopted_nodes:
+            del self.state.unadopted_nodes[node_id]
+            removed_from = "unadopted"
+
+        if removed_from:
+            self._log_activity(f"Removed node {node_id} from {removed_from} list", "info")
+            return {"success": True, "message": f"Node {node_id} removed"}
+        else:
+            return {"success": False, "message": f"Node {node_id} not found"}
 
     def set_client_count(self, count: int):
         """Update WebSocket client count."""
@@ -992,11 +1038,11 @@ class StateManager:
 
     def get_runtime_state(self, node_id: str) -> Optional[Dict[str, Any]]:
         """Get runtime state for a node as a dictionary."""
-        node = self.state.adopted_nodes.get(node_id)
-        if not node or not node.runtime_state:
+        runtime_state = self.get_or_create_runtime_state(node_id)
+        if not runtime_state:
             return None
 
-        return node.runtime_state.to_dict()
+        return runtime_state.to_dict()
 
     def get_controllable_pins(self, node_id: str) -> List[Dict[str, Any]]:
         """
@@ -1043,3 +1089,147 @@ class StateManager:
                 })
 
         return result
+
+    # =========================================================================
+    # Firmware Management Methods
+    # =========================================================================
+
+    def _get_firmware_dir(self) -> Optional[str]:
+        """Get the firmware build directory path."""
+        # Try to find firmware directory relative to package
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            package_dir = get_package_share_directory('saint_os')
+            # Firmware is in source tree, navigate from install to source
+            # install/saint_os/share/saint_os -> source/saint_os/firmware/rp2040
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(package_dir))))
+            firmware_dir = os.path.join(base_dir, 'saint_os', 'firmware', 'rp2040')
+            if os.path.isdir(firmware_dir):
+                return firmware_dir
+        except Exception:
+            pass
+
+        # Fallback: try relative to this file
+        current_dir = os.path.dirname(__file__)
+        firmware_dir = os.path.abspath(os.path.join(current_dir, '..', '..', 'firmware', 'rp2040'))
+        if os.path.isdir(firmware_dir):
+            return firmware_dir
+
+        return None
+
+    def _parse_version(self, version_str: str) -> tuple:
+        """Parse version string into comparable tuple."""
+        if not version_str:
+            return (0, 0, 0)
+        # Handle versions like "1.1.0" or "1.1.0-abc123"
+        match = re.match(r'^(\d+)\.(\d+)\.(\d+)', version_str)
+        if match:
+            return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        return (0, 0, 0)
+
+    def get_server_firmware_info(self) -> Dict[str, Any]:
+        """
+        Get the latest server firmware version and build info.
+
+        Returns dict with:
+            - version: Version string (e.g., "1.1.0")
+            - build_date: Build date if available
+            - elf_path: Path to ELF file (for simulation)
+            - uf2_path: Path to UF2 file (for hardware)
+            - available: Whether firmware files are available
+        """
+        result = {
+            "version": "0.0.0",
+            "build_date": None,
+            "elf_path": None,
+            "uf2_path": None,
+            "available": False,
+        }
+
+        firmware_dir = self._get_firmware_dir()
+        if not firmware_dir:
+            return result
+
+        # Try hardware build first, then simulation build
+        for build_type in ['build_hardware', 'build_sim']:
+            build_dir = os.path.join(firmware_dir, build_type)
+            if not os.path.isdir(build_dir):
+                continue
+
+            elf_path = os.path.join(build_dir, 'saint_node.elf')
+            uf2_path = os.path.join(build_dir, 'saint_node.uf2')
+
+            if os.path.isfile(elf_path):
+                result["elf_path"] = elf_path
+                result["available"] = True
+
+                # Get build date from file modification time
+                mtime = os.path.getmtime(elf_path)
+                result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
+
+            if os.path.isfile(uf2_path):
+                result["uf2_path"] = uf2_path
+
+            # Try to read version from CMakeLists.txt
+            cmake_path = os.path.join(firmware_dir, 'CMakeLists.txt')
+            if os.path.isfile(cmake_path):
+                try:
+                    with open(cmake_path, 'r') as f:
+                        content = f.read()
+                    major = re.search(r'set\(FIRMWARE_VERSION_MAJOR\s+(\d+)\)', content)
+                    minor = re.search(r'set\(FIRMWARE_VERSION_MINOR\s+(\d+)\)', content)
+                    patch = re.search(r'set\(FIRMWARE_VERSION_PATCH\s+(\d+)\)', content)
+                    if major and minor and patch:
+                        result["version"] = f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
+                except Exception:
+                    pass
+
+            if result["available"]:
+                break
+
+        return result
+
+    def is_firmware_update_available(self, node_id: str) -> Dict[str, Any]:
+        """
+        Check if a firmware update is available for a node.
+
+        Returns dict with:
+            - available: Whether an update is available
+            - current_version: Node's current firmware version
+            - server_version: Server's firmware version
+            - message: Human-readable status message
+        """
+        node = self.state.adopted_nodes.get(node_id) or self.state.unadopted_nodes.get(node_id)
+        if not node:
+            return {
+                "available": False,
+                "current_version": None,
+                "server_version": None,
+                "message": "Node not found",
+            }
+
+        server_fw = self.get_server_firmware_info()
+        node_version = node.firmware_version or "0.0.0"
+        server_version = server_fw.get("version", "0.0.0")
+
+        node_tuple = self._parse_version(node_version)
+        server_tuple = self._parse_version(server_version)
+
+        update_available = server_fw["available"] and server_tuple > node_tuple
+
+        if update_available:
+            message = f"Update available: {node_version} → {server_version}"
+        elif not server_fw["available"]:
+            message = "No firmware build available on server"
+        elif server_tuple == node_tuple:
+            message = "Firmware is up to date"
+        else:
+            message = "Node firmware is newer than server"
+
+        return {
+            "available": update_available,
+            "current_version": node_version,
+            "server_version": server_version,
+            "server_build_date": server_fw.get("build_date"),
+            "message": message,
+        }

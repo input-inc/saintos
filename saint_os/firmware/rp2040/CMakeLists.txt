@@ -39,7 +39,7 @@ pico_sdk_init()
 
 # Firmware version
 set(FIRMWARE_VERSION_MAJOR 1)
-set(FIRMWARE_VERSION_MINOR 1)
+set(FIRMWARE_VERSION_MINOR 2)
 set(FIRMWARE_VERSION_PATCH 0)
 
 # Build timestamp

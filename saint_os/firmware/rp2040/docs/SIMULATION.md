@@ -15,45 +15,88 @@ The simulation uses a custom **UDP Bridge** peripheral that provides direct UDP 
 1. **Renode** - Download from https://renode.io/ (tested with v1.16.0)
    - macOS: Install to `~/Applications/Renode.app`
 
-2. **Renode RP2040 Package** - Community RP2040 support for Renode
-   ```bash
-   cd ~
-   git clone https://github.com/matgla/Renode_RP2040.git
-   ```
+2. **Renode RP2040 Package** - Already included in `firmware/rp2040/simulation/renode_rp2040/`
 
 3. **Firmware built for simulation**
    ```bash
-   cd firmware/rp2040/build
-   export PICO_SDK_PATH=~/pico-sdk
-   export MICRO_ROS_PATH=~/micro_ros_raspberrypi_pico_sdk
+   cd firmware/rp2040
+   mkdir -p build && cd build
    cmake -DSIMULATION=ON ..
    make
    ```
 
+   > **Note:** The Pico SDK and micro-ROS paths are auto-detected from:
+   > - `lib/pico-sdk` (local) or `~/pico-sdk` or `$PICO_SDK_PATH`
+   > - `lib/micro_ros_raspberrypi_pico_sdk` (local) or `$MICRO_ROS_PATH`
+   >
+   > The node manager expects firmware at `build/saint_node.elf`. If you use a
+   > different build directory (e.g., `build_sim`), copy the firmware:
+   > ```bash
+   > cp build_sim/saint_node.elf build/
+   > ```
+
 4. **micro-ROS Agent** (for ROS2 connectivity)
+
+   On Linux:
    ```bash
    ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
    ```
 
+   On macOS (via Docker):
+   ```bash
+   docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:humble udp4 --port 8888 -v4
+   ```
+
 ## Running a Single Node
 
-**Terminal 1 - Start Renode:**
+### Using the Node Manager (Recommended)
+
+The node manager script handles creating and running simulated nodes:
+
 ```bash
-cd ~/Renode_RP2040
-~/Applications/Renode.app/Contents/MacOS/Renode run_saint_node.resc
+cd firmware/rp2040/simulation
+
+# Create a node (first time only)
+python3 saint_node_manager.py create node1
+
+# Start the node (foreground)
+python3 saint_node_manager.py start node1 --wait
+
+# Or start in background
+python3 saint_node_manager.py start node1
+python3 saint_node_manager.py stop node1
 ```
 
-Then in the Renode console:
-```
-(saint_node) start
+### Using Renode Directly
+
+```bash
+cd firmware/rp2040/simulation
+~/Applications/Renode.app/Contents/MacOS/Renode nodes/node1.resc
 ```
 
-**Terminal 2 - Start micro-ROS Agent:**
+The simulation auto-starts. Use Renode commands:
+```
+pause    # Pause simulation
+start    # Resume simulation
+quit     # Exit Renode
+```
+
+### Start the micro-ROS Agent
+
+In another terminal:
+
+Linux:
 ```bash
 ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
 ```
 
-**Terminal 3 - Verify Connection:**
+macOS (Docker):
+```bash
+docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:humble udp4 --port 8888 -v4
+```
+
+### Verify Connection
+
 ```bash
 ros2 topic list
 ros2 topic echo /saint/nodes/announce
@@ -61,14 +104,27 @@ ros2 topic echo /saint/nodes/announce
 
 ## Running Multiple Nodes
 
-For multi-node simulation, use the multi-node script:
+Create and start multiple nodes:
 
 ```bash
-cd ~/Renode_RP2040
-~/Applications/Renode.app/Contents/MacOS/Renode run_multi_nodes.resc
+cd firmware/rp2040/simulation
+
+# Create nodes
+python3 saint_node_manager.py create node1 --port 9999
+python3 saint_node_manager.py create node2 --port 9998
+python3 saint_node_manager.py create node3 --port 9997
+
+# Start all nodes (background)
+python3 saint_node_manager.py start-all
+
+# List status
+python3 saint_node_manager.py list
+
+# Stop all
+python3 saint_node_manager.py stop-all
 ```
 
-This creates 3 simulated nodes, each with its own UDP port:
+Each node gets its own UDP port for communication:
 - Node 1: UDP port 9999
 - Node 2: UDP port 9998
 - Node 3: UDP port 9997
@@ -174,9 +230,11 @@ If you see "Failed to open UDP socket", another process is using the port. Eithe
 - Change the local port in the firmware or simulation script
 
 **micro-ROS Agent Not Connecting:**
-1. Verify the agent is running: `ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888`
-2. Check the agent address in firmware matches (default: 192.168.1.10:8888)
-3. If running on the same machine, use `127.0.0.1` as the agent IP
+1. Verify the agent is running:
+   - Linux: `ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888`
+   - macOS: `docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:humble udp4 --port 8888`
+2. Check the agent address in firmware matches (default: 127.0.0.1:8888 for simulation)
+3. On macOS, ensure Docker is using port mapping (`-p 8888:8888/udp`)
 
 **No ROS2 Topics:**
 1. Wait for the node to initialize (watch the UART output)
@@ -187,8 +245,11 @@ If you see "Failed to open UDP socket", another process is using the port. Eithe
 
 | File | Description |
 |------|-------------|
-| `~/Renode_RP2040/run_saint_node.resc` | Single node simulation |
-| `~/Renode_RP2040/run_multi_nodes.resc` | Multi-node simulation |
-| `~/Renode_RP2040/emulation/peripherals/network/udp_bridge.cs` | UDP bridge peripheral |
-| `firmware/rp2040/transport/transport_udp_bridge.c` | Firmware UDP transport |
-| `firmware/rp2040/transport/transport_w5500.c` | Hardware ethernet transport |
+| `simulation/saint_node_manager.py` | Node lifecycle management script |
+| `simulation/nodes/<node_id>.resc` | Generated Renode scripts per node |
+| `simulation/node_storage/` | Persistent storage files per node |
+| `simulation/renode_rp2040/` | Renode RP2040 package with custom peripherals |
+| `simulation/renode_rp2040/emulation/peripherals/network/udp_bridge.cs` | UDP bridge peripheral |
+| `simulation/renode_rp2040/emulation/peripherals/storage/persistent_storage.cs` | Persistent storage peripheral |
+| `transport/transport_udp_bridge.c` | Firmware UDP transport (simulation) |
+| `transport/transport_w5500.c` | Hardware ethernet transport |

@@ -4,10 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SAINT.OS Administration</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/fonts.css">
+    <script src="css/tailwind.js"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -58,9 +56,7 @@
                     <!-- Logo -->
                     <div class="flex items-center gap-3">
                         <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
-                            <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-                            </svg>
+                            <span class="material-icons text-white icon-md">computer</span>
                         </div>
                         <div>
                             <h1 class="text-xl font-bold text-white">SAINT.OS</h1>
@@ -73,6 +69,12 @@
                         <span class="status-dot w-2 h-2 rounded-full bg-amber-500 animate-pulse-dot"></span>
                         <span class="status-text text-sm text-slate-300">Connecting...</span>
                     </div>
+
+                    <!-- Global E-Stop -->
+                    <button id="btn-estop" class="btn-danger">
+                        <span class="material-icons icon-sm">warning</span>
+                        E-Stop
+                    </button>
                 </div>
             </div>
             <!-- Accent line -->
@@ -84,46 +86,31 @@
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div class="flex items-center gap-1 overflow-x-auto py-2">
                     <a href="#dashboard" class="nav-link active" data-page="dashboard">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
-                        </svg>
+                        <span class="material-icons icon-sm">dashboard</span>
                         Dashboard
                     </a>
                     <a href="#nodes" class="nav-link" data-page="nodes">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
-                        </svg>
+                        <span class="material-icons icon-sm">dns</span>
                         Nodes
                     </a>
                     <a href="#routes" class="nav-link" data-page="routes">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                        </svg>
+                        <span class="material-icons icon-sm">bolt</span>
                         Routes
                     </a>
                     <a href="#control" class="nav-link" data-page="control">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
-                        </svg>
+                        <span class="material-icons icon-sm">tune</span>
                         Control
                     </a>
                     <a href="#inputs" class="nav-link" data-page="inputs">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.14 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/>
-                        </svg>
+                        <span class="material-icons icon-sm">sensors</span>
                         Inputs
                     </a>
                     <a href="#settings" class="nav-link" data-page="settings">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                        </svg>
+                        <span class="material-icons icon-sm">settings</span>
                         Settings
                     </a>
                     <a href="#logs" class="nav-link" data-page="logs">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                        </svg>
+                        <span class="material-icons icon-sm">description</span>
                         Logs
                     </a>
                 </div>
@@ -136,20 +123,10 @@
             <section id="page-dashboard" class="page active">
                 <div class="flex items-center justify-between mb-6">
                     <h2 class="text-2xl font-bold text-white">Dashboard</h2>
-                    <div class="flex items-center gap-2">
-                        <button id="btn-scan-nodes" class="btn-secondary">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                            </svg>
-                            Scan Nodes
-                        </button>
-                        <button id="btn-estop" class="btn-danger">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                            </svg>
-                            E-Stop All
-                        </button>
-                    </div>
+                    <button id="btn-scan-nodes" class="btn-secondary">
+                        <span class="material-icons icon-sm">search</span>
+                        Scan Nodes
+                    </button>
                 </div>
 
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -251,9 +228,7 @@
                 <!-- Header with back button -->
                 <div class="flex items-center gap-4 mb-6">
                     <button onclick="app.showPage('nodes')" class="btn-secondary">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
-                        </svg>
+                        <span class="material-icons icon-sm">arrow_back</span>
                         Back
                     </button>
                     <div class="flex-1">
@@ -304,7 +279,13 @@
                                 </div>
                                 <div class="stat-item">
                                     <span class="stat-label">Firmware</span>
-                                    <span id="node-info-firmware" class="stat-value text-sm">--</span>
+                                    <div class="flex items-center gap-2">
+                                        <span id="node-info-firmware" class="stat-value text-sm">--</span>
+                                        <span id="node-firmware-update-badge" class="hidden px-2 py-0.5 text-xs font-medium rounded-full bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 cursor-pointer hover:bg-cyan-500/30" title="Click to update">
+                                            Update Available
+                                        </span>
+                                    </div>
+                                    <span id="node-info-firmware-build" class="text-xs text-slate-500 block"></span>
                                 </div>
                                 <div class="stat-item">
                                     <span class="stat-label">IP Address</span>
@@ -358,15 +339,11 @@
                                     <h3 class="text-lg font-semibold text-white">Available Pins</h3>
                                     <div class="flex items-center gap-2">
                                         <button id="btn-refresh-capabilities" class="btn-secondary text-sm">
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                                            </svg>
+                                            <span class="material-icons icon-sm">refresh</span>
                                             Refresh
                                         </button>
                                         <button id="btn-sync-config" class="btn-primary">
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                                            </svg>
+                                            <span class="material-icons icon-sm">sync</span>
                                             Sync to Node
                                         </button>
                                     </div>
@@ -397,9 +374,7 @@
                                 <div class="flex items-center justify-between mb-4">
                                     <h3 class="text-lg font-semibold text-white">Pin Controls</h3>
                                     <div id="state-stale-indicator" class="hidden flex items-center gap-2 text-sm text-amber-400">
-                                        <svg class="w-4 h-4 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                                        </svg>
+                                        <span class="material-icons icon-sm animate-pulse">warning</span>
                                         No recent data
                                     </div>
                                 </div>
@@ -434,21 +409,15 @@
                                 <h3 class="text-lg font-semibold text-white mb-4">Quick Actions</h3>
                                 <div class="space-y-2">
                                     <button id="btn-all-pwm-zero" class="btn-secondary w-full justify-center text-sm">
-                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/>
-                                        </svg>
+                                        <span class="material-icons icon-sm">block</span>
                                         All PWM to 0%
                                     </button>
                                     <button id="btn-all-servo-center" class="btn-secondary w-full justify-center text-sm">
-                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                                        </svg>
+                                        <span class="material-icons icon-sm">center_focus_strong</span>
                                         All Servos to 90&deg;
                                     </button>
                                     <button id="btn-all-digital-off" class="btn-secondary w-full justify-center text-sm">
-                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                                        </svg>
+                                        <span class="material-icons icon-sm">power_off</span>
                                         All Digital OFF
                                     </button>
                                 </div>
@@ -476,22 +445,22 @@
                         <div class="card">
                             <h3 class="text-lg font-semibold text-white mb-4">Node Commands</h3>
                             <div class="space-y-3">
+                                <!-- Firmware Update Button (hidden by default) -->
+                                <button id="btn-firmware-update" class="btn-primary w-full justify-center hidden">
+                                    <span class="material-icons icon-sm">system_update</span>
+                                    <span class="update-text">Update Firmware</span>
+                                    <span id="firmware-update-version" class="text-xs opacity-75 ml-1"></span>
+                                </button>
                                 <button id="btn-node-restart" class="btn-secondary w-full justify-center">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                                    </svg>
+                                    <span class="material-icons icon-sm">restart_alt</span>
                                     Restart Node
                                 </button>
                                 <button id="btn-node-identify" class="btn-secondary w-full justify-center">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
-                                    </svg>
+                                    <span class="material-icons icon-sm">lightbulb</span>
                                     Identify (Blink LED)
                                 </button>
                                 <button id="btn-node-estop" class="btn-danger w-full justify-center">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                                    </svg>
+                                    <span class="material-icons icon-sm">warning</span>
                                     Emergency Stop
                                 </button>
                             </div>
@@ -501,15 +470,11 @@
                             <h3 class="text-lg font-semibold text-white mb-4">Danger Zone</h3>
                             <div class="space-y-3">
                                 <button id="btn-node-factory-reset" class="btn-secondary w-full justify-center text-amber-400 border-amber-500/50 hover:bg-amber-500/20">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                                    </svg>
+                                    <span class="material-icons icon-sm">delete_forever</span>
                                     Factory Reset
                                 </button>
                                 <button id="btn-node-unadopt" class="btn-secondary w-full justify-center text-red-400 border-red-500/50 hover:bg-red-500/20">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7a4 4 0 11-8 0 4 4 0 018 0zM9 14a6 6 0 00-6 6v1h12v-1a6 6 0 00-6-6zM21 12h-6"/>
-                                    </svg>
+                                    <span class="material-icons icon-sm">person_remove</span>
                                     Unadopt Node
                                 </button>
                             </div>
@@ -526,9 +491,7 @@
                         <div class="flex items-center justify-between mb-4">
                             <h3 class="text-lg font-semibold text-white">Configure Pin</h3>
                             <button onclick="pinConfigManager.closeModal()" class="text-slate-400 hover:text-white">
-                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-                                </svg>
+                                <span class="material-icons md-20">close</span>
                             </button>
                         </div>
 
@@ -596,9 +559,7 @@
                 <h2 class="text-2xl font-bold text-white mb-6">Routes</h2>
                 <div class="card">
                     <div class="flex flex-col items-center justify-center py-12 text-center">
-                        <svg class="w-16 h-16 text-slate-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                        </svg>
+                        <span class="material-icons icon-lg text-slate-600 mb-4">bolt</span>
                         <h3 class="text-lg font-medium text-slate-300 mb-2">Route Configuration</h3>
                         <p class="text-slate-500">Input/output routing configuration coming soon...</p>
                     </div>
@@ -609,14 +570,6 @@
             <section id="page-control" class="page">
                 <div class="flex items-center justify-between mb-6">
                     <h2 class="text-2xl font-bold text-white">Control Panel</h2>
-                    <div class="flex items-center gap-2">
-                        <button id="btn-control-estop" class="btn-danger">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                            </svg>
-                            E-Stop All
-                        </button>
-                    </div>
                 </div>
 
                 <div id="control-nodes-container" class="space-y-4">
@@ -631,6 +584,37 @@
                 <h2 class="text-2xl font-bold text-white mb-6">Inputs</h2>
 
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <!-- LiveLink Face Card -->
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">LiveLink Face</h3>
+                            <span id="livelink-status-badge" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-500/20 text-slate-400">
+                                Disconnected
+                            </span>
+                        </div>
+                        <div id="livelink-summary" class="space-y-3">
+                            <div class="stat-item">
+                                <span class="stat-label">Status</span>
+                                <span id="livelink-receiver-status" class="stat-value text-sm">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Port</span>
+                                <span id="livelink-port" class="stat-value text-sm font-mono">11111</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Packets</span>
+                                <span id="livelink-packet-count" class="stat-value text-sm">0</span>
+                            </div>
+                        </div>
+                        <div class="mt-4 pt-4 border-t border-slate-700">
+                            <button onclick="app.showLiveLinkDetail()" class="btn-secondary w-full justify-center">
+                                <span class="material-icons icon-sm">visibility</span>
+                                View Details
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- WebSocket Clients Card -->
                     <div class="card">
                         <h3 class="text-lg font-semibold text-white mb-4">WebSocket Clients</h3>
                         <div id="ws-clients" class="space-y-2">
@@ -638,13 +622,7 @@
                         </div>
                     </div>
 
-                    <div class="card">
-                        <h3 class="text-lg font-semibold text-white mb-4">LiveLink Sources</h3>
-                        <div id="livelink-sources" class="space-y-2">
-                            <p class="text-slate-400 text-sm">No sources detected</p>
-                        </div>
-                    </div>
-
+                    <!-- RC Receiver Card -->
                     <div class="card">
                         <h3 class="text-lg font-semibold text-white mb-4">RC Receiver</h3>
                         <div id="rc-status" class="space-y-2">
@@ -654,15 +632,135 @@
                 </div>
             </section>
 
+            <!-- LiveLink Detail Page -->
+            <section id="page-livelink-detail" class="page">
+                <!-- Header with back button -->
+                <div class="flex items-center gap-4 mb-6">
+                    <button onclick="app.showPage('inputs')" class="btn-secondary">
+                        <span class="material-icons icon-sm">arrow_back</span>
+                        Back
+                    </button>
+                    <div class="flex-1">
+                        <h2 class="text-2xl font-bold text-white">LiveLink Face</h2>
+                    </div>
+                    <div id="livelink-connection-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+                        <span class="w-2 h-2 rounded-full bg-slate-500"></span>
+                        <span class="text-sm text-slate-400">Disconnected</span>
+                    </div>
+                </div>
+
+                <!-- Row 1: Stats, Head Pose, Eye Tracking -->
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- Stats Card -->
+                    <div class="card">
+                        <h3 class="text-lg font-semibold text-white mb-4">Connection Stats</h3>
+                        <div class="space-y-3">
+                            <div class="stat-item">
+                                <span class="stat-label">Receiver Port</span>
+                                <span id="livelink-detail-port" class="stat-value text-sm font-mono">11111</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Total Packets</span>
+                                <span id="livelink-detail-packets" class="stat-value text-sm">0</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Errors</span>
+                                <span id="livelink-detail-errors" class="stat-value text-sm">0</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Last Update</span>
+                                <span id="livelink-detail-last-update" class="stat-value text-sm">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Head Pose Visualization -->
+                    <div class="card">
+                        <h3 class="text-lg font-semibold text-white mb-4">Head Pose</h3>
+                        <div class="flex flex-col items-center">
+                            <!-- Head visualization container -->
+                            <div class="relative w-32 h-32 mb-4">
+                                <!-- Head circle (top-down view) -->
+                                <div id="head-pose-visual" class="absolute inset-0 flex items-center justify-center">
+                                    <!-- Outer ring -->
+                                    <div class="absolute w-full h-full rounded-full border-2 border-slate-600"></div>
+                                    <!-- Head shape (oval) -->
+                                    <div id="head-shape" class="w-20 h-24 bg-slate-700 rounded-full border-2 border-cyan-500/50 transition-transform duration-75" style="transform: rotate(0deg)">
+                                        <!-- Nose indicator (forward direction) -->
+                                        <div class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1 w-3 h-3 bg-cyan-500 rounded-full"></div>
+                                        <!-- Eyes -->
+                                        <div class="absolute top-6 left-3 w-2 h-3 bg-slate-500 rounded-full"></div>
+                                        <div class="absolute top-6 right-3 w-2 h-3 bg-slate-500 rounded-full"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Values -->
+                            <div class="w-full space-y-2">
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">Yaw (L/R)</span>
+                                    <span id="head-yaw-value" class="font-mono text-cyan-400">0.00</span>
+                                </div>
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">Pitch (U/D)</span>
+                                    <span id="head-pitch-value" class="font-mono text-violet-400">0.00</span>
+                                </div>
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">Roll (Tilt)</span>
+                                    <span id="head-roll-value" class="font-mono text-amber-400">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Eye Visualization -->
+                    <div class="card">
+                        <h3 class="text-lg font-semibold text-white mb-4">Eye Tracking</h3>
+                        <div class="flex items-center justify-around">
+                            <!-- Left Eye -->
+                            <div class="text-center">
+                                <p class="text-sm text-slate-400 mb-2">Left Eye</p>
+                                <div class="relative w-24 h-24 bg-slate-900 rounded-full border-2 border-slate-600">
+                                    <div id="eye-left-pupil" class="absolute w-8 h-8 bg-cyan-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 transition-all duration-75" style="left: 50%; top: 50%;"></div>
+                                    <div class="absolute w-3 h-3 bg-white rounded-full transform -translate-x-1/2 -translate-y-1/2 pointer-events-none" style="left: 55%; top: 40%;"></div>
+                                </div>
+                                <p id="eye-left-blink" class="text-xs text-slate-400 mt-2">Blink: 0%</p>
+                            </div>
+                            <!-- Right Eye -->
+                            <div class="text-center">
+                                <p class="text-sm text-slate-400 mb-2">Right Eye</p>
+                                <div class="relative w-24 h-24 bg-slate-900 rounded-full border-2 border-slate-600">
+                                    <div id="eye-right-pupil" class="absolute w-8 h-8 bg-cyan-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 transition-all duration-75" style="left: 50%; top: 50%;"></div>
+                                    <div class="absolute w-3 h-3 bg-white rounded-full transform -translate-x-1/2 -translate-y-1/2 pointer-events-none" style="left: 55%; top: 40%;"></div>
+                                </div>
+                                <p id="eye-right-blink" class="text-xs text-slate-400 mt-2">Blink: 0%</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Row 2: Blend Shapes Preview -->
+                <div class="card mt-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold text-white">Blend Shapes Preview</h3>
+                        <div class="flex items-center gap-2">
+                            <button id="btn-livelink-pause" class="btn-secondary text-sm" onclick="window.liveLinkManager?.togglePause()">
+                                <span id="livelink-pause-icon" class="material-icons icon-sm">pause_circle</span>
+                                <span id="livelink-pause-text">Pause</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="livelink-blend-shapes" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2 max-h-[400px] overflow-y-auto">
+                        <p class="text-slate-400 col-span-full text-center py-8">Waiting for data...</p>
+                    </div>
+                </div>
+            </section>
+
             <!-- Settings Page -->
             <section id="page-settings" class="page">
                 <h2 class="text-2xl font-bold text-white mb-6">Settings</h2>
                 <div class="card">
                     <div class="flex flex-col items-center justify-center py-12 text-center">
-                        <svg class="w-16 h-16 text-slate-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                        </svg>
+                        <span class="material-icons icon-lg text-slate-600 mb-4">settings</span>
                         <h3 class="text-lg font-medium text-slate-300 mb-2">Server Settings</h3>
                         <p class="text-slate-500">Configuration options coming soon...</p>
                     </div>
@@ -1037,12 +1135,32 @@
             0%, 100% { opacity: 1; transform: scale(1); }
             50% { opacity: 0.6; transform: scale(1.2); }
         }
+
+        /* LiveLink blend shape items */
+        .blend-shape-item {
+            transition: all 0.15s ease;
+        }
+        .blend-shape-item:hover {
+            background-color: rgba(30, 41, 59, 0.8);
+            border-color: rgba(71, 85, 105, 0.8);
+        }
+
+        /* Eye visualization */
+        #eye-left-pupil, #eye-right-pupil {
+            box-shadow: 0 0 15px rgba(34, 211, 238, 0.5);
+        }
+
+        /* Head pose visualization */
+        #head-shape {
+            box-shadow: 0 0 20px rgba(34, 211, 238, 0.2);
+        }
     </style>
 
     <script src="js/websocket.js"></script>
     <script src="js/pinconfig.js"></script>
     <script src="js/pincontrol.js"></script>
     <script src="js/controlpage.js"></script>
+    <script src="js/livelink.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

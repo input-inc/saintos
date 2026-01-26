@@ -22,10 +22,13 @@ import asyncio
 import os
 import signal
 import threading
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from saint_server.webserver.state_manager import StateManager
 from saint_server.roles import RoleManager
+from saint_server.livelink import LiveLinkReceiver, LiveLinkRouter
+from saint_server.livelink.receiver import LiveLinkConfig
+from saint_server.livelink.router import LiveLinkRoute, OutputMapping, MappingType
 
 
 class SaintServerNode(Node):
@@ -68,6 +71,11 @@ class SaintServerNode(Node):
 
         # Role manager
         self.role_manager = RoleManager(logger=self.get_logger())
+
+        # LiveLink components
+        self.livelink_receiver: Optional[LiveLinkReceiver] = None
+        self.livelink_router: Optional[LiveLinkRouter] = None
+        self._livelink_enabled = self.get_parameter('livelink_enabled').value
 
         # Dynamic publishers/subscribers for node communication
         self._node_config_pubs: Dict[str, Any] = {}  # node_id -> publisher
@@ -130,9 +138,21 @@ class SaintServerNode(Node):
     def _on_node_announcement(self, msg: String):
         """Handle node announcement from micro-ROS nodes."""
         try:
+            # Log announcement for debugging
+            self.get_logger().debug(f'Received announcement: {msg.data[:100]}...')
             is_new = self.state_manager.update_node_from_announcement(msg.data)
             if is_new:
                 self.get_logger().info(f'New node discovered via announcement')
+            else:
+                # Parse to get node_id for logging
+                import json
+                try:
+                    data = json.loads(msg.data)
+                    node_id = data.get('node_id', 'unknown')
+                    fw = data.get('fw', '?')
+                    self.get_logger().debug(f'Updated node {node_id} (fw: {fw})')
+                except:
+                    pass
         except Exception as e:
             self.get_logger().error(f'Error processing announcement: {e}')
 
@@ -348,6 +368,212 @@ class SaintServerNode(Node):
         pub.publish(msg)
         self.get_logger().debug(f'Sent control to {node_id}: GPIO {gpio} = {value}')
 
+    def send_firmware_update_command(self, node_id: str):
+        """Send firmware update command to a node via ROS2.
+
+        This tells the node to:
+        1. For simulation: Restart and load new firmware ELF
+        2. For hardware: Enter bootloader mode for UF2 update
+
+        The actual update mechanism depends on the node type.
+        """
+        import json
+
+        pub = self._ensure_node_control_publisher(node_id)
+
+        # Get firmware info from state manager
+        fw_info = self.state_manager.get_server_firmware_info()
+
+        control_data = {
+            "action": "firmware_update",
+            "version": fw_info.get("version", "0.0.0"),
+            "elf_path": fw_info.get("elf_path"),
+            "build_date": fw_info.get("build_date"),
+        }
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+
+        pub.publish(msg)
+        self.get_logger().info(f'Sent firmware update command to {node_id} (version: {fw_info.get("version")})')
+
+    # =========================================================================
+    # LiveLink Integration
+    # =========================================================================
+
+    async def _start_livelink(self):
+        """Start the LiveLink receiver and router."""
+        try:
+            # Create router with output callback
+            self.livelink_router = LiveLinkRouter(logger=self.get_logger())
+            self.livelink_router.set_output_callback(self._livelink_output_callback)
+
+            # Create receiver
+            config = LiveLinkConfig(
+                port=11111,  # Default Live Link Face port
+                bind_address="0.0.0.0",
+                timeout=5.0
+            )
+            self.livelink_receiver = LiveLinkReceiver(config=config, logger=self.get_logger())
+
+            # Connect receiver to router
+            self.livelink_receiver.add_callback(self.livelink_router.process)
+
+            # Also broadcast blend shapes to WebSocket clients for visualization
+            self.livelink_receiver.add_callback(self._broadcast_blend_shapes)
+
+            # Add connection event handlers for activity logging
+            self.livelink_receiver.on_connect(self._on_livelink_connect)
+            self.livelink_receiver.on_disconnect(self._on_livelink_disconnect)
+
+            # Start receiver
+            await self.livelink_receiver.start(loop=self._async_loop)
+
+            self.get_logger().info(f'LiveLink receiver started on port {config.port}')
+
+            # Set up WebSocket handlers for LiveLink
+            if self.web_server and self.web_server.ws_handler:
+                self.web_server.ws_handler.set_livelink_callbacks(
+                    get_status=self.get_livelink_status,
+                    get_routes=self.get_livelink_routes,
+                    set_routes=self.set_livelink_routes,
+                    enable_route=self.enable_livelink_route,
+                    create_default_route=self.create_livelink_default_route,
+                )
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to start LiveLink: {e}')
+
+    async def _stop_livelink(self):
+        """Stop the LiveLink receiver."""
+        if self.livelink_receiver:
+            await self.livelink_receiver.stop()
+            self.get_logger().info('LiveLink receiver stopped')
+
+    def _on_livelink_connect(self, source_addr: str, subject_name: str):
+        """Handle LiveLink connection event."""
+        self._broadcast_activity(
+            f'LiveLink connected: {subject_name} from {source_addr}',
+            'info'
+        )
+
+    def _on_livelink_disconnect(self, source_addr: str):
+        """Handle LiveLink disconnection event."""
+        self._broadcast_activity(
+            f'LiveLink disconnected: {source_addr}',
+            'warn'
+        )
+
+    _last_blend_broadcast = 0.0  # Throttle blend shape broadcasts
+
+    def _broadcast_blend_shapes(self, blend_shapes):
+        """Broadcast blend shape data to WebSocket clients for visualization."""
+        import time
+        import math
+
+        # Throttle to ~10 Hz
+        now = time.time()
+        if now - self._last_blend_broadcast < 0.1:
+            return
+        self._last_blend_broadcast = now
+
+        if self.web_server and self.web_server.ws_handler and self._async_loop:
+            # Helper to sanitize float values (NaN/Inf are not valid JSON)
+            def sanitize(value):
+                if math.isnan(value) or math.isinf(value):
+                    return 0.0
+                return value
+
+            # Convert to dict for serialization
+            data = blend_shapes.to_dict()
+
+            # Sanitize all float values
+            for key, value in data.items():
+                if isinstance(value, float):
+                    data[key] = sanitize(value)
+
+            data['subject_name'] = blend_shapes.subject_name
+            data['timestamp'] = blend_shapes.timestamp
+
+            # Add computed properties (sanitized)
+            data['eye_look_horizontal_left'] = sanitize(blend_shapes.eye_look_horizontal_left)
+            data['eye_look_horizontal_right'] = sanitize(blend_shapes.eye_look_horizontal_right)
+            data['eye_look_vertical_left'] = sanitize(blend_shapes.eye_look_vertical_left)
+            data['eye_look_vertical_right'] = sanitize(blend_shapes.eye_look_vertical_right)
+            data['brow_left'] = sanitize(blend_shapes.brow_left)
+            data['brow_right'] = sanitize(blend_shapes.brow_right)
+
+            self._async_loop.call_soon_threadsafe(
+                lambda d=data: asyncio.create_task(
+                    self.web_server.ws_handler.broadcast_state('livelink/blend_shapes', d)
+                )
+            )
+
+    def _livelink_output_callback(self, node_id: str, output_name: str, value: float):
+        """
+        Callback from LiveLink router to send output to a node.
+
+        This looks up the GPIO pin for the logical output name and sends
+        the control command to the node.
+        """
+        # Get the node's pin config to find the GPIO for this output_name
+        pin_config = self.state_manager.get_node_pin_config(node_id)
+        if not pin_config:
+            return
+
+        # Find the pin with this logical name
+        for pin in pin_config.get('pins', []):
+            if pin.get('logical_name') == output_name:
+                gpio = pin.get('gpio')
+                if gpio is not None:
+                    self.send_control_command(node_id, gpio, value)
+                    return
+
+        # Log if output not found (but don't spam)
+        self.get_logger().debug(f'LiveLink output {output_name} not found on node {node_id}')
+
+    def get_livelink_status(self) -> Dict[str, Any]:
+        """Get LiveLink status for WebSocket API."""
+        result = {
+            "enabled": self._livelink_enabled,
+            "receiver": None,
+            "router": None
+        }
+
+        if self.livelink_receiver:
+            result["receiver"] = self.livelink_receiver.stats
+
+        if self.livelink_router:
+            result["router"] = self.livelink_router.get_status()
+
+        return result
+
+    def get_livelink_routes(self) -> List[Dict[str, Any]]:
+        """Get all LiveLink routes."""
+        if self.livelink_router:
+            return self.livelink_router.get_routes_config()
+        return []
+
+    def set_livelink_routes(self, routes_data: List[Dict[str, Any]]):
+        """Set LiveLink routes from config data."""
+        if self.livelink_router:
+            self.livelink_router.load_routes_config(routes_data)
+            self.get_logger().info(f'Loaded {len(routes_data)} LiveLink routes')
+
+    def enable_livelink_route(self, route_name: str, enabled: bool):
+        """Enable or disable a LiveLink route."""
+        if self.livelink_router:
+            self.livelink_router.enable_route(route_name, enabled)
+            self.get_logger().info(f'LiveLink route "{route_name}" {"enabled" if enabled else "disabled"}')
+
+    def create_livelink_default_route(self, node_id: str) -> Dict[str, Any]:
+        """Create and add a default head route for a node."""
+        if self.livelink_router:
+            route = self.livelink_router.create_default_head_route(node_id)
+            self.livelink_router.add_route(route)
+            return route.to_dict()
+        return {}
+
     def _run_async_loop(self):
         """Run the asyncio event loop in a background thread."""
         self._async_loop = asyncio.new_event_loop()
@@ -411,6 +637,9 @@ class SaintServerNode(Node):
                 self.web_server.ws_handler.set_send_control_callback(
                     lambda node_id, gpio, value: self.send_control_command(node_id, gpio, value)
                 )
+                self.web_server.ws_handler.set_firmware_update_callback(
+                    lambda node_id: self.send_firmware_update_command(node_id)
+                )
 
             await self.web_server.start()
 
@@ -420,6 +649,10 @@ class SaintServerNode(Node):
             self.get_logger().warn(f'Web server not available: {e}')
         except Exception as e:
             self.get_logger().error(f'Failed to start web server: {e}')
+
+        # Start LiveLink receiver if enabled
+        if self._livelink_enabled:
+            await self._start_livelink()
 
     def _broadcast_activity(self, message: str, level: str):
         """Broadcast activity message to WebSocket clients."""
@@ -435,6 +668,10 @@ class SaintServerNode(Node):
     async def stop_async_services(self):
         """Stop async services gracefully."""
         self.get_logger().info('Stopping async services...')
+
+        # Stop LiveLink
+        if self.livelink_receiver:
+            await self._stop_livelink()
 
         if self.web_server:
             await self.web_server.stop()

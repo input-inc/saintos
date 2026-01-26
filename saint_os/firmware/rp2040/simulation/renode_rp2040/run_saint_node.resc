@@ -20,7 +20,7 @@ $node_udp_port?=9999
 include $ORIGIN/boards/initialize_adafruit_feather.resc
 
 # Load the SAINT node firmware
-$global.FIRMWARE?=@/Users/hackman/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/rp2040/build/saint_node.elf
+$global.FIRMWARE?=@/Users/hackman/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/rp2040/build_sim/saint_node.elf
 
 sysbus LoadELF $global.FIRMWARE
 

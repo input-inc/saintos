@@ -13,6 +13,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
+#include "hardware/watchdog.h"
 
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
@@ -125,6 +126,17 @@ static void config_subscription_callback(const void* msgin)
         return;
     }
 
+    // SAFETY: Validate message size before processing
+    if (msg->data.size >= sizeof(config_buffer)) {
+        printf("Config message too large: %zu >= %zu, rejecting\n",
+               msg->data.size, sizeof(config_buffer));
+        return;
+    }
+
+    // Ensure null termination for safe string operations
+    // The buffer should already have the data, but ensure termination
+    config_buffer[msg->data.size] = '\0';
+
     printf("Config received: %.*s\n",
            (int)(msg->data.size < 100 ? msg->data.size : 100),
            msg->data.data);
@@ -159,6 +171,71 @@ static void config_subscription_callback(const void* msgin)
 }
 
 /**
+ * Handle firmware update command.
+ * For simulation: triggers a clean exit so Renode can restart with new firmware.
+ * For hardware: triggers watchdog reset to enter bootloader mode.
+ */
+static void handle_firmware_update(const char* json, size_t len)
+{
+    // SAFETY: Basic validation
+    if (!json || len == 0 || len > 512) {
+        printf("Firmware update: invalid command\n");
+        return;
+    }
+
+    // Parse version from command (optional, for logging)
+    const char* version_str = strstr(json, "\"version\"");
+    char new_version[32] = "unknown";
+
+    if (version_str) {
+        version_str = strchr(version_str, ':');
+        if (version_str) {
+            version_str++;
+            // Skip whitespace and opening quote
+            while (*version_str == ' ' || *version_str == '"') version_str++;
+            // Copy version string
+            size_t i = 0;
+            while (version_str[i] && version_str[i] != '"' && i < sizeof(new_version) - 1) {
+                new_version[i] = version_str[i];
+                i++;
+            }
+            new_version[i] = '\0';
+        }
+    }
+
+    printf("\n");
+    printf("====================================\n");
+    printf("FIRMWARE UPDATE REQUESTED\n");
+    printf("====================================\n");
+    printf("  Current version: %s\n", FIRMWARE_VERSION_FULL);
+    printf("  New version: %s\n", new_version);
+    printf("====================================\n");
+    printf("Rebooting for firmware update...\n\n");
+
+    // Small delay to allow message to print
+    sleep_ms(500);
+
+#ifdef SIMULATION
+    // For simulation: exit cleanly so Renode can restart with new firmware
+    // The node manager should restart the simulation with the updated ELF
+    printf("Simulation mode: exiting for firmware reload\n");
+    // In Renode, we can't really exit, but we can halt the CPU
+    // This signals that update is requested
+    while (1) {
+        // Halt - Renode will need to restart the simulation
+        tight_loop_contents();
+    }
+#else
+    // For hardware: use watchdog to reset into bootloader
+    // This will cause the RP2040 to reset
+    watchdog_enable(1, 1);  // 1ms timeout, pause on debug
+    while (1) {
+        tight_loop_contents();
+    }
+#endif
+}
+
+/**
  * Subscription callback for control messages.
  * Handles runtime pin value changes from the server.
  */
@@ -170,11 +247,28 @@ static void control_subscription_callback(const void* msgin)
         return;
     }
 
+    // SAFETY: Validate message size before processing
+    if (msg->data.size >= sizeof(control_buffer)) {
+        printf("Control message too large: %zu >= %zu, rejecting\n",
+               msg->data.size, sizeof(control_buffer));
+        return;
+    }
+
+    // Ensure null termination for safe string operations
+    control_buffer[msg->data.size] = '\0';
+
     printf("Control received: %.*s\n",
            (int)(msg->data.size < 80 ? msg->data.size : 80),
            msg->data.data);
 
-    // Apply control command
+    // Check for firmware update command
+    if (strstr(msg->data.data, "\"action\":\"firmware_update\"") ||
+        strstr(msg->data.data, "\"action\": \"firmware_update\"")) {
+        handle_firmware_update(msg->data.data, msg->data.size);
+        return;
+    }
+
+    // Apply pin control command
     if (pin_control_apply_json(msg->data.data, msg->data.size)) {
         printf("Control command applied\n");
     }
@@ -554,17 +648,31 @@ static void cleanup_micro_ros(void)
 
 int main(void)
 {
-    // Initialize stdio (USB serial)
+    // Initialize stdio (USB serial for hardware, UART for simulation)
     stdio_init_all();
 
-    // Wait for USB serial connection (optional, for debugging)
-    sleep_ms(2000);
+    // Brief delay for UART to stabilize
+    sleep_ms(100);
 
+    // Print version immediately - this is the first output
+    printf("\n\n");
+    printf("****************************************\n");
+    printf("* SAINT.OS Node Firmware\n");
+    printf("* Version: %s\n", FIRMWARE_VERSION_FULL);
+    printf("* Built:   %s\n", FIRMWARE_BUILD_TIMESTAMP);
+    printf("* Hardware: %s\n", HARDWARE_MODEL);
+#ifdef SIMULATION
+    printf("* Mode:    SIMULATION (UART/UDP)\n");
+#else
+    printf("* Mode:    HARDWARE (USB/W5500)\n");
+#endif
+    printf("****************************************\n");
     printf("\n");
-    printf("========================================\n");
-    printf("SAINT.OS Node Firmware v%s (built %s)\n", FIRMWARE_VERSION_FULL, FIRMWARE_BUILD_TIMESTAMP);
-    printf("Hardware: %s\n", HARDWARE_MODEL);
-    printf("========================================\n");
+
+    // Additional startup delay for USB enumeration (hardware only)
+#ifndef SIMULATION
+    sleep_ms(1900);  // Total 2s with the 100ms above
+#endif
 
     // Initialize node state
     node_state_init();

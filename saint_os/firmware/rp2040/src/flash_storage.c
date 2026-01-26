@@ -75,6 +75,23 @@ bool flash_storage_load(flash_storage_data_t* data)
         return false;
     }
 
+    // Handle version migration
+    if (data->version < FLASH_STORAGE_VERSION) {
+        flash_storage_data_t* mutable_data = (flash_storage_data_t*)data;
+        printf("Flash storage: migrating from version %d to %d\n",
+               mutable_data->version, FLASH_STORAGE_VERSION);
+
+        // Version 1 -> 2: Added pin_config
+        if (mutable_data->version == 1) {
+            // Initialize pin_config to empty
+            memset(&mutable_data->pin_config, 0, sizeof(mutable_data->pin_config));
+            mutable_data->pin_config.version = FLASH_PIN_CONFIG_VERSION;
+            mutable_data->pin_config.pin_count = 0;
+        }
+
+        mutable_data->version = FLASH_STORAGE_VERSION;
+    }
+
     printf("Flash storage: loaded config (version %d)\n", data->version);
     return true;
 }
@@ -159,6 +176,22 @@ bool flash_storage_load(flash_storage_data_t* data)
 
     // Copy to output
     memcpy(data, flash_data, sizeof(flash_storage_data_t));
+
+    // Handle version migration
+    if (data->version < FLASH_STORAGE_VERSION) {
+        printf("Flash storage: migrating from version %d to %d\n",
+               data->version, FLASH_STORAGE_VERSION);
+
+        // Version 1 -> 2: Added pin_config
+        if (data->version == 1) {
+            // Initialize pin_config to empty
+            memset(&data->pin_config, 0, sizeof(data->pin_config));
+            data->pin_config.version = FLASH_PIN_CONFIG_VERSION;
+            data->pin_config.pin_count = 0;
+        }
+
+        data->version = FLASH_STORAGE_VERSION;
+    }
 
     printf("Flash storage: loaded config (version %d)\n", data->version);
     return true;

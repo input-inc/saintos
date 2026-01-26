@@ -34,9 +34,10 @@ PROJECT_DIR = FIRMWARE_DIR.parent.parent.parent  # saint_os/
 
 RENODE_PATH = os.path.expanduser("~/Applications/Renode.app/Contents/MacOS/Renode")
 RENODE_RP2040_PATH = SCRIPT_DIR / "renode_rp2040"
-FIRMWARE_PATH = FIRMWARE_DIR / "build" / "saint_node.elf"
+FIRMWARE_PATH = FIRMWARE_DIR / "build_sim" / "saint_node.elf"
 NODES_DIR = SCRIPT_DIR / "nodes"
 STORAGE_DIR = SCRIPT_DIR / "node_storage"
+LOGS_DIR = SCRIPT_DIR / "logs"
 STATE_FILE = SCRIPT_DIR / "nodes.json"
 
 # Base UDP port for nodes (each node gets consecutive port)
@@ -47,6 +48,7 @@ def ensure_dirs():
     """Create necessary directories."""
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     NODES_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_state():
@@ -92,10 +94,12 @@ sysbus LoadELF @{FIRMWARE_PATH}
 sysbus.cpu0 VectorTableOffset 0x00000000
 sysbus.cpu1 VectorTableOffset 0x00000000
 
-# Show UART for debug
-showAnalyzer sysbus.uart0
+# Keep cpu1 halted - RP2040 firmware will start it when needed
+# This prevents Renode dual-core issues
+cpu1 IsHalted true
 
-logLevel 3 sysbus.uart0
+# Log Renode system messages to file
+logFile @{LOGS_DIR}/{node_id}_renode.log true
 
 echo "=============================================="
 echo "SAINT.OS Node: {node_id}"
@@ -103,6 +107,10 @@ echo "=============================================="
 echo ""
 echo "  UDP Port: {udp_port}"
 echo "  Storage: {STORAGE_DIR}/{node_id}.bin"
+echo "  Log File: {LOGS_DIR}/{node_id}_uart.log"
+echo ""
+echo "To view output:"
+echo "  tail -f {LOGS_DIR}/{node_id}_uart.log"
 echo ""
 echo "Commands:"
 echo "  start    - Start simulation"

@@ -49,8 +49,18 @@ class WebSocketHandler:
         # Callback for sending control commands to nodes (set by server_node)
         self._send_control_callback: Optional[Callable[[str, int, float], None]] = None
 
+        # Callback for triggering firmware update (set by server_node)
+        self._firmware_update_callback: Optional[Callable[[str], None]] = None
+
         # Throttle tracking: node_id -> last_send_time
         self._control_throttle: Dict[str, float] = {}
+
+        # LiveLink callbacks (set by server_node)
+        self._livelink_get_status: Optional[Callable[[], Dict[str, Any]]] = None
+        self._livelink_get_routes: Optional[Callable[[], Any]] = None
+        self._livelink_set_routes: Optional[Callable[[Any], None]] = None
+        self._livelink_enable_route: Optional[Callable[[str, bool], None]] = None
+        self._livelink_create_default_route: Optional[Callable[[str], Dict[str, Any]]] = None
 
     def set_sync_config_callback(self, callback: Callable[[str, str], None]):
         """Set callback for syncing config to nodes. Callback takes (node_id, config_json)."""
@@ -63,6 +73,25 @@ class WebSocketHandler:
     def set_send_control_callback(self, callback: Callable[[str, int, float], None]):
         """Set callback for sending control commands to nodes. Callback takes (node_id, gpio, value)."""
         self._send_control_callback = callback
+
+    def set_firmware_update_callback(self, callback: Callable[[str], None]):
+        """Set callback for triggering firmware update. Callback takes (node_id)."""
+        self._firmware_update_callback = callback
+
+    def set_livelink_callbacks(
+        self,
+        get_status: Callable[[], Dict[str, Any]],
+        get_routes: Callable[[], Any],
+        set_routes: Callable[[Any], None],
+        enable_route: Callable[[str, bool], None],
+        create_default_route: Callable[[str], Dict[str, Any]],
+    ):
+        """Set callbacks for LiveLink management."""
+        self._livelink_get_status = get_status
+        self._livelink_get_routes = get_routes
+        self._livelink_set_routes = set_routes
+        self._livelink_enable_route = enable_route
+        self._livelink_create_default_route = create_default_route
 
     def log(self, level: str, message: str):
         """Log a message if logger is available."""
@@ -152,12 +181,21 @@ class WebSocketHandler:
             'subscribe': self._handle_subscribe,
             'router': self._handle_router,
             'control': self._handle_control,
+            'livelink': self._handle_livelink,
         }.get(msg_type)
 
         if handler:
-            response = await handler(client, action, params)
-            response['id'] = msg_id
-            await self._send_to_client(client, response)
+            try:
+                response = await handler(client, action, params)
+                response['id'] = msg_id
+                await self._send_to_client(client, response)
+            except Exception as e:
+                self.log('error', f'Handler error for {msg_type}/{action}: {e}')
+                await self._send_to_client(client, {
+                    "id": msg_id,
+                    "status": "error",
+                    "message": f"Internal error: {str(e)}",
+                })
         else:
             await self._send_to_client(client, {
                 "id": msg_id,
@@ -208,6 +246,17 @@ class WebSocketHandler:
             result = self.state_manager.reset_node(node_id, factory_reset)
             if result['success']:
                 await self.broadcast_activity(f'Node {node_id} reset', 'info')
+            return {"status": "ok" if result['success'] else "error", "data": result}
+
+        elif action == 'remove_node':
+            node_id = params.get('node_id')
+
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+
+            result = self.state_manager.remove_node(node_id)
+            if result['success']:
+                await self.broadcast_activity(f'Node {node_id} removed', 'info')
             return {"status": "ok" if result['success'] else "error", "data": result}
 
         # Pin Configuration Actions
@@ -302,6 +351,48 @@ class WebSocketHandler:
             logs = self.state_manager.get_logs(limit=limit, level=level)
             return {"status": "ok", "data": {"logs": logs}}
 
+        # Firmware Management Actions
+        elif action == 'get_server_firmware':
+            fw_info = self.state_manager.get_server_firmware_info()
+            return {"status": "ok", "data": fw_info}
+
+        elif action == 'check_firmware_update':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+
+            update_info = self.state_manager.is_firmware_update_available(node_id)
+            return {"status": "ok", "data": update_info}
+
+        elif action == 'update_firmware':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+
+            # Check if update is available
+            update_info = self.state_manager.is_firmware_update_available(node_id)
+            if not update_info["available"]:
+                return {"status": "error", "message": update_info["message"]}
+
+            # Trigger firmware update via callback
+            if self._firmware_update_callback:
+                self._firmware_update_callback(node_id)
+                await self.broadcast_activity(
+                    f'Firmware update initiated for node {node_id}: '
+                    f'{update_info["current_version"]} → {update_info["server_version"]}',
+                    'info'
+                )
+                return {
+                    "status": "ok",
+                    "data": {
+                        "message": "Firmware update initiated",
+                        "from_version": update_info["current_version"],
+                        "to_version": update_info["server_version"],
+                    }
+                }
+            else:
+                return {"status": "error", "message": "Firmware update not available"}
+
         else:
             return {"status": "error", "message": f"Unknown management action: {action}"}
 
@@ -355,6 +446,8 @@ class WebSocketHandler:
             if now - last_send < CONTROL_THROTTLE_MS:
                 # Throttled - still update desired state but don't send to node
                 self.state_manager.update_pin_desired(node_id, gpio, value)
+                # Broadcast updated state to all subscribers
+                await self._broadcast_pin_state(node_id)
                 return {"status": "ok", "message": "Throttled", "data": {"throttled": True}}
 
             # Update desired state
@@ -364,6 +457,9 @@ class WebSocketHandler:
             if self._send_control_callback:
                 self._send_control_callback(node_id, gpio, value)
                 self._control_throttle[node_id] = now
+
+            # Broadcast updated state to all subscribers
+            await self._broadcast_pin_state(node_id)
 
             return {"status": "ok", "data": {"throttled": False}}
 
@@ -417,6 +513,64 @@ class WebSocketHandler:
 
         else:
             return {"status": "error", "message": f"Unknown control action: {action}"}
+
+    async def _handle_livelink(self, client: WebSocketClient, action: str, params: dict) -> dict:
+        """Handle LiveLink management messages."""
+        if action == 'get_status':
+            if self._livelink_get_status:
+                status = self._livelink_get_status()
+                return {"status": "ok", "data": status}
+            else:
+                return {"status": "error", "message": "LiveLink not available"}
+
+        elif action == 'get_routes':
+            if self._livelink_get_routes:
+                routes = self._livelink_get_routes()
+                return {"status": "ok", "data": {"routes": routes}}
+            else:
+                return {"status": "error", "message": "LiveLink not available"}
+
+        elif action == 'set_routes':
+            routes = params.get('routes', [])
+            if self._livelink_set_routes:
+                self._livelink_set_routes(routes)
+                await self.broadcast_activity(f'LiveLink routes updated ({len(routes)} routes)', 'info')
+                return {"status": "ok", "message": "Routes updated"}
+            else:
+                return {"status": "error", "message": "LiveLink not available"}
+
+        elif action == 'enable_route':
+            route_name = params.get('route_name')
+            enabled = params.get('enabled', True)
+            if not route_name:
+                return {"status": "error", "message": "Missing route_name"}
+
+            if self._livelink_enable_route:
+                self._livelink_enable_route(route_name, enabled)
+                return {"status": "ok", "message": f"Route '{route_name}' {'enabled' if enabled else 'disabled'}"}
+            else:
+                return {"status": "error", "message": "LiveLink not available"}
+
+        elif action == 'create_default_route':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+
+            if self._livelink_create_default_route:
+                route = self._livelink_create_default_route(node_id)
+                await self.broadcast_activity(f'Created default LiveLink route for {node_id}', 'info')
+                return {"status": "ok", "data": route}
+            else:
+                return {"status": "error", "message": "LiveLink not available"}
+
+        else:
+            return {"status": "error", "message": f"Unknown livelink action: {action}"}
+
+    async def _broadcast_pin_state(self, node_id: str):
+        """Broadcast pin runtime state to subscribers."""
+        state = self.state_manager.get_runtime_state(node_id)
+        if state:
+            await self.broadcast_state(f'pin_state/{node_id}', state)
 
     async def broadcast_state(self, topic: str, data: dict):
         """Broadcast state update to subscribed clients."""
@@ -477,6 +631,11 @@ class WebSocketHandler:
                     "unadopted": self.state_manager.get_unadopted_nodes(),
                 }
                 await self.broadcast_state('nodes', nodes_data)
+
+                # Broadcast LiveLink status if available
+                if self._livelink_get_status:
+                    livelink_status = self._livelink_get_status()
+                    await self.broadcast_state('livelink', livelink_status)
 
             except asyncio.CancelledError:
                 break

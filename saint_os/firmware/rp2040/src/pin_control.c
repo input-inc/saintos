@@ -337,6 +337,20 @@ bool pin_control_apply_json(const char* json, size_t json_len)
 {
     if (!json || json_len == 0) return false;
 
+    // SAFETY: Validate string is null-terminated within json_len
+    // This prevents buffer over-reads if caller provides wrong length
+    bool found_null = false;
+    for (size_t i = 0; i <= json_len && i < 1024; i++) {
+        if (json[i] == '\0') {
+            found_null = true;
+            break;
+        }
+    }
+    if (!found_null) {
+        printf("Pin control: JSON not null-terminated within length\n");
+        return false;
+    }
+
     // Check for set_pin action
     if (!strstr(json, "\"action\":\"set_pin\"") &&
         !strstr(json, "\"action\": \"set_pin\"")) {

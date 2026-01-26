@@ -11,11 +11,18 @@ Options:
     server_name:=NAME       Server name (default: SAINT-01)
     web_port:=PORT          Web interface port (default: 80)
     agent_port:=PORT        micro-ROS agent UDP port (default: 8888)
-    enable_agent:=BOOL      Enable micro-ROS agent (default: true)
+    enable_agent:=BOOL      Enable micro-ROS agent (default: true on Linux, false on macOS)
+
+Platform Notes:
+    - Linux (including Raspberry Pi): micro-ROS agent runs natively
+    - macOS: Run agent separately via Docker (see docs/DEVELOPMENT.md)
 """
 
+import platform
+import shutil
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -23,6 +30,14 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     """Generate launch description for SAINT.OS server."""
+
+    # Detect platform and agent availability
+    is_linux = platform.system() == 'Linux'
+    is_macos = platform.system() == 'Darwin'
+    agent_available = shutil.which('micro_ros_agent') is not None
+
+    # Default: enable agent on Linux if available, disable on macOS
+    default_enable_agent = 'true' if (is_linux and agent_available) else 'false'
 
     # Declare launch arguments
     server_name_arg = DeclareLaunchArgument(
@@ -45,8 +60,8 @@ def generate_launch_description():
 
     enable_agent_arg = DeclareLaunchArgument(
         'enable_agent',
-        default_value='true',
-        description='Enable micro-ROS agent for microcontroller nodes'
+        default_value=default_enable_agent,
+        description='Enable micro-ROS agent (auto-detected based on platform)'
     )
 
     # Get launch configuration values
@@ -70,6 +85,7 @@ def generate_launch_description():
 
     # micro-ROS Agent (for microcontroller nodes)
     # Uses UDP transport on specified port
+    # Only runs on Linux where the agent is available
     micro_ros_agent = ExecuteProcess(
         cmd=[
             'ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
@@ -91,6 +107,30 @@ def generate_launch_description():
         condition=IfCondition(enable_agent),
     )
 
+    # Warning for macOS users if agent is needed but not running
+    macos_agent_warning = LogInfo(
+        msg=[
+            '\n',
+            '=' * 70, '\n',
+            'NOTE: micro-ROS agent not started (macOS detected)\n',
+            'To connect microcontroller nodes, run the agent via Docker:\n',
+            '\n',
+            '  docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888\n',
+            '\n',
+            'See docs/DEVELOPMENT.md for details.\n',
+            '=' * 70,
+        ],
+    ) if is_macos else LogInfo(msg=[''])
+
+    # Warning if agent requested but not available
+    agent_not_found_warning = LogInfo(
+        msg=[
+            '\n',
+            'WARNING: micro-ROS agent not found. Install with:\n',
+            '  sudo apt install ros-humble-micro-ros-agent\n',
+        ],
+    ) if (is_linux and not agent_available) else LogInfo(msg=[''])
+
     return LaunchDescription([
         # Arguments
         server_name_arg,
@@ -101,6 +141,8 @@ def generate_launch_description():
         # Info
         startup_info,
         agent_info,
+        macos_agent_warning,
+        agent_not_found_warning,
 
         # Nodes
         saint_server_node,

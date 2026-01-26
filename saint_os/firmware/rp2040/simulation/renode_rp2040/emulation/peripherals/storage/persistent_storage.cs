@@ -19,7 +19,7 @@ using Antmicro.Renode.Peripherals.Bus;
 
 namespace Antmicro.Renode.Peripherals.Storage
 {
-    public class PersistentStorage : IDoubleWordPeripheral, IKnownSize
+    public class PersistentStorage : IDoubleWordPeripheral, IBytePeripheral, IKnownSize
     {
         public PersistentStorage(IMachine machine, string storagePath = null, string nodeId = "default")
         {
@@ -171,6 +171,65 @@ namespace Antmicro.Renode.Peripherals.Storage
         }
 
         public long Size => 0x1000;
+
+        // IBytePeripheral implementation for byte-level access
+        public byte ReadByte(long offset)
+        {
+            // Data buffer read
+            if (offset >= DATA_OFFSET && offset < DATA_OFFSET + DATA_SIZE)
+            {
+                int idx = (int)(offset - DATA_OFFSET);
+                if (idx < dataBuffer.Length)
+                {
+                    return dataBuffer[idx];
+                }
+                return 0;
+            }
+
+            // For register reads, return the appropriate byte of the register
+            if (offset >= REG_STATUS && offset < REG_STATUS + 4)
+            {
+                uint status = 0;
+                if (hasValidData) status |= STATUS_VALID;
+                if (isBusy) status |= STATUS_BUSY;
+                int byteOffset = (int)(offset - REG_STATUS);
+                return (byte)((status >> (byteOffset * 8)) & 0xFF);
+            }
+
+            return 0;
+        }
+
+        public void WriteByte(long offset, byte value)
+        {
+            // Data buffer write
+            if (offset >= DATA_OFFSET && offset < DATA_OFFSET + DATA_SIZE)
+            {
+                int idx = (int)(offset - DATA_OFFSET);
+                if (idx < dataBuffer.Length)
+                {
+                    dataBuffer[idx] = value;
+                }
+                return;
+            }
+
+            // Control register - only process on first byte with full value
+            if (offset == REG_CONTROL)
+            {
+                if ((value & CTRL_SAVE) != 0)
+                {
+                    SaveToFile();
+                }
+                if ((value & CTRL_LOAD) != 0)
+                {
+                    LoadFromFile();
+                }
+                if ((value & CTRL_ERASE) != 0)
+                {
+                    EraseStorage();
+                }
+            }
+            // Ignore writes to other control register bytes
+        }
 
         private void SaveToFile()
         {

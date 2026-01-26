@@ -3,16 +3,29 @@
  *
  * Controls the onboard NeoPixel and LED to indicate node state.
  * Uses PIO for WS2812 NeoPixel control.
+ *
+ * Note: PIO is not emulated in Renode, so LED functions are disabled
+ * in simulation mode to avoid warnings.
  */
 
 #include <stdio.h>
 
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
-#include "hardware/pio.h"
-#include "hardware/clocks.h"
 
 #include "saint_node.h"
+
+// =============================================================================
+// State Variables
+// =============================================================================
+
+static node_state_t current_state = NODE_STATE_BOOT;
+
+#ifndef SIMULATION
+// Hardware-only: PIO for NeoPixel
+
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
 
 // =============================================================================
 // WS2812 PIO Program
@@ -35,18 +48,13 @@ static const struct pio_program ws2812_program = {
     .origin = -1,
 };
 
-// =============================================================================
-// State Variables
-// =============================================================================
-
 static PIO pio = pio0;
 static uint sm = 0;
-static node_state_t current_state = NODE_STATE_BOOT;
 static uint32_t last_update_ms = 0;
-static bool led_on = false;
 
+#ifndef SIMULATION
 // =============================================================================
-// Color Definitions (GRB format for WS2812)
+// Color Definitions (GRB format for WS2812) - Hardware only
 // =============================================================================
 
 typedef struct {
@@ -63,6 +71,23 @@ static const rgb_color_t COLOR_GREEN   = {.g = 255, .r = 0,   .b = 0};
 static const rgb_color_t COLOR_WHITE   = {.g = 255, .r = 255, .b = 255};
 static const rgb_color_t COLOR_PURPLE  = {.g = 0,   .r = 128, .b = 128};
 static const rgb_color_t COLOR_OFF     = {.g = 0,   .r = 0,   .b = 0};
+
+/**
+ * Get color for state.
+ */
+static rgb_color_t get_state_color(node_state_t state)
+{
+    switch (state) {
+        case NODE_STATE_BOOT:       return COLOR_BLUE;
+        case NODE_STATE_CONNECTING: return COLOR_YELLOW;
+        case NODE_STATE_UNADOPTED:  return COLOR_ORANGE;
+        case NODE_STATE_ADOPTING:   return COLOR_WHITE;
+        case NODE_STATE_ACTIVE:     return COLOR_GREEN;
+        case NODE_STATE_ERROR:      return COLOR_PURPLE;
+        default:                    return COLOR_OFF;
+    }
+}
+#endif // !SIMULATION
 
 // =============================================================================
 // Private Functions
@@ -106,21 +131,7 @@ static void set_neopixel(rgb_color_t color, uint8_t brightness)
     pio_sm_put_blocking(pio, sm, grb << 8);
 }
 
-/**
- * Get color for state.
- */
-static rgb_color_t get_state_color(node_state_t state)
-{
-    switch (state) {
-        case NODE_STATE_BOOT:       return COLOR_BLUE;
-        case NODE_STATE_CONNECTING: return COLOR_YELLOW;
-        case NODE_STATE_UNADOPTED:  return COLOR_ORANGE;
-        case NODE_STATE_ADOPTING:   return COLOR_WHITE;
-        case NODE_STATE_ACTIVE:     return COLOR_GREEN;
-        case NODE_STATE_ERROR:      return COLOR_PURPLE;
-        default:                    return COLOR_OFF;
-    }
-}
+#endif // !SIMULATION
 
 // =============================================================================
 // Public Functions
@@ -131,6 +142,10 @@ static rgb_color_t get_state_color(node_state_t state)
  */
 void led_init(void)
 {
+#ifdef SIMULATION
+    // PIO not available in simulation
+    printf("LED initialized (simulation mode - NeoPixel disabled)\n");
+#else
     // Initialize WS2812 NeoPixel
     ws2812_init(NEOPIXEL_PIN, 800000);  // 800kHz for WS2812
 
@@ -143,6 +158,7 @@ void led_init(void)
     gpio_put(GPIO_D13, 1);
 
     printf("LED initialized\n");
+#endif
 }
 
 /**
@@ -159,6 +175,10 @@ void led_set_state(node_state_t state)
  */
 void led_update(void)
 {
+#ifdef SIMULATION
+    // No LED updates in simulation (PIO not emulated)
+    (void)current_state;
+#else
     uint32_t now = to_ms_since_boot(get_absolute_time());
     rgb_color_t color = get_state_color(current_state);
 
@@ -218,4 +238,5 @@ void led_update(void)
     }
 
     last_update_ms = now;
+#endif
 }

@@ -18,10 +18,37 @@
 
 // Magic number to identify valid configuration
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   1
+#define FLASH_STORAGE_VERSION   2           // Bumped for pin config support
+
+// Pin configuration constants (duplicated here to avoid circular dependency)
+#define FLASH_PIN_CONFIG_MAX_PINS     16
+#define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
+#define FLASH_PIN_CONFIG_VERSION      1
 
 // =============================================================================
 // Stored Configuration Structure
+// =============================================================================
+
+// =============================================================================
+// Pin Configuration Storage Structure
+// =============================================================================
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;                                // Configuration version
+    uint8_t pin_count;                              // Number of configured pins
+    uint8_t reserved_hdr[2];                        // Padding for alignment
+    struct __attribute__((packed)) {
+        uint8_t gpio;                               // GPIO number
+        uint8_t mode;                               // pin_mode_t value
+        char logical_name[FLASH_PIN_CONFIG_MAX_NAME_LEN]; // Logical function name
+        uint32_t param1;                            // Mode-specific param (e.g., PWM freq)
+        uint16_t param2;                            // Mode-specific param (e.g., duty cycle)
+        uint8_t reserved_pin[2];                    // Padding
+    } pins[FLASH_PIN_CONFIG_MAX_PINS];
+} flash_pin_config_t;
+
+// =============================================================================
+// Main Storage Structure
 // =============================================================================
 
 typedef struct __attribute__((packed)) {
@@ -41,6 +68,9 @@ typedef struct __attribute__((packed)) {
     uint8_t gateway[4];
     uint8_t server_ip[4];
     uint16_t server_port;
+
+    // Pin configuration
+    flash_pin_config_t pin_config;
 
     // Reserved for future use
     uint8_t reserved[32];

@@ -1,18 +1,58 @@
 """Setup script for SAINT.OS Python packages."""
 
+import os
+from glob import glob
 from setuptools import setup, find_packages
 
 package_name = 'saint_os'
+
+
+def get_data_files():
+    """Collect all data files for installation."""
+    data_files = [
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+    ]
+
+    # Add config files
+    config_dir = os.path.join(os.path.dirname(__file__), 'config')
+    if os.path.isdir(config_dir):
+        # Main config files
+        config_files = glob(os.path.join(config_dir, '*.yaml'))
+        if config_files:
+            data_files.append((f'share/{package_name}/config', config_files))
+
+        # Role definitions
+        roles_dir = os.path.join(config_dir, 'roles')
+        if os.path.isdir(roles_dir):
+            role_files = glob(os.path.join(roles_dir, '*.yaml'))
+            if role_files:
+                data_files.append((f'share/{package_name}/config/roles', role_files))
+
+    # Add web files
+    web_dir = os.path.join(os.path.dirname(__file__), 'web')
+    if os.path.isdir(web_dir):
+        # HTML files
+        html_files = glob(os.path.join(web_dir, '*.html'))
+        if html_files:
+            data_files.append((f'share/{package_name}/web', html_files))
+
+        # JavaScript files
+        js_dir = os.path.join(web_dir, 'js')
+        if os.path.isdir(js_dir):
+            js_files = glob(os.path.join(js_dir, '*.js'))
+            if js_files:
+                data_files.append((f'share/{package_name}/web/js', js_files))
+
+    return data_files
+
 
 setup(
     name=package_name,
     version='0.5.0',
     packages=find_packages(exclude=['test']),
-    data_files=[
-        ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-    ],
+    data_files=get_data_files(),
     install_requires=[
         'setuptools',
         'websockets>=10.0',
