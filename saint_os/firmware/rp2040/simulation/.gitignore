@@ -6,3 +6,4 @@ nodes/*.resc
 # Keep the directories but ignore contents
 !nodes/.gitkeep
 !node_storage/.gitkeep
+logs

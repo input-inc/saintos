@@ -1,0 +1,83 @@
+# SAINT.OS Role Definition - Right Arm
+role: arms_right
+display_name: "Right Arm"
+description: "Controls the right arm with shoulder, elbow, wrist, and gripper"
+
+logical_functions:
+  - name: shoulder_rotate
+    display_name: "Shoulder Rotate"
+    type: servo_output
+    required: true
+    description: "Servo for shoulder rotation (yaw)"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: shoulder_lift
+    display_name: "Shoulder Lift"
+    type: servo_output
+    required: true
+    description: "Servo for shoulder lift (pitch)"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: elbow
+    display_name: "Elbow"
+    type: servo_output
+    required: true
+    description: "Servo for elbow bend"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: wrist_rotate
+    display_name: "Wrist Rotate"
+    type: servo_output
+    required: false
+    description: "Servo for wrist rotation"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: gripper
+    display_name: "Gripper"
+    type: servo_output
+    required: false
+    description: "Servo for gripper open/close"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 1000
+      max_pulse_us: 2000
+      center_pulse_us: 1500
+
+  - name: gripper_feedback
+    display_name: "Gripper Feedback"
+    type: adc_input
+    required: false
+    description: "ADC input for gripper force/position feedback"
+    compatible_modes:
+      - adc

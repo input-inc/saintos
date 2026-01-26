@@ -53,6 +53,9 @@ class WebSocketHandler:
         # Signature: (node_id: str, simulation: bool) -> None
         self._firmware_update_callback: Optional[Callable[[str, bool], None]] = None
 
+        # Callback for sending factory reset to node (set by server_node)
+        self._factory_reset_callback: Optional[Callable[[str], None]] = None
+
         # Throttle tracking: node_id -> last_send_time
         self._control_throttle: Dict[str, float] = {}
 
@@ -78,6 +81,10 @@ class WebSocketHandler:
     def set_firmware_update_callback(self, callback: Callable[[str, bool], None]):
         """Set callback for triggering firmware update. Callback takes (node_id, simulation)."""
         self._firmware_update_callback = callback
+
+    def set_factory_reset_callback(self, callback: Callable[[str], None]):
+        """Set callback for sending factory reset to node. Callback takes (node_id)."""
+        self._factory_reset_callback = callback
 
     def set_livelink_callbacks(
         self,
@@ -244,6 +251,10 @@ class WebSocketHandler:
             if not node_id:
                 return {"status": "error", "message": "Missing node_id"}
 
+            # Send factory reset command to node first (if doing factory reset)
+            if factory_reset and self._factory_reset_callback:
+                self._factory_reset_callback(node_id)
+
             result = self.state_manager.reset_node(node_id, factory_reset)
             if result['success']:
                 await self.broadcast_activity(f'Node {node_id} reset', 'info')
@@ -254,6 +265,10 @@ class WebSocketHandler:
 
             if not node_id:
                 return {"status": "error", "message": "Missing node_id"}
+
+            # Send factory reset command to node first so it clears its config
+            if self._factory_reset_callback:
+                self._factory_reset_callback(node_id)
 
             result = self.state_manager.remove_node(node_id)
             if result['success']:

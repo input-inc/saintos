@@ -275,6 +275,30 @@ static void control_subscription_callback(const void* msgin)
         return;
     }
 
+    // Check for factory reset command
+    if (strstr(msg->data.data, "\"action\":\"factory_reset\"") ||
+        strstr(msg->data.data, "\"action\": \"factory_reset\"")) {
+        printf("\n");
+        printf("====================================\n");
+        printf("FACTORY RESET REQUESTED\n");
+        printf("====================================\n");
+        printf("Clearing saved configuration...\n");
+
+        // Clear flash storage (pin configuration)
+        flash_storage_erase();
+
+        // Clear in-memory pin configuration
+        pin_config_reset();
+
+        // Transition to UNADOPTED state
+        node_set_state(NODE_STATE_UNADOPTED);
+        led_set_state(NODE_STATE_UNADOPTED);
+
+        printf("Factory reset complete - node is now UNADOPTED\n");
+        printf("====================================\n\n");
+        return;
+    }
+
     // Apply pin control command
     if (pin_control_apply_json(msg->data.data, msg->data.size)) {
         printf("Control command applied\n");

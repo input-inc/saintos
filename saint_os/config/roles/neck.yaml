@@ -1,0 +1,57 @@
+# SAINT.OS Role Definition - Neck System
+#
+# Summary:
+#   3 Servos
+
+role: neck
+display_name: "Neck System"
+description: "Controls neck rotation and tilt mechanisms"
+
+logical_functions:
+  # ===========================================================================
+  # NECK ROTATION
+  # ===========================================================================
+  - name: neck_lr
+    display_name: "Neck - Left/Right"
+    type: servo_output
+    required: true
+    description: "Servo for neck horizontal rotation (pan)"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # NECK TILT
+  # ===========================================================================
+  - name: neck_tilt_left
+    display_name: "Neck - Left Tilt"
+    type: servo_output
+    required: true
+    description: "Servo for left side neck tilt"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: neck_tilt_right
+    display_name: "Neck - Right Tilt"
+    type: servo_output
+    required: true
+    description: "Servo for right side neck tilt"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500

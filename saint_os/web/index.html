@@ -531,6 +531,52 @@
                 </div>
             </div>
 
+            <!-- Node Adoption Modal -->
+            <div id="adopt-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="app.closeAdoptModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Adopt Node</h3>
+                            <button onclick="app.closeAdoptModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons">close</span>
+                            </button>
+                        </div>
+
+                        <div class="space-y-4">
+                            <!-- Node ID (read-only) -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Node ID</label>
+                                <div id="adopt-node-id" class="input-field w-full bg-slate-900/50 text-slate-400 font-mono">--</div>
+                            </div>
+
+                            <!-- Role Selection -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Role</label>
+                                <select id="adopt-role-select" class="input-field w-full">
+                                    <option value="">-- Select Role --</option>
+                                </select>
+                                <p id="adopt-role-description" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+
+                            <!-- Display Name (optional) -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Display Name <span class="text-slate-500">(optional)</span></label>
+                                <input type="text" id="adopt-display-name" class="input-field w-full" placeholder="e.g., Left Arm Controller">
+                            </div>
+                        </div>
+
+                        <div class="flex gap-3 mt-6">
+                            <button onclick="app.closeAdoptModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="app.submitAdoption()" class="btn-primary flex-1">
+                                <span class="material-icons icon-sm">check</span>
+                                Adopt
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Pin Config Modal (for editing individual pins) -->
             <div id="pinconfig-modal" class="fixed inset-0 z-50 hidden">
                 <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="pinConfigManager.closeModal()"></div>
@@ -1059,10 +1105,15 @@
             border-radius: 0.5rem;
             border: 1px solid #334155;
             padding: 1rem;
-            transition: all 0.2s;
+            transition: border-color 0.2s;
         }
         .node-card:hover {
             border-color: #475569;
+        }
+        /* Ensure buttons inside node cards capture hover properly */
+        .node-card button {
+            position: relative;
+            z-index: 1;
         }
 
         /* Log entries */

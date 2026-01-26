@@ -1,0 +1,72 @@
+# SAINT.OS Role Definition - Console/General Purpose
+role: console
+display_name: "Console/General Purpose"
+description: "General purpose node for sensors, indicators, and custom I/O"
+
+logical_functions:
+  - name: status_led
+    display_name: "Status LED"
+    type: digital_output
+    required: false
+    description: "General status LED indicator"
+    compatible_modes:
+      - digital_out
+      - pwm
+
+  - name: button_1
+    display_name: "Button 1"
+    type: digital_input
+    required: false
+    description: "General purpose button input"
+    compatible_modes:
+      - digital_in
+    default_params:
+      pull_up: true
+
+  - name: button_2
+    display_name: "Button 2"
+    type: digital_input
+    required: false
+    description: "General purpose button input"
+    compatible_modes:
+      - digital_in
+    default_params:
+      pull_up: true
+
+  - name: analog_1
+    display_name: "Analog Input 1"
+    type: adc_input
+    required: false
+    description: "General purpose analog input"
+    compatible_modes:
+      - adc
+
+  - name: analog_2
+    display_name: "Analog Input 2"
+    type: adc_input
+    required: false
+    description: "General purpose analog input"
+    compatible_modes:
+      - adc
+
+  - name: pwm_1
+    display_name: "PWM Output 1"
+    type: pwm_output
+    required: false
+    description: "General purpose PWM output"
+    compatible_modes:
+      - pwm
+      - servo
+    default_params:
+      pwm_frequency: 1000
+
+  - name: pwm_2
+    display_name: "PWM Output 2"
+    type: pwm_output
+    required: false
+    description: "General purpose PWM output"
+    compatible_modes:
+      - pwm
+      - servo
+    default_params:
+      pwm_frequency: 1000

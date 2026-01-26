@@ -112,6 +112,9 @@ cpu1 IsHalted true
 # Log Renode system messages to file
 logFile @{LOGS_DIR}/{node_id}_renode.log true
 
+# Show UART output in Renode console (firmware printf goes here)
+showAnalyzer sysbus.uart0
+
 echo "=============================================="
 echo "SAINT.OS Node: {node_id}"
 echo "=============================================="

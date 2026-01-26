@@ -1344,23 +1344,100 @@ class SaintApp {
     }
 
     /**
-     * Adopt a node.
+     * Show the adoption modal for a node.
      */
     async adoptNode(nodeId) {
-        const roles = ['head', 'arms', 'tracks', 'console'];
-        const role = prompt(`Enter role for node ${nodeId}:\n\nAvailable roles: ${roles.join(', ')}`);
-        if (!role) return;
+        this._adoptingNodeId = nodeId;
 
-        if (!roles.includes(role)) {
-            alert(`Invalid role. Please use one of: ${roles.join(', ')}`);
+        // Show modal
+        const modal = document.getElementById('adopt-modal');
+        modal.classList.remove('hidden');
+
+        // Set node ID
+        document.getElementById('adopt-node-id').textContent = nodeId;
+
+        // Clear previous values
+        document.getElementById('adopt-display-name').value = '';
+        document.getElementById('adopt-role-description').textContent = '';
+
+        // Fetch roles from server and populate dropdown
+        const ws = window.saintWS;
+        const roleSelect = document.getElementById('adopt-role-select');
+
+        try {
+            const result = await ws.management('get_roles');
+            const roles = result.roles || [];
+
+            // Store roles for description lookup
+            this._availableRoles = roles;
+
+            // Populate dropdown
+            roleSelect.innerHTML = '<option value="">-- Select Role --</option>';
+            for (const role of roles) {
+                const option = document.createElement('option');
+                option.value = role.role;
+                option.textContent = role.display_name || role.role;
+                roleSelect.appendChild(option);
+            }
+
+            // Add change listener to show role description
+            roleSelect.onchange = () => {
+                const selectedRole = roles.find(r => r.role === roleSelect.value);
+                const descEl = document.getElementById('adopt-role-description');
+                if (selectedRole && selectedRole.description) {
+                    descEl.textContent = selectedRole.description;
+                } else {
+                    descEl.textContent = '';
+                }
+            };
+        } catch (error) {
+            console.error('Failed to fetch roles:', error);
+            // Fallback to hardcoded roles
+            roleSelect.innerHTML = `
+                <option value="">-- Select Role --</option>
+                <option value="head">head</option>
+                <option value="arms">arms</option>
+                <option value="tracks">tracks</option>
+                <option value="console">console</option>
+            `;
+        }
+    }
+
+    /**
+     * Close the adoption modal.
+     */
+    closeAdoptModal() {
+        const modal = document.getElementById('adopt-modal');
+        modal.classList.add('hidden');
+        this._adoptingNodeId = null;
+    }
+
+    /**
+     * Submit the adoption form.
+     */
+    async submitAdoption() {
+        const nodeId = this._adoptingNodeId;
+        if (!nodeId) return;
+
+        const role = document.getElementById('adopt-role-select').value;
+        const displayName = document.getElementById('adopt-display-name').value.trim();
+
+        if (!role) {
+            alert('Please select a role');
             return;
         }
 
         const ws = window.saintWS;
 
         try {
-            await ws.management('adopt_node', { node_id: nodeId, role });
+            const params = { node_id: nodeId, role };
+            if (displayName) {
+                params.display_name = displayName;
+            }
+
+            await ws.management('adopt_node', params);
             this.addActivityLogEntry({ text: `Node ${nodeId} adopted as ${role}`, level: 'info' });
+            this.closeAdoptModal();
             await this.loadNodesData();
         } catch (error) {
             console.error('Adoption failed:', error);

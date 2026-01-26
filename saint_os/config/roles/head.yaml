@@ -1,0 +1,423 @@
+# SAINT.OS Role Definition - Head System
+# Runs on Raspberry Pi 5 Compute Module
+#
+# Summary:
+#   22 Servos
+#   2 Stepper Motors (Eye In/Out)
+#   2 NeoPixel Chains (28 LEDs each: 12 inner + 16 outer ring per eye)
+
+role: head
+display_name: "Head System"
+description: "Controls all head mechanisms including eyes, face flaps, MFRC, microphone, and antenna"
+
+logical_functions:
+  # ===========================================================================
+  # LEFT EYE - 4 Servos + 1 Stepper + LED
+  # ===========================================================================
+  - name: eye_left_lr
+    display_name: "Left Eye - Left/Right"
+    type: servo_output
+    required: true
+    description: "Servo for left eye horizontal movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: eye_left_ud
+    display_name: "Left Eye - Up/Down"
+    type: servo_output
+    required: true
+    description: "Servo for left eye vertical movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: eye_left_inout_step
+    display_name: "Left Eye - In/Out Step"
+    type: stepper_output
+    required: true
+    description: "Stepper motor step signal for left eye depth movement"
+    compatible_modes:
+      - digital_out
+      - pwm
+
+  - name: eye_left_inout_dir
+    display_name: "Left Eye - In/Out Direction"
+    type: stepper_output
+    required: true
+    description: "Stepper motor direction signal for left eye depth movement"
+    compatible_modes:
+      - digital_out
+
+  - name: eye_left_lid
+    display_name: "Left Eye - Open/Closed"
+    type: servo_output
+    required: true
+    description: "Servo for left eyelid open/close"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # RIGHT EYE - 4 Servos + 1 Stepper + LED
+  # ===========================================================================
+  - name: eye_right_lr
+    display_name: "Right Eye - Left/Right"
+    type: servo_output
+    required: true
+    description: "Servo for right eye horizontal movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: eye_right_ud
+    display_name: "Right Eye - Up/Down"
+    type: servo_output
+    required: true
+    description: "Servo for right eye vertical movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: eye_right_inout_step
+    display_name: "Right Eye - In/Out Step"
+    type: stepper_output
+    required: true
+    description: "Stepper motor step signal for right eye depth movement"
+    compatible_modes:
+      - digital_out
+      - pwm
+
+  - name: eye_right_inout_dir
+    display_name: "Right Eye - In/Out Direction"
+    type: stepper_output
+    required: true
+    description: "Stepper motor direction signal for right eye depth movement"
+    compatible_modes:
+      - digital_out
+
+  - name: eye_right_lid
+    display_name: "Right Eye - Open/Closed"
+    type: servo_output
+    required: true
+    description: "Servo for right eyelid open/close"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # EYE LIGHTS - NeoPixel Rings (WS2812B)
+  # Two rings per eye daisy-chained on single data line
+  # Supports RGB color, brightness, fading, and patterns
+  # ===========================================================================
+  - name: eye_lights_left
+    display_name: "Left Eye Lights"
+    type: neopixel
+    required: false
+    description: "Left eye NeoPixel rings (inner + outer daisy-chained)"
+    compatible_modes:
+      - digital_out
+    default_params:
+      led_count: 28          # Inner (12) + Outer (16) rings
+      inner_ring_count: 12   # First 12 LEDs are inner ring
+      outer_ring_count: 16   # Next 16 LEDs are outer ring
+      color_order: GRB       # WS2812B standard
+      supports_patterns: true
+      supported_effects:
+        - solid
+        - fade
+        - pulse
+        - rainbow
+        - chase
+
+  - name: eye_lights_right
+    display_name: "Right Eye Lights"
+    type: neopixel
+    required: false
+    description: "Right eye NeoPixel rings (inner + outer daisy-chained)"
+    compatible_modes:
+      - digital_out
+    default_params:
+      led_count: 28          # Inner (12) + Outer (16) rings
+      inner_ring_count: 12   # First 12 LEDs are inner ring
+      outer_ring_count: 16   # Next 16 LEDs are outer ring
+      color_order: GRB       # WS2812B standard
+      supports_patterns: true
+      supported_effects:
+        - solid
+        - fade
+        - pulse
+        - rainbow
+        - chase
+
+  # ===========================================================================
+  # VENT FLAPS (1 per eye = 2 total)
+  # ===========================================================================
+  - name: vent_flap_left
+    display_name: "Left Eye Vent Flap"
+    type: servo_output
+    required: true
+    description: "Servo for left eye vent flap open/close"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: vent_flap_right
+    display_name: "Right Eye Vent Flap"
+    type: servo_output
+    required: true
+    description: "Servo for right eye vent flap open/close"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # FACE FLAPS - Lower (2 Servos)
+  # ===========================================================================
+  - name: lower_flap_left
+    display_name: "Lower Flap - Left"
+    type: servo_output
+    required: true
+    description: "Servo for left lower face flap"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: lower_flap_right
+    display_name: "Lower Flap - Right"
+    type: servo_output
+    required: true
+    description: "Servo for right lower face flap"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # NOSE - Box and Basket (2 Servos)
+  # ===========================================================================
+  - name: nose_box
+    display_name: "Nose Box"
+    type: servo_output
+    required: true
+    description: "Servo for nose box mechanism"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: nose_basket
+    display_name: "Nose Basket"
+    type: servo_output
+    required: true
+    description: "Servo for nose basket mechanism"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # FACE FLAPS - Upper (4 Servos: Pitch and Yaw for Left/Right)
+  # ===========================================================================
+  - name: upper_flap_left_pitch
+    display_name: "Upper Flap Left - Pitch"
+    type: servo_output
+    required: true
+    description: "Servo for left upper flap pitch movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: upper_flap_right_pitch
+    display_name: "Upper Flap Right - Pitch"
+    type: servo_output
+    required: true
+    description: "Servo for right upper flap pitch movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: upper_flap_left_yaw
+    display_name: "Upper Flap Left - Yaw"
+    type: servo_output
+    required: true
+    description: "Servo for left upper flap yaw movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: upper_flap_right_yaw
+    display_name: "Upper Flap Right - Yaw"
+    type: servo_output
+    required: true
+    description: "Servo for right upper flap yaw movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # MFRC (2 Servos)
+  # ===========================================================================
+  - name: mfrc_ud
+    display_name: "MFRC - Up/Down"
+    type: servo_output
+    required: true
+    description: "Servo for MFRC vertical movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: mfrc_lr
+    display_name: "MFRC - Left/Right"
+    type: servo_output
+    required: true
+    description: "Servo for MFRC horizontal movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # MICROPHONE (1 Servo)
+  # ===========================================================================
+  - name: microphone_ud
+    display_name: "Microphone - Up/Down"
+    type: servo_output
+    required: false
+    description: "Servo for microphone vertical movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # WHIP ANTENNA (2 Servos)
+  # ===========================================================================
+  - name: antenna_ud
+    display_name: "Whip Antenna - Up/Down"
+    type: servo_output
+    required: false
+    description: "Servo for whip antenna vertical movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  - name: antenna_lr
+    display_name: "Whip Antenna - Left/Right"
+    type: servo_output
+    required: false
+    description: "Servo for whip antenna horizontal movement"
+    compatible_modes:
+      - servo
+      - pwm
+    default_params:
+      pwm_frequency: 50
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      center_pulse_us: 1500
+
+  # ===========================================================================
+  # STEPPER MOTOR ENABLE (Optional - shared enable for both eye steppers)
+  # ===========================================================================
+  - name: stepper_enable
+    display_name: "Stepper Motor Enable"
+    type: digital_output
+    required: false
+    description: "Enable signal for stepper motor drivers (active low)"
+    compatible_modes:
+      - digital_out

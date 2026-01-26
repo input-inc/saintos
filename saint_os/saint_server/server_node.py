@@ -391,6 +391,27 @@ class SaintServerNode(Node):
         pub.publish(msg)
         self.get_logger().debug(f'Sent control to {node_id}: GPIO {gpio} = {value}')
 
+    def send_factory_reset_command(self, node_id: str):
+        """Send factory reset command to a node via ROS2.
+
+        This tells the node to:
+        1. Clear its saved pin configuration
+        2. Transition back to UNADOPTED state
+        """
+        import json
+
+        pub = self._ensure_node_control_publisher(node_id)
+
+        control_data = {
+            "action": "factory_reset"
+        }
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+
+        pub.publish(msg)
+        self.get_logger().info(f'Sent factory reset command to {node_id}')
+
     def send_firmware_update_command(self, node_id: str, simulation: bool = False):
         """Send firmware update command to a node via ROS2.
 
@@ -719,6 +740,9 @@ class SaintServerNode(Node):
                 )
                 self.web_server.ws_handler.set_firmware_update_callback(
                     lambda node_id, simulation: self.send_firmware_update_command(node_id, simulation)
+                )
+                self.web_server.ws_handler.set_factory_reset_callback(
+                    lambda node_id: self.send_factory_reset_command(node_id)
                 )
 
             await self.web_server.start()

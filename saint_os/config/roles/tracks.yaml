@@ -1,0 +1,77 @@
+# SAINT.OS Role Definition - Track Drive System
+role: tracks
+display_name: "Track Drive System"
+description: "Controls the left and right track motors for locomotion"
+
+logical_functions:
+  - name: left_velocity
+    display_name: "Left Track Velocity"
+    type: pwm_output
+    required: true
+    description: "PWM output for left track motor speed control"
+    compatible_modes:
+      - pwm
+      - servo
+    default_params:
+      pwm_frequency: 50
+
+  - name: right_velocity
+    display_name: "Right Track Velocity"
+    type: pwm_output
+    required: true
+    description: "PWM output for right track motor speed control"
+    compatible_modes:
+      - pwm
+      - servo
+    default_params:
+      pwm_frequency: 50
+
+  - name: left_encoder_a
+    display_name: "Left Encoder A"
+    type: digital_input
+    required: false
+    description: "Quadrature encoder channel A for left track"
+    compatible_modes:
+      - digital_in
+    default_params:
+      pull_up: true
+
+  - name: left_encoder_b
+    display_name: "Left Encoder B"
+    type: digital_input
+    required: false
+    description: "Quadrature encoder channel B for left track"
+    compatible_modes:
+      - digital_in
+    default_params:
+      pull_up: true
+
+  - name: right_encoder_a
+    display_name: "Right Encoder A"
+    type: digital_input
+    required: false
+    description: "Quadrature encoder channel A for right track"
+    compatible_modes:
+      - digital_in
+    default_params:
+      pull_up: true
+
+  - name: right_encoder_b
+    display_name: "Right Encoder B"
+    type: digital_input
+    required: false
+    description: "Quadrature encoder channel B for right track"
+    compatible_modes:
+      - digital_in
+    default_params:
+      pull_up: true
+
+  - name: battery_voltage
+    display_name: "Battery Voltage"
+    type: adc_input
+    required: false
+    description: "ADC input for battery voltage monitoring"
+    compatible_modes:
+      - adc
+    default_params:
+      voltage_divider_ratio: 11.0
