@@ -129,6 +129,15 @@ class SaintApp {
         document.getElementById('btn-node-unadopt')?.addEventListener('click', () => {
             this.unadoptNode();
         });
+        document.getElementById('btn-force-firmware-update')?.addEventListener('click', () => {
+            this.showFirmwareModal();
+        });
+        document.getElementById('btn-fw-simulation')?.addEventListener('click', () => {
+            this.forceFirmwareUpdate('simulation');
+        });
+        document.getElementById('btn-fw-hardware')?.addEventListener('click', () => {
+            this.forceFirmwareUpdate('hardware');
+        });
 
         // Firmware update button
         document.getElementById('btn-firmware-update')?.addEventListener('click', () => {
@@ -218,6 +227,9 @@ class SaintApp {
                     console.log('loadPageData: matched control case');
                     await this.loadControlPageData();
                     break;
+                case 'settings':
+                    await this.loadSettingsPageData();
+                    break;
                 default:
                     console.log(`loadPageData: no match for "${pageId}"`);
             }
@@ -237,6 +249,25 @@ class SaintApp {
             console.log('controlPage.load() completed');
         } else {
             console.error('controlPage is undefined! Check if controlpage.js loaded correctly.');
+        }
+    }
+
+    /**
+     * Load settings page data.
+     */
+    async loadSettingsPageData() {
+        // Load firmware build info
+        try {
+            const ws = window.saintWS;
+            const result = await ws.management('get_firmware_builds', {});
+
+            // Update simulation build info
+            this.updateFirmwareBuildDisplay('sim', result.simulation);
+
+            // Update hardware build info
+            this.updateFirmwareBuildDisplay('hw', result.hardware);
+        } catch (error) {
+            console.error('Failed to load firmware builds:', error);
         }
     }
 
@@ -346,6 +377,34 @@ class SaintApp {
         const memValue = status.memory_usage?.toFixed(1) || '0';
         document.getElementById('server-memory').textContent = `${memValue}%`;
         document.getElementById('memory-bar').style.width = `${memValue}%`;
+    }
+
+    /**
+     * Update display for a single firmware build.
+     */
+    updateFirmwareBuildDisplay(prefix, info) {
+        const versionEl = document.getElementById(`settings-fw-${prefix}-version`);
+        const hashEl = document.getElementById(`settings-fw-${prefix}-hash`);
+        const buildEl = document.getElementById(`settings-fw-${prefix}-build`);
+        const statusEl = document.getElementById(`settings-fw-${prefix}-status`);
+
+        if (!versionEl) return;
+
+        if (info?.available) {
+            versionEl.textContent = info.version_full || info.version || '--';
+            hashEl.textContent = info.git_hash || '--';
+            buildEl.textContent = info.build_date || '--';
+
+            statusEl.textContent = 'Available';
+            statusEl.className = 'px-2 py-1 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400';
+        } else {
+            versionEl.textContent = '--';
+            hashEl.textContent = '--';
+            buildEl.textContent = '--';
+
+            statusEl.textContent = 'Not Built';
+            statusEl.className = 'px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400';
+        }
     }
 
     /**
@@ -1171,6 +1230,96 @@ class SaintApp {
                     textSpan.textContent = 'Update Firmware';
                 }
             }
+        }
+    }
+
+    /**
+     * Show firmware update modal with build options.
+     */
+    async showFirmwareModal() {
+        const modal = document.getElementById('firmware-update-modal');
+        if (!modal) return;
+
+        // Load firmware info for both build types
+        const ws = window.saintWS;
+        try {
+            const result = await ws.management('get_firmware_builds', {});
+
+            const simInfo = document.getElementById('fw-sim-info');
+            const hwInfo = document.getElementById('fw-hw-info');
+            const simBtn = document.getElementById('btn-fw-simulation');
+            const hwBtn = document.getElementById('btn-fw-hardware');
+
+            if (result.simulation?.available) {
+                simInfo.textContent = `${result.simulation.version_full || result.simulation.version} - Built: ${result.simulation.build_date || 'unknown'}`;
+                simBtn.disabled = false;
+                simBtn.classList.remove('opacity-50');
+            } else {
+                simInfo.textContent = 'Not found - build with cmake -DSIMULATION=ON';
+                simBtn.disabled = true;
+                simBtn.classList.add('opacity-50');
+            }
+
+            if (result.hardware?.available) {
+                hwInfo.textContent = `${result.hardware.version_full || result.hardware.version} - Built: ${result.hardware.build_date || 'unknown'}`;
+                hwBtn.disabled = false;
+                hwBtn.classList.remove('opacity-50');
+            } else {
+                hwInfo.textContent = 'Not found - build with cmake (no SIMULATION flag)';
+                hwBtn.disabled = true;
+                hwBtn.classList.add('opacity-50');
+            }
+        } catch (error) {
+            console.error('Failed to load firmware info:', error);
+        }
+
+        modal.classList.remove('hidden');
+    }
+
+    /**
+     * Close firmware update modal.
+     */
+    closeFirmwareModal() {
+        const modal = document.getElementById('firmware-update-modal');
+        if (modal) {
+            modal.classList.add('hidden');
+        }
+    }
+
+    /**
+     * Force firmware update with specific build type.
+     */
+    async forceFirmwareUpdate(buildType) {
+        if (!this.currentNodeId) return;
+
+        const buildName = buildType === 'simulation' ? 'Simulation' : 'Hardware';
+        if (!confirm(`Update firmware on this node with ${buildName} build?\n\nThe node will restart during the update.`)) {
+            return;
+        }
+
+        this.closeFirmwareModal();
+
+        const ws = window.saintWS;
+        try {
+            const result = await ws.management('force_firmware_update', {
+                node_id: this.currentNodeId,
+                build_type: buildType
+            });
+
+            if (result.message || result.success) {
+                this.addActivityLogEntry({
+                    text: `Firmware update initiated (${buildName} build)`,
+                    level: 'info'
+                });
+                alert(`Firmware update initiated!\n\nThe node will restart and load the ${buildName} firmware.`);
+            }
+        } catch (error) {
+            console.error('Firmware update failed:', error);
+            this.addActivityLogEntry({
+                text: `Firmware update failed: ${error.message}`,
+                level: 'error'
+            });
+            alert(`Firmware update failed: ${error.message}`);
         }
     }
 

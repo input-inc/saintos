@@ -577,6 +577,16 @@ void pin_config_reset(void)
     printf("Pin config: reset to defaults\n");
 }
 
+bool pin_config_has_configured_pins(void)
+{
+    for (uint8_t i = 0; i < pin_config_count; i++) {
+        if (pin_configs[i].mode != PIN_MODE_UNCONFIGURED) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
 {
     // Verify GPIO is available

@@ -42,36 +42,24 @@ set(FIRMWARE_VERSION_MAJOR 1)
 set(FIRMWARE_VERSION_MINOR 2)
 set(FIRMWARE_VERSION_PATCH 0)
 
-# Build timestamp
-string(TIMESTAMP FIRMWARE_BUILD_DATE "%Y-%m-%d")
-string(TIMESTAMP FIRMWARE_BUILD_TIME "%H:%M:%S")
-
-# Git hash (if in a git repo)
-execute_process(
-    COMMAND git rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE FIRMWARE_GIT_HASH
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
-if(NOT FIRMWARE_GIT_HASH)
-    set(FIRMWARE_GIT_HASH "unknown")
-endif()
-
-# Version suffix (includes git hash for simulation/dev builds)
-if(SIMULATION)
-    set(FIRMWARE_VERSION_SUFFIX "-${FIRMWARE_GIT_HASH}")
-else()
-    set(FIRMWARE_VERSION_SUFFIX "")
-endif()
-
 # Build option for Renode simulation (uses UART instead of USB)
 option(SIMULATION "Build for Renode simulation with UART output" OFF)
 
-# Configure version header
-configure_file(
-    ${CMAKE_SOURCE_DIR}/include/version.h.in
-    ${CMAKE_BINARY_DIR}/generated/version.h
+# Create directory for generated files
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
+
+# Generate version header at build time (not configure time)
+# This ensures git hash and timestamp are always current
+add_custom_target(generate_version ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DVERSION_MAJOR=${FIRMWARE_VERSION_MAJOR}
+        -DVERSION_MINOR=${FIRMWARE_VERSION_MINOR}
+        -DVERSION_PATCH=${FIRMWARE_VERSION_PATCH}
+        -DSIMULATION=${SIMULATION}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DOUTPUT_FILE=${CMAKE_BINARY_DIR}/generated/version.h
+        -P ${CMAKE_SOURCE_DIR}/cmake/GenerateVersion.cmake
+    COMMENT "Generating version.h with current git hash and timestamp"
 )
 
 # =============================================================================
@@ -122,6 +110,9 @@ else()
 endif()
 
 add_executable(saint_node ${SAINT_NODE_SOURCES})
+
+# Ensure version.h is generated before compiling
+add_dependencies(saint_node generate_version)
 
 target_include_directories(saint_node PUBLIC
     ${CMAKE_SOURCE_DIR}/include
@@ -182,6 +173,24 @@ SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections")
 
 # Create UF2 file for drag-and-drop flashing
 pico_add_extra_outputs(saint_node)
+
+# =============================================================================
+# Install Targets
+# =============================================================================
+
+# Install directory for simulation firmware
+set(SIM_INSTALL_DIR "${CMAKE_SOURCE_DIR}/install/simulation")
+
+# Custom target to install simulation firmware
+# Usage: make install_sim
+add_custom_target(install_sim
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${SIM_INSTALL_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/saint_node.elf" "${SIM_INSTALL_DIR}/saint_node.elf"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/generated/version.h" "${SIM_INSTALL_DIR}/version.h"
+    COMMAND ${CMAKE_COMMAND} -E echo "Installed simulation firmware to ${SIM_INSTALL_DIR}"
+    DEPENDS saint_node
+    COMMENT "Installing simulation firmware to ${SIM_INSTALL_DIR}"
+)
 
 # Print build info
 message(STATUS "SAINT.OS Node Firmware v${FIRMWARE_VERSION_MAJOR}.${FIRMWARE_VERSION_MINOR}.${FIRMWARE_VERSION_PATCH}")

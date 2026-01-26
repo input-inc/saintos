@@ -162,6 +162,13 @@ static void config_subscription_callback(const void* msgin)
                 printf("Pin configuration saved to flash\n");
             }
 
+            // Transition to ACTIVE state (node is now adopted)
+            if (g_node.state != NODE_STATE_ACTIVE) {
+                printf("Node adopted - transitioning to ACTIVE state\n");
+                node_set_state(NODE_STATE_ACTIVE);
+                led_set_state(NODE_STATE_ACTIVE);
+            }
+
             // Publish updated capabilities/config
             capabilities_requested = true;
         } else {
@@ -348,7 +355,7 @@ static void state_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
 
 /**
  * Timer callback for node announcements.
- * Publishes node info when in unadopted state.
+ * Publishes node info to let server know node is online.
  */
 static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
 {
@@ -364,8 +371,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         publish_capabilities();
     }
 
-    // Only announce when unadopted
-    if (g_node.state != NODE_STATE_UNADOPTED) {
+    // Announce when unadopted or active (for heartbeat/online detection)
+    if (g_node.state != NODE_STATE_UNADOPTED && g_node.state != NODE_STATE_ACTIVE) {
         return;
     }
 
@@ -789,11 +796,18 @@ int main(void)
         }
     }
 
-    // Enter unadopted state
-    node_set_state(NODE_STATE_UNADOPTED);
-    led_set_state(NODE_STATE_UNADOPTED);
-
-    printf("Node ready. Waiting for adoption...\n");
+    // Check if we have a saved configuration (previously adopted)
+    if (pin_config_has_configured_pins()) {
+        // Node was previously adopted and has saved config
+        node_set_state(NODE_STATE_ACTIVE);
+        led_set_state(NODE_STATE_ACTIVE);
+        printf("Node ready. Restored from saved config (ACTIVE)\n");
+    } else {
+        // No saved config - enter unadopted state
+        node_set_state(NODE_STATE_UNADOPTED);
+        led_set_state(NODE_STATE_UNADOPTED);
+        printf("Node ready. Waiting for adoption...\n");
+    }
     printf("========================================\n");
 
     // Main loop

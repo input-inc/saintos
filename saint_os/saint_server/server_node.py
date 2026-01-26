@@ -224,8 +224,11 @@ class SaintServerNode(Node):
             success = self.state_manager.update_node_capabilities(node_id, msg.data)
             if success:
                 self.get_logger().info(f'Capabilities stored successfully for {node_id}')
+                # Mark node as synced (config confirmed by node publishing capabilities)
+                self.state_manager.mark_node_synced(node_id, success=True)
                 # Broadcast update to WebSocket clients
                 self._broadcast_node_capabilities(node_id)
+                self._broadcast_sync_status(node_id)
             else:
                 self.get_logger().warn(f'Failed to store capabilities for {node_id}')
         except Exception as e:
@@ -237,17 +240,37 @@ class SaintServerNode(Node):
             if self._async_loop:
                 caps = self.state_manager.get_node_capabilities(node_id)
                 if caps:
-                    self.get_logger().info(f'Broadcasting capabilities for {node_id} to WebSocket clients (pins: {len(caps.get("pins", []))})')
-                    # Capture caps in local scope to avoid closure issues
-                    caps_copy = caps
+                    # Include sync_status in capabilities broadcast
+                    pin_config = self.state_manager.get_node_pin_config(node_id)
+                    if pin_config:
+                        caps["sync_status"] = pin_config.get("sync_status", "unknown")
+                        caps["last_synced"] = pin_config.get("last_synced")
+                    # Make a copy to ensure data isn't modified before async send
+                    caps_copy = dict(caps)
                     topic = f'node_capabilities/{node_id}'
                     self._async_loop.call_soon_threadsafe(
                         lambda c=caps_copy, t=topic: asyncio.create_task(
                             self.web_server.ws_handler.broadcast_state(t, c)
                         )
                     )
-                else:
-                    self.get_logger().warn(f'No capabilities found to broadcast for {node_id}')
+
+    def _broadcast_sync_status(self, node_id: str):
+        """Broadcast sync status update to WebSocket clients."""
+        if self.web_server and self.web_server.ws_handler:
+            if self._async_loop:
+                pin_config = self.state_manager.get_node_pin_config(node_id)
+                if pin_config:
+                    status_data = {
+                        "node_id": node_id,
+                        "sync_status": pin_config.get("sync_status", "unknown"),
+                        "last_synced": pin_config.get("last_synced"),
+                    }
+                    topic = f'sync_status/{node_id}'
+                    self._async_loop.call_soon_threadsafe(
+                        lambda d=status_data, t=topic: asyncio.create_task(
+                            self.web_server.ws_handler.broadcast_state(t, d)
+                        )
+                    )
 
     def send_config_to_node(self, node_id: str, config_json: str):
         """Send pin configuration to a node via ROS2."""
@@ -368,7 +391,7 @@ class SaintServerNode(Node):
         pub.publish(msg)
         self.get_logger().debug(f'Sent control to {node_id}: GPIO {gpio} = {value}')
 
-    def send_firmware_update_command(self, node_id: str):
+    def send_firmware_update_command(self, node_id: str, simulation: bool = False):
         """Send firmware update command to a node via ROS2.
 
         This tells the node to:
@@ -396,6 +419,63 @@ class SaintServerNode(Node):
 
         pub.publish(msg)
         self.get_logger().info(f'Sent firmware update command to {node_id} (version: {fw_info.get("version")})')
+
+        # For simulation nodes, also trigger the node manager to install and restart
+        if simulation:
+            self._update_simulation_node(node_id)
+
+    def _update_simulation_node(self, node_id: str):
+        """Update a simulation node by calling the node manager.
+
+        This:
+        1. Copies firmware from build_sim to install directory
+        2. Restarts the Renode simulation
+        """
+        import subprocess
+        import os
+
+        # Path to node manager script
+        node_manager_path = os.path.join(
+            os.path.dirname(__file__),
+            '..', 'firmware', 'rp2040', 'simulation', 'saint_node_manager.py'
+        )
+
+        if not os.path.exists(node_manager_path):
+            # Try alternate path (when running from install)
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                pkg_dir = get_package_share_directory('saint_os')
+                node_manager_path = os.path.join(
+                    pkg_dir, '..', '..', '..', '..', 'src', 'saint_os',
+                    'firmware', 'rp2040', 'simulation', 'saint_node_manager.py'
+                )
+            except Exception:
+                pass
+
+        if not os.path.exists(node_manager_path):
+            self.get_logger().error(f'Node manager not found at {node_manager_path}')
+            return
+
+        try:
+            # Run update command (installs firmware and restarts node)
+            result = subprocess.run(
+                ['python3', node_manager_path, 'update', node_id],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                self.get_logger().info(f'Simulation node {node_id} updated and restarted')
+                if result.stdout:
+                    self.get_logger().info(f'Node manager output: {result.stdout}')
+            else:
+                self.get_logger().error(f'Failed to update simulation node: {result.stderr}')
+
+        except subprocess.TimeoutExpired:
+            self.get_logger().error(f'Timeout updating simulation node {node_id}')
+        except Exception as e:
+            self.get_logger().error(f'Error updating simulation node {node_id}: {e}')
 
     # =========================================================================
     # LiveLink Integration
@@ -638,7 +718,7 @@ class SaintServerNode(Node):
                     lambda node_id, gpio, value: self.send_control_command(node_id, gpio, value)
                 )
                 self.web_server.ws_handler.set_firmware_update_callback(
-                    lambda node_id: self.send_firmware_update_command(node_id)
+                    lambda node_id, simulation: self.send_firmware_update_command(node_id, simulation)
                 )
 
             await self.web_server.start()

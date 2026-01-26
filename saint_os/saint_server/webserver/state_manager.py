@@ -449,6 +449,9 @@ class StateManager:
             cpu_usage = 0.0
             memory_usage = 0.0
 
+        # Get server firmware info
+        fw_info = self.get_server_firmware_info()
+
         return {
             "server_online": self.state.server_online,
             "server_name": self.state.server_name,
@@ -463,21 +466,22 @@ class StateManager:
             "livelink_source_count": self.state.livelink_source_count,
             "rc_enabled": self.state.rc_enabled,
             "rc_connected": self.state.rc_connected,
+            # Node firmware info
+            "node_firmware_version": fw_info.get("version_full") or fw_info.get("version"),
+            "node_firmware_hash": fw_info.get("git_hash"),
+            "node_firmware_build": fw_info.get("build_date"),
+            "node_firmware_path": fw_info.get("elf_path"),
+            "node_firmware_available": fw_info.get("available", False),
         }
 
     def get_adopted_nodes(self) -> List[Dict[str, Any]]:
         """Get list of adopted nodes."""
         result = []
         server_fw = self.get_server_firmware_info()
-        server_version_tuple = self._parse_version(server_fw.get("version", "0.0.0"))
 
         for node in self.state.adopted_nodes.values():
-            # Check if firmware update is available
-            node_version_tuple = self._parse_version(node.firmware_version or "0.0.0")
-            firmware_update_available = (
-                server_fw["available"] and
-                server_version_tuple > node_version_tuple
-            )
+            # Use the proper firmware update check (includes build timestamp comparison)
+            fw_update_info = self.is_firmware_update_available(node.node_id)
 
             node_data = {
                 "node_id": node.node_id,
@@ -494,8 +498,10 @@ class StateManager:
                 "uptime_seconds": node.uptime_seconds,
                 "has_capabilities": node.capabilities is not None,
                 "pin_config_status": node.pin_config.sync_status if node.pin_config else "unconfigured",
-                "firmware_update_available": firmware_update_available,
-                "server_firmware_version": server_fw.get("version") if firmware_update_available else None,
+                "firmware_update_available": fw_update_info["available"],
+                "firmware_update_message": fw_update_info["message"],
+                "server_firmware_version": server_fw.get("version"),
+                "server_firmware_build": server_fw.get("build_date"),
             }
             result.append(node_data)
         return result
@@ -1096,11 +1102,17 @@ class StateManager:
 
     def _get_firmware_dir(self) -> Optional[str]:
         """Get the firmware build directory path."""
-        # Try to find firmware directory relative to package
+        # Method 1: Try relative to this file (saint_server/webserver/state_manager.py)
+        # Path: ../.. -> saint_os, then firmware/rp2040
+        current_dir = os.path.dirname(__file__)
+        firmware_dir = os.path.abspath(os.path.join(current_dir, '..', '..', 'firmware', 'rp2040'))
+        if os.path.isdir(firmware_dir):
+            return firmware_dir
+
+        # Method 2: Try to find firmware directory relative to ROS2 package
         try:
             from ament_index_python.packages import get_package_share_directory
             package_dir = get_package_share_directory('saint_os')
-            # Firmware is in source tree, navigate from install to source
             # install/saint_os/share/saint_os -> source/saint_os/firmware/rp2040
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(package_dir))))
             firmware_dir = os.path.join(base_dir, 'saint_os', 'firmware', 'rp2040')
@@ -1109,11 +1121,14 @@ class StateManager:
         except Exception:
             pass
 
-        # Fallback: try relative to this file
-        current_dir = os.path.dirname(__file__)
-        firmware_dir = os.path.abspath(os.path.join(current_dir, '..', '..', 'firmware', 'rp2040'))
-        if os.path.isdir(firmware_dir):
-            return firmware_dir
+        # Method 3: Check common development paths
+        dev_paths = [
+            os.path.expanduser('~/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/rp2040'),
+            '/opt/saint_os/firmware/rp2040',
+        ]
+        for path in dev_paths:
+            if os.path.isdir(path):
+                return path
 
         return None
 
@@ -1133,6 +1148,8 @@ class StateManager:
 
         Returns dict with:
             - version: Version string (e.g., "1.1.0")
+            - version_full: Full version with git hash (e.g., "1.1.0-abc123-dirty")
+            - git_hash: Git commit hash
             - build_date: Build date if available
             - elf_path: Path to ELF file (for simulation)
             - uf2_path: Path to UF2 file (for hardware)
@@ -1140,6 +1157,8 @@ class StateManager:
         """
         result = {
             "version": "0.0.0",
+            "version_full": None,
+            "git_hash": None,
             "build_date": None,
             "elf_path": None,
             "uf2_path": None,
@@ -1148,6 +1167,7 @@ class StateManager:
 
         firmware_dir = self._get_firmware_dir()
         if not firmware_dir:
+            result["error"] = "Firmware directory not found"
             return result
 
         # Try hardware build first, then simulation build
@@ -1162,6 +1182,7 @@ class StateManager:
             if os.path.isfile(elf_path):
                 result["elf_path"] = elf_path
                 result["available"] = True
+                result["build_type"] = build_type
 
                 # Get build date from file modification time
                 mtime = os.path.getmtime(elf_path)
@@ -1170,24 +1191,123 @@ class StateManager:
             if os.path.isfile(uf2_path):
                 result["uf2_path"] = uf2_path
 
-            # Try to read version from CMakeLists.txt
-            cmake_path = os.path.join(firmware_dir, 'CMakeLists.txt')
-            if os.path.isfile(cmake_path):
+            # Try to read version info from generated version.h
+            version_h_path = os.path.join(build_dir, 'generated', 'version.h')
+            if os.path.isfile(version_h_path):
                 try:
-                    with open(cmake_path, 'r') as f:
+                    with open(version_h_path, 'r') as f:
                         content = f.read()
-                    major = re.search(r'set\(FIRMWARE_VERSION_MAJOR\s+(\d+)\)', content)
-                    minor = re.search(r'set\(FIRMWARE_VERSION_MINOR\s+(\d+)\)', content)
-                    patch = re.search(r'set\(FIRMWARE_VERSION_PATCH\s+(\d+)\)', content)
-                    if major and minor and patch:
-                        result["version"] = f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
+                    # Extract version string
+                    version_match = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
+                    if version_match:
+                        result["version"] = version_match.group(1)
+                    # Extract full version with git hash
+                    full_match = re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
+                    if full_match:
+                        result["version_full"] = full_match.group(1)
+                    # Extract git hash
+                    hash_match = re.search(r'FIRMWARE_GIT_HASH\s+"([^"]+)"', content)
+                    if hash_match:
+                        result["git_hash"] = hash_match.group(1)
+                    # Extract build timestamp from version.h (more accurate than file mtime)
+                    build_match = re.search(r'FIRMWARE_BUILD_TIMESTAMP\s+"([^"]+)"', content)
+                    if build_match:
+                        result["build_date"] = build_match.group(1)
                 except Exception:
                     pass
+
+            # Fallback: Try to read version from CMakeLists.txt
+            if result["version"] == "0.0.0":
+                cmake_path = os.path.join(firmware_dir, 'CMakeLists.txt')
+                if os.path.isfile(cmake_path):
+                    try:
+                        with open(cmake_path, 'r') as f:
+                            content = f.read()
+                        major = re.search(r'set\(FIRMWARE_VERSION_MAJOR\s+(\d+)\)', content)
+                        minor = re.search(r'set\(FIRMWARE_VERSION_MINOR\s+(\d+)\)', content)
+                        patch = re.search(r'set\(FIRMWARE_VERSION_PATCH\s+(\d+)\)', content)
+                        if major and minor and patch:
+                            result["version"] = f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
+                    except Exception:
+                        pass
 
             if result["available"]:
                 break
 
         return result
+
+    def get_firmware_build_info(self, build_type: str) -> Dict[str, Any]:
+        """
+        Get firmware info for a specific build type.
+
+        Args:
+            build_type: 'simulation' or 'hardware'
+
+        Returns dict with firmware info or available=False if not found.
+        """
+        result = {
+            "version": "0.0.0",
+            "version_full": None,
+            "git_hash": None,
+            "build_date": None,
+            "elf_path": None,
+            "uf2_path": None,
+            "available": False,
+            "build_type": build_type,
+        }
+
+        firmware_dir = self._get_firmware_dir()
+        if not firmware_dir:
+            return result
+
+        build_dir_name = 'build_sim' if build_type == 'simulation' else 'build_hardware'
+        build_dir = os.path.join(firmware_dir, build_dir_name)
+
+        if not os.path.isdir(build_dir):
+            return result
+
+        elf_path = os.path.join(build_dir, 'saint_node.elf')
+        uf2_path = os.path.join(build_dir, 'saint_node.uf2')
+
+        if os.path.isfile(elf_path):
+            result["elf_path"] = elf_path
+            result["available"] = True
+
+            mtime = os.path.getmtime(elf_path)
+            result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
+
+        if os.path.isfile(uf2_path):
+            result["uf2_path"] = uf2_path
+
+        # Read version from generated version.h
+        version_h_path = os.path.join(build_dir, 'generated', 'version.h')
+        if os.path.isfile(version_h_path):
+            try:
+                with open(version_h_path, 'r') as f:
+                    content = f.read()
+                version_match = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
+                if version_match:
+                    result["version"] = version_match.group(1)
+                full_match = re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
+                if full_match:
+                    result["version_full"] = full_match.group(1)
+                hash_match = re.search(r'FIRMWARE_GIT_HASH\s+"([^"]+)"', content)
+                if hash_match:
+                    result["git_hash"] = hash_match.group(1)
+                build_match = re.search(r'FIRMWARE_BUILD_TIMESTAMP\s+"([^"]+)"', content)
+                if build_match:
+                    result["build_date"] = build_match.group(1)
+            except Exception:
+                pass
+
+        return result
+
+    def get_all_firmware_builds(self) -> Dict[str, Any]:
+        """Get info for all available firmware builds."""
+        return {
+            "simulation": self.get_firmware_build_info("simulation"),
+            "hardware": self.get_firmware_build_info("hardware"),
+        }
 
     def is_firmware_update_available(self, node_id: str) -> Dict[str, Any]:
         """
@@ -1215,14 +1335,32 @@ class StateManager:
         node_tuple = self._parse_version(node_version)
         server_tuple = self._parse_version(server_version)
 
-        update_available = server_fw["available"] and server_tuple > node_tuple
+        update_available = False
+        message = ""
 
-        if update_available:
-            message = f"Update available: {node_version} → {server_version}"
-        elif not server_fw["available"]:
+        if not server_fw["available"]:
             message = "No firmware build available on server"
+        elif server_tuple > node_tuple:
+            # Server has newer version number
+            update_available = True
+            message = f"Update available: {node_version} → {server_version}"
         elif server_tuple == node_tuple:
-            message = "Firmware is up to date"
+            # Same version number - check if build is different
+            # Compare build timestamps if available
+            server_build = server_fw.get("build_date")
+            node_build = node.firmware_build  # Build timestamp from node announcement
+
+            if server_build and node_build:
+                # Server build is newer if its timestamp is later
+                # Node sends format: "2026-01-26 00:14:24"
+                # Server has format: "2026-01-26 00:17:53"
+                if server_build > node_build:
+                    update_available = True
+                    message = f"Rebuild available: {node_build} → {server_build}"
+                else:
+                    message = "Firmware is up to date"
+            else:
+                message = "Firmware is up to date"
         else:
             message = "Node firmware is newer than server"
 
@@ -1231,5 +1369,6 @@ class StateManager:
             "current_version": node_version,
             "server_version": server_version,
             "server_build_date": server_fw.get("build_date"),
+            "node_build_date": node.firmware_build if node else None,
             "message": message,
         }

@@ -16,6 +16,9 @@ Usage:
     ./saint_node_manager.py reset <node_id>
     ./saint_node_manager.py start-all
     ./saint_node_manager.py stop-all
+    ./saint_node_manager.py update [<node_id>]      # Install firmware and optionally restart node
+    ./saint_node_manager.py restart <node_id>       # Restart a node
+    ./saint_node_manager.py regenerate [<node_id>]  # Regenerate RESC scripts with current paths
 """
 
 import argparse
@@ -34,7 +37,14 @@ PROJECT_DIR = FIRMWARE_DIR.parent.parent.parent  # saint_os/
 
 RENODE_PATH = os.path.expanduser("~/Applications/Renode.app/Contents/MacOS/Renode")
 RENODE_RP2040_PATH = SCRIPT_DIR / "renode_rp2040"
-FIRMWARE_PATH = FIRMWARE_DIR / "build_sim" / "saint_node.elf"
+
+# Firmware paths
+# - INSTALL_DIR: Where Renode loads firmware from (what nodes run)
+# - BUILD_DIR: Where new builds are created (what's available for update)
+INSTALL_DIR = FIRMWARE_DIR / "install" / "simulation"
+BUILD_DIR = FIRMWARE_DIR / "build_sim"
+FIRMWARE_PATH = INSTALL_DIR / "saint_node.elf"  # Renode loads from install dir
+
 NODES_DIR = SCRIPT_DIR / "nodes"
 STORAGE_DIR = SCRIPT_DIR / "node_storage"
 LOGS_DIR = SCRIPT_DIR / "logs"
@@ -49,6 +59,7 @@ def ensure_dirs():
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     NODES_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_state():
@@ -246,9 +257,52 @@ def stop_node(node_id):
     return True
 
 
+def get_installed_firmware_info():
+    """Get information about the installed firmware."""
+    version_file = INSTALL_DIR / "version.h"
+    elf_file = INSTALL_DIR / "saint_node.elf"
+
+    info = {
+        "available": elf_file.exists(),
+        "path": str(INSTALL_DIR),
+        "version": None,
+        "build_date": None,
+    }
+
+    if version_file.exists():
+        import re
+        with open(version_file, "r") as f:
+            content = f.read()
+
+        # Parse version info from version.h
+        # Try FIRMWARE_VERSION_FULL first (includes git hash)
+        version_match = re.search(r'#define\s+FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
+        if not version_match:
+            version_match = re.search(r'#define\s+FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
+
+        date_match = re.search(r'#define\s+FIRMWARE_BUILD_TIMESTAMP\s+"([^"]+)"', content)
+
+        if version_match:
+            info["version"] = version_match.group(1)
+        if date_match:
+            info["build_date"] = date_match.group(1)
+
+    return info
+
+
 def list_nodes():
     """List all nodes and their status."""
     state = load_state()
+
+    # Show firmware info first
+    fw_info = get_installed_firmware_info()
+    print("Firmware:")
+    if fw_info["available"]:
+        print(f"  Location: {fw_info['path']}")
+        print(f"  Version:  {fw_info.get('version', 'unknown')} ({fw_info.get('build_date', 'unknown')})")
+    else:
+        print(f"  Not installed (run 'make install_sim' in build_sim/)")
+    print()
 
     if not state["nodes"]:
         print("No nodes configured")
@@ -338,6 +392,104 @@ def stop_all():
         stop_node(node_id)
 
 
+def update_firmware(node_id=None):
+    """
+    Update firmware by copying from build_sim to install directory.
+
+    If node_id is specified, also restarts that node.
+    If node_id is None, just copies the firmware (for manual restart).
+    """
+    # Check if build exists
+    build_elf = BUILD_DIR / "saint_node.elf"
+    build_version = BUILD_DIR / "generated" / "version.h"
+
+    if not build_elf.exists():
+        print(f"Error: No firmware build found at {build_elf}")
+        print("Run 'make' in build_sim directory first")
+        return False
+
+    # Ensure install directory exists
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Copy firmware files
+    import shutil
+
+    install_elf = INSTALL_DIR / "saint_node.elf"
+    install_version = INSTALL_DIR / "version.h"
+
+    print(f"Copying firmware from {BUILD_DIR} to {INSTALL_DIR}")
+    shutil.copy2(build_elf, install_elf)
+    print(f"  Copied: saint_node.elf")
+
+    if build_version.exists():
+        shutil.copy2(build_version, install_version)
+        print(f"  Copied: version.h")
+
+    print(f"Firmware installed to {INSTALL_DIR}")
+
+    # Restart node if specified
+    if node_id:
+        print(f"\nRestarting node '{node_id}'...")
+        stop_node(node_id)
+        time.sleep(1)  # Give it a moment to fully stop
+        start_node(node_id, wait=False)
+
+    return True
+
+
+def restart_node(node_id):
+    """Restart a node (stop then start)."""
+    state = load_state()
+
+    if node_id not in state["nodes"]:
+        print(f"Error: Node '{node_id}' does not exist")
+        return False
+
+    print(f"Restarting node '{node_id}'...")
+    stop_node(node_id)
+    time.sleep(1)  # Give it a moment to fully stop
+    start_node(node_id, wait=False)
+    return True
+
+
+def regenerate_script(node_id):
+    """Regenerate the RESC script for a node with current paths.
+
+    This is useful after updating the node manager to use new paths.
+    """
+    state = load_state()
+
+    if node_id not in state["nodes"]:
+        print(f"Error: Node '{node_id}' does not exist")
+        return False
+
+    node = state["nodes"][node_id]
+    port = node["udp_port"]
+
+    # Generate new script with current paths
+    script_content = generate_resc_script(node_id, port)
+    script_path = NODES_DIR / f"{node_id}.resc"
+
+    with open(script_path, "w") as f:
+        f.write(script_content)
+
+    print(f"Regenerated script for node '{node_id}'")
+    print(f"  Firmware: {FIRMWARE_PATH}")
+    return True
+
+
+def regenerate_all_scripts():
+    """Regenerate RESC scripts for all nodes."""
+    state = load_state()
+
+    if not state["nodes"]:
+        print("No nodes configured")
+        return
+
+    for node_id in state["nodes"]:
+        regenerate_script(node_id)
+
+
 def main():
     parser = argparse.ArgumentParser(description="SAINT.OS Node Manager")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
@@ -373,6 +525,26 @@ def main():
     # Stop-all command
     subparsers.add_parser("stop-all", help="Stop all running nodes")
 
+    # Update command
+    update_parser = subparsers.add_parser(
+        "update", help="Install new firmware from build_sim to install directory"
+    )
+    update_parser.add_argument(
+        "node_id", nargs="?", help="Optional node to restart after update"
+    )
+
+    # Restart command
+    restart_parser = subparsers.add_parser("restart", help="Restart a node")
+    restart_parser.add_argument("node_id", help="Node to restart")
+
+    # Regenerate command
+    regen_parser = subparsers.add_parser(
+        "regenerate", help="Regenerate RESC script with current paths"
+    )
+    regen_parser.add_argument(
+        "node_id", nargs="?", help="Node to regenerate (all if not specified)"
+    )
+
     args = parser.parse_args()
 
     if args.command == "create":
@@ -391,6 +563,15 @@ def main():
         start_all()
     elif args.command == "stop-all":
         stop_all()
+    elif args.command == "update":
+        update_firmware(args.node_id)
+    elif args.command == "restart":
+        restart_node(args.node_id)
+    elif args.command == "regenerate":
+        if args.node_id:
+            regenerate_script(args.node_id)
+        else:
+            regenerate_all_scripts()
     else:
         parser.print_help()
 

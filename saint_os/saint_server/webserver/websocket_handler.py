@@ -50,7 +50,8 @@ class WebSocketHandler:
         self._send_control_callback: Optional[Callable[[str, int, float], None]] = None
 
         # Callback for triggering firmware update (set by server_node)
-        self._firmware_update_callback: Optional[Callable[[str], None]] = None
+        # Signature: (node_id: str, simulation: bool) -> None
+        self._firmware_update_callback: Optional[Callable[[str, bool], None]] = None
 
         # Throttle tracking: node_id -> last_send_time
         self._control_throttle: Dict[str, float] = {}
@@ -74,8 +75,8 @@ class WebSocketHandler:
         """Set callback for sending control commands to nodes. Callback takes (node_id, gpio, value)."""
         self._send_control_callback = callback
 
-    def set_firmware_update_callback(self, callback: Callable[[str], None]):
-        """Set callback for triggering firmware update. Callback takes (node_id)."""
+    def set_firmware_update_callback(self, callback: Callable[[str, bool], None]):
+        """Set callback for triggering firmware update. Callback takes (node_id, simulation)."""
         self._firmware_update_callback = callback
 
     def set_livelink_callbacks(
@@ -374,9 +375,9 @@ class WebSocketHandler:
             if not update_info["available"]:
                 return {"status": "error", "message": update_info["message"]}
 
-            # Trigger firmware update via callback
+            # Trigger firmware update via callback (default to hardware update)
             if self._firmware_update_callback:
-                self._firmware_update_callback(node_id)
+                self._firmware_update_callback(node_id, False)  # simulation=False
                 await self.broadcast_activity(
                     f'Firmware update initiated for node {node_id}: '
                     f'{update_info["current_version"]} → {update_info["server_version"]}',
@@ -388,6 +389,45 @@ class WebSocketHandler:
                         "message": "Firmware update initiated",
                         "from_version": update_info["current_version"],
                         "to_version": update_info["server_version"],
+                    }
+                }
+            else:
+                return {"status": "error", "message": "Firmware update not available"}
+
+        elif action == 'get_firmware_builds':
+            # Get info for all firmware builds (simulation and hardware)
+            builds = self.state_manager.get_all_firmware_builds()
+            return {"status": "ok", "data": builds}
+
+        elif action == 'force_firmware_update':
+            node_id = params.get('node_id')
+            build_type = params.get('build_type')  # 'simulation' or 'hardware'
+
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            if build_type not in ('simulation', 'hardware'):
+                return {"status": "error", "message": "Invalid build_type (must be 'simulation' or 'hardware')"}
+
+            # Get firmware info for the requested build type
+            fw_info = self.state_manager.get_firmware_build_info(build_type)
+            if not fw_info["available"]:
+                return {"status": "error", "message": f"No {build_type} firmware build found"}
+
+            # Trigger firmware update via callback
+            if self._firmware_update_callback:
+                is_simulation = (build_type == 'simulation')
+                self._firmware_update_callback(node_id, is_simulation)
+                await self.broadcast_activity(
+                    f'Force firmware update ({build_type}) initiated for node {node_id}: {fw_info.get("version_full") or fw_info.get("version")}',
+                    'info'
+                )
+                return {
+                    "status": "ok",
+                    "data": {
+                        "message": "Firmware update initiated",
+                        "build_type": build_type,
+                        "version": fw_info.get("version_full") or fw_info.get("version"),
+                        "success": True,
                     }
                 }
             else:
@@ -581,13 +621,9 @@ class WebSocketHandler:
         }
 
         async with self._lock:
-            sent_count = 0
             for client in self.clients.values():
                 if topic in client.subscriptions or 'all' in client.subscriptions:
                     await self._send_to_client(client, message)
-                    sent_count += 1
-            if 'node_capabilities' in topic:
-                self.log('info', f'Broadcast {topic} to {sent_count} clients (total clients: {len(self.clients)})')
 
     async def broadcast_activity(self, text: str, level: str = 'info'):
         """Broadcast activity log entry to all clients."""

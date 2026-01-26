@@ -202,6 +202,13 @@ bool pin_config_load(void);
 void pin_config_reset(void);
 
 /**
+ * Check if any pins are configured (non-UNCONFIGURED mode).
+ * Used to determine if node was previously adopted.
+ * @return true if at least one pin has a mode other than UNCONFIGURED
+ */
+bool pin_config_has_configured_pins(void);
+
+/**
  * Configure a single pin.
  * @param gpio GPIO number
  * @param mode Desired mode

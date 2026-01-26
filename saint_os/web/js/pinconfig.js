@@ -80,16 +80,24 @@ class PinConfigManager {
 
         // Listen for capabilities updates
         ws.on('state', (message) => {
-            console.log('State message received:', message.node);
             if (message.node && message.node.startsWith('node_capabilities/')) {
                 const nodeId = message.node.replace('node_capabilities/', '');
-                console.log(`Received capabilities for ${nodeId}, selected: ${this.selectedNode}`);
                 if (nodeId === this.selectedNode) {
-                    console.log('Capabilities data:', message.data);
                     this.capabilities = message.data;
                     this.renderPins();
                     this.renderFunctions();
                     this.renderSummary();
+                    // Update sync status if included in capabilities
+                    if (message.data.sync_status) {
+                        this.updateSyncStatus(message.data.sync_status);
+                    }
+                }
+            }
+            // Listen for sync status updates
+            if (message.node && message.node.startsWith('sync_status/')) {
+                const nodeId = message.node.replace('sync_status/', '');
+                if (nodeId === this.selectedNode) {
+                    this.updateSyncStatus(message.data.sync_status);
                 }
             }
         });
@@ -597,10 +605,8 @@ class PinConfigManager {
             const result = await ws.management('sync_pin_config', { node_id: this.selectedNode });
 
             if (result?.success || result?.message) {
-                console.log('Sync initiated:', result.message || 'OK');
                 this.updateSyncStatus('pending');
             } else {
-                console.warn('Sync response:', result);
                 this.updateSyncStatus('pending');  // Still mark as pending since we sent the request
             }
         } catch (error) {
