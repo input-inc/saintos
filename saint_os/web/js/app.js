@@ -261,11 +261,14 @@ class SaintApp {
             const ws = window.saintWS;
             const result = await ws.management('get_firmware_builds', {});
 
-            // Update simulation build info
+            // Update simulation build info (RP2040)
             this.updateFirmwareBuildDisplay('sim', result.simulation);
 
-            // Update hardware build info
+            // Update hardware build info (RP2040)
             this.updateFirmwareBuildDisplay('hw', result.hardware);
+
+            // Update Pi 5 firmware info
+            this.updatePi5FirmwareDisplay(result.rpi5);
         } catch (error) {
             console.error('Failed to load firmware builds:', error);
         }
@@ -403,6 +406,34 @@ class SaintApp {
             buildEl.textContent = '--';
 
             statusEl.textContent = 'Not Built';
+            statusEl.className = 'px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400';
+        }
+    }
+
+    /**
+     * Update display for Pi 5 firmware.
+     */
+    updatePi5FirmwareDisplay(info) {
+        const versionEl = document.getElementById('settings-fw-rpi5-version');
+        const packageEl = document.getElementById('settings-fw-rpi5-package');
+        const buildEl = document.getElementById('settings-fw-rpi5-build');
+        const statusEl = document.getElementById('settings-fw-rpi5-status');
+
+        if (!versionEl) return;
+
+        if (info?.available) {
+            versionEl.textContent = info.version || '--';
+            packageEl.textContent = info.filename || '--';
+            buildEl.textContent = info.build_date || '--';
+
+            statusEl.textContent = 'Available';
+            statusEl.className = 'px-2 py-1 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400';
+        } else {
+            versionEl.textContent = '--';
+            packageEl.textContent = '--';
+            buildEl.textContent = '--';
+
+            statusEl.textContent = 'Not Available';
             statusEl.className = 'px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400';
         }
     }

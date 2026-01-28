@@ -1307,6 +1307,7 @@ class StateManager:
         return {
             "simulation": self.get_firmware_build_info("simulation"),
             "hardware": self.get_firmware_build_info("hardware"),
+            "rpi5": self.get_firmware_info_for_type("rpi5"),
         }
 
     def is_firmware_update_available(self, node_id: str) -> Dict[str, Any]:

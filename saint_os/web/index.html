@@ -982,6 +982,45 @@
                     </div>
                 </div>
 
+                <!-- Pi 5 Firmware Section -->
+                <div class="card mb-6">
+                    <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                        <span class="material-icons text-rose-400">memory</span>
+                        Node Firmware (Raspberry Pi 5)
+                    </h3>
+                    <p class="text-sm text-slate-400 mb-4">Firmware for Raspberry Pi 5 nodes with GPIO control</p>
+
+                    <div class="space-y-4">
+                        <!-- Pi 5 Build -->
+                        <div class="bg-slate-800/50 rounded-lg p-4">
+                            <div class="flex items-start justify-between">
+                                <div class="flex items-center gap-2">
+                                    <span class="material-icons text-rose-400">developer_board</span>
+                                    <h4 class="font-medium text-white">Production Build</h4>
+                                </div>
+                                <span id="settings-fw-rpi5-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
+                                    Checking...
+                                </span>
+                            </div>
+                            <p class="text-xs text-slate-500 mt-1 ml-8">For Raspberry Pi 5 devices</p>
+                            <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                                <div>
+                                    <span class="text-slate-500">Version:</span>
+                                    <span id="settings-fw-rpi5-version" class="text-white ml-2">--</span>
+                                </div>
+                                <div>
+                                    <span class="text-slate-500">Package:</span>
+                                    <span id="settings-fw-rpi5-package" class="text-white ml-2 font-mono text-xs">--</span>
+                                </div>
+                                <div class="col-span-2">
+                                    <span class="text-slate-500">Build Date:</span>
+                                    <span id="settings-fw-rpi5-build" class="text-white ml-2">--</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Server Settings -->
                 <div class="card">
                     <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
