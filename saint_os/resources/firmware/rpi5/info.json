@@ -1,0 +1,15 @@
+{
+    "type": "rpi5",
+    "latest_version": "1.1.0",
+    "latest_package": "saint_firmware_rpi5_1.1.0.zip",
+    "latest_checksum": "1fad665beb954e6f3e80136e82e70a9b72261398b6222b559d4bc3870ff89563",
+    "updated": "2026-01-28T00:28:43Z",
+    "packages": [
+        {
+            "version": "1.1.0",
+            "filename": "saint_firmware_rpi5_1.1.0.zip",
+            "checksum": "1fad665beb954e6f3e80136e82e70a9b72261398b6222b559d4bc3870ff89563",
+            "size": 20534
+        }
+    ]
+}

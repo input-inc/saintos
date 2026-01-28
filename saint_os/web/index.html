@@ -666,9 +666,71 @@
                     <h2 class="text-2xl font-bold text-white">Control Panel</h2>
                 </div>
 
-                <div id="control-nodes-container" class="space-y-4">
-                    <div class="card">
-                        <p class="text-slate-400 text-sm">Loading adopted nodes...</p>
+                <!-- Control Sub-tabs -->
+                <div class="flex items-center gap-1 mb-6 border-b border-slate-700">
+                    <button class="control-tab active" data-tab="nodes" onclick="controlPage.switchTab('nodes')">Nodes</button>
+                    <button class="control-tab" data-tab="moods" onclick="controlPage.switchTab('moods')">Moods</button>
+                </div>
+
+                <!-- Tab Content: Nodes -->
+                <div id="control-tab-nodes" class="control-tab-content">
+                    <div id="control-nodes-container" class="space-y-4">
+                        <div class="card">
+                            <p class="text-slate-400 text-sm">Loading adopted nodes...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: Moods -->
+                <div id="control-tab-moods" class="control-tab-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <!-- Mood List -->
+                        <div class="card">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Available Moods</h3>
+                                <button onclick="moodsManager.refresh()" class="btn-icon" title="Refresh">
+                                    <span class="material-icons md-20">refresh</span>
+                                </button>
+                            </div>
+                            <div id="moods-list" class="space-y-2">
+                                <p class="text-slate-400 text-sm">Loading moods...</p>
+                            </div>
+                        </div>
+
+                        <!-- Mood Details -->
+                        <div class="lg:col-span-2 card">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Mood Properties</h3>
+                                <button id="btn-apply-mood" onclick="moodsManager.applyMood()"
+                                        class="btn-primary" disabled>
+                                    <span class="material-icons icon-sm">play_arrow</span>
+                                    Apply to Head
+                                </button>
+                            </div>
+                            <div id="mood-details" class="space-y-4">
+                                <div class="flex flex-col items-center justify-center py-8 text-center">
+                                    <span class="material-icons text-slate-600 mb-4" style="font-size: 48px;">mood</span>
+                                    <p class="text-slate-500">Select a mood to view its properties</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Upload Section -->
+                    <div class="card mt-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Upload Mood</h3>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <input type="file" id="mood-file-input" accept=".uasset"
+                                   class="hidden" onchange="moodsManager.handleFileSelect(event)">
+                            <button onclick="document.getElementById('mood-file-input').click()"
+                                    class="btn-secondary">
+                                <span class="material-icons icon-sm">upload_file</span>
+                                Select .uasset File
+                            </button>
+                            <span id="mood-upload-status" class="text-sm text-slate-400"></span>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -1208,6 +1270,64 @@
             display: none;
         }
 
+        /* Control Page Sub-tabs */
+        .control-tab {
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #94a3b8;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            background: none;
+            border-top: none;
+            border-left: none;
+            border-right: none;
+            cursor: pointer;
+        }
+        .control-tab:hover {
+            color: white;
+        }
+        .control-tab.active {
+            color: #22d3ee;
+            border-bottom-color: #22d3ee;
+        }
+        .control-tab-content {
+            display: block;
+        }
+        .control-tab-content.hidden {
+            display: none;
+        }
+
+        /* Mood list item */
+        .mood-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem;
+            background: rgba(30, 41, 59, 0.5);
+            border: 1px solid #334155;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .mood-item:hover {
+            background: rgba(30, 41, 59, 0.8);
+            border-color: #475569;
+        }
+        .mood-item.selected {
+            background: rgba(6, 182, 212, 0.1);
+            border-color: #22d3ee;
+        }
+        .mood-property {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #334155;
+        }
+        .mood-property:last-child {
+            border-bottom: none;
+        }
+
         /* Pin Control Sliders */
         .pin-slider {
             -webkit-appearance: none;
@@ -1331,6 +1451,7 @@
     <script src="js/pinconfig.js"></script>
     <script src="js/pincontrol.js"></script>
     <script src="js/controlpage.js"></script>
+    <script src="js/moods.js"></script>
     <script src="js/livelink.js"></script>
     <script src="js/app.js"></script>
 </body>

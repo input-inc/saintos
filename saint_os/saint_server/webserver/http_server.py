@@ -4,9 +4,12 @@ SAINT.OS HTTP Server
 Serves static files and provides WebSocket endpoint for the admin interface.
 """
 
+import hashlib
+import json
 import mimetypes
 import os
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Dict, Any
 
 from aiohttp import web
 
@@ -17,6 +20,9 @@ from saint_server.webserver.websocket_handler import WebSocketHandler
 class WebServer:
     """HTTP server for static files and WebSocket endpoint."""
 
+    # Supported firmware types
+    FIRMWARE_TYPES = ['rp2040', 'rpi5']
+
     def __init__(
         self,
         web_root: str,
@@ -24,13 +30,21 @@ class WebServer:
         host: str = '0.0.0.0',
         server_name: str = 'SAINT-01',
         logger=None,
-        state_manager: Optional[StateManager] = None
+        state_manager: Optional[StateManager] = None,
+        firmware_root: Optional[str] = None
     ):
         self.web_root = web_root
         self.port = port
         self.host = host
         self.server_name = server_name
         self.logger = logger
+
+        # Firmware root defaults to resources/firmware relative to server
+        if firmware_root:
+            self.firmware_root = firmware_root
+        else:
+            server_dir = Path(__file__).parent.parent.parent
+            self.firmware_root = str(server_dir / 'resources' / 'firmware')
 
         # Components - use provided state_manager or create new one
         self.state_manager = state_manager or StateManager(
@@ -69,6 +83,11 @@ class WebServer:
         # Add routes
         self.app.router.add_get('/api/ws', self.ws_handler.handle_connection)
         self.app.router.add_get('/api/status', self._handle_status)
+
+        # Firmware routes
+        self.app.router.add_get('/api/firmware', self._handle_firmware_list)
+        self.app.router.add_get('/api/firmware/{fw_type}', self._handle_firmware_type_info)
+        self.app.router.add_get('/api/firmware/{fw_type}/{filename}', self._handle_firmware_download)
 
         # Serve index.html for root
         self.app.router.add_get('/', self._handle_index)
@@ -165,3 +184,107 @@ class WebServer:
 
         self.log('debug', f'Serving: {file_path} as {content_type}')
         return web.FileResponse(file_path)
+
+    def _get_firmware_info(self, fw_type: str) -> Optional[Dict[str, Any]]:
+        """Get firmware info for a specific type."""
+        fw_dir = Path(self.firmware_root) / fw_type
+
+        if not fw_dir.is_dir():
+            return None
+
+        # Look for info.json or version file
+        info_file = fw_dir / 'info.json'
+        if info_file.exists():
+            try:
+                with open(info_file, 'r') as f:
+                    info = json.load(f)
+                    # Add computed fields
+                    info['type'] = fw_type
+                    return info
+            except Exception as e:
+                self.log('error', f'Failed to read firmware info: {e}')
+
+        # Fallback: scan for firmware files
+        packages = []
+        for ext in ['.zip', '.tar.gz', '.tgz', '.elf']:
+            for f in fw_dir.glob(f'*{ext}'):
+                stat = f.stat()
+                packages.append({
+                    'filename': f.name,
+                    'size': stat.st_size,
+                    'modified': stat.st_mtime,
+                    'checksum': self._calculate_checksum(f),
+                })
+
+        if packages:
+            # Sort by modified time, newest first
+            packages.sort(key=lambda x: x['modified'], reverse=True)
+            return {
+                'type': fw_type,
+                'packages': packages,
+                'latest': packages[0]['filename'] if packages else None,
+            }
+
+        return None
+
+    def _calculate_checksum(self, file_path: Path) -> str:
+        """Calculate SHA256 checksum of a file."""
+        sha256 = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+
+    async def _handle_firmware_list(self, request: web.Request) -> web.Response:
+        """Handle request for list of available firmware types."""
+        result = {
+            'firmware_types': [],
+            'firmware_root': self.firmware_root,
+        }
+
+        for fw_type in self.FIRMWARE_TYPES:
+            info = self._get_firmware_info(fw_type)
+            if info:
+                result['firmware_types'].append(info)
+
+        return web.json_response(result)
+
+    async def _handle_firmware_type_info(self, request: web.Request) -> web.Response:
+        """Handle request for specific firmware type info."""
+        fw_type = request.match_info.get('fw_type', '')
+
+        if fw_type not in self.FIRMWARE_TYPES:
+            return web.json_response(
+                {'error': f'Unknown firmware type: {fw_type}'},
+                status=400
+            )
+
+        info = self._get_firmware_info(fw_type)
+        if not info:
+            return web.json_response(
+                {'error': f'No firmware available for type: {fw_type}'},
+                status=404
+            )
+
+        return web.json_response(info)
+
+    async def _handle_firmware_download(self, request: web.Request) -> web.Response:
+        """Handle firmware file download."""
+        fw_type = request.match_info.get('fw_type', '')
+        filename = request.match_info.get('filename', '')
+
+        if fw_type not in self.FIRMWARE_TYPES:
+            return web.Response(text='Invalid firmware type', status=400)
+
+        # Security: prevent directory traversal
+        if '..' in filename or '/' in filename or '\\' in filename:
+            return web.Response(text='Forbidden', status=403)
+
+        fw_path = Path(self.firmware_root) / fw_type / filename
+
+        if not fw_path.is_file():
+            self.log('warning', f'Firmware not found: {fw_path}')
+            return web.Response(text='Not Found', status=404)
+
+        self.log('info', f'Serving firmware: {fw_path}')
+        return web.FileResponse(fw_path)

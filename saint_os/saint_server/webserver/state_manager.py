@@ -1372,3 +1372,75 @@ class StateManager:
             "node_build_date": node.firmware_build if node else None,
             "message": message,
         }
+
+    def get_firmware_info_for_type(self, fw_type: str) -> Dict[str, Any]:
+        """
+        Get firmware info for a specific platform type.
+
+        Args:
+            fw_type: 'rp2040' or 'rpi5'
+
+        Returns dict with:
+            - available: Whether firmware is available
+            - version: Version string
+            - filename: Package filename
+            - checksum: SHA256 checksum
+            - build_date: Build timestamp
+        """
+        result = {
+            "available": False,
+            "version": "0.0.0",
+            "filename": None,
+            "checksum": None,
+            "build_date": None,
+            "type": fw_type,
+        }
+
+        if fw_type == 'rp2040':
+            # Use existing method for RP2040
+            rp2040_info = self.get_server_firmware_info()
+            result["available"] = rp2040_info.get("available", False)
+            result["version"] = rp2040_info.get("version", "0.0.0")
+            result["build_date"] = rp2040_info.get("build_date")
+            result["elf_path"] = rp2040_info.get("elf_path")
+            result["uf2_path"] = rp2040_info.get("uf2_path")
+            return result
+
+        elif fw_type == 'rpi5':
+            # Look for Pi 5 firmware in resources/firmware/rpi5
+            current_dir = os.path.dirname(__file__)
+            firmware_dir = os.path.abspath(
+                os.path.join(current_dir, '..', '..', 'resources', 'firmware', 'rpi5')
+            )
+
+            if not os.path.isdir(firmware_dir):
+                return result
+
+            # Check for info.json
+            info_file = os.path.join(firmware_dir, 'info.json')
+            if os.path.isfile(info_file):
+                try:
+                    with open(info_file, 'r') as f:
+                        info = json.load(f)
+                        result["available"] = True
+                        result["version"] = info.get("latest_version", "0.0.0")
+                        result["filename"] = info.get("latest_package")
+                        result["checksum"] = info.get("latest_checksum")
+                        result["build_date"] = info.get("updated")
+                        return result
+                except Exception:
+                    pass
+
+            # Fallback: scan for zip files
+            for f in os.listdir(firmware_dir):
+                if f.endswith('.zip') and 'rpi5' in f:
+                    result["available"] = True
+                    result["filename"] = f
+                    # Try to extract version from filename
+                    import re
+                    version_match = re.search(r'(\d+\.\d+\.\d+)', f)
+                    if version_match:
+                        result["version"] = version_match.group(1)
+                    break
+
+        return result

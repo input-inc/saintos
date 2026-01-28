@@ -77,6 +77,9 @@ class SaintServerNode(Node):
         self.livelink_router: Optional[LiveLinkRouter] = None
         self._livelink_enabled = self.get_parameter('livelink_enabled').value
 
+        # ROS Bridge for WebSocket-ROS communication
+        self.ros_bridge = None
+
         # Dynamic publishers/subscribers for node communication
         self._node_config_pubs: Dict[str, Any] = {}  # node_id -> publisher
         self._node_caps_subs: Dict[str, Any] = {}    # node_id -> subscription
@@ -416,14 +419,61 @@ class SaintServerNode(Node):
         """Send firmware update command to a node via ROS2.
 
         This tells the node to:
-        1. For simulation: Restart and load new firmware ELF
-        2. For hardware: Enter bootloader mode for UF2 update
+        1. For RP2040 simulation: Restart and load new firmware ELF
+        2. For RP2040 hardware: Enter bootloader mode for UF2 update
+        3. For Pi 5: Download and install update package from server
 
         The actual update mechanism depends on the node type.
         """
         import json
 
+        # Determine node type from state manager
+        node_info = self.state_manager.get_node(node_id)
+        hw_type = node_info.get('hw', '') if node_info else ''
+
         pub = self._ensure_node_control_publisher(node_id)
+
+        if 'Raspberry Pi' in hw_type or 'rpi5' in hw_type.lower():
+            # Pi 5 node - send download URL
+            self._send_rpi5_firmware_update(pub, node_id)
+        else:
+            # RP2040 node - original behavior
+            self._send_rp2040_firmware_update(pub, node_id, simulation)
+
+    def _send_rpi5_firmware_update(self, pub, node_id: str):
+        """Send firmware update command to a Pi 5 node."""
+        import json
+
+        # Get Pi 5 firmware info
+        fw_info = self.state_manager.get_firmware_info_for_type('rpi5')
+
+        if not fw_info or not fw_info.get('available'):
+            self.get_logger().error(f'No Pi 5 firmware available for update')
+            return
+
+        # Construct download URL using server's address
+        server_port = getattr(self.web_server, 'port', 80) if hasattr(self, 'web_server') else 80
+        # Use the node's last known IP to determine which interface the server should use
+        # For now, use a relative path that assumes the node can reach the server
+        download_url = f'http://{{server_ip}}:{server_port}/api/firmware/rpi5/{fw_info["filename"]}'
+
+        control_data = {
+            "action": "firmware_update",
+            "version": fw_info.get("version", "0.0.0"),
+            "url": download_url,
+            "checksum": fw_info.get("checksum"),
+            "build_date": fw_info.get("build_date"),
+        }
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+
+        pub.publish(msg)
+        self.get_logger().info(f'Sent Pi 5 firmware update command to {node_id} (version: {fw_info.get("version")})')
+
+    def _send_rp2040_firmware_update(self, pub, node_id: str, simulation: bool):
+        """Send firmware update command to an RP2040 node."""
+        import json
 
         # Get firmware info from state manager
         fw_info = self.state_manager.get_server_firmware_info()
@@ -439,7 +489,7 @@ class SaintServerNode(Node):
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
-        self.get_logger().info(f'Sent firmware update command to {node_id} (version: {fw_info.get("version")})')
+        self.get_logger().info(f'Sent RP2040 firmware update command to {node_id} (version: {fw_info.get("version")})')
 
         # For simulation nodes, also trigger the node manager to install and restart
         if simulation:
@@ -745,6 +795,18 @@ class SaintServerNode(Node):
                     lambda node_id: self.send_factory_reset_command(node_id)
                 )
 
+                # Initialize ROS Bridge for WebSocket-ROS communication
+                try:
+                    from saint_server.ros_bridge import ROSBridge
+                    self.ros_bridge = ROSBridge(self, logger=self.get_logger())
+                    self.ros_bridge.initialize()
+                    self.web_server.ws_handler.set_ros_bridge(self.ros_bridge)
+                    # Override the callback to use thread-safe async broadcast
+                    self.ros_bridge.set_message_callback(self._broadcast_ros_message)
+                    self.get_logger().info('ROS Bridge initialized and connected to WebSocket handler')
+                except Exception as e:
+                    self.get_logger().warn(f'ROS Bridge not available: {e}')
+
             await self.web_server.start()
 
             self.get_logger().info(f'Web server started on http://localhost:{self.web_port}/')
@@ -766,6 +828,17 @@ class SaintServerNode(Node):
                 self._async_loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(
                         self.web_server.ws_handler.broadcast_activity(message, level)
+                    )
+                )
+
+    def _broadcast_ros_message(self, topic: str, data: Dict[str, Any]):
+        """Broadcast ROS message to WebSocket clients (thread-safe)."""
+        if self.web_server and self.web_server.ws_handler:
+            if self._async_loop:
+                # Use call_soon_threadsafe to schedule broadcast in async loop
+                self._async_loop.call_soon_threadsafe(
+                    lambda t=topic, d=data: asyncio.create_task(
+                        self.web_server.ws_handler.broadcast_ros_state(t, d)
                     )
                 )
 

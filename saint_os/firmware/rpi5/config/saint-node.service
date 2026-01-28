@@ -1,0 +1,37 @@
+[Unit]
+Description=SAINT.OS Node Service
+Documentation=https://github.com/OpenSAINT/SaintOS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Environment for ROS2
+Environment="ROS_DOMAIN_ID=0"
+Environment="RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
+
+# Source ROS2 setup before running
+ExecStartPre=/bin/bash -c "source /opt/ros/jazzy/setup.bash || source /opt/ros/humble/setup.bash"
+
+# Run the node
+ExecStart=/usr/bin/python3 -m saint_node.node
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=saint-node
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

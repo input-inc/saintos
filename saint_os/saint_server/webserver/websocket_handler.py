@@ -5,16 +5,24 @@ Manages WebSocket client connections and message handling.
 """
 
 import asyncio
+import base64
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Set, Any, Optional, Callable, Awaitable
 
 from aiohttp import web, WSMsgType
 
 from saint_server.webserver.state_manager import StateManager
 from saint_server.roles import RoleManager
+
+# Type checking imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from saint_server.ros_bridge import ROSBridge
 
 
 # Throttle settings
@@ -28,6 +36,7 @@ class WebSocketClient:
     ws: web.WebSocketResponse
     subscriptions: Set[str] = field(default_factory=set)
     connected_at: float = field(default_factory=time.time)
+    authenticated: bool = False  # True if auth succeeded or auth not required
 
 
 class WebSocketHandler:
@@ -66,6 +75,26 @@ class WebSocketHandler:
         self._livelink_enable_route: Optional[Callable[[str, bool], None]] = None
         self._livelink_create_default_route: Optional[Callable[[str], Dict[str, Any]]] = None
 
+        # ROS Bridge (set by server_node)
+        self._ros_bridge: Optional['ROSBridge'] = None
+
+        # Authentication settings (loaded from config)
+        self._auth_password: Optional[str] = None
+        self._auth_timeout: float = 10.0
+        self._load_auth_config()
+
+    def _load_auth_config(self):
+        """Load authentication settings from server config."""
+        try:
+            from saint_server.config import get_config
+            config = get_config()
+            self._auth_password = config.websocket.password
+            self._auth_timeout = config.websocket.auth_timeout
+            if self._auth_password:
+                self.log('info', 'WebSocket authentication enabled')
+        except Exception as e:
+            self.log('warn', f'Could not load auth config: {e}')
+
     def set_sync_config_callback(self, callback: Callable[[str, str], None]):
         """Set callback for syncing config to nodes. Callback takes (node_id, config_json)."""
         self._sync_config_callback = callback
@@ -101,6 +130,17 @@ class WebSocketHandler:
         self._livelink_enable_route = enable_route
         self._livelink_create_default_route = create_default_route
 
+    def set_ros_bridge(self, bridge: 'ROSBridge'):
+        """Set the ROS bridge for topic subscriptions/publications."""
+        self._ros_bridge = bridge
+        bridge.set_message_callback(self._on_ros_message)
+
+    def _on_ros_message(self, topic: str, data: Dict[str, Any]):
+        """Callback when ROS message received - broadcasts to WebSocket clients."""
+        # This will be called from ROS thread, need to schedule in async loop
+        # The actual broadcast is handled by the caller (server_node)
+        pass
+
     def log(self, level: str, message: str):
         """Log a message if logger is available."""
         if self.logger:
@@ -112,7 +152,12 @@ class WebSocketHandler:
         await ws.prepare(request)
 
         client_id = str(uuid.uuid4())[:8]
-        client = WebSocketClient(id=client_id, ws=ws)
+        auth_required = self._auth_password is not None
+        client = WebSocketClient(
+            id=client_id,
+            ws=ws,
+            authenticated=not auth_required  # Auto-auth if no password set
+        )
 
         async with self._lock:
             self.clients[client_id] = client
@@ -120,12 +165,20 @@ class WebSocketHandler:
 
         self.log('info', f'WebSocket client connected: {client_id}')
 
-        # Send connected confirmation
+        # Send connected confirmation with auth requirement
         await self._send_to_client(client, {
             "type": "connected",
             "client_id": client_id,
             "server_name": self.state_manager.state.server_name,
+            "auth_required": auth_required,
         })
+
+        # Start auth timeout if authentication is required
+        auth_timeout_task = None
+        if auth_required:
+            auth_timeout_task = asyncio.create_task(
+                self._auth_timeout_handler(client)
+            )
 
         try:
             async for msg in ws:
@@ -135,13 +188,32 @@ class WebSocketHandler:
                     self.log('error', f'WebSocket error: {ws.exception()}')
                     break
         finally:
+            # Cancel auth timeout task if still running
+            if auth_timeout_task and not auth_timeout_task.done():
+                auth_timeout_task.cancel()
+
             async with self._lock:
                 self.clients.pop(client_id, None)
                 self.state_manager.set_client_count(len(self.clients))
 
+            # Clean up ROS subscriptions for this client
+            if self._ros_bridge:
+                self._ros_bridge.client_disconnected(client_id)
+
             self.log('info', f'WebSocket client disconnected: {client_id}')
 
         return ws
+
+    async def _auth_timeout_handler(self, client: WebSocketClient):
+        """Disconnect client if not authenticated within timeout."""
+        await asyncio.sleep(self._auth_timeout)
+        if not client.authenticated:
+            self.log('warn', f'Client {client.id} auth timeout - disconnecting')
+            await self._send_to_client(client, {
+                "type": "auth_failed",
+                "message": "Authentication timeout",
+            })
+            await client.ws.close()
 
     async def _send_to_client(self, client: WebSocketClient, message: dict):
         """Send a message to a specific client."""
@@ -149,6 +221,139 @@ class WebSocketHandler:
             await client.ws.send_json(message)
         except Exception as e:
             self.log('error', f'Failed to send to client {client.id}: {e}')
+
+    async def _handle_auth(self, client: WebSocketClient, message: dict):
+        """Handle authentication message from client."""
+        action = message.get('action', 'login')
+
+        if action == 'login':
+            await self._handle_auth_login(client, message)
+        elif action == 'change_password':
+            await self._handle_auth_change_password(client, message)
+        else:
+            await self._send_to_client(client, {
+                "type": "auth_result",
+                "status": "error",
+                "message": f"Unknown auth action: {action}",
+            })
+
+    async def _handle_auth_login(self, client: WebSocketClient, message: dict):
+        """Handle login authentication."""
+        if client.authenticated:
+            await self._send_to_client(client, {
+                "type": "auth_result",
+                "status": "ok",
+                "message": "Already authenticated",
+            })
+            return
+
+        password = message.get('password')
+
+        # Convert to string for comparison (handle int passwords from YAML)
+        if self._auth_password is not None:
+            auth_pass_str = str(self._auth_password)
+        else:
+            auth_pass_str = None
+
+        if auth_pass_str is None or str(password) == auth_pass_str:
+            client.authenticated = True
+            self.log('info', f'Client {client.id} authenticated successfully')
+            await self._send_to_client(client, {
+                "type": "auth_result",
+                "status": "ok",
+                "message": "Authentication successful",
+            })
+        else:
+            self.log('warn', f'Client {client.id} authentication failed')
+            await self._send_to_client(client, {
+                "type": "auth_result",
+                "status": "error",
+                "message": "Invalid password",
+            })
+            # Disconnect after failed auth
+            await client.ws.close()
+
+    async def _handle_auth_change_password(self, client: WebSocketClient, message: dict):
+        """Handle password change request."""
+        # Must be authenticated to change password
+        if not client.authenticated:
+            await self._send_to_client(client, {
+                "type": "auth_result",
+                "status": "error",
+                "message": "Must be authenticated to change password",
+            })
+            return
+
+        new_password = message.get('new_password')
+
+        if new_password is None:
+            await self._send_to_client(client, {
+                "type": "auth_result",
+                "status": "error",
+                "message": "Missing new_password field",
+            })
+            return
+
+        # Update in-memory password
+        old_had_password = self._auth_password is not None
+        self._auth_password = new_password if new_password != "" else None
+
+        # Save to config file
+        try:
+            self._save_password_to_config(new_password if new_password != "" else None)
+            self.log('info', f'Client {client.id} changed server password')
+
+            # Notify about auth requirement change
+            auth_now_required = self._auth_password is not None
+            await self._send_to_client(client, {
+                "type": "auth_result",
+                "status": "ok",
+                "message": "Password changed successfully",
+                "data": {
+                    "auth_required": auth_now_required,
+                }
+            })
+
+            # Broadcast to all clients that auth requirement may have changed
+            await self.broadcast_activity(
+                f'Server password {"updated" if auth_now_required else "removed"}',
+                'info'
+            )
+
+        except Exception as e:
+            self.log('error', f'Failed to save password: {e}')
+            # Revert in-memory change
+            self._auth_password = self._auth_password if old_had_password else None
+            await self._send_to_client(client, {
+                "type": "auth_result",
+                "status": "error",
+                "message": f"Failed to save password: {str(e)}",
+            })
+
+    def _save_password_to_config(self, new_password: Optional[str]):
+        """Save the new password to server_config.yaml."""
+        import os
+        import yaml
+
+        config_path = os.path.join(
+            os.path.dirname(__file__), '..', 'config', 'server_config.yaml'
+        )
+
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
+        # Read current config
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f) or {}
+
+        # Update password
+        if 'websocket' not in config:
+            config['websocket'] = {}
+        config['websocket']['password'] = new_password
+
+        # Write back
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
     async def _handle_message(self, client: WebSocketClient, data: str):
         """Handle an incoming message from a client."""
@@ -158,6 +363,21 @@ class WebSocketHandler:
             await self._send_to_client(client, {
                 "status": "error",
                 "message": "Invalid JSON",
+            })
+            return
+
+        # Handle authentication message
+        msg_type = message.get('type')
+        if msg_type == 'auth':
+            await self._handle_auth(client, message)
+            return
+
+        # Require authentication for all other messages
+        if not client.authenticated:
+            await self._send_to_client(client, {
+                "id": message.get('id'),
+                "status": "error",
+                "message": "Authentication required. Send {\"type\": \"auth\", \"password\": \"...\"} first.",
             })
             return
 
@@ -190,6 +410,8 @@ class WebSocketHandler:
             'router': self._handle_router,
             'control': self._handle_control,
             'livelink': self._handle_livelink,
+            'ros': self._handle_ros,
+            'file': self._handle_file,
         }.get(msg_type)
 
         if handler:
@@ -620,6 +842,373 @@ class WebSocketHandler:
 
         else:
             return {"status": "error", "message": f"Unknown livelink action: {action}"}
+
+    async def _handle_ros(self, client: WebSocketClient, action: str, params: dict) -> dict:
+        """Handle ROS bridge messages (subscribe, unsubscribe, publish, list_endpoints).
+
+        Uses unified endpoint paths - same path for subscribe and publish:
+          /saint/head  <- subscribe gets state, publish sends commands
+        """
+        if not self._ros_bridge:
+            return {"status": "error", "message": "ROS bridge not available"}
+
+        if action == 'subscribe':
+            # Support both 'endpoint' and 'topic' param names for flexibility
+            endpoint = params.get('endpoint') or params.get('topic')
+            if not endpoint:
+                return {"status": "error", "message": "Missing endpoint parameter"}
+
+            result = self._ros_bridge.subscribe(endpoint, client.id)
+            if result.get('status') == 'ok':
+                # Track subscription in client for WebSocket state management
+                client.subscriptions.add(f'ros:{endpoint}')
+            return result
+
+        elif action == 'unsubscribe':
+            endpoint = params.get('endpoint') or params.get('topic')
+            if not endpoint:
+                return {"status": "error", "message": "Missing endpoint parameter"}
+
+            result = self._ros_bridge.unsubscribe(endpoint, client.id)
+            client.subscriptions.discard(f'ros:{endpoint}')
+            return result
+
+        elif action == 'publish':
+            endpoint = params.get('endpoint') or params.get('topic')
+            data = params.get('data', {})
+            if not endpoint:
+                return {"status": "error", "message": "Missing endpoint parameter"}
+
+            return self._ros_bridge.publish(endpoint, data, client.id)
+
+        elif action in ('list_endpoints', 'list_topics'):
+            return self._ros_bridge.list_endpoints()
+
+        else:
+            return {"status": "error", "message": f"Unknown ROS action: {action}"}
+
+    def _get_resources_dir(self) -> Path:
+        """Get the resources directory path."""
+        # Resources directory is at saint_os/resources
+        return Path(__file__).parent.parent.parent / 'resources'
+
+    def _validate_filename(self, filename: str) -> bool:
+        """Validate filename to prevent path traversal attacks."""
+        if not filename:
+            return False
+        # Reject paths with directory traversal
+        if '..' in filename or filename.startswith('/') or filename.startswith('\\'):
+            return False
+        # Reject absolute paths on Windows
+        if len(filename) > 1 and filename[1] == ':':
+            return False
+        # Only allow certain characters
+        safe_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./!')
+        if not all(c in safe_chars for c in filename):
+            return False
+        return True
+
+    def _get_safe_path(self, filename: str, category: Optional[str] = None) -> Optional[Path]:
+        """
+        Get a safe file path within the resources directory.
+
+        Returns None if the path would escape the resources directory.
+        """
+        resources_dir = self._get_resources_dir()
+
+        # Build the path
+        if category:
+            if not self._validate_filename(category):
+                return None
+            file_path = resources_dir / category / filename
+        else:
+            file_path = resources_dir / filename
+
+        # Resolve to absolute and verify it's still under resources
+        try:
+            resolved = file_path.resolve()
+            resources_resolved = resources_dir.resolve()
+            if not str(resolved).startswith(str(resources_resolved)):
+                return None
+            return resolved
+        except (ValueError, OSError):
+            return None
+
+    async def _handle_file(self, client: WebSocketClient, action: str, params: dict) -> dict:
+        """
+        Handle file transfer messages.
+
+        Actions:
+          - upload: Upload a file to resources (base64 encoded)
+          - list: List files in resources directory
+          - download: Download a file (base64 encoded)
+          - delete: Delete a file from resources
+          - parse: Upload and parse a data asset file
+        """
+        if action == 'upload':
+            return await self._handle_file_upload(client, params)
+        elif action == 'list':
+            return await self._handle_file_list(client, params)
+        elif action == 'download':
+            return await self._handle_file_download(client, params)
+        elif action == 'delete':
+            return await self._handle_file_delete(client, params)
+        elif action == 'parse':
+            return await self._handle_file_parse(client, params)
+        else:
+            return {"status": "error", "message": f"Unknown file action: {action}"}
+
+    async def _handle_file_upload(self, client: WebSocketClient, params: dict) -> dict:
+        """Handle file upload."""
+        filename = params.get('filename')
+        content_b64 = params.get('content')
+        category = params.get('category')  # Optional subdirectory
+
+        if not filename:
+            return {"status": "error", "message": "Missing filename"}
+        if not content_b64:
+            return {"status": "error", "message": "Missing content"}
+
+        # Validate filename
+        if not self._validate_filename(filename):
+            return {"status": "error", "message": "Invalid filename"}
+
+        # Get safe path
+        file_path = self._get_safe_path(filename, category)
+        if not file_path:
+            return {"status": "error", "message": "Invalid file path"}
+
+        # Decode content
+        try:
+            content = base64.b64decode(content_b64)
+        except Exception as e:
+            return {"status": "error", "message": f"Invalid base64 content: {e}"}
+
+        # Create directory if needed
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return {"status": "error", "message": f"Failed to create directory: {e}"}
+
+        # Write file
+        try:
+            with open(file_path, 'wb') as f:
+                f.write(content)
+        except OSError as e:
+            return {"status": "error", "message": f"Failed to write file: {e}"}
+
+        # Calculate relative path for response
+        resources_dir = self._get_resources_dir().resolve()
+        relative_path = str(file_path.relative_to(resources_dir))
+
+        self.log('info', f'Client {client.id} uploaded file: {relative_path} ({len(content)} bytes)')
+        await self.broadcast_activity(f'File uploaded: {relative_path}', 'info')
+
+        return {
+            "status": "ok",
+            "data": {
+                "path": relative_path,
+                "size": len(content),
+                "filename": filename,
+            }
+        }
+
+    async def _handle_file_list(self, client: WebSocketClient, params: dict) -> dict:
+        """List files in resources directory."""
+        category = params.get('category')  # Optional subdirectory filter
+        pattern = params.get('pattern', '*')  # Optional glob pattern
+
+        resources_dir = self._get_resources_dir()
+
+        if category:
+            if not self._validate_filename(category):
+                return {"status": "error", "message": "Invalid category"}
+            search_dir = resources_dir / category
+        else:
+            search_dir = resources_dir
+
+        if not search_dir.exists():
+            return {"status": "ok", "data": {"files": []}}
+
+        try:
+            files = []
+            for path in search_dir.rglob(pattern):
+                if path.is_file():
+                    relative = path.relative_to(resources_dir)
+                    files.append({
+                        "path": str(relative),
+                        "name": path.name,
+                        "size": path.stat().st_size,
+                        "modified": path.stat().st_mtime,
+                    })
+
+            # Sort by name
+            files.sort(key=lambda f: f['path'])
+
+            return {"status": "ok", "data": {"files": files}}
+        except OSError as e:
+            return {"status": "error", "message": f"Failed to list files: {e}"}
+
+    async def _handle_file_download(self, client: WebSocketClient, params: dict) -> dict:
+        """Download a file from resources."""
+        filename = params.get('filename')
+        category = params.get('category')
+
+        if not filename:
+            return {"status": "error", "message": "Missing filename"}
+
+        if not self._validate_filename(filename):
+            return {"status": "error", "message": "Invalid filename"}
+
+        file_path = self._get_safe_path(filename, category)
+        if not file_path:
+            return {"status": "error", "message": "Invalid file path"}
+
+        if not file_path.exists():
+            return {"status": "error", "message": "File not found"}
+
+        if not file_path.is_file():
+            return {"status": "error", "message": "Path is not a file"}
+
+        try:
+            with open(file_path, 'rb') as f:
+                content = f.read()
+
+            content_b64 = base64.b64encode(content).decode('utf-8')
+
+            return {
+                "status": "ok",
+                "data": {
+                    "filename": filename,
+                    "content": content_b64,
+                    "size": len(content),
+                }
+            }
+        except OSError as e:
+            return {"status": "error", "message": f"Failed to read file: {e}"}
+
+    async def _handle_file_delete(self, client: WebSocketClient, params: dict) -> dict:
+        """Delete a file from resources."""
+        filename = params.get('filename')
+        category = params.get('category')
+
+        if not filename:
+            return {"status": "error", "message": "Missing filename"}
+
+        if not self._validate_filename(filename):
+            return {"status": "error", "message": "Invalid filename"}
+
+        file_path = self._get_safe_path(filename, category)
+        if not file_path:
+            return {"status": "error", "message": "Invalid file path"}
+
+        if not file_path.exists():
+            return {"status": "error", "message": "File not found"}
+
+        if not file_path.is_file():
+            return {"status": "error", "message": "Path is not a file"}
+
+        try:
+            file_path.unlink()
+
+            resources_dir = self._get_resources_dir().resolve()
+            relative_path = str(file_path.relative_to(resources_dir))
+
+            self.log('info', f'Client {client.id} deleted file: {relative_path}')
+            await self.broadcast_activity(f'File deleted: {relative_path}', 'info')
+
+            return {"status": "ok", "data": {"deleted": relative_path}}
+        except OSError as e:
+            return {"status": "error", "message": f"Failed to delete file: {e}"}
+
+    async def _handle_file_parse(self, client: WebSocketClient, params: dict) -> dict:
+        """
+        Upload and parse a data asset file.
+
+        This combines upload with parsing, returning both the file path
+        and the parsed asset data.
+        """
+        filename = params.get('filename')
+        content_b64 = params.get('content')
+        category = params.get('category', 'moods')  # Default to moods
+
+        if not filename:
+            return {"status": "error", "message": "Missing filename"}
+        if not content_b64:
+            return {"status": "error", "message": "Missing content"}
+
+        # Validate filename
+        if not self._validate_filename(filename):
+            return {"status": "error", "message": "Invalid filename"}
+
+        # Decode content
+        try:
+            content = base64.b64decode(content_b64)
+        except Exception as e:
+            return {"status": "error", "message": f"Invalid base64 content: {e}"}
+
+        # Try to parse as data asset
+        parsed_data = None
+        if filename.endswith('.uasset'):
+            try:
+                from saint_server.unreal.data_asset_reader import DataAssetReader
+                reader = DataAssetReader()
+                asset = reader.load_bytes(content, filename)
+                parsed_data = asset.to_motion_dict()
+            except Exception as e:
+                self.log('warn', f'Failed to parse asset {filename}: {e}')
+                # Continue with upload even if parsing fails
+
+        # Get safe path
+        file_path = self._get_safe_path(filename, category)
+        if not file_path:
+            return {"status": "error", "message": "Invalid file path"}
+
+        # Create directory if needed
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return {"status": "error", "message": f"Failed to create directory: {e}"}
+
+        # Write file
+        try:
+            with open(file_path, 'wb') as f:
+                f.write(content)
+        except OSError as e:
+            return {"status": "error", "message": f"Failed to write file: {e}"}
+
+        # Calculate relative path
+        resources_dir = self._get_resources_dir().resolve()
+        relative_path = str(file_path.relative_to(resources_dir))
+
+        self.log('info', f'Client {client.id} uploaded asset: {relative_path} ({len(content)} bytes)')
+        await self.broadcast_activity(f'Asset uploaded: {relative_path}', 'info')
+
+        return {
+            "status": "ok",
+            "data": {
+                "path": relative_path,
+                "size": len(content),
+                "filename": filename,
+                "parsed": parsed_data,
+            }
+        }
+
+    async def broadcast_ros_state(self, topic: str, data: dict):
+        """Broadcast ROS state update to subscribed WebSocket clients."""
+        message = {
+            "type": "ros_state",
+            "topic": topic,
+            "data": data,
+            "timestamp": time.time(),
+        }
+
+        subscription_key = f'ros:{topic}'
+
+        async with self._lock:
+            for client in self.clients.values():
+                if subscription_key in client.subscriptions:
+                    await self._send_to_client(client, message)
 
     async def _broadcast_pin_state(self, node_id: str):
         """Broadcast pin runtime state to subscribers."""

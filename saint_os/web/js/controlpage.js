@@ -13,6 +13,7 @@ class ControlPage {
         this.expandedNodes = new Set();
         this.nodeManagers = {};  // node_id -> PinControlManager instance
         this.container = null;
+        this.activeTab = 'nodes';  // 'nodes' or 'moods'
     }
 
     /**
@@ -21,6 +22,37 @@ class ControlPage {
     init() {
         this.container = document.getElementById('control-nodes-container');
         this.setupEventListeners();
+    }
+
+    /**
+     * Switch between control sub-tabs.
+     */
+    switchTab(tabId) {
+        console.log('ControlPage: Switching to tab:', tabId);
+        this.activeTab = tabId;
+
+        // Update tab buttons
+        document.querySelectorAll('.control-tab').forEach(tab => {
+            if (tab.dataset.tab === tabId) {
+                tab.classList.add('active');
+            } else {
+                tab.classList.remove('active');
+            }
+        });
+
+        // Update tab content
+        document.querySelectorAll('.control-tab-content').forEach(content => {
+            if (content.id === `control-tab-${tabId}`) {
+                content.classList.remove('hidden');
+            } else {
+                content.classList.add('hidden');
+            }
+        });
+
+        // Load tab-specific data
+        if (tabId === 'moods' && window.moodsManager) {
+            moodsManager.load();
+        }
     }
 
     /**

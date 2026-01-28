@@ -1,0 +1,46 @@
+# ROS Bridge Endpoint Definitions
+#
+# Each endpoint defines a unified path that supports both subscribe (state) and publish (command).
+# The bridge automatically generates serializers using ROS message introspection.
+#
+# To add a new endpoint:
+#   1. Define your .msg files in saint_os/msg/
+#   2. Add an entry here
+#   3. Rebuild the ROS package (colcon build)
+#
+# Format:
+#   /path/to/endpoint:
+#     state_type: package/msg/MessageType    # For subscribing (optional)
+#     command_type: package/msg/MessageType  # For publishing (optional)
+#     state_qos: state|command               # QoS profile (default: state)
+#     command_qos: state|command             # QoS profile (default: command)
+
+endpoints:
+  # Head control
+  /saint/head:
+    state_type: saint_os/msg/HeadState
+    command_type: saint_os/msg/HeadCommand
+
+  # Left arm control
+  /saint/arm/left:
+    state_type: saint_os/msg/ArmState
+    command_type: saint_os/msg/ArmCommand
+
+  # Right arm control
+  /saint/arm/right:
+    state_type: saint_os/msg/ArmState
+    command_type: saint_os/msg/ArmCommand
+
+  # Left gripper control
+  /saint/gripper/left:
+    state_type: saint_os/msg/GripperState
+    command_type: saint_os/msg/GripperCommand
+
+  # Right gripper control
+  /saint/gripper/right:
+    state_type: saint_os/msg/GripperState
+    command_type: saint_os/msg/GripperCommand
+
+  # Track/mobility (state only - commands go through different mechanism)
+  /saint/track:
+    state_type: saint_os/msg/TrackState

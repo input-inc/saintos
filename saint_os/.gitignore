@@ -8,5 +8,20 @@ firmware/current/*.img
 firmware/current/*.sha256
 firmware/archive/
 
+# Pi 5 firmware build artifacts
+firmware/rpi5/dist/
+
+# Simulation runtime files
+firmware/simulation/logs/
+firmware/simulation/nodes.json
+firmware/simulation/rp2040_scripts/
+firmware/simulation/rp2040_storage/
+firmware/simulation/rpi5_configs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
 # Local configuration overrides
 config/*.local.yaml
