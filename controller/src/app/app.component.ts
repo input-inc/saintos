@@ -16,18 +16,26 @@ import { PresetPanelComponent } from './shared/components/preset-panel/preset-pa
       <!-- Header -->
       <header class="bg-saint-surface border-b border-saint-surface-light px-4 py-3 flex items-center justify-between">
         <nav class="flex gap-2">
-          <a routerLink="/controller" routerLinkActive="bg-saint-primary"
-             class="px-3 py-1.5 rounded-lg text-sm hover:bg-saint-surface-light transition-colors">
-            Controller
-          </a>
-          <a routerLink="/bindings" routerLinkActive="bg-saint-primary"
-             class="px-3 py-1.5 rounded-lg text-sm hover:bg-saint-surface-light transition-colors">
-            Bindings
-          </a>
-          <a routerLink="/settings" routerLinkActive="bg-saint-primary"
-             class="px-3 py-1.5 rounded-lg text-sm hover:bg-saint-surface-light transition-colors">
-            Settings
-          </a>
+          @if (!presetPanelActive()) {
+            <a routerLink="/controller" routerLinkActive="bg-saint-primary"
+               class="px-3 py-1.5 rounded-lg text-sm hover:bg-saint-surface-light transition-colors">
+              Controller
+            </a>
+            <a routerLink="/bindings" routerLinkActive="bg-saint-primary"
+               class="px-3 py-1.5 rounded-lg text-sm hover:bg-saint-surface-light transition-colors">
+              Bindings
+            </a>
+            <a routerLink="/settings" routerLinkActive="bg-saint-primary"
+               class="px-3 py-1.5 rounded-lg text-sm hover:bg-saint-surface-light transition-colors">
+              Settings
+            </a>
+          } @else {
+            <button (click)="bindingsService.hidePanel()"
+                    class="px-3 py-1.5 rounded-lg text-sm hover:bg-saint-surface-light transition-colors flex items-center gap-2">
+              <span class="material-icons text-sm">arrow_back</span>
+              Back
+            </button>
+          }
         </nav>
 
         <div class="flex items-center gap-4">
@@ -48,13 +56,16 @@ import { PresetPanelComponent } from './shared/components/preset-panel/preset-pa
         </div>
       </header>
 
-      <!-- Main Content -->
-      <main class="flex-1 overflow-auto">
-        <router-outlet></router-outlet>
+      <!-- Main Content - shows either router outlet or preset panel -->
+      <main class="flex-1 overflow-hidden">
+        @if (presetPanelActive()) {
+          <app-preset-panel></app-preset-panel>
+        } @else {
+          <div class="h-full overflow-auto">
+            <router-outlet></router-outlet>
+          </div>
+        }
       </main>
-
-      <!-- Preset Panel Overlay -->
-      <app-preset-panel></app-preset-panel>
 
       <!-- Footer Navigation Bar -->
       <footer class="bg-saint-surface border-t border-saint-surface-light">
@@ -184,15 +195,19 @@ import { PresetPanelComponent } from './shared/components/preset-panel/preset-pa
                     <div class="flex items-center gap-6 justify-end mr-4">
                       <!-- Face Buttons (ABXY) -->
                       <div class="relative w-20 h-20">
-                        <!-- Y (top) -->
+                        <!-- Y (top) - Opens Moods panel -->
                         <button class="absolute top-0 left-1/2 -translate-x-1/2 w-8 h-8 rounded-full text-xs font-bold transition-colors shadow-md active:scale-90"
                                 [class.bg-yellow-400]="gamepadButtons()['Y'] || virtualPressed()['y']"
                                 [class.bg-yellow-600]="!gamepadButtons()['Y'] && !virtualPressed()['y']"
                                 [class.scale-95]="gamepadButtons()['Y'] || virtualPressed()['y']"
-                                (click)="onVirtualButtonPress('y')">
+                                (mousedown)="onVirtualButtonDown('y')"
+                                (mouseup)="onVirtualButtonUp('y')"
+                                (mouseleave)="onVirtualButtonUp('y')"
+                                (touchstart)="onVirtualButtonDown('y'); $event.preventDefault()"
+                                (touchend)="onVirtualButtonUp('y')">
                           Y
                         </button>
-                        <!-- A (bottom) -->
+                        <!-- A (bottom) - Select -->
                         <button class="absolute bottom-0 left-1/2 -translate-x-1/2 w-8 h-8 rounded-full text-xs font-bold transition-colors shadow-md active:scale-90"
                                 [class.bg-green-400]="gamepadButtons()['A'] || virtualPressed()['a']"
                                 [class.bg-green-600]="!gamepadButtons()['A'] && !virtualPressed()['a']"
@@ -200,15 +215,19 @@ import { PresetPanelComponent } from './shared/components/preset-panel/preset-pa
                                 (click)="onVirtualButtonPress('a')">
                           A
                         </button>
-                        <!-- X (left) -->
+                        <!-- X (left) - Opens Animations panel -->
                         <button class="absolute left-0 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full text-xs font-bold transition-colors shadow-md active:scale-90"
                                 [class.bg-blue-400]="gamepadButtons()['X'] || virtualPressed()['x']"
                                 [class.bg-blue-600]="!gamepadButtons()['X'] && !virtualPressed()['x']"
                                 [class.scale-95]="gamepadButtons()['X'] || virtualPressed()['x']"
-                                (click)="onVirtualButtonPress('x')">
+                                (mousedown)="onVirtualButtonDown('x')"
+                                (mouseup)="onVirtualButtonUp('x')"
+                                (mouseleave)="onVirtualButtonUp('x')"
+                                (touchstart)="onVirtualButtonDown('x'); $event.preventDefault()"
+                                (touchend)="onVirtualButtonUp('x')">
                           X
                         </button>
-                        <!-- B (right) -->
+                        <!-- B (right) - Close/Back -->
                         <button class="absolute right-0 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full text-xs font-bold transition-colors shadow-md active:scale-90"
                                 [class.bg-red-400]="gamepadButtons()['B'] || virtualPressed()['b']"
                                 [class.bg-red-600]="!gamepadButtons()['B'] && !virtualPressed()['b']"
@@ -246,6 +265,9 @@ export class AppComponent {
   rightStick = signal<JoystickPosition>({ x: 0, y: 0 });
   virtualPressed = signal<Record<string, boolean>>({});
 
+  // Track which button is being held for hold-mode panels
+  private heldButton = signal<DigitalInput | null>(null);
+
   // Gamepad state from physical controller
   gamepadConnected = computed(() => this.inputService.isGamepadConnected());
   gamepadName = computed(() => this.inputService.gamepad().name);
@@ -255,6 +277,9 @@ export class AppComponent {
   leftTrigger = computed(() => this.inputService.gamepad().leftTrigger);
   rightTrigger = computed(() => this.inputService.gamepad().rightTrigger);
 
+  // Check if a preset panel is currently active
+  presetPanelActive = computed(() => this.bindingsService.activePanelState().activePanelId !== null);
+
   constructor(
     public connectionService: ConnectionService,
     public inputService: InputService,
@@ -262,40 +287,83 @@ export class AppComponent {
   ) {}
 
   /**
-   * Handle virtual button press from onscreen controls
+   * Handle virtual button press (mousedown/touchstart) from onscreen controls
    */
-  onVirtualButtonPress(button: DigitalInput): void {
-    console.log('Virtual button pressed:', button);
+  onVirtualButtonDown(button: DigitalInput): void {
+    console.log('Virtual button down:', button);
 
-    // Visual feedback - show button as pressed briefly
+    // Visual feedback - show button as pressed
     this.virtualPressed.update(state => ({ ...state, [button]: true }));
-    setTimeout(() => {
-      this.virtualPressed.update(state => ({ ...state, [button]: false }));
-    }, 150);
 
-    // Find the binding for this button and execute it
+    // Find the binding for this button
     const profile = this.bindingsService.activeProfile();
-    console.log('Active profile:', profile?.name, 'digitalBindings count:', profile?.digitalBindings?.length);
-
     if (!profile) {
       console.log('No active profile found!');
       return;
     }
 
-    const binding = profile.digitalBindings.find(
+    // Check for both 'press' and 'hold' triggers
+    const pressBinding = profile.digitalBindings.find(
       b => b.input === button && b.trigger === 'press' && b.enabled
     );
+    const holdBinding = profile.digitalBindings.find(
+      b => b.input === button && b.trigger === 'hold' && b.enabled
+    );
 
-    if (!binding) {
-      console.log(`No binding found for button: ${button}`);
-      console.log('Available bindings:', profile.digitalBindings.map(b => `${b.input}:${b.trigger}`));
+    // Determine panel activation mode from settings
+    const panelActivation = profile.settings.panelActivation || 'press';
+
+    // If this is a show_panel action, handle based on activation mode
+    if (pressBinding?.action.type === 'show_panel' || holdBinding?.action.type === 'show_panel') {
+      const binding = holdBinding || pressBinding;
+      if (!binding) return;
+
+      if (panelActivation === 'hold') {
+        // Hold mode: show panel now, will hide on release
+        this.heldButton.set(button);
+        this.executeDigitalAction(binding.action);
+      } else {
+        // Press mode: show panel (will stay open until B is pressed)
+        this.executeDigitalAction(binding.action);
+      }
       return;
     }
 
-    console.log('Found binding, executing action:', binding.action.type);
+    // For non-panel actions, execute on press
+    if (pressBinding) {
+      this.executeDigitalAction(pressBinding.action);
+    }
+  }
 
-    // Execute the action
-    this.executeDigitalAction(binding.action);
+  /**
+   * Handle virtual button release (mouseup/touchend) from onscreen controls
+   */
+  onVirtualButtonUp(button: DigitalInput): void {
+    console.log('Virtual button up:', button);
+
+    // Visual feedback - show button as released
+    this.virtualPressed.update(state => ({ ...state, [button]: false }));
+
+    // Check if this was a held button for hold-mode panel
+    if (this.heldButton() === button) {
+      const profile = this.bindingsService.activeProfile();
+      const panelActivation = profile?.settings.panelActivation || 'press';
+
+      if (panelActivation === 'hold') {
+        // Hide the panel when button is released in hold mode
+        this.bindingsService.hidePanel();
+      }
+      this.heldButton.set(null);
+    }
+  }
+
+  /**
+   * Handle virtual button click (for simple press actions like navigation)
+   */
+  onVirtualButtonPress(button: DigitalInput): void {
+    this.onVirtualButtonDown(button);
+    // Auto-release after a short delay for click events
+    setTimeout(() => this.onVirtualButtonUp(button), 150);
   }
 
   /**

@@ -269,8 +269,15 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
           <div class="space-y-4">
             <h3 class="text-lg font-medium">Profile Settings</h3>
             @if (profileSettings()) {
-              <div class="card space-y-4">
+              <div class="card space-y-6">
                 <div class="grid grid-cols-2 gap-4">
+                  <div class="col-span-2">
+                    <span class="block text-sm font-medium text-saint-text mb-2">Panel Activation Mode</span>
+                    <div class="flex gap-2">
+                      <button type="button" class="btn" [class.btn-primary]="profileSettings()?.panelActivation === 'press'" [class.btn-secondary]="profileSettings()?.panelActivation !== 'press'" (click)="updatePanelActivation('press')">Press (stays open)</button>
+                      <button type="button" class="btn" [class.btn-primary]="profileSettings()?.panelActivation === 'hold'" [class.btn-secondary]="profileSettings()?.panelActivation !== 'hold'" (click)="updatePanelActivation('hold')">Hold (release to close)</button>
+                    </div>
+                  </div>
                   <div>
                     <label class="block text-sm text-saint-text-muted mb-1">Global Deadzone</label>
                     <input type="number" step="0.01" min="0" max="1" class="input w-full"
@@ -898,6 +905,16 @@ export class BindingsComponent {
   editPresetPanel(panel: PresetPanel): void {
     // TODO: Open preset panel editor modal
     console.log('Edit panel:', panel);
+  }
+
+  updatePanelActivation(mode: 'press' | 'hold'): void {
+    const profile = this.bindingsService.activeProfile();
+    if (!profile) return;
+
+    const updatedSettings = { ...profile.settings, panelActivation: mode };
+
+    // Update through binding service - we need to add this method
+    this.bindingsService.updateProfileSettings(updatedSettings);
   }
 
   cancelEdit(): void {

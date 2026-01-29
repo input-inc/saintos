@@ -1,6 +1,6 @@
 import { Component, computed, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { BindingsService, Preset, PresetPanel } from '../../../core/services/bindings.service';
+import { BindingsService, Preset } from '../../../core/services/bindings.service';
 
 @Component({
   selector: 'app-preset-panel',
@@ -8,129 +8,121 @@ import { BindingsService, Preset, PresetPanel } from '../../../core/services/bin
   imports: [CommonModule],
   template: `
     @if (panel(); as p) {
-      <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-           (click)="onBackdropClick($event)">
-        <div class="preset-panel w-full max-w-2xl mx-4 rounded-2xl overflow-hidden shadow-2xl"
-             [style.--panel-color]="p.color">
-          <!-- Header -->
-          <div class="panel-header px-6 py-4 flex items-center justify-between"
-               [style.background]="p.color">
-            <div class="flex items-center gap-3">
-              <span class="material-symbols-outlined text-2xl text-white">{{ p.icon }}</span>
-              <h2 class="text-xl font-semibold text-white">{{ p.name }}</h2>
-            </div>
+      <div class="h-full flex flex-col" [style.--panel-color]="p.color">
+        <!-- Header -->
+        <div class="panel-header px-6 py-4 flex items-center justify-between"
+             [style.background]="p.color">
+          <div class="flex items-center gap-3">
+            <span class="material-symbols-outlined text-2xl text-white">{{ p.icon }}</span>
+            <h2 class="text-xl font-semibold text-white">{{ p.name }}</h2>
+          </div>
+          <div class="flex items-center gap-4">
             <div class="text-white/80 text-sm">
               Page {{ currentPage() + 1 }}/{{ totalPages() }}
             </div>
+            <button class="p-1.5 rounded hover:bg-white/20 transition-colors text-white"
+                    (click)="close()">
+              <span class="material-symbols-outlined">close</span>
+            </button>
           </div>
+        </div>
 
-          <!-- Grid Content -->
-          <div class="panel-content bg-saint-surface p-4">
-            <div class="grid gap-3"
-                 [style.grid-template-columns]="'repeat(' + p.columns + ', 1fr)'">
-              @for (preset of visiblePresets(); track preset.id; let i = $index) {
-                <button class="preset-item group relative flex flex-col items-center justify-center
-                               p-4 rounded-xl transition-all duration-150"
-                        [class.preset-selected]="isSelected(i)"
-                        [style.--preset-color]="preset.color || p.color"
-                        (click)="selectPreset(preset)">
-                  <!-- Icon -->
-                  <span class="material-symbols-outlined text-3xl mb-2 transition-transform
-                               group-hover:scale-110"
-                        [style.color]="preset.color || p.color">
-                    {{ preset.icon || 'radio_button_unchecked' }}
-                  </span>
-                  <!-- Name -->
-                  <span class="text-sm font-medium text-saint-text text-center">
-                    {{ preset.name }}
-                  </span>
-                  <!-- Selection indicator -->
-                  @if (isSelected(i)) {
-                    <div class="absolute inset-0 rounded-xl border-2 pointer-events-none"
-                         [style.border-color]="preset.color || p.color"></div>
-                  }
-                </button>
-              }
-            </div>
-
-            <!-- Empty state -->
-            @if (visiblePresets().length === 0) {
-              <div class="text-center py-12 text-saint-text-muted">
-                <span class="material-symbols-outlined text-4xl mb-2">folder_open</span>
-                <p>No presets in this panel</p>
-              </div>
+        <!-- Grid Content -->
+        <div class="panel-content flex-1 bg-saint-background p-6 overflow-auto">
+          <div class="grid gap-4 max-w-4xl mx-auto"
+               [style.grid-template-columns]="'repeat(' + p.columns + ', 1fr)'">
+            @for (preset of visiblePresets(); track preset.id; let i = $index) {
+              <button class="preset-item group relative flex flex-col items-center justify-center
+                             p-6 rounded-xl transition-all duration-150"
+                      [class.preset-selected]="isSelected(i)"
+                      [style.--preset-color]="preset.color || p.color"
+                      (click)="selectPreset(preset)">
+                <!-- Icon -->
+                <span class="material-symbols-outlined text-4xl mb-3 transition-transform
+                             group-hover:scale-110"
+                      [style.color]="preset.color || p.color">
+                  {{ preset.icon || 'radio_button_unchecked' }}
+                </span>
+                <!-- Name -->
+                <span class="text-base font-medium text-saint-text text-center">
+                  {{ preset.name }}
+                </span>
+                <!-- Selection indicator -->
+                @if (isSelected(i)) {
+                  <div class="absolute inset-0 rounded-xl border-2 pointer-events-none"
+                       [style.border-color]="preset.color || p.color"></div>
+                }
+              </button>
             }
           </div>
 
-          <!-- Footer with controls hint -->
-          <div class="panel-footer px-6 py-3 bg-saint-surface-light border-t border-saint-border
-                      flex items-center justify-between text-sm text-saint-text-muted">
-            <div class="flex items-center gap-4">
-              <span class="flex items-center gap-1">
-                <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-saint-surface
-                             text-xs font-bold">D</span>
-                Navigate
-              </span>
-              <span class="flex items-center gap-1">
-                <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-green-600
-                             text-white text-xs font-bold">A</span>
-                Select
-              </span>
-              <span class="flex items-center gap-1">
-                <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-red-500
-                             text-white text-xs font-bold">B</span>
-                Close
-              </span>
+          <!-- Empty state -->
+          @if (visiblePresets().length === 0) {
+            <div class="text-center py-12 text-saint-text-muted">
+              <span class="material-symbols-outlined text-4xl mb-2">folder_open</span>
+              <p>No presets in this panel</p>
             </div>
-            <div class="flex items-center gap-2">
-              @if (totalPages() > 1) {
-                <button class="p-1.5 rounded hover:bg-saint-surface transition-colors"
-                        [disabled]="currentPage() === 0"
-                        [class.opacity-50]="currentPage() === 0"
-                        (click)="prevPage()">
-                  <span class="material-symbols-outlined text-lg">chevron_left</span>
-                </button>
-                <button class="p-1.5 rounded hover:bg-saint-surface transition-colors"
-                        [disabled]="currentPage() >= totalPages() - 1"
-                        [class.opacity-50]="currentPage() >= totalPages() - 1"
-                        (click)="nextPage()">
-                  <span class="material-symbols-outlined text-lg">chevron_right</span>
-                </button>
-              }
-            </div>
+          }
+        </div>
+
+        <!-- Footer with controls hint -->
+        <div class="panel-footer px-6 py-3 bg-saint-surface border-t border-saint-surface-light
+                    flex items-center justify-between text-sm text-saint-text-muted">
+          <div class="flex items-center gap-4">
+            <span class="flex items-center gap-1">
+              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-saint-surface-light
+                           text-xs font-bold">D</span>
+              Navigate
+            </span>
+            <span class="flex items-center gap-1">
+              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-green-600
+                           text-white text-xs font-bold">A</span>
+              Select
+            </span>
+            <span class="flex items-center gap-1">
+              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-red-500
+                           text-white text-xs font-bold">B</span>
+              Close
+            </span>
+          </div>
+          <div class="flex items-center gap-2">
+            @if (totalPages() > 1) {
+              <button class="p-1.5 rounded hover:bg-saint-surface-light transition-colors"
+                      [disabled]="currentPage() === 0"
+                      [class.opacity-50]="currentPage() === 0"
+                      (click)="prevPage()">
+                <span class="material-symbols-outlined text-lg">chevron_left</span>
+              </button>
+              <button class="p-1.5 rounded hover:bg-saint-surface-light transition-colors"
+                      [disabled]="currentPage() >= totalPages() - 1"
+                      [class.opacity-50]="currentPage() >= totalPages() - 1"
+                      (click)="nextPage()">
+                <span class="material-symbols-outlined text-lg">chevron_right</span>
+              </button>
+            }
           </div>
         </div>
       </div>
     }
   `,
   styles: [`
-    .preset-panel {
-      animation: slideUp 0.2s ease-out;
-    }
-
-    @keyframes slideUp {
-      from {
-        opacity: 0;
-        transform: translateY(20px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
+    :host {
+      display: block;
+      height: 100%;
     }
 
     .preset-item {
-      background: var(--saint-surface-light, #2a2a2a);
-      border: 1px solid transparent;
+      background: var(--saint-surface, #1a1a1a);
+      border: 1px solid var(--saint-surface-light, #2a2a2a);
     }
 
     .preset-item:hover {
-      background: var(--saint-surface, #1a1a1a);
+      background: var(--saint-surface-light, #2a2a2a);
       border-color: var(--preset-color);
     }
 
     .preset-selected {
-      background: color-mix(in srgb, var(--preset-color) 15%, var(--saint-surface-light, #2a2a2a));
+      background: color-mix(in srgb, var(--preset-color) 15%, var(--saint-surface, #1a1a1a));
     }
   `]
 })
@@ -168,10 +160,8 @@ export class PresetPanelComponent {
     this.bindingsService.hidePanel();
   }
 
-  onBackdropClick(event: MouseEvent): void {
-    if ((event.target as HTMLElement).classList.contains('fixed')) {
-      this.bindingsService.hidePanel();
-    }
+  close(): void {
+    this.bindingsService.hidePanel();
   }
 
   prevPage(): void {

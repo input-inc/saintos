@@ -145,11 +145,14 @@ export interface PresetPanel {
 // Profile
 // ============================================================================
 
+export type PanelActivationMode = 'press' | 'hold';
+
 export interface ProfileSettings {
   globalDeadzone: number;
   hapticFeedback: boolean;
   doubleTapTimeMs: number;
   longPressTimeMs: number;
+  panelActivation: PanelActivationMode;
 }
 
 export interface BindingProfile {
@@ -425,6 +428,16 @@ export class BindingsService {
     this.saveProfiles();
   }
 
+  updateProfileSettings(settings: ProfileSettings): void {
+    this.profiles.update(profiles => {
+      return profiles.map(p => {
+        if (p.id !== this.activeProfileId()) return p;
+        return { ...p, settings };
+      });
+    });
+    this.saveProfiles();
+  }
+
   private subscribeToActionEvents(): void {
     this.tauri.listen<ActionEvent>('action-event').subscribe(event => {
       this.handleActionEvent(event);
@@ -578,7 +591,8 @@ export class BindingsService {
         globalDeadzone: 0.1,
         hapticFeedback: true,
         doubleTapTimeMs: 300,
-        longPressTimeMs: 500
+        longPressTimeMs: 500,
+        panelActivation: 'press'
       }
     };
   }
