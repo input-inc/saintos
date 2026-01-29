@@ -99,6 +99,12 @@ pub enum DigitalAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NavigateDirection {
+    // Grid navigation
+    Up,
+    Down,
+    Left,
+    Right,
+    // Linear navigation
     NextItem,
     PrevItem,
     NextPage,

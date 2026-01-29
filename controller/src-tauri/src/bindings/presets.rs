@@ -130,12 +130,12 @@ pub fn create_default_profile() -> BindingProfile {
             action: DigitalAction::HidePanel,
             enabled: true,
         },
-        // D-Pad navigation
+        // D-Pad - Grid navigation
         DigitalBinding {
             input: DigitalInput::DPadUp,
             trigger: ButtonTrigger::Press,
             action: DigitalAction::NavigatePanel {
-                direction: NavigateDirection::PrevItem,
+                direction: NavigateDirection::Up,
             },
             enabled: true,
         },
@@ -143,7 +143,7 @@ pub fn create_default_profile() -> BindingProfile {
             input: DigitalInput::DPadDown,
             trigger: ButtonTrigger::Press,
             action: DigitalAction::NavigatePanel {
-                direction: NavigateDirection::NextItem,
+                direction: NavigateDirection::Down,
             },
             enabled: true,
         },
@@ -151,7 +151,7 @@ pub fn create_default_profile() -> BindingProfile {
             input: DigitalInput::DPadLeft,
             trigger: ButtonTrigger::Press,
             action: DigitalAction::NavigatePanel {
-                direction: NavigateDirection::PrevPage,
+                direction: NavigateDirection::Left,
             },
             enabled: true,
         },
@@ -159,26 +159,25 @@ pub fn create_default_profile() -> BindingProfile {
             input: DigitalInput::DPadRight,
             trigger: ButtonTrigger::Press,
             action: DigitalAction::NavigatePanel {
-                direction: NavigateDirection::NextPage,
+                direction: NavigateDirection::Right,
             },
             enabled: true,
         },
-        // LB - Cycle speed mode
+        // LB - Previous page
         DigitalBinding {
             input: DigitalInput::LB,
             trigger: ButtonTrigger::Press,
-            action: DigitalAction::CycleOutput {
-                target_id: "speed_mode".to_string(),
-                values: vec!["slow".to_string(), "normal".to_string(), "fast".to_string()],
+            action: DigitalAction::NavigatePanel {
+                direction: NavigateDirection::PrevPage,
             },
             enabled: true,
         },
-        // RB - Toggle head tracking
+        // RB - Next page
         DigitalBinding {
             input: DigitalInput::RB,
             trigger: ButtonTrigger::Press,
-            action: DigitalAction::ToggleOutput {
-                target_id: "head_tracking".to_string(),
+            action: DigitalAction::NavigatePanel {
+                direction: NavigateDirection::NextPage,
             },
             enabled: true,
         },
@@ -221,6 +220,7 @@ fn create_moods_panel() -> PresetPanel {
         columns: 4,
         items_per_page: 8,
         presets: vec![
+            // Page 1
             create_mood_preset("happy", "Happy", "sentiment_very_satisfied", "#22c55e"),
             create_mood_preset("sad", "Sad", "sentiment_dissatisfied", "#3b82f6"),
             create_mood_preset("angry", "Angry", "mood_bad", "#ef4444"),
@@ -229,6 +229,15 @@ fn create_moods_panel() -> PresetPanel {
             create_mood_preset("surprised", "Surprised", "sentiment_excited", "#f59e0b"),
             create_mood_preset("love", "Love", "favorite", "#ec4899"),
             create_mood_preset("neutral", "Neutral", "sentiment_neutral", "#9ca3af"),
+            // Page 2
+            create_mood_preset("excited", "Excited", "celebration", "#f97316"),
+            create_mood_preset("confused", "Confused", "help", "#a855f7"),
+            create_mood_preset("scared", "Scared", "warning", "#facc15"),
+            create_mood_preset("proud", "Proud", "military_tech", "#eab308"),
+            create_mood_preset("shy", "Shy", "face_retouching_off", "#f472b6"),
+            create_mood_preset("bored", "Bored", "sentiment_dissatisfied", "#78716c"),
+            create_mood_preset("playful", "Playful", "toys", "#06b6d4"),
+            create_mood_preset("focused", "Focused", "center_focus_strong", "#0ea5e9"),
         ],
     }
 }
