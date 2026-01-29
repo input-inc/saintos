@@ -233,10 +233,15 @@ export class BindingsService {
       const profiles = await this.tauri.invoke<BindingProfile[]>('get_binding_profiles');
       // Only update if we got profiles from backend; otherwise keep the default
       if (profiles && profiles.length > 0) {
+        console.log('Loaded profiles from Tauri backend:', profiles.length, 'profiles');
+        const moodsPanel = profiles[0]?.presetPanels?.find(p => p.id === 'moods');
+        console.log('Moods panel from backend has', moodsPanel?.presets?.length, 'presets');
         this.profiles.set(profiles);
+      } else {
+        console.log('No profiles from backend, using frontend default');
       }
     } catch (err) {
-      console.error('Failed to load profiles from backend, using default:', err);
+      console.error('Failed to load profiles from backend, using frontend default:', err);
       // Default profile is already set in constructor, so no action needed
     }
   }
@@ -283,10 +288,11 @@ export class BindingsService {
       console.log('No active panel, navigation ignored');
       return;
     }
-    console.log('Panel:', panel.name, 'columns:', panel.columns, 'presets:', panel.presets.length);
+    const totalPages = Math.ceil(panel.presets.length / panel.itemsPerPage);
+    console.log('Panel:', panel.name, 'presets:', panel.presets.length, 'itemsPerPage:', panel.itemsPerPage, 'totalPages:', totalPages);
 
     this.panelState.update(state => {
-      console.log('Current state:', state);
+      console.log('Current state:', state, 'direction:', direction);
       const totalItems = panel.presets.length;
       const columns = panel.columns;
       const itemsPerPage = panel.itemsPerPage;
