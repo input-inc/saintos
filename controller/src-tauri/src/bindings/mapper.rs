@@ -279,14 +279,44 @@ impl InputMapper {
         if let Some(panel_id) = &self.panel_state.active_panel_id {
             if let Some(panel) = profile.get_panel(panel_id) {
                 let total_items = panel.presets.len();
+                let columns = panel.columns as usize;
                 let items_per_page = panel.items_per_page as usize;
                 let total_pages = (total_items + items_per_page - 1) / items_per_page;
 
                 match direction {
+                    // Grid navigation
+                    NavigateDirection::Up => {
+                        if self.panel_state.selected_index >= columns {
+                            self.panel_state.selected_index -= columns;
+                            self.panel_state.current_page =
+                                self.panel_state.selected_index / items_per_page;
+                        }
+                    }
+                    NavigateDirection::Down => {
+                        if self.panel_state.selected_index + columns < total_items {
+                            self.panel_state.selected_index += columns;
+                            self.panel_state.current_page =
+                                self.panel_state.selected_index / items_per_page;
+                        }
+                    }
+                    NavigateDirection::Left => {
+                        if self.panel_state.selected_index > 0 {
+                            self.panel_state.selected_index -= 1;
+                            self.panel_state.current_page =
+                                self.panel_state.selected_index / items_per_page;
+                        }
+                    }
+                    NavigateDirection::Right => {
+                        if self.panel_state.selected_index + 1 < total_items {
+                            self.panel_state.selected_index += 1;
+                            self.panel_state.current_page =
+                                self.panel_state.selected_index / items_per_page;
+                        }
+                    }
+                    // Linear navigation
                     NavigateDirection::NextItem => {
                         if self.panel_state.selected_index + 1 < total_items {
                             self.panel_state.selected_index += 1;
-                            // Update page if needed
                             self.panel_state.current_page =
                                 self.panel_state.selected_index / items_per_page;
                         }
