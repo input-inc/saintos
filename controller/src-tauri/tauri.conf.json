@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SAINT Controller",
+  "version": "0.1.0",
+  "identifier": "com.saintos.controller",
+  "build": {
+    "beforeDevCommand": "npm run start",
+    "devUrl": "http://localhost:4200",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist/saint-controller/browser"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "SAINT Controller",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ws: wss: http: https:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  }
+}

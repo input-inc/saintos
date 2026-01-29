@@ -172,3 +172,29 @@ credentials.json
 *.temp
 *.bak
 *.backup
+
+# =============================================================================
+# Controller Application (Tauri + Angular)
+# =============================================================================
+controller/node_modules/
+controller/dist/
+controller/.angular/
+controller/src-tauri/target/
+controller/src-tauri/gen/
+controller/src-tauri/icons/
+
+# =============================================================================
+# Node.js / NPM
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# =============================================================================
+# Rust
+# =============================================================================
+target/
+Cargo.lock
+**/*.rs.bk

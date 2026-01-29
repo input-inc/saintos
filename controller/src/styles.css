@@ -1,0 +1,113 @@
+/* Fonts - bundled locally */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
+
+/* Material Icons - bundled locally */
+@import 'material-icons/iconfont/material-icons.css';
+
+/* Material Symbols - for newer icons */
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body {
+    @apply h-full m-0 p-0 overflow-hidden;
+  }
+
+  ::-webkit-scrollbar {
+    @apply w-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-saint-background;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-saint-surface-light rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-saint-text-muted;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
+  }
+
+  .btn-primary {
+    @apply bg-saint-primary text-white hover:bg-blue-600;
+  }
+
+  .btn-secondary {
+    @apply bg-saint-surface text-saint-text hover:bg-saint-surface-light;
+  }
+
+  .btn-danger {
+    @apply bg-saint-error text-white hover:bg-red-600;
+  }
+
+  .card {
+    @apply bg-saint-surface rounded-xl p-4 border border-saint-surface-light;
+  }
+
+  .input {
+    @apply bg-saint-background border border-saint-surface-light rounded-lg px-3 py-2
+           text-saint-text placeholder-saint-text-muted focus:outline-none
+           focus:border-saint-primary focus:ring-1 focus:ring-saint-primary;
+  }
+
+  .status-indicator {
+    @apply w-3 h-3 rounded-full;
+  }
+
+  .status-connected {
+    @apply bg-saint-success animate-pulse;
+  }
+
+  .status-disconnected {
+    @apply bg-saint-error;
+  }
+
+  .status-connecting {
+    @apply bg-saint-warning animate-pulse;
+  }
+
+  /* Material Icons size variants */
+  .material-icons.md-18 { font-size: 18px; }
+  .material-icons.md-20 { font-size: 20px; }
+  .material-icons.md-24 { font-size: 24px; }
+  .material-icons.md-36 { font-size: 36px; }
+  .material-icons.md-48 { font-size: 48px; }
+  .material-icons.icon-sm { font-size: 16px; }
+  .material-icons.icon-md { font-size: 24px; }
+  .material-icons.icon-lg { font-size: 64px; }
+
+  /* Material Symbols base style */
+  .material-symbols-outlined {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    font-size: 24px;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: 'liga';
+  }
+}
