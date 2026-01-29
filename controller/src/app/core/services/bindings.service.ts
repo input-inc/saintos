@@ -22,7 +22,7 @@ export type DigitalInput =
 
 export type ButtonTrigger = 'press' | 'release' | 'hold' | 'double_tap' | 'long_press';
 
-export type NavigateDirection = 'next_item' | 'prev_item' | 'next_page' | 'prev_page';
+export type NavigateDirection = 'up' | 'down' | 'left' | 'right' | 'next_item' | 'prev_item' | 'next_page' | 'prev_page';
 
 // ============================================================================
 // Actions
@@ -267,18 +267,54 @@ export class BindingsService {
     this.panelState.update(s => ({ ...s, activePanelId: null }));
   }
 
+  togglePanel(panelId: string): void {
+    const currentPanelId = this.panelState().activePanelId;
+    if (currentPanelId === panelId) {
+      this.hidePanel();
+    } else {
+      this.showPanel(panelId);
+    }
+  }
+
   navigatePanel(direction: NavigateDirection): void {
     const panel = this.activePanel();
     if (!panel) return;
 
     this.panelState.update(state => {
       const totalItems = panel.presets.length;
+      const columns = panel.columns;
       const itemsPerPage = panel.itemsPerPage;
       const totalPages = Math.ceil(totalItems / itemsPerPage);
 
       let { selectedIndex, currentPage } = state;
 
       switch (direction) {
+        // Grid navigation
+        case 'up':
+          if (selectedIndex - columns >= 0) {
+            selectedIndex -= columns;
+            currentPage = Math.floor(selectedIndex / itemsPerPage);
+          }
+          break;
+        case 'down':
+          if (selectedIndex + columns < totalItems) {
+            selectedIndex += columns;
+            currentPage = Math.floor(selectedIndex / itemsPerPage);
+          }
+          break;
+        case 'left':
+          if (selectedIndex > 0) {
+            selectedIndex--;
+            currentPage = Math.floor(selectedIndex / itemsPerPage);
+          }
+          break;
+        case 'right':
+          if (selectedIndex + 1 < totalItems) {
+            selectedIndex++;
+            currentPage = Math.floor(selectedIndex / itemsPerPage);
+          }
+          break;
+        // Legacy linear navigation
         case 'next_item':
           if (selectedIndex + 1 < totalItems) {
             selectedIndex++;
@@ -523,12 +559,12 @@ export class BindingsService {
         { input: 'x', trigger: 'press', action: { type: 'show_panel', panel_id: 'animations' }, enabled: true },
         { input: 'a', trigger: 'press', action: { type: 'select_panel_item' }, enabled: true },
         { input: 'b', trigger: 'press', action: { type: 'hide_panel' }, enabled: true },
-        { input: 'd_pad_up', trigger: 'press', action: { type: 'navigate_panel', direction: 'prev_item' }, enabled: true },
-        { input: 'd_pad_down', trigger: 'press', action: { type: 'navigate_panel', direction: 'next_item' }, enabled: true },
-        { input: 'd_pad_left', trigger: 'press', action: { type: 'navigate_panel', direction: 'prev_page' }, enabled: true },
-        { input: 'd_pad_right', trigger: 'press', action: { type: 'navigate_panel', direction: 'next_page' }, enabled: true },
-        { input: 'lb', trigger: 'press', action: { type: 'cycle_output', target_id: 'speed_mode', values: ['slow', 'normal', 'fast'] }, enabled: true },
-        { input: 'rb', trigger: 'press', action: { type: 'toggle_output', target_id: 'head_tracking' }, enabled: true },
+        { input: 'd_pad_up', trigger: 'press', action: { type: 'navigate_panel', direction: 'up' }, enabled: true },
+        { input: 'd_pad_down', trigger: 'press', action: { type: 'navigate_panel', direction: 'down' }, enabled: true },
+        { input: 'd_pad_left', trigger: 'press', action: { type: 'navigate_panel', direction: 'left' }, enabled: true },
+        { input: 'd_pad_right', trigger: 'press', action: { type: 'navigate_panel', direction: 'right' }, enabled: true },
+        { input: 'lb', trigger: 'press', action: { type: 'navigate_panel', direction: 'prev_page' }, enabled: true },
+        { input: 'rb', trigger: 'press', action: { type: 'navigate_panel', direction: 'next_page' }, enabled: true },
         { input: 'select', trigger: 'press', action: { type: 'e_stop' }, enabled: true },
         { input: 'start', trigger: 'press', action: { type: 'show_panel', panel_id: 'sounds' }, enabled: true }
       ],

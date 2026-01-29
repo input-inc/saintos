@@ -67,8 +67,12 @@ const DIGITAL_ACTION_TYPES = [
 ];
 
 const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
-  { value: 'next_item', label: 'Next Item' },
-  { value: 'prev_item', label: 'Previous Item' },
+  { value: 'up', label: 'Up (Grid)' },
+  { value: 'down', label: 'Down (Grid)' },
+  { value: 'left', label: 'Left (Grid)' },
+  { value: 'right', label: 'Right (Grid)' },
+  { value: 'next_item', label: 'Next Item (Linear)' },
+  { value: 'prev_item', label: 'Previous Item (Linear)' },
   { value: 'next_page', label: 'Next Page' },
   { value: 'prev_page', label: 'Previous Page' }
 ];

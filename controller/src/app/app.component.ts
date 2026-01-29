@@ -316,15 +316,17 @@ export class AppComponent {
     // If this is a show_panel action, handle based on activation mode
     if (pressBinding?.action.type === 'show_panel' || holdBinding?.action.type === 'show_panel') {
       const binding = holdBinding || pressBinding;
-      if (!binding) return;
+      if (!binding || binding.action.type !== 'show_panel') return;
+
+      const panelId = binding.action.panel_id;
 
       if (panelActivation === 'hold') {
         // Hold mode: show panel now, will hide on release
         this.heldButton.set(button);
-        this.executeDigitalAction(binding.action);
+        this.bindingsService.showPanel(panelId);
       } else {
-        // Press mode: show panel (will stay open until B is pressed)
-        this.executeDigitalAction(binding.action);
+        // Press mode: toggle panel (press again to close)
+        this.bindingsService.togglePanel(panelId);
       }
       return;
     }
