@@ -23,7 +23,9 @@ pub enum DigitalInput {
     B,
     X,
     Y,
+    #[serde(rename = "lb")]
     LB,
+    #[serde(rename = "rb")]
     RB,
     DPadUp,
     DPadDown,

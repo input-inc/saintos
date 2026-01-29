@@ -7,6 +7,35 @@ import { BindingsService, DigitalInput } from './core/services/bindings.service'
 import { VirtualJoystickComponent, JoystickPosition } from './shared/components/virtual-joystick/virtual-joystick.component';
 import { PresetPanelComponent } from './shared/components/preset-panel/preset-panel.component';
 
+// Battery cell data
+interface BatteryCell {
+  voltage: number;
+  temperature: number;
+  health: number;
+}
+
+// BMS (Battery Management System) data
+interface BMSData {
+  manufacturer: string;
+  model: string;
+  serialNumber: string;
+  firmwareVersion: string;
+  cycleCount: number;
+  maxCapacity: number;
+  currentCapacity: number;
+}
+
+// Track drive battery data
+interface TrackBattery {
+  name: string;
+  cells: BatteryCell[];
+  chargePercent: number;
+  isCharging: boolean;
+  voltage: number;
+  current: number;
+  bms: BMSData;
+}
+
 @Component({
   selector: 'app-root',
   standalone: true,
@@ -88,6 +117,22 @@ import { PresetPanelComponent } from './shared/components/preset-panel/preset-pa
             }
             <span class="material-icons icon-sm transition-transform"
                   [class.rotate-180]="activePanel() === 'controls'">
+              expand_less
+            </span>
+          </button>
+
+          <button
+            (click)="togglePanel('battery')"
+            [class]="getTabClass('battery')"
+            class="flex items-center gap-2 px-4 py-2 text-sm transition-colors">
+            <span class="material-icons icon-sm">battery_4_bar</span>
+            <span>Battery</span>
+            <span class="px-2 py-0.5 text-xs rounded-full"
+                  [ngClass]="getBatteryStatusClass()">
+              {{ overallBatteryPercent() }}%
+            </span>
+            <span class="material-icons icon-sm transition-transform"
+                  [class.rotate-180]="activePanel() === 'battery'">
               expand_less
             </span>
           </button>
@@ -254,6 +299,94 @@ import { PresetPanelComponent } from './shared/components/preset-panel/preset-pa
               </div>
             </div>
           }
+
+          <!-- Battery Panel -->
+          @if (activePanel() === 'battery') {
+            <div class="p-4 h-full">
+              <div class="flex gap-4 h-full">
+                @for (battery of batteries(); track battery.name) {
+                  <div class="bg-saint-surface-light rounded-lg p-4 flex-1 flex flex-col">
+                    <!-- Battery Header -->
+                    <div class="flex items-center justify-between mb-2">
+                      <div class="flex items-center gap-2">
+                        <span class="material-icons text-2xl"
+                              [class.text-saint-success]="battery.chargePercent >= 50"
+                              [class.text-yellow-500]="battery.chargePercent >= 20 && battery.chargePercent < 50"
+                              [class.text-red-500]="battery.chargePercent < 20">
+                          @if (battery.isCharging) {
+                            battery_charging_full
+                          } @else if (battery.chargePercent >= 80) {
+                            battery_full
+                          } @else if (battery.chargePercent >= 50) {
+                            battery_4_bar
+                          } @else if (battery.chargePercent >= 20) {
+                            battery_2_bar
+                          } @else {
+                            battery_1_bar
+                          }
+                        </span>
+                        <div>
+                          <div class="font-medium">{{ battery.name }}</div>
+                          <div class="flex gap-3 text-xs text-saint-text-muted">
+                            <span>{{ battery.voltage.toFixed(2) }}V</span>
+                            <span>{{ battery.current.toFixed(1) }}A</span>
+                            @if (battery.isCharging) {
+                              <span class="text-saint-success">Charging</span>
+                            }
+                          </div>
+                        </div>
+                      </div>
+                      <span class="text-2xl font-bold"
+                            [class.text-saint-success]="battery.chargePercent >= 50"
+                            [class.text-yellow-500]="battery.chargePercent >= 20 && battery.chargePercent < 50"
+                            [class.text-red-500]="battery.chargePercent < 20">
+                        {{ battery.chargePercent }}%
+                      </span>
+                    </div>
+
+                    <!-- Cells and BMS side by side -->
+                    <div class="flex gap-4 flex-1">
+                      <!-- Cell Voltages -->
+                      <div class="flex-1">
+                        <div class="text-xs text-saint-text-muted mb-1">Cell Voltages</div>
+                        <div class="grid grid-cols-4 gap-2">
+                          @for (cell of battery.cells; track $index; let i = $index) {
+                            <div class="bg-saint-surface rounded p-2 text-center">
+                              <div class="text-[10px] text-saint-text-muted">C{{ i + 1 }}</div>
+                              <div class="text-sm font-medium"
+                                   [class.text-saint-success]="cell.voltage >= 3.7"
+                                   [class.text-yellow-500]="cell.voltage >= 3.4 && cell.voltage < 3.7"
+                                   [class.text-red-500]="cell.voltage < 3.4">
+                                {{ cell.voltage.toFixed(2) }}V
+                              </div>
+                              <div class="text-[10px] text-saint-text-muted">{{ cell.temperature }}°C</div>
+                            </div>
+                          }
+                        </div>
+                      </div>
+
+                      <!-- BMS Info -->
+                      <div class="border-l border-saint-surface pl-4 min-w-48">
+                        <div class="text-xs text-saint-text-muted mb-1">BMS Information</div>
+                        <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+                          <span class="text-saint-text-muted">Model</span>
+                          <span>{{ battery.bms.model }}</span>
+                          <span class="text-saint-text-muted">Serial</span>
+                          <span class="font-mono text-[10px]">{{ battery.bms.serialNumber }}</span>
+                          <span class="text-saint-text-muted">Firmware</span>
+                          <span>v{{ battery.bms.firmwareVersion }}</span>
+                          <span class="text-saint-text-muted">Cycles</span>
+                          <span>{{ battery.bms.cycleCount }}</span>
+                          <span class="text-saint-text-muted">Capacity</span>
+                          <span>{{ battery.bms.currentCapacity }}/{{ battery.bms.maxCapacity }} mAh</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                }
+              </div>
+            </div>
+          }
         </div>
       </footer>
     </div>
@@ -267,6 +400,61 @@ export class AppComponent {
 
   // Track which button is being held for hold-mode panels
   private heldButton = signal<DigitalInput | null>(null);
+
+  // Mock battery data for left and right track drives
+  batteries = signal<TrackBattery[]>([
+    {
+      name: 'Left Track',
+      cells: [
+        { voltage: 3.92, temperature: 28, health: 98 },
+        { voltage: 3.89, temperature: 29, health: 97 },
+        { voltage: 3.91, temperature: 28, health: 99 },
+        { voltage: 3.88, temperature: 30, health: 96 },
+      ],
+      chargePercent: 78,
+      isCharging: false,
+      voltage: 15.6,
+      current: -1.2,
+      bms: {
+        manufacturer: 'SAINT Power',
+        model: 'BMS-4S-30A',
+        serialNumber: 'SP-L-2024-00142',
+        firmwareVersion: '1.2.4',
+        cycleCount: 127,
+        maxCapacity: 5000,
+        currentCapacity: 4850,
+      },
+    },
+    {
+      name: 'Right Track',
+      cells: [
+        { voltage: 3.95, temperature: 27, health: 99 },
+        { voltage: 3.93, temperature: 28, health: 98 },
+        { voltage: 3.94, temperature: 27, health: 99 },
+        { voltage: 3.91, temperature: 29, health: 97 },
+      ],
+      chargePercent: 82,
+      isCharging: false,
+      voltage: 15.73,
+      current: -1.1,
+      bms: {
+        manufacturer: 'SAINT Power',
+        model: 'BMS-4S-30A',
+        serialNumber: 'SP-R-2024-00143',
+        firmwareVersion: '1.2.4',
+        cycleCount: 124,
+        maxCapacity: 5000,
+        currentCapacity: 4900,
+      },
+    },
+  ]);
+
+  // Computed overall battery percentage (average of both tracks)
+  overallBatteryPercent = computed(() => {
+    const bats = this.batteries();
+    if (bats.length === 0) return 0;
+    return Math.round(bats.reduce((sum, b) => sum + b.chargePercent, 0) / bats.length);
+  });
 
   // Gamepad state from physical controller
   gamepadConnected = computed(() => this.inputService.isGamepadConnected());
@@ -333,7 +521,12 @@ export class AppComponent {
 
     // For non-panel actions, execute on press
     if (pressBinding) {
+      console.log('Executing action for', button, ':', pressBinding.action);
       this.executeDigitalAction(pressBinding.action);
+    } else {
+      console.log('No press binding found for', button);
+      const profile = this.bindingsService.activeProfile();
+      console.log('Available digital bindings:', profile?.digitalBindings?.map(b => `${b.input}:${b.action.type}`));
     }
   }
 
@@ -434,6 +627,16 @@ export class AppComponent {
       return `${base} bg-saint-primary text-white`;
     }
     return `${base} hover:bg-saint-surface-light text-saint-text-muted`;
+  }
+
+  getBatteryStatusClass(): string {
+    const percent = this.overallBatteryPercent();
+    if (percent >= 50) {
+      return 'bg-green-500/20 text-green-500';
+    } else if (percent >= 20) {
+      return 'bg-yellow-500/20 text-yellow-500';
+    }
+    return 'bg-red-500/20 text-red-500';
   }
 
   getStatusClass(): string {

@@ -340,15 +340,23 @@ export class BindingsService {
           }
           break;
         case 'next_page':
+          console.log('next_page: currentPage=', currentPage, 'totalPages=', totalPages, 'condition=', currentPage + 1 < totalPages);
           if (currentPage + 1 < totalPages) {
             currentPage++;
             selectedIndex = currentPage * itemsPerPage;
+            console.log('next_page: moved to page', currentPage, 'selectedIndex=', selectedIndex);
+          } else {
+            console.log('next_page: already on last page');
           }
           break;
         case 'prev_page':
+          console.log('prev_page: currentPage=', currentPage, 'condition=', currentPage > 0);
           if (currentPage > 0) {
             currentPage--;
             selectedIndex = currentPage * itemsPerPage;
+            console.log('prev_page: moved to page', currentPage, 'selectedIndex=', selectedIndex);
+          } else {
+            console.log('prev_page: already on first page');
           }
           break;
       }
