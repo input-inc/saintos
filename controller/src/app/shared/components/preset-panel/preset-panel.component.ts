@@ -70,33 +70,32 @@ import { BindingsService, Preset } from '../../../core/services/bindings.service
                     flex items-center justify-between text-sm text-saint-text-muted">
           <div class="flex items-center gap-4">
             <span class="flex items-center gap-1">
-              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-saint-surface-light
-                           text-xs font-bold">D</span>
+              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-saint-surface-light text-xs font-bold">D</span>
               Navigate
             </span>
             <span class="flex items-center gap-1">
-              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-green-600
-                           text-white text-xs font-bold">A</span>
+              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-green-600 text-white text-xs font-bold">A</span>
               Select
             </span>
             <span class="flex items-center gap-1">
-              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-red-500
-                           text-white text-xs font-bold">B</span>
+              <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-red-500 text-white text-xs font-bold">B</span>
               Close
             </span>
+            @if (totalPages() > 1) {
+              <span class="flex items-center gap-1 ml-2 pl-2 border-l border-saint-surface-light">
+                <span class="inline-flex items-center justify-center px-2 h-6 rounded bg-saint-surface-light text-xs font-bold">LB</span>
+                <span class="inline-flex items-center justify-center px-2 h-6 rounded bg-saint-surface-light text-xs font-bold">RB</span>
+                Page
+              </span>
+            }
           </div>
           <div class="flex items-center gap-2">
             @if (totalPages() > 1) {
-              <button class="p-1.5 rounded hover:bg-saint-surface-light transition-colors"
-                      [disabled]="currentPage() === 0"
-                      [class.opacity-50]="currentPage() === 0"
-                      (click)="prevPage()">
+              <button class="p-1.5 rounded hover:bg-saint-surface-light transition-colors" [disabled]="currentPage() === 0" [class.opacity-50]="currentPage() === 0" (click)="prevPage()">
                 <span class="material-symbols-outlined text-lg">chevron_left</span>
               </button>
-              <button class="p-1.5 rounded hover:bg-saint-surface-light transition-colors"
-                      [disabled]="currentPage() >= totalPages() - 1"
-                      [class.opacity-50]="currentPage() >= totalPages() - 1"
-                      (click)="nextPage()">
+              <span class="text-saint-text">{{ currentPage() + 1 }} / {{ totalPages() }}</span>
+              <button class="p-1.5 rounded hover:bg-saint-surface-light transition-colors" [disabled]="currentPage() >= totalPages() - 1" [class.opacity-50]="currentPage() >= totalPages() - 1" (click)="nextPage()">
                 <span class="material-symbols-outlined text-lg">chevron_right</span>
               </button>
             }

@@ -277,10 +277,16 @@ export class BindingsService {
   }
 
   navigatePanel(direction: NavigateDirection): void {
+    console.log('navigatePanel called with direction:', direction);
     const panel = this.activePanel();
-    if (!panel) return;
+    if (!panel) {
+      console.log('No active panel, navigation ignored');
+      return;
+    }
+    console.log('Panel:', panel.name, 'columns:', panel.columns, 'presets:', panel.presets.length);
 
     this.panelState.update(state => {
+      console.log('Current state:', state);
       const totalItems = panel.presets.length;
       const columns = panel.columns;
       const itemsPerPage = panel.itemsPerPage;
@@ -578,6 +584,7 @@ export class BindingsService {
           columns: 4,
           itemsPerPage: 8,
           presets: [
+            // Page 1
             { id: 'mood_happy', name: 'Happy', icon: 'sentiment_very_satisfied', color: '#22c55e', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
             { id: 'mood_sad', name: 'Sad', icon: 'sentiment_dissatisfied', color: '#3b82f6', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
             { id: 'mood_angry', name: 'Angry', icon: 'mood_bad', color: '#ef4444', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
@@ -585,7 +592,16 @@ export class BindingsService {
             { id: 'mood_sleepy', name: 'Sleepy', icon: 'bedtime', color: '#6b7280', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
             { id: 'mood_surprised', name: 'Surprised', icon: 'sentiment_excited', color: '#f59e0b', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
             { id: 'mood_love', name: 'Love', icon: 'favorite', color: '#ec4899', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-            { id: 'mood_neutral', name: 'Neutral', icon: 'sentiment_neutral', color: '#9ca3af', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } }
+            { id: 'mood_neutral', name: 'Neutral', icon: 'sentiment_neutral', color: '#9ca3af', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
+            // Page 2
+            { id: 'mood_excited', name: 'Excited', icon: 'celebration', color: '#f97316', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
+            { id: 'mood_confused', name: 'Confused', icon: 'help', color: '#a855f7', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
+            { id: 'mood_scared', name: 'Scared', icon: 'warning', color: '#facc15', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
+            { id: 'mood_proud', name: 'Proud', icon: 'military_tech', color: '#eab308', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
+            { id: 'mood_shy', name: 'Shy', icon: 'face_retouching_off', color: '#f472b6', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
+            { id: 'mood_bored', name: 'Bored', icon: 'sentiment_dissatisfied', color: '#78716c', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
+            { id: 'mood_playful', name: 'Playful', icon: 'toys', color: '#06b6d4', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
+            { id: 'mood_focused', name: 'Focused', icon: 'center_focus_strong', color: '#0ea5e9', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } }
           ]
         },
         {
