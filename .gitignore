@@ -181,7 +181,6 @@ controller/dist/
 controller/.angular/
 controller/src-tauri/target/
 controller/src-tauri/gen/
-controller/src-tauri/icons/
 
 # =============================================================================
 # Node.js / NPM

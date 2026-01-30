@@ -57,27 +57,10 @@ Steam Deck requires additional setup due to its read-only filesystem.
 
 5. **Install development dependencies:**
    ```bash
-   sudo pacman -S --noconfirm \
-     base-devel \
-     glibc \
-     linux-api-headers \
-     webkit2gtk-4.1 \
-     gtk3 \
-     glib2 \
-     pango \
-     gdk-pixbuf2 \
-     cairo \
-     atk \
-     libayatana-appindicator \
-     librsvg \
-     openssl \
-     nodejs \
-     npm \
-     git \
-     pkg-config \
-     pcre2 \
-     sysprof
+   sudo pacman -S --noconfirm --overwrite '*' base-devel glibc linux-api-headers webkit2gtk-4.1 gtk3 glib2 pango gdk-pixbuf2 cairo atk libayatana-appindicator librsvg openssl nodejs npm git pkg-config pcre2 sysprof harfbuzz fontconfig freetype2 fribidi libthai libdatrie expat brotli bzip2 zstd xz graphite libffi libpng libjpeg-turbo libtiff pixman libx11 libxcb libxext libxrender xorgproto libxau libxdmcp libxft libxi libxrandr libxcursor libxfixes libxcomposite libxdamage libxinerama wayland libxkbcommon libepoxy libcloudproviders mesa libglvnd
    ```
+
+   > **Note:** SteamOS strips development files (headers, .pc files) from some packages. The `--overwrite '*'` flag ensures proper installation.
 
 6. **Set PKG_CONFIG_PATH (add to ~/.bashrc for persistence):**
    ```bash
