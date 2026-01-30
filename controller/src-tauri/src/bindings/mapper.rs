@@ -374,6 +374,12 @@ impl InputMapper {
             DigitalInput::Select => "Select",
             DigitalInput::LeftStick => "LeftStick",
             DigitalInput::RightStick => "RightStick",
+            // Steam Deck back buttons
+            DigitalInput::L4 => "L4",
+            DigitalInput::R4 => "R4",
+            DigitalInput::L5 => "L5",
+            DigitalInput::R5 => "R5",
+            DigitalInput::Steam => "Steam",
         };
         input.gamepad.buttons.get(button_name).copied().unwrap_or(false)
     }

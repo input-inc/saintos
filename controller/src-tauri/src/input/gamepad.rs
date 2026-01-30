@@ -194,9 +194,9 @@ impl GamepadHandler {
                     }
                     EventType::AxisChanged(axis, value, _) => match axis {
                         Axis::LeftStickX => s.left_stick.x = value,
-                        Axis::LeftStickY => s.left_stick.y = -value,
+                        Axis::LeftStickY => s.left_stick.y = value,
                         Axis::RightStickX => s.right_stick.x = value,
-                        Axis::RightStickY => s.right_stick.y = -value,
+                        Axis::RightStickY => s.right_stick.y = value,
                         _ => {}
                     },
                     EventType::ButtonChanged(button, value, _) => match button {

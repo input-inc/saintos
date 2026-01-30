@@ -1,5 +1,5 @@
 use super::gamepad::{GamepadHandler, GamepadState};
-use super::gyro::{GyroHandler, GyroState};
+use super::gyro::{GyroHandler, GyroState, TouchpadState};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,6 +11,10 @@ use std::thread;
 pub struct InputState {
     pub gamepad: GamepadState,
     pub gyro: GyroState,
+    #[serde(rename = "leftTouchpad")]
+    pub left_touchpad: TouchpadState,
+    #[serde(rename = "rightTouchpad")]
+    pub right_touchpad: TouchpadState,
 }
 
 pub struct InputManager {
@@ -31,6 +35,7 @@ impl InputManager {
     pub fn start<R: Runtime + 'static>(&self, app_handle: AppHandle<R>, poll_interval_ms: u64) {
         let gamepad_state = self.gamepad.state();
         let gyro_state = self.gyro.state();
+        let extras_state = self.gyro.extras_state();
         let running = self.running.clone();
 
         *running.write() = true;
@@ -38,10 +43,14 @@ impl InputManager {
         // Spawn a thread for emitting events to the frontend
         thread::spawn(move || {
             while *running.read() {
+                let extras = extras_state.read();
                 let state = InputState {
                     gamepad: gamepad_state.read().clone(),
                     gyro: gyro_state.read().clone(),
+                    left_touchpad: extras.left_touchpad.clone(),
+                    right_touchpad: extras.right_touchpad.clone(),
                 };
+                drop(extras);
 
                 if let Err(e) = app_handle.emit("input-state", &state) {
                     tracing::error!("Failed to emit input state: {}", e);
@@ -63,9 +72,12 @@ impl InputManager {
     }
 
     pub fn get_state(&self) -> InputState {
+        let extras = self.gyro.get_extras();
         InputState {
             gamepad: self.gamepad.get_state(),
             gyro: self.gyro.get_state(),
+            left_touchpad: extras.left_touchpad,
+            right_touchpad: extras.right_touchpad,
         }
     }
 

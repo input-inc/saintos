@@ -13,6 +13,13 @@ export interface GyroState {
   yaw: number;
 }
 
+export interface TouchpadState {
+  x: number;
+  y: number;
+  touched: boolean;
+  clicked: boolean;
+}
+
 export interface GamepadState {
   connected: boolean;
   name: string;
@@ -26,6 +33,8 @@ export interface GamepadState {
 export interface InputState {
   gamepad: GamepadState;
   gyro: GyroState;
+  leftTouchpad: TouchpadState;
+  rightTouchpad: TouchpadState;
 }
 
 export interface ButtonEvent {
@@ -47,6 +56,18 @@ const DEFAULT_INPUT_STATE: InputState = {
     pitch: 0,
     roll: 0,
     yaw: 0
+  },
+  leftTouchpad: {
+    x: 0,
+    y: 0,
+    touched: false,
+    clicked: false
+  },
+  rightTouchpad: {
+    x: 0,
+    y: 0,
+    touched: false,
+    clicked: false
   }
 };
 
@@ -65,6 +86,8 @@ export class InputService implements OnDestroy {
 
   readonly gamepad = computed(() => this.inputState().gamepad);
   readonly gyro = computed(() => this.inputState().gyro);
+  readonly leftTouchpad = computed(() => this.inputState().leftTouchpad);
+  readonly rightTouchpad = computed(() => this.inputState().rightTouchpad);
   readonly isGamepadConnected = computed(() => this.inputState().gamepad.connected);
 
   constructor(private tauri: TauriService) {
