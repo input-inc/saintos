@@ -42,6 +42,7 @@ impl InputManager {
 
         // Spawn a thread for emitting events to the frontend
         thread::spawn(move || {
+            log::info!("Input emit thread started");
             while *running.read() {
                 let extras = extras_state.read();
                 let state = InputState {
@@ -53,15 +54,15 @@ impl InputManager {
                 drop(extras);
 
                 if let Err(e) = app_handle.emit("input-state", &state) {
-                    tracing::error!("Failed to emit input state: {}", e);
+                    log::error!("Failed to emit input state: {}", e);
                 }
 
                 thread::sleep(Duration::from_millis(poll_interval_ms));
             }
-            tracing::info!("Input manager stopped");
+            log::info!("Input manager stopped");
         });
 
-        tracing::info!(
+        log::info!(
             "Input manager started with {}ms poll interval",
             poll_interval_ms
         );

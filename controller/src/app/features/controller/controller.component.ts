@@ -1,6 +1,6 @@
 import { Component, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { InputService, GamepadState, GyroState } from '../../core/services/input.service';
+import { InputService, GamepadState, GyroState, TouchpadState } from '../../core/services/input.service';
 import { ConnectionService } from '../../core/services/connection.service';
 
 @Component({
@@ -29,7 +29,7 @@ import { ConnectionService } from '../../core/services/connection.service';
               <div class="relative w-32 h-32 bg-saint-background rounded-full border-2 border-saint-surface-light">
                 <div class="absolute w-4 h-4 bg-saint-primary rounded-full transform -translate-x-1/2 -translate-y-1/2"
                      [style.left.%]="50 + gamepad().leftStick.x * 40"
-                     [style.top.%]="50 + gamepad().leftStick.y * 40"></div>
+                     [style.top.%]="50 - gamepad().leftStick.y * 40"></div>
                 <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
                   <div class="w-1 h-full bg-saint-surface-light opacity-30"></div>
                 </div>
@@ -48,7 +48,7 @@ import { ConnectionService } from '../../core/services/connection.service';
               <div class="relative w-32 h-32 bg-saint-background rounded-full border-2 border-saint-surface-light">
                 <div class="absolute w-4 h-4 bg-saint-primary rounded-full transform -translate-x-1/2 -translate-y-1/2"
                      [style.left.%]="50 + gamepad().rightStick.x * 40"
-                     [style.top.%]="50 + gamepad().rightStick.y * 40"></div>
+                     [style.top.%]="50 - gamepad().rightStick.y * 40"></div>
                 <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
                   <div class="w-1 h-full bg-saint-surface-light opacity-30"></div>
                 </div>
@@ -100,6 +100,48 @@ import { ConnectionService } from '../../core/services/connection.service';
         }
       </div>
 
+      <!-- Touchpads (Steam Deck) -->
+      <div class="card">
+        <h2 class="text-lg font-semibold mb-4">Touchpads</h2>
+        <div class="grid grid-cols-2 gap-6">
+          <!-- Left Touchpad -->
+          <div class="flex flex-col items-center">
+            <span class="text-sm text-saint-text-muted mb-2">Left Touchpad</span>
+            <div class="relative w-32 h-32 bg-saint-background rounded-lg border-2 border-saint-surface-light"
+                 [class.border-saint-primary]="leftTouchpad().touched">
+              <div class="absolute w-3 h-3 bg-saint-accent rounded-full transform -translate-x-1/2 -translate-y-1/2"
+                   [class.bg-saint-primary]="leftTouchpad().clicked"
+                   [style.left.%]="50 + leftTouchpad().x * 45"
+                   [style.top.%]="50 - leftTouchpad().y * 45"
+                   [style.opacity]="leftTouchpad().touched ? 1 : 0.3"></div>
+            </div>
+            <span class="text-xs text-saint-text-muted mt-2">
+              {{ formatAxis(leftTouchpad().x) }}, {{ formatAxis(leftTouchpad().y) }}
+              {{ leftTouchpad().touched ? '(touched)' : '' }}
+              {{ leftTouchpad().clicked ? '(clicked)' : '' }}
+            </span>
+          </div>
+
+          <!-- Right Touchpad -->
+          <div class="flex flex-col items-center">
+            <span class="text-sm text-saint-text-muted mb-2">Right Touchpad</span>
+            <div class="relative w-32 h-32 bg-saint-background rounded-lg border-2 border-saint-surface-light"
+                 [class.border-saint-primary]="rightTouchpad().touched">
+              <div class="absolute w-3 h-3 bg-saint-accent rounded-full transform -translate-x-1/2 -translate-y-1/2"
+                   [class.bg-saint-primary]="rightTouchpad().clicked"
+                   [style.left.%]="50 + rightTouchpad().x * 45"
+                   [style.top.%]="50 - rightTouchpad().y * 45"
+                   [style.opacity]="rightTouchpad().touched ? 1 : 0.3"></div>
+            </div>
+            <span class="text-xs text-saint-text-muted mt-2">
+              {{ formatAxis(rightTouchpad().x) }}, {{ formatAxis(rightTouchpad().y) }}
+              {{ rightTouchpad().touched ? '(touched)' : '' }}
+              {{ rightTouchpad().clicked ? '(clicked)' : '' }}
+            </span>
+          </div>
+        </div>
+      </div>
+
       <!-- Gyroscope -->
       <div class="card">
         <h2 class="text-lg font-semibold mb-4">Gyroscope</h2>
@@ -134,7 +176,7 @@ import { ConnectionService } from '../../core/services/connection.service';
   `
 })
 export class ControllerComponent {
-  readonly buttonList = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'Select', 'Start'];
+  readonly buttonList = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'Select', 'Start', 'L4', 'R4', 'L5', 'R5'];
 
   constructor(
     private inputService: InputService,
@@ -143,6 +185,8 @@ export class ControllerComponent {
 
   readonly gamepad = computed(() => this.inputService.gamepad());
   readonly gyro = computed(() => this.inputService.gyro());
+  readonly leftTouchpad = computed(() => this.inputService.leftTouchpad());
+  readonly rightTouchpad = computed(() => this.inputService.rightTouchpad());
 
   formatAxis(value: number): string {
     return value.toFixed(2);

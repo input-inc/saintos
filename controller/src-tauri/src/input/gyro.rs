@@ -53,7 +53,7 @@ impl GyroHandler {
     fn log_input_devices() {
         use evdev::Device;
 
-        tracing::info!("=== Scanning input devices ===");
+        log::info!("=== Scanning input devices ===");
         if let Ok(entries) = std::fs::read_dir("/dev/input") {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -62,11 +62,11 @@ impl GyroHandler {
                 }
                 if let Ok(device) = Device::open(&path) {
                     let name = device.name().unwrap_or("Unknown");
-                    tracing::info!("  {:?}: {}", path, name);
+                    log::info!("  {:?}: {}", path, name);
                 }
             }
         }
-        tracing::info!("=== End device scan ===");
+        log::info!("=== End device scan ===");
     }
 
     #[cfg(target_os = "linux")]
@@ -92,22 +92,22 @@ impl GyroHandler {
 
                     // Steam Deck IMU / Gyro
                     if name.contains("gyro") || name.contains("imu") || name.contains("motion") {
-                        tracing::info!("Found gyro device: {} at {:?}", device.name().unwrap_or("Unknown"), path);
+                        log::info!("Found gyro device: {} at {:?}", device.name().unwrap_or("Unknown"), path);
                         devices.insert("gyro".to_string(), device);
                     }
                     // Steam Deck left touchpad
                     else if name.contains("left") && name.contains("trackpad") {
-                        tracing::info!("Found left touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
+                        log::info!("Found left touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
                         devices.insert("left_touchpad".to_string(), device);
                     }
                     // Steam Deck right touchpad
                     else if name.contains("right") && name.contains("trackpad") {
-                        tracing::info!("Found right touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
+                        log::info!("Found right touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
                         devices.insert("right_touchpad".to_string(), device);
                     }
                     // Generic touchpad detection
                     else if name.contains("touchpad") || name.contains("trackpad") {
-                        tracing::info!("Found touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
+                        log::info!("Found touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
                         if !devices.contains_key("left_touchpad") {
                             devices.insert("left_touchpad".to_string(), device);
                         } else if !devices.contains_key("right_touchpad") {
@@ -119,11 +119,11 @@ impl GyroHandler {
         }
 
         if devices.is_empty() {
-            tracing::warn!("No Steam Deck input devices found (gyro, touchpads)");
+            log::warn!("No Steam Deck input devices found (gyro, touchpads)");
             return;
         }
 
-        tracing::info!("Monitoring {} Steam Deck input device(s)", devices.len());
+        log::info!("Monitoring {} Steam Deck input device(s)", devices.len());
 
         // Create poll structure for all devices
         let mut poll_fds: Vec<libc::pollfd> = devices

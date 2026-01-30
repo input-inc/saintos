@@ -45,7 +45,7 @@ impl GamepadHandler {
     fn run_gamepad_loop(state: Arc<RwLock<GamepadState>>) {
         use objc2_game_controller::GCController;
 
-        tracing::info!("Starting macOS Game Controller detection loop...");
+        log::info!("Starting macOS Game Controller detection loop...");
 
         loop {
             // Get all connected controllers
@@ -62,7 +62,7 @@ impl GamepadHandler {
                         let mut s = state.write();
 
                         if !s.connected {
-                            tracing::info!("Controller connected: Xbox Controller");
+                            log::info!("Controller connected: Xbox Controller");
                         }
                         s.connected = true;
                         s.name = "Xbox Controller".to_string();
@@ -117,7 +117,7 @@ impl GamepadHandler {
             } else {
                 let mut s = state.write();
                 if s.connected {
-                    tracing::info!("Controller disconnected");
+                    log::info!("Controller disconnected");
                     s.connected = false;
                     s.name.clear();
                 }
@@ -131,25 +131,25 @@ impl GamepadHandler {
     fn run_gamepad_loop(state: Arc<RwLock<GamepadState>>) {
         use gilrs::{Axis, Button, Event, EventType, Gilrs};
 
-        tracing::info!("Starting gamepad detection loop (gilrs)...");
+        log::info!("Starting gamepad detection loop (gilrs)...");
 
         let gilrs_result = Gilrs::new();
         let mut gilrs = match gilrs_result {
             Ok(g) => {
-                tracing::info!("gilrs initialized successfully");
+                log::info!("gilrs initialized successfully");
                 g
             }
             Err(e) => {
-                tracing::error!("Failed to initialize gilrs: {:?}", e);
+                log::error!("Failed to initialize gilrs: {:?}", e);
                 return;
             }
         };
 
         // Log all detected gamepads at startup
         let gamepad_count = gilrs.gamepads().count();
-        tracing::info!("Found {} gamepad(s) at startup", gamepad_count);
+        log::info!("Found {} gamepad(s) at startup", gamepad_count);
         for (id, gamepad) in gilrs.gamepads() {
-            tracing::info!(
+            log::info!(
                 "  Gamepad {:?}: {} (connected: {})",
                 id,
                 gamepad.name(),
@@ -162,7 +162,7 @@ impl GamepadHandler {
             let mut s = state.write();
             s.connected = true;
             s.name = gamepad.name().to_string();
-            tracing::info!("Initial gamepad set: {}", s.name);
+            log::info!("Initial gamepad set: {}", s.name);
         }
 
         loop {
@@ -174,13 +174,13 @@ impl GamepadHandler {
                         if let Some(gamepad) = gilrs.connected_gamepad(id) {
                             s.connected = true;
                             s.name = gamepad.name().to_string();
-                            tracing::info!("Gamepad connected: {}", s.name);
+                            log::info!("Gamepad connected: {}", s.name);
                         }
                     }
                     EventType::Disconnected => {
                         s.connected = false;
                         s.name.clear();
-                        tracing::info!("Gamepad disconnected");
+                        log::info!("Gamepad disconnected");
                     }
                     EventType::ButtonPressed(button, _) => {
                         if let Some(name) = button_name(button) {
@@ -194,9 +194,9 @@ impl GamepadHandler {
                     }
                     EventType::AxisChanged(axis, value, _) => match axis {
                         Axis::LeftStickX => s.left_stick.x = value,
-                        Axis::LeftStickY => s.left_stick.y = value,
+                        Axis::LeftStickY => s.left_stick.y = -value,
                         Axis::RightStickX => s.right_stick.x = value,
-                        Axis::RightStickY => s.right_stick.y = value,
+                        Axis::RightStickY => s.right_stick.y = -value,
                         _ => {}
                     },
                     EventType::ButtonChanged(button, value, _) => match button {
@@ -255,7 +255,7 @@ fn button_name(button: gilrs::Button) -> Option<&'static str> {
         Button::Mode => Some("Steam"),       // Steam button
         _ => {
             // Log unknown buttons for debugging
-            tracing::debug!("Unknown button pressed: {:?}", button);
+            log::debug!("Unknown button pressed: {:?}", button);
             None
         }
     }
