@@ -69,6 +69,27 @@ import { invoke } from '@tauri-apps/api/core';
         </div>
       </div>
 
+      <!-- Display Settings -->
+      <div class="card">
+        <h2 class="text-lg font-semibold mb-4">Display</h2>
+
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-saint-text-muted mb-1">
+              UI Scale (for high DPI displays)
+            </label>
+            <select class="input w-full" [(ngModel)]="uiScale" (ngModelChange)="onScaleChange($event)">
+              @for (option of scaleOptions; track option.value) {
+                <option [value]="option.value">{{ option.label }}</option>
+              }
+            </select>
+            <p class="text-xs text-saint-text-muted mt-1">
+              Increase scale for better visibility on Steam Deck and other high DPI displays
+            </p>
+          </div>
+        </div>
+      </div>
+
       <!-- Input Settings -->
       <div class="card">
         <h2 class="text-lg font-semibold mb-4">Input Settings</h2>
@@ -158,10 +179,26 @@ export class SettingsComponent {
   pollingRate = 16;
   throttleMs = 50;
   devtoolsOpen = signal(false);
+  uiScale = 1.0;
+
+  readonly scaleOptions = [
+    { value: 1.0, label: '100% (Default)' },
+    { value: 1.25, label: '125%' },
+    { value: 1.5, label: '150%' },
+    { value: 1.75, label: '175%' },
+    { value: 2.0, label: '200%' },
+  ];
 
   constructor(public connectionService: ConnectionService) {
     // Check initial devtools state
     this.checkDevtoolsState();
+
+    // Load saved UI scale
+    const savedScale = localStorage.getItem('saint-controller-ui-scale');
+    if (savedScale) {
+      this.uiScale = parseFloat(savedScale);
+      this.applyScale(this.uiScale);
+    }
     // Load saved config from localStorage
     const saved = localStorage.getItem('saint-controller-config');
     if (saved) {
@@ -260,5 +297,19 @@ export class SettingsComponent {
     } catch (err) {
       console.error('Failed to quit app:', err);
     }
+  }
+
+  onScaleChange(scale: number): void {
+    // Ensure scale is a number (ngModel might pass string)
+    const scaleValue = typeof scale === 'string' ? parseFloat(scale) : scale;
+    this.uiScale = scaleValue;
+    localStorage.setItem('saint-controller-ui-scale', scaleValue.toString());
+    this.applyScale(scaleValue);
+  }
+
+  private applyScale(scale: number): void {
+    // Apply scale to the root HTML element using CSS zoom
+    // This scales the entire UI uniformly
+    document.documentElement.style.zoom = scale.toString();
   }
 }

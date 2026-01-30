@@ -472,7 +472,13 @@ export class AppComponent {
     public connectionService: ConnectionService,
     public inputService: InputService,
     public bindingsService: BindingsService
-  ) {}
+  ) {
+    // Apply saved UI scale on startup
+    const savedScale = localStorage.getItem('saint-controller-ui-scale');
+    if (savedScale) {
+      document.documentElement.style.zoom = savedScale;
+    }
+  }
 
   /**
    * Handle virtual button press (mousedown/touchstart) from onscreen controls
