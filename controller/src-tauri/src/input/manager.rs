@@ -67,12 +67,14 @@ impl InputManager {
                 let (gyro, left_touchpad, right_touchpad) = {
                     let hid = hid_state.read();
 
-                    // Merge back button states from HID into gamepad buttons
+                    // Merge back button and stick click states from HID into gamepad buttons
                     // Always set the state (true or false) so buttons properly release
                     gamepad.buttons.insert("L4".to_string(), hid.l4_pressed);
                     gamepad.buttons.insert("R4".to_string(), hid.r4_pressed);
                     gamepad.buttons.insert("L5".to_string(), hid.l5_pressed);
                     gamepad.buttons.insert("R5".to_string(), hid.r5_pressed);
+                    gamepad.buttons.insert("L3".to_string(), hid.l3_pressed);
+                    gamepad.buttons.insert("R3".to_string(), hid.r3_pressed);
                     gamepad.buttons.insert("Steam".to_string(), hid.steam_pressed);
                     gamepad.buttons.insert("QAM".to_string(), hid.qam_pressed);
 
@@ -158,11 +160,13 @@ impl InputManager {
         let (gyro, left_touchpad, right_touchpad) = {
             let hid = self.steamdeck_hid.get_state();
 
-            // Merge back button states
+            // Merge back button and stick click states
             gamepad.buttons.insert("L4".to_string(), hid.l4_pressed);
             gamepad.buttons.insert("R4".to_string(), hid.r4_pressed);
             gamepad.buttons.insert("L5".to_string(), hid.l5_pressed);
             gamepad.buttons.insert("R5".to_string(), hid.r5_pressed);
+            gamepad.buttons.insert("L3".to_string(), hid.l3_pressed);
+            gamepad.buttons.insert("R3".to_string(), hid.r3_pressed);
             gamepad.buttons.insert("Steam".to_string(), hid.steam_pressed);
             gamepad.buttons.insert("QAM".to_string(), hid.qam_pressed);
 

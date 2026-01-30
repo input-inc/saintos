@@ -77,6 +77,10 @@ pub struct SteamDeckHidState {
     pub l5_pressed: bool,
     pub r5_pressed: bool,
 
+    // Stick clicks
+    pub l3_pressed: bool,  // Left stick click
+    pub r3_pressed: bool,  // Right stick click
+
     // Other buttons (from HID, may differ from gilrs)
     pub steam_pressed: bool,
     pub qam_pressed: bool,  // Quick Access Menu (...)
@@ -433,6 +437,10 @@ impl SteamDeckHidReader {
         s.r4_pressed = (buttons_h & STEAMDECK_HBUTTON_R4) != 0;
         s.l5_pressed = (buttons_l & STEAMDECK_LBUTTON_L5) != 0;
         s.r5_pressed = (buttons_l & STEAMDECK_LBUTTON_R5) != 0;
+
+        // Stick clicks
+        s.l3_pressed = (buttons_l & STEAMDECK_LBUTTON_L3) != 0;
+        s.r3_pressed = (buttons_l & STEAMDECK_LBUTTON_R3) != 0;
 
         // Other buttons
         s.steam_pressed = (buttons_l & STEAMDECK_LBUTTON_STEAM) != 0;
