@@ -194,9 +194,9 @@ impl GamepadHandler {
                     }
                     EventType::AxisChanged(axis, value, _) => match axis {
                         Axis::LeftStickX => s.left_stick.x = value,
-                        Axis::LeftStickY => s.left_stick.y = -value,
+                        Axis::LeftStickY => s.left_stick.y = value,
                         Axis::RightStickX => s.right_stick.x = value,
-                        Axis::RightStickY => s.right_stick.y = -value,
+                        Axis::RightStickY => s.right_stick.y = value,
                         _ => {}
                     },
                     EventType::ButtonChanged(button, value, _) => match button {
@@ -247,15 +247,19 @@ fn button_name(button: gilrs::Button) -> Option<&'static str> {
         Button::DPadRight => Some("DPadRight"),
         Button::LeftThumb => Some("LeftStick"),
         Button::RightThumb => Some("RightStick"),
-        // Steam Deck back buttons (may be mapped to these)
+        Button::Mode => Some("Steam"),
+        // Steam Deck back buttons - these may vary by controller/driver
+        // C and Z are common mappings for extra buttons
         Button::C => Some("L4"),
         Button::Z => Some("R4"),
-        Button::LeftTrigger2 => Some("L5"),  // Full trigger pull
-        Button::RightTrigger2 => Some("R5"), // Full trigger pull
-        Button::Mode => Some("Steam"),       // Steam button
+        // Unknown buttons mapped to debug (some controllers use these for back buttons)
+        Button::Unknown => {
+            log::info!("Unknown button pressed (may be back button)");
+            None
+        }
         _ => {
-            // Log unknown buttons for debugging
-            log::debug!("Unknown button pressed: {:?}", button);
+            // Log all other buttons for debugging - helps identify back button codes
+            log::info!("Unmapped button pressed: {:?}", button);
             None
         }
     }

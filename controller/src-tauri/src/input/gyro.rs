@@ -80,6 +80,7 @@ impl GyroHandler {
 
         // Find Steam Deck specific devices
         let mut devices: HashMap<String, Device> = HashMap::new();
+        let mut steam_controller_devices: Vec<(std::path::PathBuf, Device)> = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir("/dev/input") {
             for entry in entries.flatten() {
@@ -90,29 +91,61 @@ impl GyroHandler {
                 if let Ok(device) = Device::open(&path) {
                     let name = device.name().unwrap_or("Unknown").to_lowercase();
 
-                    // Steam Deck IMU / Gyro
+                    // Steam Deck IMU / Gyro - explicit names
                     if name.contains("gyro") || name.contains("imu") || name.contains("motion") {
                         log::info!("Found gyro device: {} at {:?}", device.name().unwrap_or("Unknown"), path);
                         devices.insert("gyro".to_string(), device);
                     }
-                    // Steam Deck left touchpad
-                    else if name.contains("left") && name.contains("trackpad") {
+                    // Steam Deck left touchpad - explicit names
+                    else if name.contains("left") && (name.contains("trackpad") || name.contains("touchpad")) {
                         log::info!("Found left touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
                         devices.insert("left_touchpad".to_string(), device);
                     }
-                    // Steam Deck right touchpad
-                    else if name.contains("right") && name.contains("trackpad") {
+                    // Steam Deck right touchpad - explicit names
+                    else if name.contains("right") && (name.contains("trackpad") || name.contains("touchpad")) {
                         log::info!("Found right touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
                         devices.insert("right_touchpad".to_string(), device);
                     }
-                    // Generic touchpad detection
-                    else if name.contains("touchpad") || name.contains("trackpad") {
-                        log::info!("Found touchpad: {} at {:?}", device.name().unwrap_or("Unknown"), path);
-                        if !devices.contains_key("left_touchpad") {
-                            devices.insert("left_touchpad".to_string(), device);
-                        } else if !devices.contains_key("right_touchpad") {
-                            devices.insert("right_touchpad".to_string(), device);
-                        }
+                    // Collect Valve/Steam Controller devices for capability-based detection
+                    else if name.contains("valve") || name.contains("steam") {
+                        log::info!("Found Steam device: {} at {:?}", device.name().unwrap_or("Unknown"), path);
+                        steam_controller_devices.push((path, device));
+                    }
+                }
+            }
+        }
+
+        // If we didn't find explicitly named devices, try to identify Steam Controller devices by capabilities
+        if devices.is_empty() && !steam_controller_devices.is_empty() {
+            log::info!("Analyzing {} Steam Controller device(s) by capabilities...", steam_controller_devices.len());
+
+            for (path, device) in steam_controller_devices {
+                let name = device.name().unwrap_or("Unknown");
+
+                // Check device capabilities
+                if let Some(abs_info) = device.supported_absolute_axes() {
+                    let has_gyro_axes = abs_info.contains(AbsoluteAxisType::ABS_RX)
+                        && abs_info.contains(AbsoluteAxisType::ABS_RY)
+                        && abs_info.contains(AbsoluteAxisType::ABS_RZ);
+
+                    let has_touchpad_axes = abs_info.contains(AbsoluteAxisType::ABS_X)
+                        && abs_info.contains(AbsoluteAxisType::ABS_Y);
+
+                    let has_mt_axes = abs_info.contains(AbsoluteAxisType::ABS_MT_POSITION_X);
+
+                    log::info!("  {} - gyro_axes: {}, touchpad_axes: {}, mt_axes: {}",
+                        name, has_gyro_axes, has_touchpad_axes, has_mt_axes);
+
+                    // Prioritize by capability
+                    if has_gyro_axes && !devices.contains_key("gyro") {
+                        log::info!("  -> Using as gyro device");
+                        devices.insert("gyro".to_string(), device);
+                    } else if (has_touchpad_axes || has_mt_axes) && !devices.contains_key("left_touchpad") {
+                        log::info!("  -> Using as left touchpad");
+                        devices.insert("left_touchpad".to_string(), device);
+                    } else if (has_touchpad_axes || has_mt_axes) && !devices.contains_key("right_touchpad") {
+                        log::info!("  -> Using as right touchpad");
+                        devices.insert("right_touchpad".to_string(), device);
                     }
                 }
             }
