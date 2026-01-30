@@ -34,6 +34,16 @@ pub enum DigitalInput {
     Select,
     LeftStick,
     RightStick,
+    // Steam Deck back buttons
+    #[serde(rename = "l4")]
+    L4,
+    #[serde(rename = "r4")]
+    R4,
+    #[serde(rename = "l5")]
+    L5,
+    #[serde(rename = "r5")]
+    R5,
+    Steam,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

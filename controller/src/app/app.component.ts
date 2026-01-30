@@ -1,8 +1,9 @@
-import { Component, signal, computed } from '@angular/core';
+import { Component, signal, computed, OnInit, OnDestroy } from '@angular/core';
 import { RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { CommonModule } from '@angular/common';
+import { Subscription } from 'rxjs';
 import { ConnectionService, ConnectionStatus } from './core/services/connection.service';
-import { InputService } from './core/services/input.service';
+import { InputService, ButtonEvent } from './core/services/input.service';
 import { BindingsService, DigitalInput } from './core/services/bindings.service';
 import { VirtualJoystickComponent, JoystickPosition } from './shared/components/virtual-joystick/virtual-joystick.component';
 import { PresetPanelComponent } from './shared/components/preset-panel/preset-panel.component';
@@ -392,7 +393,7 @@ interface TrackBattery {
     </div>
   `
 })
-export class AppComponent {
+export class AppComponent implements OnInit, OnDestroy {
   activePanel = signal<string | null>(null);
   leftStick = signal<JoystickPosition>({ x: 0, y: 0 });
   rightStick = signal<JoystickPosition>({ x: 0, y: 0 });
@@ -400,6 +401,7 @@ export class AppComponent {
 
   // Track which button is being held for hold-mode panels
   private heldButton = signal<DigitalInput | null>(null);
+  private buttonSubscription?: Subscription;
 
   // Mock battery data for left and right track drives
   batteries = signal<TrackBattery[]>([
@@ -468,6 +470,30 @@ export class AppComponent {
   // Check if a preset panel is currently active
   presetPanelActive = computed(() => this.bindingsService.activePanelState().activePanelId !== null);
 
+  // Map hardware button names to DigitalInput values
+  private readonly buttonMap: Record<string, DigitalInput> = {
+    'A': 'a',
+    'B': 'b',
+    'X': 'x',
+    'Y': 'y',
+    'LB': 'lb',
+    'RB': 'rb',
+    'DPadUp': 'd_pad_up',
+    'DPadDown': 'd_pad_down',
+    'DPadLeft': 'd_pad_left',
+    'DPadRight': 'd_pad_right',
+    'Start': 'start',
+    'Select': 'select',
+    'LeftStick': 'left_stick',
+    'RightStick': 'right_stick',
+    // Steam Deck back buttons
+    'L4': 'l4',
+    'R4': 'r4',
+    'L5': 'l5',
+    'R5': 'r5',
+    'Steam': 'steam',
+  };
+
   constructor(
     public connectionService: ConnectionService,
     public inputService: InputService,
@@ -477,6 +503,33 @@ export class AppComponent {
     const savedScale = localStorage.getItem('saint-controller-ui-scale');
     if (savedScale) {
       document.documentElement.style.zoom = savedScale;
+    }
+  }
+
+  ngOnInit(): void {
+    // Subscribe to hardware button events
+    this.buttonSubscription = this.inputService.buttonEvents$.subscribe(event => {
+      this.handleHardwareButton(event);
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.buttonSubscription?.unsubscribe();
+  }
+
+  private handleHardwareButton(event: ButtonEvent): void {
+    const digitalInput = this.buttonMap[event.button];
+    if (!digitalInput) {
+      console.log('Unknown button:', event.button);
+      return;
+    }
+
+    if (event.pressed) {
+      // Button pressed
+      this.onVirtualButtonDown(digitalInput);
+    } else {
+      // Button released
+      this.onVirtualButtonUp(digitalInput);
     }
   }
 

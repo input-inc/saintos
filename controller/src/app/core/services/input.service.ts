@@ -1,6 +1,6 @@
 import { Injectable, OnDestroy, signal, computed } from '@angular/core';
 import { TauriService } from './tauri.service';
-import { Subscription } from 'rxjs';
+import { Subject, Subscription } from 'rxjs';
 
 export interface AxisState {
   x: number;
@@ -28,6 +28,11 @@ export interface InputState {
   gyro: GyroState;
 }
 
+export interface ButtonEvent {
+  button: string;
+  pressed: boolean;
+}
+
 const DEFAULT_INPUT_STATE: InputState = {
   gamepad: {
     connected: false,
@@ -50,8 +55,13 @@ const DEFAULT_INPUT_STATE: InputState = {
 })
 export class InputService implements OnDestroy {
   private subscription?: Subscription;
+  private previousButtons: { [key: string]: boolean } = {};
 
   private inputState = signal<InputState>(DEFAULT_INPUT_STATE);
+
+  // Subject for button press/release events
+  private buttonEventSubject = new Subject<ButtonEvent>();
+  readonly buttonEvents$ = this.buttonEventSubject.asObservable();
 
   readonly gamepad = computed(() => this.inputState().gamepad);
   readonly gyro = computed(() => this.inputState().gyro);
@@ -63,8 +73,30 @@ export class InputService implements OnDestroy {
 
   private subscribeToInputEvents(): void {
     this.subscription = this.tauri.listen<InputState>('input-state').subscribe(state => {
+      // Detect button state changes
+      this.detectButtonChanges(state.gamepad.buttons);
       this.inputState.set(state);
     });
+  }
+
+  private detectButtonChanges(currentButtons: { [key: string]: boolean }): void {
+    // Check all buttons in current state
+    for (const [button, pressed] of Object.entries(currentButtons)) {
+      const wasPressed = this.previousButtons[button] || false;
+      if (pressed !== wasPressed) {
+        this.buttonEventSubject.next({ button, pressed });
+      }
+    }
+
+    // Check for buttons that were released (no longer in current state)
+    for (const [button, wasPressed] of Object.entries(this.previousButtons)) {
+      if (wasPressed && !currentButtons[button]) {
+        this.buttonEventSubject.next({ button, pressed: false });
+      }
+    }
+
+    // Update previous state
+    this.previousButtons = { ...currentButtons };
   }
 
   async getInputState(): Promise<InputState> {
@@ -77,5 +109,6 @@ export class InputService implements OnDestroy {
 
   ngOnDestroy(): void {
     this.subscription?.unsubscribe();
+    this.buttonEventSubject.complete();
   }
 }

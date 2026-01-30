@@ -18,7 +18,9 @@ export type DigitalInput =
   | 'lb' | 'rb'
   | 'd_pad_up' | 'd_pad_down' | 'd_pad_left' | 'd_pad_right'
   | 'start' | 'select'
-  | 'left_stick' | 'right_stick';
+  | 'left_stick' | 'right_stick'
+  // Steam Deck back buttons
+  | 'l4' | 'r4' | 'l5' | 'r5' | 'steam';
 
 export type ButtonTrigger = 'press' | 'release' | 'hold' | 'double_tap' | 'long_press';
 

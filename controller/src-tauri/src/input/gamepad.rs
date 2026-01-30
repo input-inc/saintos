@@ -247,7 +247,17 @@ fn button_name(button: gilrs::Button) -> Option<&'static str> {
         Button::DPadRight => Some("DPadRight"),
         Button::LeftThumb => Some("LeftStick"),
         Button::RightThumb => Some("RightStick"),
-        _ => None,
+        // Steam Deck back buttons (may be mapped to these)
+        Button::C => Some("L4"),
+        Button::Z => Some("R4"),
+        Button::LeftTrigger2 => Some("L5"),  // Full trigger pull
+        Button::RightTrigger2 => Some("R5"), // Full trigger pull
+        Button::Mode => Some("Steam"),       // Steam button
+        _ => {
+            // Log unknown buttons for debugging
+            tracing::debug!("Unknown button pressed: {:?}", button);
+            None
+        }
     }
 }
 
