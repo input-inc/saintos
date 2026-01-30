@@ -76,6 +76,13 @@ impl InputManager {
                     gamepad.buttons.insert("Steam".to_string(), hid.steam_pressed);
                     gamepad.buttons.insert("QAM".to_string(), hid.qam_pressed);
 
+                    // Filter out right stick when right touchpad is active
+                    // Steam Input mirrors touchpad to right stick, so ignore stick when pad is touched
+                    if hid.right_pad_touched || hid.right_pad_x.abs() > 0.01 || hid.right_pad_y.abs() > 0.01 {
+                        gamepad.right_stick.x = 0.0;
+                        gamepad.right_stick.y = 0.0;
+                    }
+
                     // Use HID data for gyro if available
                     let gyro = if hid.gyro_pitch != 0.0 || hid.gyro_roll != 0.0 || hid.gyro_yaw != 0.0 {
                         GyroState {
@@ -165,6 +172,13 @@ impl InputManager {
             gamepad.buttons.insert("R5".to_string(), hid.r5_pressed);
             gamepad.buttons.insert("Steam".to_string(), hid.steam_pressed);
             gamepad.buttons.insert("QAM".to_string(), hid.qam_pressed);
+
+            // Filter out right stick when right touchpad is active
+            // Steam Input mirrors touchpad to right stick, so ignore stick when pad is touched
+            if hid.right_pad_touched || hid.right_pad_x.abs() > 0.01 || hid.right_pad_y.abs() > 0.01 {
+                gamepad.right_stick.x = 0.0;
+                gamepad.right_stick.y = 0.0;
+            }
 
             let gyro = if hid.gyro_pitch != 0.0 || hid.gyro_roll != 0.0 || hid.gyro_yaw != 0.0 {
                 GyroState {
