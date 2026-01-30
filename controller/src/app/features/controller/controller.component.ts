@@ -176,7 +176,7 @@ import { ConnectionService } from '../../core/services/connection.service';
   `
 })
 export class ControllerComponent {
-  readonly buttonList = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'Select', 'Start', 'L4', 'R4', 'L5', 'R5'];
+  readonly buttonList = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'Select', 'Start', 'L3', 'R3', 'L4', 'R4', 'L5', 'R5', 'Steam', 'QAM'];
 
   constructor(
     private inputService: InputService,
