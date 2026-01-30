@@ -121,9 +121,14 @@ impl GyroHandler {
 
             for (path, device) in steam_controller_devices {
                 let name = device.name().unwrap_or("Unknown");
+                log::info!("  Checking: {} at {:?}", name, path);
 
                 // Check device capabilities
                 if let Some(abs_info) = device.supported_absolute_axes() {
+                    // Log all supported axes for debugging
+                    let axes: Vec<_> = abs_info.iter().collect();
+                    log::info!("    Supported axes: {:?}", axes);
+
                     let has_gyro_axes = abs_info.contains(AbsoluteAxisType::ABS_RX)
                         && abs_info.contains(AbsoluteAxisType::ABS_RY)
                         && abs_info.contains(AbsoluteAxisType::ABS_RZ);
@@ -133,20 +138,24 @@ impl GyroHandler {
 
                     let has_mt_axes = abs_info.contains(AbsoluteAxisType::ABS_MT_POSITION_X);
 
-                    log::info!("  {} - gyro_axes: {}, touchpad_axes: {}, mt_axes: {}",
-                        name, has_gyro_axes, has_touchpad_axes, has_mt_axes);
+                    log::info!("    gyro_axes(RX+RY+RZ): {}, touchpad_axes(X+Y): {}, mt_axes: {}",
+                        has_gyro_axes, has_touchpad_axes, has_mt_axes);
 
                     // Prioritize by capability
                     if has_gyro_axes && !devices.contains_key("gyro") {
-                        log::info!("  -> Using as gyro device");
+                        log::info!("    -> Using as gyro device");
                         devices.insert("gyro".to_string(), device);
                     } else if (has_touchpad_axes || has_mt_axes) && !devices.contains_key("left_touchpad") {
-                        log::info!("  -> Using as left touchpad");
+                        log::info!("    -> Using as left touchpad");
                         devices.insert("left_touchpad".to_string(), device);
                     } else if (has_touchpad_axes || has_mt_axes) && !devices.contains_key("right_touchpad") {
-                        log::info!("  -> Using as right touchpad");
+                        log::info!("    -> Using as right touchpad");
                         devices.insert("right_touchpad".to_string(), device);
+                    } else {
+                        log::info!("    -> Not using (doesn't match needed capabilities or already assigned)");
                     }
+                } else {
+                    log::info!("    No absolute axes supported");
                 }
             }
         }

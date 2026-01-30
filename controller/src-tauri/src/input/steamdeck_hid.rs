@@ -140,36 +140,86 @@ impl SteamDeckHidReader {
         }
         log::info!("=== End HID scan ===");
 
-        // Try to open Steam Deck controller
-        let device = match api.open(STEAM_DECK_VID, STEAM_DECK_PID) {
-            Ok(dev) => {
-                log::info!("Opened Steam Deck HID device (VID:{:04X} PID:{:04X})",
-                    STEAM_DECK_VID, STEAM_DECK_PID);
-                dev
+        // Collect all Steam Deck HID devices
+        let mut deck_devices: Vec<_> = api.device_list()
+            .filter(|d| d.vendor_id() == STEAM_DECK_VID && d.product_id() == STEAM_DECK_PID)
+            .collect();
+
+        if deck_devices.is_empty() {
+            log::warn!("No Steam Deck HID devices found");
+            return;
+        }
+
+        log::info!("Found {} Steam Deck HID device(s), trying each...", deck_devices.len());
+
+        // Try each device to find one that provides input data
+        let mut working_device = None;
+        for device_info in &deck_devices {
+            let path = device_info.path();
+            log::info!("Trying device: {}", path.to_string_lossy());
+
+            match api.open_path(path) {
+                Ok(dev) => {
+                    // Set non-blocking mode
+                    if let Err(e) = dev.set_blocking_mode(false) {
+                        log::warn!("  Failed to set non-blocking mode: {}", e);
+                    }
+
+                    // Try reading some data
+                    let mut test_buf = [0u8; 64];
+                    thread::sleep(Duration::from_millis(50));
+
+                    match dev.read_timeout(&mut test_buf, 100) {
+                        Ok(size) if size > 0 => {
+                            log::info!("  Got {} bytes from this device!", size);
+                            log::info!("  First 16 bytes: {:02X?}", &test_buf[..16.min(size)]);
+                            working_device = Some(dev);
+                            break;
+                        }
+                        Ok(_) => {
+                            log::info!("  No data from this device (might be mouse/keyboard)");
+                        }
+                        Err(e) => {
+                            log::warn!("  Read error: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("  Failed to open: {}", e);
+                }
             }
-            Err(e) => {
-                log::warn!("Failed to open Steam Deck HID device: {}", e);
-                log::info!("This is normal if not running on Steam Deck or if Steam is using the device");
+        }
+
+        let device = match working_device {
+            Some(dev) => dev,
+            None => {
+                log::warn!("Could not find a Steam Deck HID device that provides input data");
                 return;
             }
         };
 
-        // Set non-blocking mode
-        if let Err(e) = device.set_blocking_mode(false) {
-            log::warn!("Failed to set non-blocking mode: {}", e);
-        }
+        log::info!("Steam Deck HID reader running");
 
         let mut buf = [0u8; 64];
-
-        log::info!("Steam Deck HID reader running");
+        let mut report_count = 0u64;
+        let mut last_log_time = std::time::Instant::now();
 
         while *running.read() {
             match device.read_timeout(&mut buf, 16) {
                 Ok(size) if size > 0 => {
+                    report_count += 1;
+
+                    // Log first few reports and then periodically
+                    if report_count <= 5 || last_log_time.elapsed().as_secs() >= 10 {
+                        log::info!("HID report #{}: {} bytes, first 20: {:02X?}",
+                            report_count, size, &buf[..20.min(size)]);
+                        last_log_time = std::time::Instant::now();
+                    }
+
                     Self::parse_hid_report(&buf[..size], &state);
                 }
                 Ok(_) => {
-                    // No data available, that's ok
+                    // No data available
                 }
                 Err(e) => {
                     log::error!("HID read error: {}", e);
@@ -180,7 +230,7 @@ impl SteamDeckHidReader {
             thread::sleep(Duration::from_millis(1));
         }
 
-        log::info!("Steam Deck HID reader stopped");
+        log::info!("Steam Deck HID reader stopped (processed {} reports)", report_count);
     }
 
     #[cfg(not(target_os = "linux"))]
