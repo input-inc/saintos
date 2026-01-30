@@ -3,7 +3,7 @@ use crate::input::InputManager;
 use crate::protocol::{ConnectionState, WebSocketClient};
 use parking_lot::RwLock;
 use serde_json::Value;
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State, WebviewWindow};
 
 pub struct AppState {
     pub input_manager: InputManager,
@@ -191,4 +191,42 @@ pub fn get_gamepad_debug_info() -> String {
     }
 
     info
+}
+
+/// Open the web inspector/devtools
+#[tauri::command]
+pub fn open_devtools(window: WebviewWindow) {
+    window.open_devtools();
+}
+
+/// Close the web inspector/devtools
+#[tauri::command]
+pub fn close_devtools(window: WebviewWindow) {
+    window.close_devtools();
+}
+
+/// Check if devtools are open
+#[tauri::command]
+pub fn is_devtools_open(window: WebviewWindow) -> bool {
+    window.is_devtools_open()
+}
+
+/// Quit the application
+#[tauri::command]
+pub fn quit_app<R: Runtime>(app_handle: AppHandle<R>) {
+    tracing::info!("Application quit requested");
+    app_handle.exit(0);
+}
+
+/// Log a message from the frontend
+#[tauri::command]
+pub fn log_frontend(level: String, message: String, context: Option<String>) {
+    let ctx = context.unwrap_or_default();
+    match level.as_str() {
+        "error" => tracing::error!(target: "frontend", "[{}] {}", ctx, message),
+        "warn" => tracing::warn!(target: "frontend", "[{}] {}", ctx, message),
+        "info" => tracing::info!(target: "frontend", "[{}] {}", ctx, message),
+        "debug" => tracing::debug!(target: "frontend", "[{}] {}", ctx, message),
+        _ => tracing::trace!(target: "frontend", "[{}] {}", ctx, message),
+    }
 }

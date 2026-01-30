@@ -2,7 +2,7 @@ import { Component, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ConnectionService, ConnectionStatus, ConnectionConfig } from '../../core/services/connection.service';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 
 @Component({
   selector: 'app-settings',
@@ -109,6 +109,29 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
         </div>
       </div>
 
+      <!-- Developer Tools -->
+      <div class="card">
+        <h2 class="text-lg font-semibold mb-4">Developer Tools</h2>
+        <div class="space-y-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="font-medium">Web Inspector</p>
+              <p class="text-sm text-saint-text-muted">Open browser developer tools for debugging</p>
+            </div>
+            <button class="btn btn-secondary flex items-center gap-2" (click)="toggleDevtools()">
+              <span class="material-icons icon-sm">code</span>
+              {{ devtoolsOpen() ? 'Close' : 'Open' }} DevTools
+            </button>
+          </div>
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="font-medium">Log Location</p>
+              <p class="text-sm text-saint-text-muted font-mono">~/.local/share/com.saintos.controller/logs/</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Quit Application -->
       <div class="card">
         <div class="flex items-center justify-between">
@@ -134,8 +157,11 @@ export class SettingsComponent {
 
   pollingRate = 16;
   throttleMs = 50;
+  devtoolsOpen = signal(false);
 
   constructor(public connectionService: ConnectionService) {
+    // Check initial devtools state
+    this.checkDevtoolsState();
     // Load saved config from localStorage
     const saved = localStorage.getItem('saint-controller-config');
     if (saved) {
@@ -200,13 +226,39 @@ export class SettingsComponent {
     await this.connectionService.disconnect();
   }
 
-  async quitApp(): Promise<void> {
-    // Disconnect first if connected
-    if (this.connectionService.isConnected()) {
-      await this.connectionService.disconnect();
+  async checkDevtoolsState(): Promise<void> {
+    try {
+      const isOpen = await invoke<boolean>('is_devtools_open');
+      this.devtoolsOpen.set(isOpen);
+    } catch (err) {
+      console.error('Failed to check devtools state:', err);
     }
-    // Close the main window to exit the application
-    const window = getCurrentWindow();
-    await window.close();
+  }
+
+  async toggleDevtools(): Promise<void> {
+    try {
+      if (this.devtoolsOpen()) {
+        await invoke('close_devtools');
+        this.devtoolsOpen.set(false);
+      } else {
+        await invoke('open_devtools');
+        this.devtoolsOpen.set(true);
+      }
+    } catch (err) {
+      console.error('Failed to toggle devtools:', err);
+    }
+  }
+
+  async quitApp(): Promise<void> {
+    try {
+      // Disconnect first if connected
+      if (this.connectionService.isConnected()) {
+        await this.connectionService.disconnect();
+      }
+      // Quit the application via Tauri command
+      await invoke('quit_app');
+    } catch (err) {
+      console.error('Failed to quit app:', err);
+    }
   }
 }
