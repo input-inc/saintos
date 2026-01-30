@@ -152,10 +152,10 @@ impl GyroHandler {
                 for (i, pfd) in poll_fds.iter().enumerate() {
                     if pfd.revents & libc::POLLIN != 0 {
                         if let Ok(events) = device_list[i].fetch_events() {
-                            let device_name = &device_names[i];
+                            let device_name: &str = device_names[i].as_str();
 
                             for event in events {
-                                match device_name.as_str() {
+                                match device_name {
                                     "gyro" => {
                                         if let InputEventKind::AbsAxis(axis) = event.kind() {
                                             let mut s = gyro_state.write();
@@ -199,7 +199,7 @@ impl GyroHandler {
                                                     Key::BTN_TOUCH => {
                                                         e.left_touchpad.touched = event.value() != 0;
                                                     }
-                                                    Key::BTN_LEFT | Key::BTN_MOUSE => {
+                                                    Key::BTN_LEFT => {
                                                         e.left_touchpad.clicked = event.value() != 0;
                                                     }
                                                     _ => {}
@@ -227,7 +227,7 @@ impl GyroHandler {
                                                     Key::BTN_TOUCH => {
                                                         e.right_touchpad.touched = event.value() != 0;
                                                     }
-                                                    Key::BTN_LEFT | Key::BTN_MOUSE => {
+                                                    Key::BTN_LEFT => {
                                                         e.right_touchpad.clicked = event.value() != 0;
                                                     }
                                                     _ => {}
