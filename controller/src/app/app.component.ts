@@ -303,10 +303,10 @@ interface TrackBattery {
 
           <!-- Battery Panel -->
           @if (activePanel() === 'battery') {
-            <div class="p-4 h-full">
-              <div class="flex gap-4 h-full">
+            <div class="p-3 h-full overflow-auto">
+              <div class="flex flex-wrap gap-3 h-full">
                 @for (battery of batteries(); track battery.name) {
-                  <div class="bg-saint-surface-light rounded-lg p-4 flex-1 flex flex-col">
+                  <div class="bg-saint-surface-light rounded-lg p-3 flex-1 min-w-[280px] flex flex-col">
                     <!-- Battery Header -->
                     <div class="flex items-center justify-between mb-2">
                       <div class="flex items-center gap-2">
@@ -348,38 +348,38 @@ interface TrackBattery {
                     <!-- Cells and BMS side by side -->
                     <div class="flex gap-4 flex-1">
                       <!-- Cell Voltages -->
-                      <div class="flex-1">
+                      <div class="flex-1 min-w-0 overflow-hidden">
                         <div class="text-xs text-saint-text-muted mb-1">Cell Voltages</div>
-                        <div class="grid grid-cols-4 gap-2">
+                        <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                           @for (cell of battery.cells; track $index; let i = $index) {
-                            <div class="bg-saint-surface rounded p-2 text-center">
-                              <div class="text-[10px] text-saint-text-muted">C{{ i + 1 }}</div>
-                              <div class="text-sm font-medium"
+                            <div class="bg-saint-surface rounded p-1.5 text-center min-w-0">
+                              <div class="text-[10px] text-saint-text-muted truncate">C{{ i + 1 }}</div>
+                              <div class="text-xs sm:text-sm font-medium truncate"
                                    [class.text-saint-success]="cell.voltage >= 3.7"
                                    [class.text-yellow-500]="cell.voltage >= 3.4 && cell.voltage < 3.7"
                                    [class.text-red-500]="cell.voltage < 3.4">
                                 {{ cell.voltage.toFixed(2) }}V
                               </div>
-                              <div class="text-[10px] text-saint-text-muted">{{ cell.temperature }}°C</div>
+                              <div class="text-[10px] text-saint-text-muted truncate">{{ cell.temperature }}°</div>
                             </div>
                           }
                         </div>
                       </div>
 
                       <!-- BMS Info -->
-                      <div class="border-l border-saint-surface pl-4 min-w-48">
-                        <div class="text-xs text-saint-text-muted mb-1">BMS Information</div>
-                        <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+                      <div class="border-l border-saint-surface pl-3 min-w-0 flex-shrink-0 overflow-hidden">
+                        <div class="text-xs text-saint-text-muted mb-1">BMS Info</div>
+                        <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
                           <span class="text-saint-text-muted">Model</span>
-                          <span>{{ battery.bms.model }}</span>
+                          <span class="truncate">{{ battery.bms.model }}</span>
                           <span class="text-saint-text-muted">Serial</span>
-                          <span class="font-mono text-[10px]">{{ battery.bms.serialNumber }}</span>
-                          <span class="text-saint-text-muted">Firmware</span>
-                          <span>v{{ battery.bms.firmwareVersion }}</span>
+                          <span class="font-mono text-[10px] truncate">{{ battery.bms.serialNumber }}</span>
+                          <span class="text-saint-text-muted">FW</span>
+                          <span class="truncate">v{{ battery.bms.firmwareVersion }}</span>
                           <span class="text-saint-text-muted">Cycles</span>
                           <span>{{ battery.bms.cycleCount }}</span>
-                          <span class="text-saint-text-muted">Capacity</span>
-                          <span>{{ battery.bms.currentCapacity }}/{{ battery.bms.maxCapacity }} mAh</span>
+                          <span class="text-saint-text-muted">Cap</span>
+                          <span class="truncate">{{ battery.bms.currentCapacity }}/{{ battery.bms.maxCapacity }}</span>
                         </div>
                       </div>
                     </div>
