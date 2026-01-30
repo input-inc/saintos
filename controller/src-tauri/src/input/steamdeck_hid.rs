@@ -11,6 +11,11 @@ use std::time::Duration;
 const STEAM_DECK_VID: u16 = 0x28DE;
 const STEAM_DECK_PID: u16 = 0x1205;
 
+// Feature report IDs for Steam Controller protocol
+const STEAM_FEATURE_REPORT_CLEAR_MAPPINGS: u8 = 0x81;
+const STEAM_FEATURE_REPORT_SET_SETTINGS: u8 = 0x87;
+const STEAM_FEATURE_REPORT_ENABLE_SENSORS: u8 = 0x87;
+
 // Button masks for ulButtonsL (lower 32 bits)
 const STEAMDECK_LBUTTON_R2: u32 = 0x00000001;
 const STEAMDECK_LBUTTON_L2: u32 = 0x00000002;
@@ -152,11 +157,12 @@ impl SteamDeckHidReader {
 
         log::info!("Found {} Steam Deck HID device(s), trying each...", deck_devices.len());
 
-        // Try each device to find one that provides input data
+        // Try each device to find one that provides controller input data (report ID 0x09)
         let mut working_device = None;
         for device_info in &deck_devices {
             let path = device_info.path();
-            log::info!("Trying device: {}", path.to_string_lossy());
+            let interface = device_info.interface_number();
+            log::info!("Trying device: {} (interface {})", path.to_string_lossy(), interface);
 
             match api.open_path(path) {
                 Ok(dev) => {
@@ -165,23 +171,40 @@ impl SteamDeckHidReader {
                         log::warn!("  Failed to set non-blocking mode: {}", e);
                     }
 
-                    // Try reading some data
+                    // Try reading several times to catch controller data
                     let mut test_buf = [0u8; 64];
-                    thread::sleep(Duration::from_millis(50));
+                    let mut found_controller = false;
 
-                    match dev.read_timeout(&mut test_buf, 100) {
-                        Ok(size) if size > 0 => {
-                            log::info!("  Got {} bytes from this device!", size);
-                            log::info!("  First 16 bytes: {:02X?}", &test_buf[..16.min(size)]);
-                            working_device = Some(dev);
-                            break;
+                    for attempt in 0..10 {
+                        thread::sleep(Duration::from_millis(20));
+                        match dev.read_timeout(&mut test_buf, 50) {
+                            Ok(size) if size >= 64 => {
+                                let report_id = test_buf[0];
+                                log::info!("  Attempt {}: {} bytes, report ID: 0x{:02X}", attempt, size, report_id);
+                                log::info!("  First 32 bytes: {:02X?}", &test_buf[..32.min(size)]);
+
+                                // Report ID 0x09 is controller input state
+                                if report_id == 0x09 || report_id == 0x01 {
+                                    log::info!("  Found controller input device!");
+                                    found_controller = true;
+                                    break;
+                                }
+                            }
+                            Ok(size) if size > 0 => {
+                                log::info!("  Attempt {}: {} bytes (too small for controller)", attempt, size);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                log::warn!("  Attempt {}: Read error: {}", attempt, e);
+                            }
                         }
-                        Ok(_) => {
-                            log::info!("  No data from this device (might be mouse/keyboard)");
-                        }
-                        Err(e) => {
-                            log::warn!("  Read error: {}", e);
-                        }
+                    }
+
+                    if found_controller {
+                        working_device = Some(dev);
+                        break;
+                    } else {
+                        log::info!("  No controller data from this device");
                     }
                 }
                 Err(e) => {
@@ -198,11 +221,15 @@ impl SteamDeckHidReader {
             }
         };
 
+        // Try to enable gyro/sensors by sending feature reports
+        Self::enable_sensors(&device);
+
         log::info!("Steam Deck HID reader running");
 
         let mut buf = [0u8; 64];
         let mut report_count = 0u64;
         let mut last_log_time = std::time::Instant::now();
+        let mut last_value_log_time = std::time::Instant::now();
 
         while *running.read() {
             match device.read_timeout(&mut buf, 16) {
@@ -210,13 +237,29 @@ impl SteamDeckHidReader {
                     report_count += 1;
 
                     // Log first few reports and then periodically
-                    if report_count <= 5 || last_log_time.elapsed().as_secs() >= 10 {
-                        log::info!("HID report #{}: {} bytes, first 20: {:02X?}",
-                            report_count, size, &buf[..20.min(size)]);
+                    if report_count <= 5 || last_log_time.elapsed().as_secs() >= 30 {
+                        log::info!("HID report #{}: {} bytes, report_id: 0x{:02X}",
+                            report_count, size, buf[0]);
+                        log::info!("  Raw bytes [0-31]: {:02X?}", &buf[..32.min(size)]);
+                        log::info!("  Raw bytes [32-63]: {:02X?}", &buf[32..64.min(size)]);
                         last_log_time = std::time::Instant::now();
                     }
 
                     Self::parse_hid_report(&buf[..size], &state);
+
+                    // Log parsed values periodically to verify parsing
+                    if last_value_log_time.elapsed().as_secs() >= 5 {
+                        let s = state.read();
+                        log::info!("Parsed HID state - Gyro: pitch={:.1}, roll={:.1}, yaw={:.1}",
+                            s.gyro_pitch, s.gyro_roll, s.gyro_yaw);
+                        log::info!("  Left pad: ({:.2}, {:.2}) touched={}, Right pad: ({:.2}, {:.2}) touched={}",
+                            s.left_pad_x, s.left_pad_y, s.left_pad_touched,
+                            s.right_pad_x, s.right_pad_y, s.right_pad_touched);
+                        log::info!("  Back buttons: L4={}, R4={}, L5={}, R5={}, Steam={}, QAM={}",
+                            s.l4_pressed, s.r4_pressed, s.l5_pressed, s.r5_pressed,
+                            s.steam_pressed, s.qam_pressed);
+                        last_value_log_time = std::time::Instant::now();
+                    }
                 }
                 Ok(_) => {
                     // No data available
@@ -239,19 +282,86 @@ impl SteamDeckHidReader {
     }
 
     #[cfg(target_os = "linux")]
-    fn parse_hid_report(data: &[u8], state: &Arc<RwLock<SteamDeckHidState>>) {
-        // The Steam Deck HID report structure:
-        // Based on SDL's SteamDeckStatePacket_t
-        // Report includes header bytes before the payload
+    fn enable_sensors(device: &hidapi::HidDevice) {
+        // Send feature reports to enable gyro and sensors
+        // Based on SDL's Steam Controller initialization
 
-        if data.len() < 56 {
-            return;  // Not enough data
+        // Feature report to enable gyro (0x87 = set settings)
+        // This tells the controller to include gyro data in input reports
+        let mut enable_gyro = [0u8; 64];
+        enable_gyro[0] = STEAM_FEATURE_REPORT_ENABLE_SENSORS; // 0x87
+        enable_gyro[1] = 0x03; // Length
+        enable_gyro[2] = 0x30; // Setting: Enable gyro
+        enable_gyro[3] = 0x18; // Gyro mode (raw)
+        enable_gyro[4] = 0x00;
+
+        match device.send_feature_report(&enable_gyro) {
+            Ok(_) => log::info!("Sent gyro enable feature report"),
+            Err(e) => log::warn!("Failed to send gyro enable: {} (this may be expected)", e),
         }
 
-        // Skip report header (typically 4 bytes: report ID + header)
-        // The exact offset depends on the report format
-        // For Steam Deck, try offset 4 for the state packet
-        let offset = 4;
+        thread::sleep(Duration::from_millis(50));
+
+        // Alternative: Try clearing steam mappings to get raw input
+        let mut clear_mappings = [0u8; 64];
+        clear_mappings[0] = STEAM_FEATURE_REPORT_CLEAR_MAPPINGS; // 0x81
+        clear_mappings[1] = 0x00;
+
+        match device.send_feature_report(&clear_mappings) {
+            Ok(_) => log::info!("Sent clear mappings feature report"),
+            Err(e) => log::warn!("Failed to send clear mappings: {} (this may be expected)", e),
+        }
+
+        thread::sleep(Duration::from_millis(50));
+
+        // Request settings to confirm device is responsive
+        let mut get_settings = [0u8; 64];
+        get_settings[0] = 0x83; // Get settings
+        get_settings[1] = 0x00;
+
+        match device.get_feature_report(&mut get_settings) {
+            Ok(len) => log::info!("Got feature report response: {} bytes", len),
+            Err(e) => log::warn!("Failed to get settings: {} (this may be expected)", e),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn parse_hid_report(data: &[u8], state: &Arc<RwLock<SteamDeckHidState>>) {
+        // The Steam Deck HID report structure:
+        // Report ID 0x09 = Input state (controller data)
+        // Report ID 0x04 = Mouse/keyboard emulation
+        //
+        // Structure (64 bytes total):
+        // [0]: Report ID
+        // [1-3]: Header/sequence
+        // [4-7]: ulButtonsL (lower 32 bits)
+        // [8-11]: ulButtonsH (upper 32 bits)
+        // [12-13]: Left pad X
+        // [14-15]: Left pad Y
+        // [16-17]: Right pad X
+        // [18-19]: Right pad Y
+        // [20-21]: Accel X
+        // [22-23]: Accel Y
+        // [24-25]: Accel Z
+        // [26-27]: Gyro X (pitch)
+        // [28-29]: Gyro Y (yaw)
+        // [30-31]: Gyro Z (roll)
+        // ... more data including analog sticks, triggers, pressure
+
+        if data.len() < 64 {
+            return;  // Not enough data for a full report
+        }
+
+        // Check report ID - 0x09 is input state, 0x01 is also used sometimes
+        let report_id = data[0];
+        if report_id != 0x09 && report_id != 0x01 {
+            // Not a controller input report, skip
+            return;
+        }
+
+        // Payload starts after report ID (byte 0)
+        // hidapi may or may not include report ID depending on platform
+        let offset = if report_id == 0x09 || report_id == 0x01 { 4 } else { 0 };
 
         if data.len() < offset + 56 {
             return;
