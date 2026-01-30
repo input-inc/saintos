@@ -8,8 +8,6 @@
     "shell:allow-open",
     "log:default",
     "process:default",
-    "core:webview:allow-open-devtools",
-    "core:webview:allow-close-devtools",
-    "core:webview:allow-is-devtools-open"
+    "core:webview:allow-internal-toggle-devtools"
   ]
 }
