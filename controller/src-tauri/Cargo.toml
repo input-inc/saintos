@@ -35,6 +35,7 @@ gilrs = "0.11"
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
 libc = "0.2"
+hidapi = "2.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
