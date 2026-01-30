@@ -2,6 +2,7 @@ import { Component, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ConnectionService, ConnectionStatus, ConnectionConfig } from '../../core/services/connection.service';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 @Component({
   selector: 'app-settings',
@@ -107,6 +108,20 @@ import { ConnectionService, ConnectionStatus, ConnectionConfig } from '../../cor
           <p>Supports gamepad, gyroscope, and touch input.</p>
         </div>
       </div>
+
+      <!-- Quit Application -->
+      <div class="card">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-semibold">Quit Application</h2>
+            <p class="text-sm text-saint-text-muted">Exit the SAINT Controller</p>
+          </div>
+          <button class="btn btn-danger flex items-center gap-2" (click)="quitApp()">
+            <span class="material-icons icon-sm">power_settings_new</span>
+            Quit
+          </button>
+        </div>
+      </div>
     </div>
   `
 })
@@ -183,5 +198,15 @@ export class SettingsComponent {
 
   async disconnect(): Promise<void> {
     await this.connectionService.disconnect();
+  }
+
+  async quitApp(): Promise<void> {
+    // Disconnect first if connected
+    if (this.connectionService.isConnected()) {
+      await this.connectionService.disconnect();
+    }
+    // Close the main window to exit the application
+    const window = getCurrentWindow();
+    await window.close();
   }
 }
