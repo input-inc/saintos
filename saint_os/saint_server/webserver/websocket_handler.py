@@ -142,9 +142,26 @@ class WebSocketHandler:
         pass
 
     def log(self, level: str, message: str):
-        """Log a message if logger is available."""
-        if self.logger:
-            getattr(self.logger, level)(message)
+        """Log a message if logger is available.
+
+        Note: Each level must be called from a different line because ROS2's
+        rcutils logger tracks calls by file/line and rejects severity changes
+        from the same call site.
+        """
+        if not self.logger:
+            return
+        if level == 'debug':
+            self.logger.debug(message)
+        elif level == 'info':
+            self.logger.info(message)
+        elif level == 'warn' or level == 'warning':
+            self.logger.warning(message)
+        elif level == 'error':
+            self.logger.error(message)
+        elif level == 'fatal':
+            self.logger.fatal(message)
+        else:
+            self.logger.info(message)
 
     async def handle_connection(self, request: web.Request) -> web.WebSocketResponse:
         """Handle a new WebSocket connection."""

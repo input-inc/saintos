@@ -48,7 +48,55 @@
     </style>
 </head>
 <body class="bg-slate-900 text-slate-100 font-sans min-h-screen">
-    <div id="app" class="flex flex-col min-h-screen">
+    <!-- Login Screen -->
+    <div id="login-screen" class="min-h-screen flex items-center justify-center p-4">
+        <div class="w-full max-w-md">
+            <!-- Logo -->
+            <div class="text-center mb-8">
+                <div class="w-20 h-20 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center mx-auto mb-4">
+                    <span class="material-icons text-white text-4xl">computer</span>
+                </div>
+                <h1 class="text-3xl font-bold text-white">SAINT.OS</h1>
+                <p class="text-slate-400 mt-1">Administration Console</p>
+            </div>
+
+            <!-- Login Form -->
+            <div class="bg-slate-800 rounded-xl border border-slate-700 p-6">
+                <h2 class="text-lg font-semibold text-white mb-4">Connect to Server</h2>
+
+                <div id="login-error" class="hidden mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm"></div>
+
+                <form id="login-form" class="space-y-4">
+                    <div>
+                        <label for="login-host" class="block text-sm font-medium text-slate-300 mb-1">Server Address</label>
+                        <input type="text" id="login-host" placeholder="localhost:80"
+                            class="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent">
+                        <p class="text-xs text-slate-500 mt-1">Leave empty to use current page host</p>
+                    </div>
+
+                    <div>
+                        <label for="login-password" class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+                        <input type="password" id="login-password" placeholder="Enter password"
+                            class="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent">
+                        <p class="text-xs text-slate-500 mt-1">Leave empty if server has no password</p>
+                    </div>
+
+                    <button type="submit" id="login-btn"
+                        class="w-full py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-medium rounded-lg hover:from-cyan-600 hover:to-blue-700 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-slate-800 transition-all">
+                        Connect
+                    </button>
+                </form>
+
+                <div id="login-status" class="mt-4 text-center text-sm text-slate-400 hidden">
+                    <span class="inline-block w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mr-2"></span>
+                    Connecting...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Application (hidden until authenticated) -->
+    <div id="app" class="flex flex-col min-h-screen hidden">
         <!-- Header -->
         <header class="sticky top-0 z-50 bg-slate-900/80 backdrop-blur-lg border-b border-slate-700/50">
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -68,6 +116,9 @@
                     <div id="connection-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
                         <span class="status-dot w-2 h-2 rounded-full bg-amber-500 animate-pulse-dot"></span>
                         <span class="status-text text-sm text-slate-300">Connecting...</span>
+                        <button id="btn-connection-settings" class="ml-1 p-0.5 rounded hover:bg-slate-700 transition-colors" title="Disconnect">
+                            <span class="material-icons text-slate-400 text-base">logout</span>
+                        </button>
                     </div>
 
                     <!-- Global E-Stop -->

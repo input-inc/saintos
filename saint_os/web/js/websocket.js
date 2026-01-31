@@ -1,30 +1,83 @@
 /**
  * SAINT.OS WebSocket Client
  *
- * Handles WebSocket connection to the SAINT.OS server.
+ * Handles WebSocket connection to the SAINT.OS server with authentication support.
  */
 
 class SaintWebSocket {
     constructor() {
         this.ws = null;
         this.connected = false;
+        this.authenticated = false;
+        this.authRequired = false;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
         this.reconnectDelay = 1000;
         this.messageHandlers = new Map();
         this.pendingRequests = new Map();
         this.requestId = 0;
+        this.serverName = null;
+        this.clientId = null;
+
+        // Load settings from localStorage
+        this.settings = this.loadSettings();
+    }
+
+    /**
+     * Load connection settings from localStorage.
+     */
+    loadSettings() {
+        const defaults = {
+            host: window.location.host,
+            password: '',
+            autoConnect: true
+        };
+
+        try {
+            const saved = localStorage.getItem('saint_ws_settings');
+            if (saved) {
+                return { ...defaults, ...JSON.parse(saved) };
+            }
+        } catch (e) {
+            console.warn('Failed to load settings:', e);
+        }
+
+        return defaults;
+    }
+
+    /**
+     * Save connection settings to localStorage.
+     */
+    saveSettings(settings) {
+        this.settings = { ...this.settings, ...settings };
+        try {
+            localStorage.setItem('saint_ws_settings', JSON.stringify(this.settings));
+        } catch (e) {
+            console.warn('Failed to save settings:', e);
+        }
+    }
+
+    /**
+     * Get current settings.
+     */
+    getSettings() {
+        return { ...this.settings };
     }
 
     /**
      * Connect to the WebSocket server.
+     * @param {string} [host] - Optional host override (e.g., "localhost:8080")
      */
-    connect() {
+    connect(host = null) {
+        const targetHost = host || this.settings.host || window.location.host;
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.host;
-        const url = `${protocol}//${host}/api/ws`;
+        const url = `${protocol}//${targetHost}/api/ws`;
 
         console.log(`Connecting to ${url}...`);
+
+        // Reset state
+        this.authenticated = false;
+        this.authRequired = false;
 
         try {
             this.ws = new WebSocket(url);
@@ -40,6 +93,71 @@ class SaintWebSocket {
     }
 
     /**
+     * Disconnect from the server.
+     */
+    disconnect() {
+        this.reconnectAttempts = this.maxReconnectAttempts; // Prevent auto-reconnect
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+        this.connected = false;
+        this.authenticated = false;
+    }
+
+    /**
+     * Authenticate with the server.
+     * @param {string} password - The password to authenticate with
+     */
+    authenticate(password = null) {
+        const pwd = password !== null ? password : this.settings.password;
+
+        if (!this.connected) {
+            return Promise.reject(new Error('Not connected'));
+        }
+
+        return new Promise((resolve, reject) => {
+            // Set up one-time handler for auth result
+            const authHandler = (message) => {
+                this.off('auth_result', authHandler);
+
+                if (message.status === 'ok') {
+                    this.authenticated = true;
+                    // Save password on successful auth
+                    if (password !== null) {
+                        this.saveSettings({ password });
+                    }
+                    resolve(message);
+                } else {
+                    reject(new Error(message.message || 'Authentication failed'));
+                }
+            };
+
+            this.on('auth_result', authHandler);
+
+            // Send auth message (no id needed for auth)
+            this.ws.send(JSON.stringify({
+                type: 'auth',
+                action: 'login',
+                password: pwd
+            }));
+
+            // Timeout after 10 seconds
+            setTimeout(() => {
+                this.off('auth_result', authHandler);
+                reject(new Error('Authentication timeout'));
+            }, 10000);
+        });
+    }
+
+    /**
+     * Check if currently authenticated (or auth not required).
+     */
+    isAuthenticated() {
+        return this.authenticated || !this.authRequired;
+    }
+
+    /**
      * Send a message to the server.
      * Can be called as send(type, action, params) or send({type, action, params})
      */
@@ -47,6 +165,11 @@ class SaintWebSocket {
         if (!this.connected) {
             console.warn('Not connected, cannot send message');
             return Promise.reject(new Error('Not connected'));
+        }
+
+        if (!this.isAuthenticated()) {
+            console.warn('Not authenticated, cannot send message');
+            return Promise.reject(new Error('Authentication required'));
         }
 
         // Support both calling conventions
@@ -149,12 +272,13 @@ class SaintWebSocket {
         console.log('WebSocket connected');
         this.connected = true;
         this.reconnectAttempts = 0;
-        this._emit('connected');
+        // Don't emit 'connected' yet - wait for server's connected message
     }
 
     _onClose(event) {
         console.log(`WebSocket closed: ${event.code} ${event.reason}`);
         this.connected = false;
+        this.authenticated = false;
         this._emit('disconnected', { code: event.code, reason: event.reason });
         this._scheduleReconnect();
     }
@@ -167,6 +291,46 @@ class SaintWebSocket {
     _onMessage(event) {
         try {
             const message = JSON.parse(event.data);
+
+            // Handle server's initial connected message
+            if (message.type === 'connected') {
+                this.serverName = message.server_name;
+                this.clientId = message.client_id;
+                this.authRequired = message.auth_required || false;
+
+                console.log(`Connected to ${this.serverName} as ${this.clientId}, auth_required: ${this.authRequired}`);
+
+                // If auth not required, we're authenticated
+                if (!this.authRequired) {
+                    this.authenticated = true;
+                    this._emit('connected', message);
+                    this._emit('ready');
+                } else {
+                    // Try auto-auth with saved password
+                    this._emit('connected', message);
+                    this._emit('auth_required', message);
+
+                    if (this.settings.password) {
+                        this.authenticate().then(() => {
+                            console.log('Auto-authenticated with saved password');
+                            this._emit('ready');
+                        }).catch((err) => {
+                            console.warn('Auto-auth failed:', err.message);
+                            this._emit('auth_failed', { message: err.message });
+                        });
+                    }
+                }
+                return;
+            }
+
+            // Handle auth result
+            if (message.type === 'auth_result') {
+                this._emit('auth_result', message);
+                if (message.status === 'ok') {
+                    this._emit('ready');
+                }
+                return;
+            }
 
             // Handle response to pending request
             if (message.id && this.pendingRequests.has(message.id)) {

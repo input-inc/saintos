@@ -18,21 +18,96 @@ class SaintApp {
      * Initialize the application.
      */
     init() {
+        this.setupLoginForm();
         this.setupNavigation();
         this.setupWebSocket();
         this.setupEventListeners();
+
+        // Load saved settings into login form
+        const settings = window.saintWS.getSettings();
+        document.getElementById('login-host').value = settings.host || '';
+        document.getElementById('login-password').value = settings.password || '';
+    }
+
+    /**
+     * Setup login form handlers.
+     */
+    setupLoginForm() {
+        const form = document.getElementById('login-form');
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            this.handleLoginSubmit();
+        });
+
+        // Settings button in header
+        document.getElementById('btn-connection-settings')?.addEventListener('click', () => {
+            this.showLoginScreen();
+        });
+    }
+
+    /**
+     * Handle login form submission.
+     */
+    async handleLoginSubmit() {
+        const hostInput = document.getElementById('login-host');
+        const passwordInput = document.getElementById('login-password');
+        const errorEl = document.getElementById('login-error');
+        const statusEl = document.getElementById('login-status');
+        const loginBtn = document.getElementById('login-btn');
+
+        const host = hostInput.value.trim() || window.location.host;
+        const password = passwordInput.value;
+
+        // Show loading state
+        errorEl.classList.add('hidden');
+        statusEl.classList.remove('hidden');
+        loginBtn.disabled = true;
+
+        // Save settings
+        window.saintWS.saveSettings({ host, password });
+
+        // Disconnect if already connected
+        window.saintWS.disconnect();
+        window.saintWS.reconnectAttempts = 0;
+
+        // Connect to server
+        window.saintWS.connect(host);
+    }
+
+    /**
+     * Show login screen, hide main app.
+     */
+    showLoginScreen() {
+        document.getElementById('login-screen').classList.remove('hidden');
+        document.getElementById('app').classList.add('hidden');
+
+        // Reset login form state
+        document.getElementById('login-error').classList.add('hidden');
+        document.getElementById('login-status').classList.add('hidden');
+        document.getElementById('login-btn').disabled = false;
+
+        // Load current settings
+        const settings = window.saintWS.getSettings();
+        document.getElementById('login-host').value = settings.host || '';
+        document.getElementById('login-password').value = settings.password || '';
+    }
+
+    /**
+     * Show main app, hide login screen.
+     */
+    showMainApp() {
+        document.getElementById('login-screen').classList.add('hidden');
+        document.getElementById('app').classList.remove('hidden');
 
         // Show initial page based on URL hash
         const hash = window.location.hash.slice(1) || 'dashboard';
 
         // Check for special URL hashes
         if (hash.startsWith('node/')) {
-            // Node detail URL (e.g., #node/rp2040_abc123)
             const nodeId = hash.slice(5);
             this.currentNodeId = nodeId;
             this.showPage('node-detail');
         } else if (hash === 'livelink') {
-            // LiveLink detail page
             this.showPage('livelink-detail');
         } else {
             this.showPage(hash);
@@ -59,13 +134,43 @@ class SaintApp {
     setupWebSocket() {
         const ws = window.saintWS;
 
-        ws.on('connected', () => {
-            this.updateConnectionStatus(true);
+        ws.on('connected', (message) => {
+            this.updateConnectionStatus('connected', message.auth_required);
+            // Update login status
+            document.getElementById('login-status').innerHTML =
+                '<span class="inline-block w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mr-2"></span>' +
+                (message.auth_required ? 'Authenticating...' : 'Connected!');
+        });
+
+        ws.on('ready', () => {
+            // Authenticated (or auth not required) - ready to use
+            this.updateConnectionStatus('ready');
+            this.showMainApp();
             this.requestInitialData();
         });
 
+        ws.on('auth_required', () => {
+            // If no saved password, show error in login form
+            if (!ws.settings.password) {
+                this.showLoginError('Password required');
+            }
+        });
+
+        ws.on('auth_failed', (data) => {
+            this.updateConnectionStatus('auth_failed');
+            this.showLoginError(data?.message || 'Authentication failed');
+        });
+
         ws.on('disconnected', () => {
-            this.updateConnectionStatus(false);
+            this.updateConnectionStatus('disconnected');
+        });
+
+        ws.on('error', () => {
+            this.showLoginError('Connection failed. Check server address.');
+        });
+
+        ws.on('reconnect_failed', () => {
+            this.showLoginError('Could not connect to server');
         });
 
         ws.on('state', (message) => {
@@ -76,9 +181,24 @@ class SaintApp {
             this.addActivityLogEntry(message);
         });
 
-        // Connect
-        ws.connect();
+        // Don't auto-connect - wait for login form submission
+        // ws.connect();
     }
+
+    /**
+     * Show error in login form.
+     */
+    showLoginError(message) {
+        const errorEl = document.getElementById('login-error');
+        const statusEl = document.getElementById('login-status');
+        const loginBtn = document.getElementById('login-btn');
+
+        errorEl.textContent = message;
+        errorEl.classList.remove('hidden');
+        statusEl.classList.add('hidden');
+        loginBtn.disabled = false;
+    }
+
 
     /**
      * Setup button click handlers.
@@ -294,18 +414,38 @@ class SaintApp {
     /**
      * Update connection status indicator.
      */
-    updateConnectionStatus(connected) {
+    updateConnectionStatus(status, authRequired = false) {
         const statusDot = document.querySelector('.status-dot');
         const statusText = document.querySelector('.status-text');
 
-        if (connected) {
-            statusDot.classList.remove('bg-amber-500', 'bg-red-500', 'animate-pulse-dot');
-            statusDot.classList.add('bg-emerald-500');
-            statusText.textContent = 'Connected';
-        } else {
-            statusDot.classList.remove('bg-emerald-500', 'bg-amber-500');
-            statusDot.classList.add('bg-red-500', 'animate-pulse-dot');
-            statusText.textContent = 'Disconnected';
+        // Remove all status classes
+        statusDot.classList.remove('bg-amber-500', 'bg-red-500', 'bg-emerald-500', 'bg-cyan-500', 'animate-pulse-dot');
+
+        switch (status) {
+            case 'ready':
+                // Fully connected and authenticated
+                statusDot.classList.add('bg-emerald-500');
+                statusText.textContent = 'Connected';
+                break;
+            case 'connected':
+                // Connected but may need auth
+                if (authRequired) {
+                    statusDot.classList.add('bg-cyan-500', 'animate-pulse-dot');
+                    statusText.textContent = 'Authenticating...';
+                } else {
+                    statusDot.classList.add('bg-emerald-500');
+                    statusText.textContent = 'Connected';
+                }
+                break;
+            case 'auth_failed':
+                statusDot.classList.add('bg-amber-500');
+                statusText.textContent = 'Auth Required';
+                break;
+            case 'disconnected':
+            default:
+                statusDot.classList.add('bg-red-500', 'animate-pulse-dot');
+                statusText.textContent = 'Disconnected';
+                break;
         }
     }
 
