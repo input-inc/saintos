@@ -17,6 +17,7 @@ pub fn run() {
                 .targets([
                     Target::new(TargetKind::Stdout),
                     Target::new(TargetKind::LogDir { file_name: Some("saint-controller".into()) }),
+                    Target::new(TargetKind::Webview),  // Forward Rust logs to browser console
                 ])
                 .level(log::LevelFilter::Debug)
                 .build(),

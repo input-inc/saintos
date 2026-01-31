@@ -4,13 +4,12 @@ import { routes } from './app.routes';
 import { LoggingService, GlobalErrorHandler } from './core/services/logging.service';
 import { KeyboardService } from './core/services/keyboard.service';
 
-function initializeLogging(logging: LoggingService) {
-  return () => logging.init();
-}
-
-function initializeKeyboard(keyboard: KeyboardService) {
-  // Just injecting the service is enough - it sets up listeners in constructor
-  return () => {};
+async function initializeApp(logging: LoggingService, keyboard: KeyboardService) {
+  // Initialize logging first so console.log goes to log file
+  await logging.init();
+  // KeyboardService constructor already set up listeners
+  // Just log that we're ready
+  console.log('[AppInit] Application initialized');
 }
 
 export const appConfig: ApplicationConfig = {
@@ -21,14 +20,8 @@ export const appConfig: ApplicationConfig = {
     KeyboardService,
     {
       provide: APP_INITIALIZER,
-      useFactory: initializeLogging,
-      deps: [LoggingService],
-      multi: true
-    },
-    {
-      provide: APP_INITIALIZER,
-      useFactory: initializeKeyboard,
-      deps: [KeyboardService],
+      useFactory: (logging: LoggingService, keyboard: KeyboardService) => () => initializeApp(logging, keyboard),
+      deps: [LoggingService, KeyboardService],
       multi: true
     },
     {

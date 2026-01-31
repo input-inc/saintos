@@ -12,11 +12,14 @@ export class LoggingService {
 
     try {
       // Attach console to forward all console.log/error/etc to the log file
-      await attachConsole();
+      const detach = await attachConsole();
       this.initialized = true;
-      await this.info('LoggingService', 'Frontend logging initialized');
+      console.log('[LoggingService] Frontend logging initialized - console attached to Tauri log');
+      // Note: After this point, console.log calls should appear in the log file
     } catch (err) {
-      console.error('Failed to initialize logging:', err);
+      console.error('[LoggingService] Failed to initialize logging:', err);
+      // Still mark as initialized to avoid repeated attempts
+      this.initialized = true;
     }
   }
 
