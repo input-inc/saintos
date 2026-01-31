@@ -125,7 +125,7 @@ pub fn activate_preset(state: State<'_, AppState>, preset_id: String) -> Result<
         }
         crate::bindings::config::PresetData::Animation(anim_data) => {
             // TODO: Implement animation playback
-            tracing::info!("Playing animation preset: {} ({} keyframes)", preset_id, anim_data.keyframes.len());
+            log::info!("Playing animation preset: {} ({} keyframes)", preset_id, anim_data.keyframes.len());
         }
         crate::bindings::config::PresetData::Sound(sound_data) => {
             // Send sound play command
@@ -214,7 +214,7 @@ pub fn is_devtools_open(window: WebviewWindow) -> bool {
 /// Quit the application
 #[tauri::command]
 pub fn quit_app<R: Runtime>(app_handle: AppHandle<R>) {
-    tracing::info!("Application quit requested");
+    log::info!("Application quit requested");
     app_handle.exit(0);
 }
 
@@ -223,11 +223,11 @@ pub fn quit_app<R: Runtime>(app_handle: AppHandle<R>) {
 pub fn log_frontend(level: String, message: String, context: Option<String>) {
     let ctx = context.unwrap_or_default();
     match level.as_str() {
-        "error" => tracing::error!(target: "frontend", "[{}] {}", ctx, message),
-        "warn" => tracing::warn!(target: "frontend", "[{}] {}", ctx, message),
-        "info" => tracing::info!(target: "frontend", "[{}] {}", ctx, message),
-        "debug" => tracing::debug!(target: "frontend", "[{}] {}", ctx, message),
-        _ => tracing::trace!(target: "frontend", "[{}] {}", ctx, message),
+        "error" => log::error!(target: "frontend", "[{}] {}", ctx, message),
+        "warn" => log::warn!(target: "frontend", "[{}] {}", ctx, message),
+        "info" => log::info!(target: "frontend", "[{}] {}", ctx, message),
+        "debug" => log::debug!(target: "frontend", "[{}] {}", ctx, message),
+        _ => log::trace!(target: "frontend", "[{}] {}", ctx, message),
     }
 }
 
@@ -235,17 +235,17 @@ pub fn log_frontend(level: String, message: String, context: Option<String>) {
 /// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (KDE virtual keyboard)
 #[tauri::command]
 pub fn show_keyboard() -> Result<(), String> {
-    tracing::info!("show_keyboard command invoked");
+    log::info!("show_keyboard command invoked");
 
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
 
-        tracing::info!("Platform: Linux - attempting to open virtual keyboard");
+        log::info!("Platform: Linux - attempting to open virtual keyboard");
 
         // Method 1: KWin virtual keyboard via busctl (Desktop Mode - KDE Plasma)
         // This is the most reliable method for Steam Deck Desktop Mode
-        tracing::info!("Trying: busctl call to KWin InputMethod");
+        log::info!("Trying: busctl call to KWin InputMethod");
         let kwin_result = Command::new("busctl")
             .args([
                 "--user",
@@ -261,24 +261,24 @@ pub fn show_keyboard() -> Result<(), String> {
 
         match kwin_result {
             Ok(output) => {
-                tracing::info!(
+                log::info!(
                     "busctl KWin executed - status: {:?}, stdout: {}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if output.status.success() {
-                    tracing::info!("KWin virtual keyboard enabled");
+                    log::info!("KWin virtual keyboard enabled");
                     return Ok(());
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute busctl for KWin: {}", e);
+                log::warn!("Failed to execute busctl for KWin: {}", e);
             }
         }
 
         // Method 2: DBus call to Steam directly (Gaming Mode)
-        tracing::info!("Trying: dbus-send to Steam");
+        log::info!("Trying: dbus-send to Steam");
         let dbus_result = Command::new("dbus-send")
             .args([
                 "--type=method_call",
@@ -295,31 +295,31 @@ pub fn show_keyboard() -> Result<(), String> {
 
         match dbus_result {
             Ok(output) => {
-                tracing::info!(
+                log::info!(
                     "dbus-send Steam executed - status: {:?}, stdout: {}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if output.status.success() {
-                    tracing::info!("Steam keyboard opened via dbus-send");
+                    log::info!("Steam keyboard opened via dbus-send");
                     return Ok(());
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute dbus-send to Steam: {}", e);
+                log::warn!("Failed to execute dbus-send to Steam: {}", e);
             }
         }
 
         // Method 3: xdg-open with steam:// URL (Gaming Mode fallback)
-        tracing::info!("Trying: xdg-open steam://open/keyboard");
+        log::info!("Trying: xdg-open steam://open/keyboard");
         let result = Command::new("xdg-open")
             .arg("steam://open/keyboard")
             .output();
 
         match result {
             Ok(output) => {
-                tracing::info!(
+                log::info!(
                     "xdg-open executed - status: {:?}, stdout: {}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
@@ -327,19 +327,19 @@ pub fn show_keyboard() -> Result<(), String> {
                 );
 
                 if output.status.success() {
-                    tracing::info!("Steam keyboard opened via xdg-open");
+                    log::info!("Steam keyboard opened via xdg-open");
                     return Ok(());
                 } else {
-                    tracing::warn!("xdg-open returned non-zero status");
+                    log::warn!("xdg-open returned non-zero status");
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute xdg-open: {}", e);
+                log::warn!("Failed to execute xdg-open: {}", e);
             }
         }
 
         // Method 4: qdbus for KWin virtual keyboard (Desktop Mode alternative)
-        tracing::info!("Trying: qdbus org.kde.KWin VirtualKeyboard.setEnabled");
+        log::info!("Trying: qdbus org.kde.KWin VirtualKeyboard.setEnabled");
         let qdbus_result = Command::new("qdbus")
             .args([
                 "org.kde.KWin",
@@ -351,23 +351,23 @@ pub fn show_keyboard() -> Result<(), String> {
 
         match qdbus_result {
             Ok(output) => {
-                tracing::info!(
+                log::info!(
                     "qdbus KWin keyboard executed - status: {:?}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if output.status.success() {
-                    tracing::info!("KWin virtual keyboard enabled via qdbus");
+                    log::info!("KWin virtual keyboard enabled via qdbus");
                     return Ok(());
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute qdbus for KWin: {}", e);
+                log::warn!("Failed to execute qdbus for KWin: {}", e);
             }
         }
 
         // Method 5: Try Maliit keyboard (fallback for some systems)
-        tracing::info!("Trying: dbus-send to Maliit");
+        log::info!("Trying: dbus-send to Maliit");
         let maliit_result = Command::new("dbus-send")
             .args([
                 "--type=method_call",
@@ -379,7 +379,7 @@ pub fn show_keyboard() -> Result<(), String> {
 
         match maliit_result {
             Ok(output) => {
-                tracing::info!(
+                log::info!(
                     "Maliit dbus-send executed - status: {:?}",
                     output.status
                 );
@@ -388,17 +388,17 @@ pub fn show_keyboard() -> Result<(), String> {
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute Maliit dbus-send: {}", e);
+                log::warn!("Failed to execute Maliit dbus-send: {}", e);
             }
         }
 
-        tracing::warn!("All keyboard open methods attempted - none confirmed successful");
+        log::warn!("All keyboard open methods attempted - none confirmed successful");
         Ok(()) // Don't return error - one of the async methods might work
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        tracing::info!("show_keyboard called on non-Linux platform (no-op)");
+        log::info!("show_keyboard called on non-Linux platform (no-op)");
         Ok(())
     }
 }
@@ -407,14 +407,14 @@ pub fn show_keyboard() -> Result<(), String> {
 /// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (KDE virtual keyboard)
 #[tauri::command]
 pub fn hide_keyboard() -> Result<(), String> {
-    tracing::info!("hide_keyboard command invoked");
+    log::info!("hide_keyboard command invoked");
 
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
 
         // Method 1: KWin virtual keyboard via busctl (Desktop Mode)
-        tracing::info!("Trying: busctl call to KWin to disable keyboard");
+        log::info!("Trying: busctl call to KWin to disable keyboard");
         let kwin_result = Command::new("busctl")
             .args([
                 "--user",
@@ -430,7 +430,7 @@ pub fn hide_keyboard() -> Result<(), String> {
 
         match kwin_result {
             Ok(output) => {
-                tracing::info!(
+                log::info!(
                     "busctl KWin disable executed - status: {:?}",
                     output.status
                 );
@@ -439,26 +439,26 @@ pub fn hide_keyboard() -> Result<(), String> {
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute busctl for KWin: {}", e);
+                log::warn!("Failed to execute busctl for KWin: {}", e);
             }
         }
 
         // Method 2: Try steam:// URL to close keyboard (Gaming Mode)
-        tracing::info!("Trying: xdg-open steam://close/keyboard");
+        log::info!("Trying: xdg-open steam://close/keyboard");
         let result = Command::new("xdg-open")
             .arg("steam://close/keyboard")
             .output();
 
         match result {
             Ok(output) => {
-                tracing::info!(
+                log::info!(
                     "xdg-open close executed - status: {:?}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
             Err(e) => {
-                tracing::warn!("Failed to close keyboard via xdg-open: {}", e);
+                log::warn!("Failed to close keyboard via xdg-open: {}", e);
             }
         }
 
@@ -468,7 +468,7 @@ pub fn hide_keyboard() -> Result<(), String> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        tracing::info!("hide_keyboard called on non-Linux platform (no-op)");
+        log::info!("hide_keyboard called on non-Linux platform (no-op)");
         Ok(())
     }
 }
