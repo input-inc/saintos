@@ -63,6 +63,8 @@ pub fn run() {
             commands::is_devtools_open,
             commands::quit_app,
             commands::log_frontend,
+            commands::show_keyboard,
+            commands::hide_keyboard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

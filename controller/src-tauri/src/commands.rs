@@ -230,3 +230,136 @@ pub fn log_frontend(level: String, message: String, context: Option<String>) {
         _ => tracing::trace!(target: "frontend", "[{}] {}", ctx, message),
     }
 }
+
+/// Show the Steam virtual keyboard (Steam Deck / SteamOS)
+#[tauri::command]
+pub fn show_keyboard() -> Result<(), String> {
+    tracing::info!("show_keyboard command invoked");
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        tracing::info!("Platform: Linux - attempting to open Steam keyboard");
+
+        // Try xdg-open with steam:// URL first (works in Gaming Mode)
+        tracing::info!("Trying: xdg-open steam://open/keyboard");
+        let result = Command::new("xdg-open")
+            .arg("steam://open/keyboard")
+            .output(); // Use output() instead of spawn() to capture result
+
+        match result {
+            Ok(output) => {
+                tracing::info!(
+                    "xdg-open executed - status: {:?}, stdout: {}, stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+
+                if output.status.success() {
+                    tracing::info!("Steam keyboard opened via xdg-open");
+                    return Ok(());
+                } else {
+                    tracing::warn!("xdg-open returned non-zero status");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to execute xdg-open: {}", e);
+            }
+        }
+
+        // Fallback: try qdbus if available (Desktop Mode with KDE)
+        tracing::info!("Trying fallback: qdbus org.kde.kwin /org/kde/osd showVirtualKeyboard");
+        let qdbus_result = Command::new("qdbus")
+            .args(["org.kde.kwin", "/org/kde/osd", "showVirtualKeyboard"])
+            .output();
+
+        match qdbus_result {
+            Ok(output) => {
+                tracing::info!(
+                    "qdbus executed - status: {:?}, stdout: {}, stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+
+                if output.status.success() {
+                    tracing::info!("Virtual keyboard opened via qdbus");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to execute qdbus: {}", e);
+            }
+        }
+
+        // Try alternative DBus path for Steam keyboard
+        tracing::info!("Trying: steam-runtime steam://open/keyboard");
+        let steam_result = Command::new("steam")
+            .arg("steam://open/keyboard")
+            .output();
+
+        match steam_result {
+            Ok(output) => {
+                tracing::info!(
+                    "steam command executed - status: {:?}, stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to execute steam command: {}", e);
+            }
+        }
+
+        tracing::error!("All keyboard open methods failed");
+        Err("Failed to open keyboard - all methods failed".to_string())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        tracing::info!("show_keyboard called on non-Linux platform (no-op)");
+        Ok(())
+    }
+}
+
+/// Hide the Steam virtual keyboard (Steam Deck / SteamOS)
+#[tauri::command]
+pub fn hide_keyboard() -> Result<(), String> {
+    tracing::info!("hide_keyboard command invoked");
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        // Try steam:// URL to close keyboard
+        tracing::info!("Trying: xdg-open steam://close/keyboard");
+        let result = Command::new("xdg-open")
+            .arg("steam://close/keyboard")
+            .output();
+
+        match result {
+            Ok(output) => {
+                tracing::info!(
+                    "xdg-open close executed - status: {:?}, stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to close keyboard via xdg-open: {}", e);
+            }
+        }
+
+        // Not a fatal error - keyboard may close on its own
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        tracing::info!("hide_keyboard called on non-Linux platform (no-op)");
+        Ok(())
+    }
+}
