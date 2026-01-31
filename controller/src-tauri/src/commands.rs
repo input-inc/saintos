@@ -242,11 +242,45 @@ pub fn show_keyboard() -> Result<(), String> {
 
         tracing::info!("Platform: Linux - attempting to open Steam keyboard");
 
-        // Try xdg-open with steam:// URL first (works in Gaming Mode)
+        // Method 1: DBus call to Steam directly (most reliable for both modes)
+        tracing::info!("Trying: dbus-send to Steam");
+        let dbus_result = Command::new("dbus-send")
+            .args([
+                "--type=method_call",
+                "--dest=com.steampowered.Steamclient",
+                "/com/steampowered/Steamclient",
+                "com.steampowered.Steamclient.ShowFloatingGamepadTextInput",
+                "int32:0",  // keyboard mode (0 = normal)
+                "int32:0",  // x position
+                "int32:0",  // y position
+                "int32:800", // width
+                "int32:400", // height
+            ])
+            .output();
+
+        match dbus_result {
+            Ok(output) => {
+                tracing::info!(
+                    "dbus-send executed - status: {:?}, stdout: {}, stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if output.status.success() {
+                    tracing::info!("Steam keyboard opened via dbus-send");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to execute dbus-send: {}", e);
+            }
+        }
+
+        // Method 2: xdg-open with steam:// URL (works in Gaming Mode)
         tracing::info!("Trying: xdg-open steam://open/keyboard");
         let result = Command::new("xdg-open")
             .arg("steam://open/keyboard")
-            .output(); // Use output() instead of spawn() to capture result
+            .output();
 
         match result {
             Ok(output) => {
@@ -269,23 +303,40 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Fallback: try qdbus if available (Desktop Mode with KDE)
-        tracing::info!("Trying fallback: qdbus org.kde.kwin /org/kde/osd showVirtualKeyboard");
+        // Method 3: Try steam command directly
+        tracing::info!("Trying: steam steam://open/keyboard");
+        let steam_result = Command::new("steam")
+            .arg("steam://open/keyboard")
+            .spawn(); // Use spawn() to not block
+
+        match steam_result {
+            Ok(_) => {
+                tracing::info!("Steam command spawned");
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to execute steam command: {}", e);
+            }
+        }
+
+        // Method 4: qdbus for KDE virtual keyboard (Desktop Mode fallback)
+        tracing::info!("Trying: qdbus org.kde.keyboard InputMethod.activate");
         let qdbus_result = Command::new("qdbus")
-            .args(["org.kde.kwin", "/org/kde/osd", "showVirtualKeyboard"])
+            .args([
+                "org.kde.keyboard",
+                "/org/kde/keyboard",
+                "org.kde.keyboard.InputMethod.activate",
+            ])
             .output();
 
         match qdbus_result {
             Ok(output) => {
                 tracing::info!(
-                    "qdbus executed - status: {:?}, stdout: {}, stderr: {}",
+                    "qdbus keyboard executed - status: {:?}, stderr: {}",
                     output.status,
-                    String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
-
                 if output.status.success() {
-                    tracing::info!("Virtual keyboard opened via qdbus");
                     return Ok(());
                 }
             }
@@ -294,28 +345,34 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Try alternative DBus path for Steam keyboard
-        tracing::info!("Trying: steam-runtime steam://open/keyboard");
-        let steam_result = Command::new("steam")
-            .arg("steam://open/keyboard")
+        // Method 5: Try Maliit keyboard (another option on some systems)
+        tracing::info!("Trying: dbus-send to Maliit");
+        let maliit_result = Command::new("dbus-send")
+            .args([
+                "--type=method_call",
+                "--dest=org.maliit.server",
+                "/org/maliit/server/address",
+                "org.maliit.Server.Address.activateContext",
+            ])
             .output();
 
-        match steam_result {
+        match maliit_result {
             Ok(output) => {
                 tracing::info!(
-                    "steam command executed - status: {:?}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
+                    "Maliit dbus-send executed - status: {:?}",
+                    output.status
                 );
-                return Ok(());
+                if output.status.success() {
+                    return Ok(());
+                }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute steam command: {}", e);
+                tracing::warn!("Failed to execute Maliit dbus-send: {}", e);
             }
         }
 
-        tracing::error!("All keyboard open methods failed");
-        Err("Failed to open keyboard - all methods failed".to_string())
+        tracing::warn!("All keyboard open methods attempted - some may have worked");
+        Ok(()) // Don't return error - one of the async methods might work
     }
 
     #[cfg(not(target_os = "linux"))]

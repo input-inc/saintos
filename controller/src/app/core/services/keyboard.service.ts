@@ -11,8 +11,6 @@ import { invoke } from '@tauri-apps/api/core';
   providedIn: 'root'
 })
 export class KeyboardService {
-  private keyboardVisible = false;
-
   constructor() {
     console.log('[KeyboardService] Initializing keyboard service');
     // Set up global focus/blur listeners for input fields
@@ -21,20 +19,15 @@ export class KeyboardService {
 
   /**
    * Show the virtual keyboard.
+   * Always invokes the command - the keyboard may have been dismissed by the user.
    */
   async showKeyboard(): Promise<void> {
-    console.log('[KeyboardService] showKeyboard called, keyboardVisible:', this.keyboardVisible);
-
-    if (this.keyboardVisible) {
-      console.log('[KeyboardService] Keyboard already visible, skipping');
-      return;
-    }
+    console.log('[KeyboardService] showKeyboard called');
 
     try {
       console.log('[KeyboardService] Invoking show_keyboard command...');
       const result = await invoke('show_keyboard');
       console.log('[KeyboardService] show_keyboard result:', result);
-      this.keyboardVisible = true;
     } catch (err) {
       console.error('[KeyboardService] Failed to show keyboard:', err);
     }
@@ -44,18 +37,12 @@ export class KeyboardService {
    * Hide the virtual keyboard.
    */
   async hideKeyboard(): Promise<void> {
-    console.log('[KeyboardService] hideKeyboard called, keyboardVisible:', this.keyboardVisible);
-
-    if (!this.keyboardVisible) {
-      console.log('[KeyboardService] Keyboard not visible, skipping');
-      return;
-    }
+    console.log('[KeyboardService] hideKeyboard called');
 
     try {
       console.log('[KeyboardService] Invoking hide_keyboard command...');
       const result = await invoke('hide_keyboard');
       console.log('[KeyboardService] hide_keyboard result:', result);
-      this.keyboardVisible = false;
     } catch (err) {
       console.error('[KeyboardService] Failed to hide keyboard:', err);
     }
