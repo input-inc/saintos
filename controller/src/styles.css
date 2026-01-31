@@ -211,4 +211,12 @@
     background: #3b82f6;
     color: #fff;
   }
+
+  /* Ensure touch events work on keyboard buttons */
+  .simple-keyboard.hg-theme-default .hg-button {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: rgba(59, 130, 246, 0.3);
+    user-select: none;
+    -webkit-user-select: none;
+  }
 }

@@ -110,6 +110,7 @@ type KeyboardLayout = 'default' | 'shift' | 'symbols' | 'symbols-shift';
 
     .keyboard-wrapper {
       padding: 0.75rem;
+      touch-action: manipulation;
     }
 
     .keyboard-toolbar {
@@ -206,62 +207,63 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
   private initKeyboard(): void {
     if (this.keyboard || !this.keyboardContainer?.nativeElement) return;
 
-    // Run keyboard creation outside Angular zone for performance,
-    // but wrap callbacks to run inside zone for change detection
-    this.ngZone.runOutsideAngular(() => {
-      this.keyboard = new Keyboard(this.keyboardContainer.nativeElement, {
-        onChange: (input) => {
-          this.ngZone.run(() => this.onInputChange(input));
-        },
-        onKeyPress: (button) => {
-          this.ngZone.run(() => this.onKeyPress(button));
-        },
-        layout: {
-          default: [
-            '1 2 3 4 5 6 7 8 9 0',
-            'q w e r t y u i o p',
-            'a s d f g h j k l',
-            '{shift} z x c v b n m {backspace}',
-            '{symbols} {space} . {enter}'
-          ],
-          shift: [
-            '1 2 3 4 5 6 7 8 9 0',
-            'Q W E R T Y U I O P',
-            'A S D F G H J K L',
-            '{shift} Z X C V B N M {backspace}',
-            '{symbols} {space} . {enter}'
-          ],
-          symbols: [
-            '! @ # $ % ^ & * ( )',
-            '- _ = + [ ] { } |',
-            '; : \' " , . < > ?',
-            '{shift} / \\ ~ ` {backspace}',
-            '{abc} {space} . {enter}'
-          ],
-          'symbols-shift': [
-            '1 2 3 4 5 6 7 8 9 0',
-            '€ £ ¥ © ® ™ § ¶ •',
-            '° ± × ÷ ≠ ≈ ∞ µ',
-            '{shift} … – — « » {backspace}',
-            '{abc} {space} . {enter}'
-          ]
-        },
-        display: {
-          '{backspace}': '⌫',
-          '{enter}': '↵',
-          '{shift}': '⇧',
-          '{space}': ' ',
-          '{symbols}': '?123',
-          '{abc}': 'ABC'
-        },
-        theme: 'simple-keyboard hg-theme-default',
-        physicalKeyboardHighlight: true,
-        physicalKeyboardHighlightPress: true,
-      });
+    console.log('[VirtualKeyboard] Initializing keyboard...');
 
-      // Set initial value
-      this.keyboard.setInput(this.inputValue());
+    this.keyboard = new Keyboard(this.keyboardContainer.nativeElement, {
+      onChange: (input) => {
+        console.log('[VirtualKeyboard] onChange callback:', input);
+        this.ngZone.run(() => this.onInputChange(input));
+      },
+      onKeyPress: (button) => {
+        console.log('[VirtualKeyboard] onKeyPress callback:', button);
+        this.ngZone.run(() => this.onKeyPress(button));
+      },
+      layout: {
+        default: [
+          '1 2 3 4 5 6 7 8 9 0',
+          'q w e r t y u i o p',
+          'a s d f g h j k l',
+          '{shift} z x c v b n m {backspace}',
+          '{symbols} {space} . {enter}'
+        ],
+        shift: [
+          '1 2 3 4 5 6 7 8 9 0',
+          'Q W E R T Y U I O P',
+          'A S D F G H J K L',
+          '{shift} Z X C V B N M {backspace}',
+          '{symbols} {space} . {enter}'
+        ],
+        symbols: [
+          '! @ # $ % ^ & * ( )',
+          '- _ = + [ ] { } |',
+          '; : \' " , . < > ?',
+          '{shift} / \\ ~ ` {backspace}',
+          '{abc} {space} . {enter}'
+        ],
+        'symbols-shift': [
+          '1 2 3 4 5 6 7 8 9 0',
+          '€ £ ¥ © ® ™ § ¶ •',
+          '° ± × ÷ ≠ ≈ ∞ µ',
+          '{shift} … – — « » {backspace}',
+          '{abc} {space} . {enter}'
+        ]
+      },
+      display: {
+        '{backspace}': '⌫',
+        '{enter}': '↵',
+        '{shift}': '⇧',
+        '{space}': ' ',
+        '{symbols}': '?123',
+        '{abc}': 'ABC'
+      },
+      theme: 'simple-keyboard hg-theme-default',
+      useButtonTag: true,  // Use <button> elements for better touch support
+      disableButtonHold: true,  // Disable hold behavior for simpler touch handling
     });
+
+    // Set initial value
+    this.keyboard.setInput(this.inputValue());
+    console.log('[VirtualKeyboard] Keyboard initialized');
   }
 
   private destroyKeyboard(): void {
