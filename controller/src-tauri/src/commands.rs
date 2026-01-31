@@ -234,7 +234,7 @@ pub fn log_frontend(level: String, message: String, context: Option<String>) {
 /// Show the virtual keyboard (Steam Deck / SteamOS)
 /// Works in both Gaming Mode and Desktop Mode by invoking Steam directly
 #[tauri::command]
-pub fn show_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
+pub fn show_keyboard() -> Result<(), String> {
     log::info!("show_keyboard command invoked");
 
     #[cfg(target_os = "linux")]
@@ -243,14 +243,7 @@ pub fn show_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
 
         log::info!("Platform: Linux - opening Steam keyboard");
 
-        // First, exit fullscreen so the keyboard can appear on top
-        log::info!("Exiting fullscreen to allow keyboard overlay");
-        let _ = window.set_fullscreen(false);
-
-        // Small delay to let the window state change
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Open the keyboard
+        // Open the keyboard via steam:// URL - works in both modes
         log::info!("Trying: steam steam://open/keyboard");
         let result = Command::new("steam")
             .arg("steam://open/keyboard")
@@ -266,7 +259,7 @@ pub fn show_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
             }
         }
 
-        // Fallback: DBus call to Steam (older method)
+        // Fallback: DBus call to Steam (works in Gaming Mode)
         log::info!("Fallback: dbus-send to Steam");
         let dbus_result = Command::new("dbus-send")
             .args([
@@ -305,7 +298,6 @@ pub fn show_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = &window; // Silence unused warning
         log::info!("show_keyboard called on non-Linux platform (no-op)");
         Ok(())
     }
@@ -314,14 +306,14 @@ pub fn show_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
 /// Hide the virtual keyboard (Steam Deck / SteamOS)
 /// Works in both Gaming Mode and Desktop Mode by invoking Steam directly
 #[tauri::command]
-pub fn hide_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
+pub fn hide_keyboard() -> Result<(), String> {
     log::info!("hide_keyboard command invoked");
 
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
 
-        // Primary method: Call steam with steam://close/keyboard URL
+        // Close the keyboard via steam:// URL
         log::info!("Trying: steam steam://close/keyboard");
         let result = Command::new("steam")
             .arg("steam://close/keyboard")
@@ -336,19 +328,11 @@ pub fn hide_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
             }
         }
 
-        // Small delay before restoring fullscreen
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Restore fullscreen
-        log::info!("Restoring fullscreen");
-        let _ = window.set_fullscreen(true);
-
         Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = &window; // Silence unused warning
         log::info!("hide_keyboard called on non-Linux platform (no-op)");
         Ok(())
     }
