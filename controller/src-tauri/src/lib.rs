@@ -5,7 +5,7 @@ mod protocol;
 
 use commands::AppState;
 use tauri::Manager;
-use tauri_plugin_log::{Target, TargetKind};
+use tauri_plugin_log::{Target, TargetKind, RotationStrategy};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -20,6 +20,7 @@ pub fn run() {
                     Target::new(TargetKind::Webview),  // Forward Rust logs to browser console
                 ])
                 .level(log::LevelFilter::Debug)
+                .rotation_strategy(RotationStrategy::KeepAll)  // Don't truncate, keep appending
                 .build(),
         )
         .setup(|app| {
