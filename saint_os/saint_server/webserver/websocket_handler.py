@@ -37,6 +37,9 @@ class WebSocketClient:
     subscriptions: Set[str] = field(default_factory=set)
     connected_at: float = field(default_factory=time.time)
     authenticated: bool = False  # True if auth succeeded or auth not required
+    ip_address: str = ""  # Client's IP address
+    user_agent: str = ""  # Client's User-Agent header
+    client_name: str = ""  # Optional client-provided name
 
 
 class WebSocketHandler:
@@ -170,17 +173,31 @@ class WebSocketHandler:
 
         client_id = str(uuid.uuid4())[:8]
         auth_required = self._auth_password is not None
+
+        # Get client IP address (check X-Forwarded-For for reverse proxy setups)
+        forwarded_for = request.headers.get('X-Forwarded-For')
+        if forwarded_for:
+            ip_address = forwarded_for.split(',')[0].strip()
+        else:
+            peername = request.transport.get_extra_info('peername')
+            ip_address = peername[0] if peername else 'unknown'
+
+        # Get user agent
+        user_agent = request.headers.get('User-Agent', 'unknown')
+
         client = WebSocketClient(
             id=client_id,
             ws=ws,
-            authenticated=not auth_required  # Auto-auth if no password set
+            authenticated=not auth_required,  # Auto-auth if no password set
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
 
         async with self._lock:
             self.clients[client_id] = client
             self.state_manager.set_client_count(len(self.clients))
 
-        self.log('info', f'WebSocket client connected: {client_id}')
+        self.log('info', f'WebSocket client connected: {client_id} from {ip_address}')
 
         # Send connected confirmation with auth requirement
         await self._send_to_client(client, {
@@ -469,6 +486,48 @@ class WebSocketHandler:
         elif action == 'list_unadopted':
             nodes = self.state_manager.get_unadopted_nodes()
             return {"status": "ok", "data": {"nodes": nodes}}
+
+        elif action == 'list_clients':
+            # Return list of connected WebSocket clients
+            clients_list = []
+            async with self._lock:
+                for c in self.clients.values():
+                    clients_list.append({
+                        "id": c.id,
+                        "ip_address": c.ip_address,
+                        "user_agent": c.user_agent,
+                        "client_name": c.client_name,
+                        "connected_at": c.connected_at,
+                        "authenticated": c.authenticated,
+                        "is_self": c.id == client.id,
+                    })
+            return {"status": "ok", "data": {"clients": clients_list}}
+
+        elif action == 'disconnect_client':
+            target_client_id = params.get('client_id')
+            if not target_client_id:
+                return {"status": "error", "message": "Missing client_id"}
+
+            # Don't allow disconnecting yourself
+            if target_client_id == client.id:
+                return {"status": "error", "message": "Cannot disconnect yourself"}
+
+            async with self._lock:
+                target_client = self.clients.get(target_client_id)
+                if not target_client:
+                    return {"status": "error", "message": "Client not found"}
+
+                # Send disconnect message to target client
+                await self._send_to_client(target_client, {
+                    "type": "disconnected",
+                    "reason": "Disconnected by administrator",
+                })
+                # Close the connection
+                await target_client.ws.close()
+
+            self.log('info', f'Client {target_client_id} disconnected by {client.id}')
+            await self.broadcast_activity(f'Client {target_client_id} disconnected by administrator', 'info')
+            return {"status": "ok", "message": f"Client {target_client_id} disconnected"}
 
         elif action == 'adopt_node':
             node_id = params.get('node_id')

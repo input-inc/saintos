@@ -9,6 +9,7 @@ class SaintApp {
         this.currentPage = 'dashboard';
         this.systemStatus = null;
         this.nodes = { adopted: [], unadopted: [] };
+        this.connectedClients = [];
         this.activityLog = [];
         this.currentNodeId = null;  // Currently viewed node
         this.currentNodeInfo = null;
@@ -216,6 +217,11 @@ class SaintApp {
         document.getElementById('btn-view-logs')?.addEventListener('click', () => {
             this.showPage('logs');
             window.location.hash = 'logs';
+        });
+
+        // Refresh WebSocket clients
+        document.getElementById('btn-refresh-clients')?.addEventListener('click', () => {
+            this.loadWebSocketClients();
         });
 
         // Log filters
@@ -1095,7 +1101,122 @@ class SaintApp {
         const ws = window.saintWS;
         if (ws && ws.connected) {
             await ws.subscribe(['livelink']);
+            // Load WebSocket clients
+            await this.loadWebSocketClients();
         }
+    }
+
+    /**
+     * Load and display connected WebSocket clients.
+     */
+    async loadWebSocketClients() {
+        const ws = window.saintWS;
+        if (!ws || !ws.connected) return;
+
+        const container = document.getElementById('ws-clients');
+        if (!container) return;
+
+        try {
+            const result = await ws.management('list_clients');
+            const clients = result?.clients || [];
+            this.connectedClients = clients;
+            this.renderWebSocketClients();
+        } catch (err) {
+            console.error('Failed to load WebSocket clients:', err);
+            container.innerHTML = `<p class="text-red-400 text-sm">Failed to load clients</p>`;
+        }
+    }
+
+    /**
+     * Render the WebSocket clients list.
+     */
+    renderWebSocketClients() {
+        const container = document.getElementById('ws-clients');
+        if (!container) return;
+
+        const clients = this.connectedClients;
+        if (!clients || clients.length === 0) {
+            container.innerHTML = `<p class="text-slate-400 text-sm">No clients connected</p>`;
+            return;
+        }
+
+        const now = Date.now() / 1000;
+        let html = '';
+        for (const client of clients) {
+            const connectedDuration = now - client.connected_at;
+            const durationStr = this.formatDuration(connectedDuration);
+
+            // Determine client type from user agent
+            let clientType = 'Unknown';
+            let clientIcon = 'devices';
+            if (client.user_agent.includes('Tauri') || client.user_agent.includes('saint-controller')) {
+                clientType = 'Controller';
+                clientIcon = 'sports_esports';
+            } else if (client.user_agent.includes('Mozilla') || client.user_agent.includes('Chrome') || client.user_agent.includes('Safari')) {
+                clientType = 'Browser';
+                clientIcon = 'language';
+            }
+
+            const selfBadge = client.is_self
+                ? '<span class="px-1.5 py-0.5 text-xs bg-cyan-500/20 text-cyan-400 rounded">you</span>'
+                : '';
+
+            const disconnectBtn = client.is_self
+                ? ''
+                : `<button onclick="app.disconnectClient('${client.id}')"
+                          class="p-1 rounded hover:bg-red-500/20 transition-colors" title="Disconnect">
+                      <span class="material-icons text-sm text-red-400">close</span>
+                   </button>`;
+
+            html += `
+                <div class="flex items-center justify-between p-2 bg-slate-800/50 rounded-lg">
+                    <div class="flex items-center gap-3 min-w-0">
+                        <span class="material-icons text-slate-400">${clientIcon}</span>
+                        <div class="min-w-0">
+                            <div class="flex items-center gap-2">
+                                <span class="text-sm text-white font-mono">${client.ip_address}</span>
+                                ${selfBadge}
+                            </div>
+                            <div class="text-xs text-slate-500 truncate">
+                                ${clientType} · ${durationStr}
+                            </div>
+                        </div>
+                    </div>
+                    ${disconnectBtn}
+                </div>
+            `;
+        }
+
+        container.innerHTML = html;
+    }
+
+    /**
+     * Disconnect a WebSocket client.
+     */
+    async disconnectClient(clientId) {
+        const ws = window.saintWS;
+        if (!ws || !ws.connected) return;
+
+        if (!confirm('Disconnect this client?')) return;
+
+        try {
+            await ws.management('disconnect_client', { client_id: clientId });
+            // Refresh the list
+            await this.loadWebSocketClients();
+        } catch (err) {
+            console.error('Failed to disconnect client:', err);
+            alert('Failed to disconnect client: ' + err.message);
+        }
+    }
+
+    /**
+     * Format duration in seconds to human readable string.
+     */
+    formatDuration(seconds) {
+        if (seconds < 60) return `${Math.floor(seconds)}s`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+        if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+        return `${Math.floor(seconds / 86400)}d`;
     }
 
     /**
