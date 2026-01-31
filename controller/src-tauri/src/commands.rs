@@ -231,7 +231,8 @@ pub fn log_frontend(level: String, message: String, context: Option<String>) {
     }
 }
 
-/// Show the Steam virtual keyboard (Steam Deck / SteamOS)
+/// Show the virtual keyboard (Steam Deck / SteamOS)
+/// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (KDE virtual keyboard)
 #[tauri::command]
 pub fn show_keyboard() -> Result<(), String> {
     tracing::info!("show_keyboard command invoked");
@@ -240,9 +241,43 @@ pub fn show_keyboard() -> Result<(), String> {
     {
         use std::process::Command;
 
-        tracing::info!("Platform: Linux - attempting to open Steam keyboard");
+        tracing::info!("Platform: Linux - attempting to open virtual keyboard");
 
-        // Method 1: DBus call to Steam directly (most reliable for both modes)
+        // Method 1: KWin virtual keyboard via busctl (Desktop Mode - KDE Plasma)
+        // This is the most reliable method for Steam Deck Desktop Mode
+        tracing::info!("Trying: busctl call to KWin InputMethod");
+        let kwin_result = Command::new("busctl")
+            .args([
+                "--user",
+                "call",
+                "org.kde.KWin",
+                "/kwin",
+                "org.kde.kwin.VirtualKeyboard",
+                "setEnabled",
+                "b",
+                "true",
+            ])
+            .output();
+
+        match kwin_result {
+            Ok(output) => {
+                tracing::info!(
+                    "busctl KWin executed - status: {:?}, stdout: {}, stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if output.status.success() {
+                    tracing::info!("KWin virtual keyboard enabled");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to execute busctl for KWin: {}", e);
+            }
+        }
+
+        // Method 2: DBus call to Steam directly (Gaming Mode)
         tracing::info!("Trying: dbus-send to Steam");
         let dbus_result = Command::new("dbus-send")
             .args([
@@ -261,7 +296,7 @@ pub fn show_keyboard() -> Result<(), String> {
         match dbus_result {
             Ok(output) => {
                 tracing::info!(
-                    "dbus-send executed - status: {:?}, stdout: {}, stderr: {}",
+                    "dbus-send Steam executed - status: {:?}, stdout: {}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
@@ -272,11 +307,11 @@ pub fn show_keyboard() -> Result<(), String> {
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute dbus-send: {}", e);
+                tracing::warn!("Failed to execute dbus-send to Steam: {}", e);
             }
         }
 
-        // Method 2: xdg-open with steam:// URL (works in Gaming Mode)
+        // Method 3: xdg-open with steam:// URL (Gaming Mode fallback)
         tracing::info!("Trying: xdg-open steam://open/keyboard");
         let result = Command::new("xdg-open")
             .arg("steam://open/keyboard")
@@ -303,49 +338,35 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Method 3: Try steam command directly
-        tracing::info!("Trying: steam steam://open/keyboard");
-        let steam_result = Command::new("steam")
-            .arg("steam://open/keyboard")
-            .spawn(); // Use spawn() to not block
-
-        match steam_result {
-            Ok(_) => {
-                tracing::info!("Steam command spawned");
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::warn!("Failed to execute steam command: {}", e);
-            }
-        }
-
-        // Method 4: qdbus for KDE virtual keyboard (Desktop Mode fallback)
-        tracing::info!("Trying: qdbus org.kde.keyboard InputMethod.activate");
+        // Method 4: qdbus for KWin virtual keyboard (Desktop Mode alternative)
+        tracing::info!("Trying: qdbus org.kde.KWin VirtualKeyboard.setEnabled");
         let qdbus_result = Command::new("qdbus")
             .args([
-                "org.kde.keyboard",
-                "/org/kde/keyboard",
-                "org.kde.keyboard.InputMethod.activate",
+                "org.kde.KWin",
+                "/kwin",
+                "org.kde.kwin.VirtualKeyboard.setEnabled",
+                "true",
             ])
             .output();
 
         match qdbus_result {
             Ok(output) => {
                 tracing::info!(
-                    "qdbus keyboard executed - status: {:?}, stderr: {}",
+                    "qdbus KWin keyboard executed - status: {:?}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if output.status.success() {
+                    tracing::info!("KWin virtual keyboard enabled via qdbus");
                     return Ok(());
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to execute qdbus: {}", e);
+                tracing::warn!("Failed to execute qdbus for KWin: {}", e);
             }
         }
 
-        // Method 5: Try Maliit keyboard (another option on some systems)
+        // Method 5: Try Maliit keyboard (fallback for some systems)
         tracing::info!("Trying: dbus-send to Maliit");
         let maliit_result = Command::new("dbus-send")
             .args([
@@ -371,7 +392,7 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        tracing::warn!("All keyboard open methods attempted - some may have worked");
+        tracing::warn!("All keyboard open methods attempted - none confirmed successful");
         Ok(()) // Don't return error - one of the async methods might work
     }
 
@@ -382,7 +403,8 @@ pub fn show_keyboard() -> Result<(), String> {
     }
 }
 
-/// Hide the Steam virtual keyboard (Steam Deck / SteamOS)
+/// Hide the virtual keyboard (Steam Deck / SteamOS)
+/// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (KDE virtual keyboard)
 #[tauri::command]
 pub fn hide_keyboard() -> Result<(), String> {
     tracing::info!("hide_keyboard command invoked");
@@ -391,7 +413,37 @@ pub fn hide_keyboard() -> Result<(), String> {
     {
         use std::process::Command;
 
-        // Try steam:// URL to close keyboard
+        // Method 1: KWin virtual keyboard via busctl (Desktop Mode)
+        tracing::info!("Trying: busctl call to KWin to disable keyboard");
+        let kwin_result = Command::new("busctl")
+            .args([
+                "--user",
+                "call",
+                "org.kde.KWin",
+                "/kwin",
+                "org.kde.kwin.VirtualKeyboard",
+                "setEnabled",
+                "b",
+                "false",
+            ])
+            .output();
+
+        match kwin_result {
+            Ok(output) => {
+                tracing::info!(
+                    "busctl KWin disable executed - status: {:?}",
+                    output.status
+                );
+                if output.status.success() {
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to execute busctl for KWin: {}", e);
+            }
+        }
+
+        // Method 2: Try steam:// URL to close keyboard (Gaming Mode)
         tracing::info!("Trying: xdg-open steam://close/keyboard");
         let result = Command::new("xdg-open")
             .arg("steam://close/keyboard")
