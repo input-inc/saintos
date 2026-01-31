@@ -231,8 +231,25 @@ pub fn log_frontend(level: String, message: String, context: Option<String>) {
     }
 }
 
+/// Check if we're running in SteamOS Gaming Mode (gamescope) or Desktop Mode (KDE)
+#[cfg(target_os = "linux")]
+fn is_gaming_mode() -> bool {
+    // Check for gamescope (Gaming Mode compositor)
+    if std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok() {
+        return true;
+    }
+    // Check XDG_CURRENT_DESKTOP - Gaming Mode doesn't set this, Desktop Mode sets it to KDE
+    if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+        if desktop.contains("KDE") || desktop.contains("plasma") || desktop.contains("GNOME") {
+            return false;
+        }
+    }
+    // Default to Gaming Mode if we can't determine
+    true
+}
+
 /// Show the virtual keyboard (Steam Deck / SteamOS)
-/// Works in both Gaming Mode and Desktop Mode by invoking Steam directly
+/// Uses Steam's keyboard in Gaming Mode, CoreKeyboard in Desktop Mode
 #[tauri::command]
 pub fn show_keyboard() -> Result<(), String> {
     log::info!("show_keyboard command invoked");
@@ -241,73 +258,87 @@ pub fn show_keyboard() -> Result<(), String> {
     {
         use std::process::Command;
 
-        log::info!("Platform: Linux - opening Steam keyboard");
+        let gaming_mode = is_gaming_mode();
+        log::info!("Detected mode: {}", if gaming_mode { "Gaming Mode" } else { "Desktop Mode" });
 
-        // Open the keyboard via steam:// URL - run through shell for proper environment
-        log::info!("Trying: steam steam://open/keyboard (via shell)");
-        let result = Command::new("sh")
-            .args(["-c", "steam steam://open/keyboard"])
-            .spawn();
+        if gaming_mode {
+            // Gaming Mode: Use Steam's keyboard via DBus
+            log::info!("Gaming Mode: Using Steam keyboard via DBus");
+            let dbus_result = Command::new("dbus-send")
+                .args([
+                    "--type=method_call",
+                    "--dest=com.steampowered.Steamclient",
+                    "/com/steampowered/Steamclient",
+                    "com.steampowered.Steamclient.ShowFloatingGamepadTextInput",
+                    "int32:0",  // keyboard mode (0 = normal)
+                    "int32:0",  // x position
+                    "int32:0",  // y position
+                    "int32:800", // width
+                    "int32:400", // height
+                ])
+                .output();
 
-        match result {
-            Ok(_) => {
-                log::info!("Steam keyboard command sent via shell");
-                // Don't return yet - this may not work in Desktop Mode
-            }
-            Err(e) => {
-                log::warn!("Failed to execute steam command via shell: {}", e);
-            }
-        }
-
-        // Also try xdg-open as fallback (might work differently)
-        log::info!("Also trying: xdg-open steam://open/keyboard");
-        let xdg_result = Command::new("xdg-open")
-            .arg("steam://open/keyboard")
-            .spawn();
-
-        match xdg_result {
-            Ok(_) => {
-                log::info!("xdg-open keyboard command sent");
-            }
-            Err(e) => {
-                log::warn!("Failed to execute xdg-open: {}", e);
-            }
-        }
-
-        // Fallback: DBus call to Steam (works in Gaming Mode)
-        log::info!("Fallback: dbus-send to Steam");
-        let dbus_result = Command::new("dbus-send")
-            .args([
-                "--type=method_call",
-                "--dest=com.steampowered.Steamclient",
-                "/com/steampowered/Steamclient",
-                "com.steampowered.Steamclient.ShowFloatingGamepadTextInput",
-                "int32:0",  // keyboard mode (0 = normal)
-                "int32:0",  // x position
-                "int32:0",  // y position
-                "int32:800", // width
-                "int32:400", // height
-            ])
-            .output();
-
-        match dbus_result {
-            Ok(output) => {
-                log::info!(
-                    "dbus-send Steam executed - status: {:?}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                if output.status.success() {
-                    log::info!("Steam keyboard opened via dbus-send");
-                    return Ok(());
+            match dbus_result {
+                Ok(output) => {
+                    log::info!(
+                        "Steam keyboard DBus call - status: {:?}",
+                        output.status
+                    );
+                    if output.status.success() {
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to call Steam keyboard: {}", e);
                 }
             }
-            Err(e) => {
-                log::warn!("Failed to execute dbus-send to Steam: {}", e);
+
+            // Fallback: steam:// URL
+            log::info!("Fallback: steam steam://open/keyboard");
+            let _ = Command::new("steam")
+                .arg("steam://open/keyboard")
+                .spawn();
+        } else {
+            // Desktop Mode: Use CoreKeyboard (flatpak) as primary option
+            log::info!("Desktop Mode: Trying CoreKeyboard");
+
+            // Try CoreKeyboard (flatpak)
+            let corekeyboard_result = Command::new("flatpak")
+                .args(["run", "org.nickvision.keyboard"])
+                .spawn();
+
+            match corekeyboard_result {
+                Ok(_) => {
+                    log::info!("CoreKeyboard launched successfully");
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::warn!("CoreKeyboard not available: {}", e);
+                }
             }
+
+            // Fallback: Try maliit-keyboard
+            log::info!("Fallback: Trying maliit-keyboard");
+            let maliit_result = Command::new("maliit-keyboard")
+                .spawn();
+
+            match maliit_result {
+                Ok(_) => {
+                    log::info!("maliit-keyboard launched");
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::warn!("maliit-keyboard not available: {}", e);
+                }
+            }
+
+            // Last resort: Try steam command anyway
+            log::info!("Last resort: steam steam://open/keyboard");
+            let _ = Command::new("steam")
+                .arg("steam://open/keyboard")
+                .spawn();
         }
 
-        log::warn!("All keyboard open methods failed");
         Ok(())
     }
 
@@ -319,7 +350,7 @@ pub fn show_keyboard() -> Result<(), String> {
 }
 
 /// Hide the virtual keyboard (Steam Deck / SteamOS)
-/// Works in both Gaming Mode and Desktop Mode by invoking Steam directly
+/// Uses appropriate method based on Gaming Mode vs Desktop Mode
 #[tauri::command]
 pub fn hide_keyboard() -> Result<(), String> {
     log::info!("hide_keyboard command invoked");
@@ -328,19 +359,24 @@ pub fn hide_keyboard() -> Result<(), String> {
     {
         use std::process::Command;
 
-        // Close the keyboard via steam:// URL
-        log::info!("Trying: steam steam://close/keyboard");
-        let result = Command::new("steam")
-            .arg("steam://close/keyboard")
-            .spawn();
+        let gaming_mode = is_gaming_mode();
+        log::info!("Detected mode for hide: {}", if gaming_mode { "Gaming Mode" } else { "Desktop Mode" });
 
-        match result {
-            Ok(_) => {
-                log::info!("Steam keyboard close command sent successfully");
-            }
-            Err(e) => {
-                log::warn!("Failed to execute steam close command: {}", e);
-            }
+        if gaming_mode {
+            // Gaming Mode: Close Steam keyboard
+            log::info!("Gaming Mode: Closing Steam keyboard");
+            let _ = Command::new("steam")
+                .arg("steam://close/keyboard")
+                .spawn();
+        } else {
+            // Desktop Mode: Kill CoreKeyboard or maliit-keyboard processes
+            log::info!("Desktop Mode: Closing keyboard processes");
+            let _ = Command::new("pkill")
+                .args(["-f", "org.nickvision.keyboard"])
+                .output();
+            let _ = Command::new("pkill")
+                .args(["-f", "maliit-keyboard"])
+                .output();
         }
 
         Ok(())
