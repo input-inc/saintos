@@ -243,15 +243,15 @@ pub fn show_keyboard() -> Result<(), String> {
 
         log::info!("Platform: Linux - attempting to open virtual keyboard");
 
-        // Method 1: KWin virtual keyboard via busctl (Desktop Mode - KDE Plasma)
-        // This is the most reliable method for Steam Deck Desktop Mode
-        log::info!("Trying: busctl call to KWin InputMethod");
+        // Method 1: KWin virtual keyboard via busctl (Desktop Mode - KDE Plasma 6)
+        // SteamOS 3.5+ uses Plasma 6 with a different DBus path
+        log::info!("Trying: busctl call to KWin VirtualKeyboard (Plasma 6 path)");
         let kwin_result = Command::new("busctl")
             .args([
                 "--user",
                 "call",
                 "org.kde.KWin",
-                "/kwin",
+                "/org/kde/KWin/VirtualKeyboard",
                 "org.kde.kwin.VirtualKeyboard",
                 "setEnabled",
                 "b",
@@ -262,18 +262,51 @@ pub fn show_keyboard() -> Result<(), String> {
         match kwin_result {
             Ok(output) => {
                 log::info!(
-                    "busctl KWin executed - status: {:?}, stdout: {}, stderr: {}",
+                    "busctl KWin (Plasma 6) executed - status: {:?}, stdout: {}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if output.status.success() {
-                    log::info!("KWin virtual keyboard enabled");
+                    log::info!("KWin virtual keyboard enabled (Plasma 6)");
                     return Ok(());
                 }
             }
             Err(e) => {
-                log::warn!("Failed to execute busctl for KWin: {}", e);
+                log::warn!("Failed to execute busctl for KWin (Plasma 6): {}", e);
+            }
+        }
+
+        // Method 2: KWin virtual keyboard via busctl (older Plasma 5 path)
+        log::info!("Trying: busctl call to KWin VirtualKeyboard (Plasma 5 path)");
+        let kwin_p5_result = Command::new("busctl")
+            .args([
+                "--user",
+                "call",
+                "org.kde.KWin",
+                "/VirtualKeyboard",
+                "org.kde.kwin.VirtualKeyboard",
+                "setEnabled",
+                "b",
+                "true",
+            ])
+            .output();
+
+        match kwin_p5_result {
+            Ok(output) => {
+                log::info!(
+                    "busctl KWin (Plasma 5) executed - status: {:?}, stdout: {}, stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if output.status.success() {
+                    log::info!("KWin virtual keyboard enabled (Plasma 5)");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to execute busctl for KWin (Plasma 5): {}", e);
             }
         }
 
@@ -338,12 +371,12 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Method 4: qdbus for KWin virtual keyboard (Desktop Mode alternative)
-        log::info!("Trying: qdbus org.kde.KWin VirtualKeyboard.setEnabled");
+        // Method 4: qdbus for KWin virtual keyboard (Desktop Mode alternative - Plasma 6)
+        log::info!("Trying: qdbus org.kde.KWin VirtualKeyboard.setEnabled (Plasma 6)");
         let qdbus_result = Command::new("qdbus")
             .args([
                 "org.kde.KWin",
-                "/kwin",
+                "/org/kde/KWin/VirtualKeyboard",
                 "org.kde.kwin.VirtualKeyboard.setEnabled",
                 "true",
             ])
@@ -413,14 +446,14 @@ pub fn hide_keyboard() -> Result<(), String> {
     {
         use std::process::Command;
 
-        // Method 1: KWin virtual keyboard via busctl (Desktop Mode)
-        log::info!("Trying: busctl call to KWin to disable keyboard");
+        // Method 1: KWin virtual keyboard via busctl (Desktop Mode - Plasma 6)
+        log::info!("Trying: busctl call to KWin to disable keyboard (Plasma 6)");
         let kwin_result = Command::new("busctl")
             .args([
                 "--user",
                 "call",
                 "org.kde.KWin",
-                "/kwin",
+                "/org/kde/KWin/VirtualKeyboard",
                 "org.kde.kwin.VirtualKeyboard",
                 "setEnabled",
                 "b",
@@ -431,7 +464,7 @@ pub fn hide_keyboard() -> Result<(), String> {
         match kwin_result {
             Ok(output) => {
                 log::info!(
-                    "busctl KWin disable executed - status: {:?}",
+                    "busctl KWin disable (Plasma 6) executed - status: {:?}",
                     output.status
                 );
                 if output.status.success() {
@@ -439,7 +472,37 @@ pub fn hide_keyboard() -> Result<(), String> {
                 }
             }
             Err(e) => {
-                log::warn!("Failed to execute busctl for KWin: {}", e);
+                log::warn!("Failed to execute busctl for KWin (Plasma 6): {}", e);
+            }
+        }
+
+        // Method 2: KWin virtual keyboard via busctl (older Plasma 5 path)
+        log::info!("Trying: busctl call to KWin to disable keyboard (Plasma 5)");
+        let kwin_p5_result = Command::new("busctl")
+            .args([
+                "--user",
+                "call",
+                "org.kde.KWin",
+                "/VirtualKeyboard",
+                "org.kde.kwin.VirtualKeyboard",
+                "setEnabled",
+                "b",
+                "false",
+            ])
+            .output();
+
+        match kwin_p5_result {
+            Ok(output) => {
+                log::info!(
+                    "busctl KWin disable (Plasma 5) executed - status: {:?}",
+                    output.status
+                );
+                if output.status.success() {
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to execute busctl for KWin (Plasma 5): {}", e);
             }
         }
 
