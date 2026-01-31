@@ -98,6 +98,27 @@
            focus:border-saint-primary focus:ring-1 focus:ring-saint-primary;
   }
 
+  /* Style all select/dropdown elements with dark theme */
+  select,
+  .select {
+    @apply bg-saint-background border border-saint-surface-light rounded-lg px-3 py-2
+           text-saint-text focus:outline-none focus:border-saint-primary
+           focus:ring-1 focus:ring-saint-primary;
+    /* Style the dropdown arrow */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2394a3b8'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.5rem center;
+    background-size: 1.5rem;
+    padding-right: 2.5rem;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+
+  select option,
+  .select option {
+    @apply bg-saint-background text-saint-text;
+  }
+
   .status-indicator {
     @apply w-3 h-3 rounded-full;
   }
