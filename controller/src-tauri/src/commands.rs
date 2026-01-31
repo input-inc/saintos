@@ -243,72 +243,15 @@ pub fn show_keyboard() -> Result<(), String> {
 
         log::info!("Platform: Linux - attempting to open virtual keyboard");
 
-        // Method 1: Try kglobalaccel to invoke the KDE virtual keyboard shortcut
-        // This works when KDE has a virtual keyboard configured
-        log::info!("Trying: kglobalaccel invokeShortcut for virtual keyboard toggle");
-        let kglobal_result = Command::new("qdbus")
-            .args([
-                "org.kde.kglobalaccel",
-                "/component/kwin",
-                "org.kde.kglobalaccel.Component.invokeShortcut",
-                "Toggle Virtual Keyboard",
-            ])
-            .output();
-
-        match kglobal_result {
-            Ok(output) => {
-                log::info!(
-                    "kglobalaccel invokeShortcut executed - status: {:?}, stdout: {}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                if output.status.success() {
-                    log::info!("Virtual keyboard toggled via kglobalaccel");
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to execute kglobalaccel: {}", e);
-            }
-        }
-
-        // Method 2: Try qdbus org.kde.keyboard to enable virtual keyboard
-        log::info!("Trying: qdbus org.kde.keyboard /modules/keyboard");
-        let kde_kb_result = Command::new("qdbus")
-            .args([
-                "org.kde.keyboard",
-                "/modules/keyboard",
-                "org.kde.KeyboardModule.showVirtualKeyboard",
-            ])
-            .output();
-
-        match kde_kb_result {
-            Ok(output) => {
-                log::info!(
-                    "qdbus org.kde.keyboard executed - status: {:?}, stdout: {}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                if output.status.success() {
-                    log::info!("Virtual keyboard shown via org.kde.keyboard");
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to execute qdbus for org.kde.keyboard: {}", e);
-            }
-        }
-
-        // Method 3: Launch maliit-keyboard directly if installed
+        // Method 1: Launch maliit-keyboard directly (Desktop Mode - SteamOS has this installed)
+        // This is the most reliable method for SteamOS Desktop Mode
         log::info!("Trying: launch maliit-keyboard directly");
         let maliit_launch = Command::new("maliit-keyboard")
             .spawn();
 
         match maliit_launch {
             Ok(_) => {
-                log::info!("maliit-keyboard process launched");
+                log::info!("maliit-keyboard process launched successfully");
                 return Ok(());
             }
             Err(e) => {
@@ -316,7 +259,7 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Method 4: DBus call to Steam directly (Gaming Mode)
+        // Method 2: DBus call to Steam directly (Gaming Mode)
         log::info!("Trying: dbus-send to Steam");
         let dbus_result = Command::new("dbus-send")
             .args([
@@ -350,7 +293,7 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Method 5: xdg-open with steam:// URL (Gaming Mode fallback)
+        // Method 3: xdg-open with steam:// URL (Gaming Mode fallback)
         log::info!("Trying: xdg-open steam://open/keyboard");
         let result = Command::new("xdg-open")
             .arg("steam://open/keyboard")
@@ -374,51 +317,6 @@ pub fn show_keyboard() -> Result<(), String> {
             }
             Err(e) => {
                 log::warn!("Failed to execute xdg-open: {}", e);
-            }
-        }
-
-        // Method 6: Try launching CoreKeyboard (SteamOS specific on-screen keyboard)
-        log::info!("Trying: launch CoreKeyboard");
-        let corekb_result = Command::new("CoreKeyboard")
-            .spawn();
-
-        match corekb_result {
-            Ok(_) => {
-                log::info!("CoreKeyboard process launched");
-                return Ok(());
-            }
-            Err(e) => {
-                log::warn!("Failed to launch CoreKeyboard: {}", e);
-            }
-        }
-
-        // Method 7: Try onboard (common Linux on-screen keyboard)
-        log::info!("Trying: launch onboard");
-        let onboard_result = Command::new("onboard")
-            .spawn();
-
-        match onboard_result {
-            Ok(_) => {
-                log::info!("onboard process launched");
-                return Ok(());
-            }
-            Err(e) => {
-                log::warn!("Failed to launch onboard: {}", e);
-            }
-        }
-
-        // Method 8: Try squeekboard (Phosh/mobile Linux keyboard)
-        log::info!("Trying: launch squeekboard");
-        let squeek_result = Command::new("squeekboard")
-            .spawn();
-
-        match squeek_result {
-            Ok(_) => {
-                log::info!("squeekboard process launched");
-                return Ok(());
-            }
-            Err(e) => {
-                log::warn!("Failed to launch squeekboard: {}", e);
             }
         }
 
