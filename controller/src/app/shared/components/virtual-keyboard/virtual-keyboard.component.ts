@@ -259,6 +259,18 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
       theme: 'simple-keyboard hg-theme-default',
       useButtonTag: true,  // Use <button> elements for better touch support
       disableButtonHold: true,  // Disable hold behavior for simpler touch handling
+      useTouchEvents: true,  // Use touch events instead of mouse events
+      useMouseEvents: true,  // Also keep mouse events for desktop testing
+    });
+
+    // Debug: Add a test click listener to verify events reach the container
+    this.keyboardContainer.nativeElement.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      console.log('[VirtualKeyboard] Container click event:', target.tagName, target.className, target.textContent?.trim());
+    });
+    this.keyboardContainer.nativeElement.addEventListener('touchend', (e) => {
+      const target = e.target as HTMLElement;
+      console.log('[VirtualKeyboard] Container touchend event:', target.tagName, target.className, target.textContent?.trim());
     });
 
     // Set initial value
