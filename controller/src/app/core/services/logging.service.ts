@@ -1,5 +1,5 @@
 import { Injectable, ErrorHandler } from '@angular/core';
-import { error, warn, info, debug, trace, attachConsole } from '@tauri-apps/plugin-log';
+import { invoke } from '@tauri-apps/api/core';
 
 @Injectable({
   providedIn: 'root'
@@ -7,66 +7,112 @@ import { error, warn, info, debug, trace, attachConsole } from '@tauri-apps/plug
 export class LoggingService {
   private initialized = false;
 
+  // Store original console methods
+  private originalConsole = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+    debug: console.debug.bind(console),
+  };
+
   async init(): Promise<void> {
     if (this.initialized) return;
 
     try {
-      // Attach console to forward all console.log/error/etc to the log file
-      const detach = await attachConsole();
+      // Override console methods to forward to Rust log
+      this.interceptConsole();
       this.initialized = true;
-      console.log('[LoggingService] Frontend logging initialized - console attached to Tauri log');
-      // Note: After this point, console.log calls should appear in the log file
+      console.log('[LoggingService] Frontend logging initialized - console intercepted');
     } catch (err) {
-      console.error('[LoggingService] Failed to initialize logging:', err);
-      // Still mark as initialized to avoid repeated attempts
+      this.originalConsole.error('[LoggingService] Failed to initialize logging:', err);
       this.initialized = true;
     }
   }
 
+  private interceptConsole(): void {
+    // Override console.log
+    console.log = (...args: unknown[]) => {
+      this.originalConsole.log(...args);
+      this.forwardToRust('debug', args);
+    };
+
+    // Override console.info
+    console.info = (...args: unknown[]) => {
+      this.originalConsole.info(...args);
+      this.forwardToRust('info', args);
+    };
+
+    // Override console.warn
+    console.warn = (...args: unknown[]) => {
+      this.originalConsole.warn(...args);
+      this.forwardToRust('warn', args);
+    };
+
+    // Override console.error
+    console.error = (...args: unknown[]) => {
+      this.originalConsole.error(...args);
+      this.forwardToRust('error', args);
+    };
+
+    // Override console.debug
+    console.debug = (...args: unknown[]) => {
+      this.originalConsole.debug(...args);
+      this.forwardToRust('debug', args);
+    };
+  }
+
+  private forwardToRust(level: string, args: unknown[]): void {
+    try {
+      // Format all arguments into a single message string
+      const message = args.map(arg => {
+        if (typeof arg === 'string') return arg;
+        if (arg instanceof Error) return `${arg.message}\n${arg.stack || ''}`;
+        try {
+          return JSON.stringify(arg);
+        } catch {
+          return String(arg);
+        }
+      }).join(' ');
+
+      // Extract context if message starts with [ContextName]
+      let context: string | undefined;
+      let finalMessage = message;
+      const contextMatch = message.match(/^\[([^\]]+)\]\s*/);
+      if (contextMatch) {
+        context = contextMatch[1];
+        finalMessage = message.slice(contextMatch[0].length);
+      }
+
+      // Fire and forget - don't await to avoid blocking
+      invoke('log_frontend', { level, message: finalMessage, context }).catch(() => {
+        // Silently ignore errors to prevent infinite loops
+      });
+    } catch {
+      // Silently ignore to prevent infinite loops
+    }
+  }
+
+  // Direct logging methods for explicit use
   async error(context: string, message: string, err?: unknown): Promise<void> {
     const fullMessage = err ? `${message}: ${this.formatError(err)}` : message;
     console.error(`[${context}]`, fullMessage);
-    try {
-      await error(`[${context}] ${fullMessage}`);
-    } catch {
-      // Logging failed, already logged to console
-    }
   }
 
   async warn(context: string, message: string): Promise<void> {
     console.warn(`[${context}]`, message);
-    try {
-      await warn(`[${context}] ${message}`);
-    } catch {
-      // Logging failed, already logged to console
-    }
   }
 
   async info(context: string, message: string): Promise<void> {
     console.info(`[${context}]`, message);
-    try {
-      await info(`[${context}] ${message}`);
-    } catch {
-      // Logging failed, already logged to console
-    }
   }
 
   async debug(context: string, message: string): Promise<void> {
     console.debug(`[${context}]`, message);
-    try {
-      await debug(`[${context}] ${message}`);
-    } catch {
-      // Logging failed, already logged to console
-    }
   }
 
   async trace(context: string, message: string): Promise<void> {
-    console.trace(`[${context}]`, message);
-    try {
-      await trace(`[${context}] ${message}`);
-    } catch {
-      // Logging failed, already logged to console
-    }
+    console.debug(`[${context}]`, message); // Use debug for trace since console.trace shows stack
   }
 
   private formatError(err: unknown): string {
