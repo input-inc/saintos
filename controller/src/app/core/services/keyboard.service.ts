@@ -1,51 +1,95 @@
-import { Injectable } from '@angular/core';
-import { invoke } from '@tauri-apps/api/core';
+import { Injectable, signal } from '@angular/core';
 
 /**
- * Service to manage the Steam virtual keyboard on Steam Deck.
+ * Service to manage the built-in virtual keyboard.
  *
- * On Linux (Steam Deck), this invokes the Steam keyboard when text inputs are focused.
- * On other platforms, it's a no-op.
+ * Shows an on-screen keyboard when text inputs are focused,
+ * optimized for gamepad/touch input on Steam Deck.
  */
 @Injectable({
   providedIn: 'root'
 })
 export class KeyboardService {
+  // Keyboard visibility state
+  private _isVisible = signal(false);
+  isVisible = this._isVisible.asReadonly();
+
+  // The currently focused input element
+  private activeInput: HTMLInputElement | HTMLTextAreaElement | null = null;
+
+  // Callback for when value is submitted
+  private onSubmitCallback: ((value: string) => void) | null = null;
+
   constructor() {
     console.log('[KeyboardService] Initializing keyboard service');
-    // Set up global focus/blur listeners for input fields
     this.setupGlobalListeners();
   }
 
   /**
-   * Show the virtual keyboard.
-   * Always invokes the command - the keyboard may have been dismissed by the user.
+   * Show the virtual keyboard for a specific input element.
    */
-  async showKeyboard(): Promise<void> {
-    console.log('[KeyboardService] showKeyboard called');
+  show(input?: HTMLInputElement | HTMLTextAreaElement): void {
+    console.log('[KeyboardService] show called');
 
-    try {
-      console.log('[KeyboardService] Invoking show_keyboard command...');
-      const result = await invoke('show_keyboard');
-      console.log('[KeyboardService] show_keyboard result:', result);
-    } catch (err) {
-      console.error('[KeyboardService] Failed to show keyboard:', err);
+    if (input) {
+      this.activeInput = input;
     }
+
+    this._isVisible.set(true);
   }
 
   /**
-   * Hide the virtual keyboard.
+   * Hide the virtual keyboard without submitting.
    */
-  async hideKeyboard(): Promise<void> {
-    console.log('[KeyboardService] hideKeyboard called');
+  hide(): void {
+    console.log('[KeyboardService] hide called');
+    this._isVisible.set(false);
+    this.activeInput = null;
+    this.onSubmitCallback = null;
+  }
 
-    try {
-      console.log('[KeyboardService] Invoking hide_keyboard command...');
-      const result = await invoke('hide_keyboard');
-      console.log('[KeyboardService] hide_keyboard result:', result);
-    } catch (err) {
-      console.error('[KeyboardService] Failed to hide keyboard:', err);
+  /**
+   * Submit the keyboard value and hide.
+   */
+  submitValue(value: string): void {
+    console.log('[KeyboardService] submitValue:', value);
+
+    // Update the active input if we have one
+    if (this.activeInput) {
+      this.activeInput.value = value;
+      // Dispatch input event so Angular forms detect the change
+      this.activeInput.dispatchEvent(new Event('input', { bubbles: true }));
+      this.activeInput.dispatchEvent(new Event('change', { bubbles: true }));
     }
+
+    // Call the submit callback if set
+    if (this.onSubmitCallback) {
+      this.onSubmitCallback(value);
+    }
+
+    this.hide();
+  }
+
+  /**
+   * Get the current value from the active input.
+   */
+  getCurrentInputValue(): string {
+    return this.activeInput?.value ?? '';
+  }
+
+  /**
+   * Set a callback for when the keyboard submits a value.
+   */
+  onSubmit(callback: (value: string) => void): void {
+    this.onSubmitCallback = callback;
+  }
+
+  /**
+   * Check if a text input is currently focused.
+   * Used to determine if button presses should be passed through for keyboard use.
+   */
+  isTextFieldFocused(): boolean {
+    return this.isTextInput(document.activeElement as HTMLElement);
   }
 
   /**
@@ -61,42 +105,21 @@ export class KeyboardService {
 
       if (this.isTextInput(target)) {
         console.log('[KeyboardService] Text input focused, showing keyboard');
-        this.showKeyboard();
-      } else {
-        console.log('[KeyboardService] Not a text input, ignoring');
+        this.activeInput = target as HTMLInputElement | HTMLTextAreaElement;
+        this.show();
       }
     });
 
-    // Listen for blur events to hide keyboard
+    // Listen for blur events - but don't auto-hide since user might click keyboard
     document.addEventListener('focusout', (event) => {
       const target = event.target as HTMLElement;
-      console.log('[KeyboardService] focusout event:', target.tagName, target.getAttribute('type'));
+      console.log('[KeyboardService] focusout event:', target.tagName);
 
-      if (this.isTextInput(target)) {
-        // Small delay to allow for focus to move to another input
-        setTimeout(() => {
-          const activeElement = document.activeElement as HTMLElement;
-          console.log('[KeyboardService] After delay, activeElement:', activeElement?.tagName, activeElement?.getAttribute('type'));
-
-          if (!this.isTextInput(activeElement)) {
-            console.log('[KeyboardService] Focus left text inputs, hiding keyboard');
-            this.hideKeyboard();
-          } else {
-            console.log('[KeyboardService] Focus moved to another text input, keeping keyboard');
-          }
-        }, 100);
-      }
+      // Don't hide keyboard on focusout - the keyboard component handles its own dismissal
+      // This prevents the keyboard from closing when you click on it
     });
 
     console.log('[KeyboardService] Listeners registered');
-  }
-
-  /**
-   * Check if a text input is currently focused.
-   * Used to determine if button presses should be passed through for keyboard use.
-   */
-  isTextFieldFocused(): boolean {
-    return this.isTextInput(document.activeElement as HTMLElement);
   }
 
   /**
@@ -110,20 +133,16 @@ export class KeyboardService {
       const inputType = (element as HTMLInputElement).type.toLowerCase();
       // These input types would use a keyboard
       const textTypes = ['text', 'password', 'email', 'search', 'tel', 'url', 'number'];
-      const isText = textTypes.includes(inputType);
-      console.log('[KeyboardService] isTextInput check: INPUT type=', inputType, 'isText=', isText);
-      return isText;
+      return textTypes.includes(inputType);
     }
 
     // Check for textarea
     if (element.tagName === 'TEXTAREA') {
-      console.log('[KeyboardService] isTextInput check: TEXTAREA = true');
       return true;
     }
 
     // Check for contenteditable
     if (element.isContentEditable) {
-      console.log('[KeyboardService] isTextInput check: contentEditable = true');
       return true;
     }
 

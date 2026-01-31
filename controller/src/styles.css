@@ -149,4 +149,55 @@
     text-rendering: optimizeLegibility;
     font-feature-settings: 'liga';
   }
+
+  /* Virtual Keyboard Theme */
+  .simple-keyboard {
+    background: transparent;
+    font-family: 'Inter', sans-serif;
+  }
+
+  .simple-keyboard .hg-row {
+    margin-bottom: 0.5rem;
+  }
+
+  .simple-keyboard .hg-row:last-child {
+    margin-bottom: 0;
+  }
+
+  .simple-keyboard .hg-button {
+    background: #334155;
+    border: 1px solid #475569;
+    border-radius: 0.5rem;
+    color: #f1f5f9;
+    font-size: 1.125rem;
+    height: 3.5rem;
+    margin: 0 0.25rem;
+    transition: all 0.15s ease;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  }
+
+  .simple-keyboard .hg-button:hover {
+    background: #475569;
+  }
+
+  .simple-keyboard .hg-button:active,
+  .simple-keyboard .hg-button.hg-activeButton {
+    background: #3b82f6;
+    border-color: #60a5fa;
+    transform: translateY(1px);
+    box-shadow: none;
+  }
+
+  .simple-keyboard .hg-button.hg-functionBtn {
+    background: #1e293b;
+    max-width: none;
+  }
+
+  .simple-keyboard .hg-button.hg-functionBtn:hover {
+    background: #334155;
+  }
+
+  .simple-keyboard .hg-button.hg-functionBtn:active {
+    background: #3b82f6;
+  }
 }

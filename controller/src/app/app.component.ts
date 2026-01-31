@@ -8,6 +8,7 @@ import { BindingsService, DigitalInput } from './core/services/bindings.service'
 import { KeyboardService } from './core/services/keyboard.service';
 import { VirtualJoystickComponent, JoystickPosition } from './shared/components/virtual-joystick/virtual-joystick.component';
 import { PresetPanelComponent } from './shared/components/preset-panel/preset-panel.component';
+import { VirtualKeyboardComponent } from './shared/components/virtual-keyboard/virtual-keyboard.component';
 
 // Battery cell data
 interface BatteryCell {
@@ -41,7 +42,7 @@ interface TrackBattery {
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, RouterOutlet, RouterLink, RouterLinkActive, VirtualJoystickComponent, PresetPanelComponent],
+  imports: [CommonModule, RouterOutlet, RouterLink, RouterLinkActive, VirtualJoystickComponent, PresetPanelComponent, VirtualKeyboardComponent],
   template: `
     <div class="h-screen flex flex-col">
       <!-- Header -->
@@ -391,6 +392,9 @@ interface TrackBattery {
           }
         </div>
       </footer>
+
+      <!-- Virtual Keyboard (overlay) -->
+      <app-virtual-keyboard></app-virtual-keyboard>
     </div>
   `
 })
