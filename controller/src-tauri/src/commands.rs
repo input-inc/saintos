@@ -232,7 +232,7 @@ pub fn log_frontend(level: String, message: String, context: Option<String>) {
 }
 
 /// Show the virtual keyboard (Steam Deck / SteamOS)
-/// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (various methods)
+/// Works in both Gaming Mode and Desktop Mode by invoking Steam directly
 #[tauri::command]
 pub fn show_keyboard() -> Result<(), String> {
     log::info!("show_keyboard command invoked");
@@ -241,76 +241,27 @@ pub fn show_keyboard() -> Result<(), String> {
     {
         use std::process::Command;
 
-        log::info!("Platform: Linux - attempting to open virtual keyboard");
+        log::info!("Platform: Linux - opening Steam keyboard");
 
-        // Method 1: Simulate the Steam Deck X button press using ydotool
-        // On SteamOS Desktop Mode, the X button triggers the on-screen keyboard
-        // ydotool works on Wayland (which SteamOS uses)
-        log::info!("Trying: ydotool to simulate keyboard toggle key");
+        // Primary method: Call steam with steam://open/keyboard URL
+        // This works in both Gaming Mode and Desktop Mode
+        log::info!("Trying: steam steam://open/keyboard");
+        let result = Command::new("steam")
+            .arg("steam://open/keyboard")
+            .spawn();
 
-        // First, try ydotoold daemon (needs to be running for ydotool to work)
-        let ydotool_result = Command::new("ydotool")
-            .args(["key", "200:1", "200:0"])  // KEY_PROG1 (200) - often used for special functions
-            .output();
-
-        match ydotool_result {
-            Ok(output) => {
-                log::info!(
-                    "ydotool executed - status: {:?}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                if output.status.success() {
-                    log::info!("ydotool key sent");
-                    // Don't return - this might not be the right key
-                }
+        match result {
+            Ok(_) => {
+                log::info!("Steam keyboard command sent successfully");
+                return Ok(());
             }
             Err(e) => {
-                log::warn!("Failed to execute ydotool: {}", e);
+                log::warn!("Failed to execute steam command: {}", e);
             }
         }
 
-        // Method 2: Try the steam-osk script if it exists (SteamOS-specific)
-        log::info!("Trying: steam-osk command");
-        let steam_osk = Command::new("steam-osk")
-            .output();
-
-        match steam_osk {
-            Ok(output) => {
-                log::info!(
-                    "steam-osk executed - status: {:?}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                if output.status.success() {
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                log::warn!("steam-osk not found: {}", e);
-            }
-        }
-
-        // Method 3: Try steam-im-modules keyboard activation
-        log::info!("Trying: steam-im keyboard activation");
-        let steam_im = Command::new("sh")
-            .args(["-c", "steam-runtime-launch-client --list-client-apps 2>/dev/null | head -1"])
-            .output();
-
-        match steam_im {
-            Ok(output) => {
-                log::info!(
-                    "steam-im check - status: {:?}",
-                    output.status
-                );
-            }
-            Err(e) => {
-                log::warn!("steam-im check failed: {}", e);
-            }
-        }
-
-        // Method 2: DBus call to Steam directly (Gaming Mode)
-        log::info!("Trying: dbus-send to Steam");
+        // Fallback: DBus call to Steam (older method)
+        log::info!("Fallback: dbus-send to Steam");
         let dbus_result = Command::new("dbus-send")
             .args([
                 "--type=method_call",
@@ -328,9 +279,8 @@ pub fn show_keyboard() -> Result<(), String> {
         match dbus_result {
             Ok(output) => {
                 log::info!(
-                    "dbus-send Steam executed - status: {:?}, stdout: {}, stderr: {}",
+                    "dbus-send Steam executed - status: {:?}, stderr: {}",
                     output.status,
-                    String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if output.status.success() {
@@ -343,35 +293,8 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Method 3: xdg-open with steam:// URL (Gaming Mode fallback)
-        log::info!("Trying: xdg-open steam://open/keyboard");
-        let result = Command::new("xdg-open")
-            .arg("steam://open/keyboard")
-            .output();
-
-        match result {
-            Ok(output) => {
-                log::info!(
-                    "xdg-open executed - status: {:?}, stdout: {}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-
-                if output.status.success() {
-                    log::info!("Steam keyboard opened via xdg-open");
-                    return Ok(());
-                } else {
-                    log::warn!("xdg-open returned non-zero status");
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to execute xdg-open: {}", e);
-            }
-        }
-
-        log::warn!("All keyboard open methods attempted - none confirmed successful");
-        Ok(()) // Don't return error - one of the async methods might work
+        log::warn!("All keyboard open methods failed");
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -382,7 +305,7 @@ pub fn show_keyboard() -> Result<(), String> {
 }
 
 /// Hide the virtual keyboard (Steam Deck / SteamOS)
-/// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (various methods)
+/// Works in both Gaming Mode and Desktop Mode by invoking Steam directly
 #[tauri::command]
 pub fn hide_keyboard() -> Result<(), String> {
     log::info!("hide_keyboard command invoked");
@@ -391,62 +314,25 @@ pub fn hide_keyboard() -> Result<(), String> {
     {
         use std::process::Command;
 
-        // Method 1: Try kglobalaccel to invoke the KDE virtual keyboard shortcut (toggle off)
-        log::info!("Trying: kglobalaccel invokeShortcut for virtual keyboard toggle (hide)");
-        let _ = Command::new("qdbus")
-            .args([
-                "org.kde.kglobalaccel",
-                "/component/kwin",
-                "org.kde.kglobalaccel.Component.invokeShortcut",
-                "Toggle Virtual Keyboard",
-            ])
-            .output();
-
-        // Method 2: Try to hide via org.kde.keyboard
-        log::info!("Trying: qdbus org.kde.keyboard hideVirtualKeyboard");
-        let _ = Command::new("qdbus")
-            .args([
-                "org.kde.keyboard",
-                "/modules/keyboard",
-                "org.kde.KeyboardModule.hideVirtualKeyboard",
-            ])
-            .output();
-
-        // Method 3: Kill any running on-screen keyboard processes
-        log::info!("Trying: pkill keyboard processes");
-        let _ = Command::new("pkill")
-            .args(["-f", "maliit-keyboard"])
-            .output();
-        let _ = Command::new("pkill")
-            .args(["-f", "onboard"])
-            .output();
-        let _ = Command::new("pkill")
-            .args(["-f", "squeekboard"])
-            .output();
-        let _ = Command::new("pkill")
-            .args(["-f", "CoreKeyboard"])
-            .output();
-
-        // Method 4: Try steam:// URL to close keyboard (Gaming Mode)
-        log::info!("Trying: xdg-open steam://close/keyboard");
-        let result = Command::new("xdg-open")
+        // Primary method: Call steam with steam://close/keyboard URL
+        log::info!("Trying: steam steam://close/keyboard");
+        let result = Command::new("steam")
             .arg("steam://close/keyboard")
-            .output();
+            .spawn();
 
         match result {
-            Ok(output) => {
-                log::info!(
-                    "xdg-open close executed - status: {:?}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
+            Ok(_) => {
+                log::info!("Steam keyboard close command sent successfully");
+                return Ok(());
             }
             Err(e) => {
-                log::warn!("Failed to close keyboard via xdg-open: {}", e);
+                log::warn!("Failed to execute steam close command: {}", e);
             }
         }
 
-        // Not a fatal error - keyboard may close on its own
+        // Steam keyboard typically closes automatically when input loses focus
+        // But we try to close it explicitly just in case
+        log::warn!("Steam close command failed - keyboard may close on its own");
         Ok(())
     }
 
