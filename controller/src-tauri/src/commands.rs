@@ -232,7 +232,7 @@ pub fn log_frontend(level: String, message: String, context: Option<String>) {
 }
 
 /// Show the virtual keyboard (Steam Deck / SteamOS)
-/// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (KDE virtual keyboard)
+/// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (various methods)
 #[tauri::command]
 pub fn show_keyboard() -> Result<(), String> {
     log::info!("show_keyboard command invoked");
@@ -243,74 +243,80 @@ pub fn show_keyboard() -> Result<(), String> {
 
         log::info!("Platform: Linux - attempting to open virtual keyboard");
 
-        // Method 1: KWin virtual keyboard via busctl (Desktop Mode - KDE Plasma 6)
-        // SteamOS 3.5+ uses Plasma 6 with a different DBus path
-        log::info!("Trying: busctl call to KWin VirtualKeyboard (Plasma 6 path)");
-        let kwin_result = Command::new("busctl")
+        // Method 1: Try kglobalaccel to invoke the KDE virtual keyboard shortcut
+        // This works when KDE has a virtual keyboard configured
+        log::info!("Trying: kglobalaccel invokeShortcut for virtual keyboard toggle");
+        let kglobal_result = Command::new("qdbus")
             .args([
-                "--user",
-                "call",
-                "org.kde.KWin",
-                "/org/kde/KWin/VirtualKeyboard",
-                "org.kde.kwin.VirtualKeyboard",
-                "setEnabled",
-                "b",
-                "true",
+                "org.kde.kglobalaccel",
+                "/component/kwin",
+                "org.kde.kglobalaccel.Component.invokeShortcut",
+                "Toggle Virtual Keyboard",
             ])
             .output();
 
-        match kwin_result {
+        match kglobal_result {
             Ok(output) => {
                 log::info!(
-                    "busctl KWin (Plasma 6) executed - status: {:?}, stdout: {}, stderr: {}",
+                    "kglobalaccel invokeShortcut executed - status: {:?}, stdout: {}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if output.status.success() {
-                    log::info!("KWin virtual keyboard enabled (Plasma 6)");
+                    log::info!("Virtual keyboard toggled via kglobalaccel");
                     return Ok(());
                 }
             }
             Err(e) => {
-                log::warn!("Failed to execute busctl for KWin (Plasma 6): {}", e);
+                log::warn!("Failed to execute kglobalaccel: {}", e);
             }
         }
 
-        // Method 2: KWin virtual keyboard via busctl (older Plasma 5 path)
-        log::info!("Trying: busctl call to KWin VirtualKeyboard (Plasma 5 path)");
-        let kwin_p5_result = Command::new("busctl")
+        // Method 2: Try qdbus org.kde.keyboard to enable virtual keyboard
+        log::info!("Trying: qdbus org.kde.keyboard /modules/keyboard");
+        let kde_kb_result = Command::new("qdbus")
             .args([
-                "--user",
-                "call",
-                "org.kde.KWin",
-                "/VirtualKeyboard",
-                "org.kde.kwin.VirtualKeyboard",
-                "setEnabled",
-                "b",
-                "true",
+                "org.kde.keyboard",
+                "/modules/keyboard",
+                "org.kde.KeyboardModule.showVirtualKeyboard",
             ])
             .output();
 
-        match kwin_p5_result {
+        match kde_kb_result {
             Ok(output) => {
                 log::info!(
-                    "busctl KWin (Plasma 5) executed - status: {:?}, stdout: {}, stderr: {}",
+                    "qdbus org.kde.keyboard executed - status: {:?}, stdout: {}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if output.status.success() {
-                    log::info!("KWin virtual keyboard enabled (Plasma 5)");
+                    log::info!("Virtual keyboard shown via org.kde.keyboard");
                     return Ok(());
                 }
             }
             Err(e) => {
-                log::warn!("Failed to execute busctl for KWin (Plasma 5): {}", e);
+                log::warn!("Failed to execute qdbus for org.kde.keyboard: {}", e);
             }
         }
 
-        // Method 2: DBus call to Steam directly (Gaming Mode)
+        // Method 3: Launch maliit-keyboard directly if installed
+        log::info!("Trying: launch maliit-keyboard directly");
+        let maliit_launch = Command::new("maliit-keyboard")
+            .spawn();
+
+        match maliit_launch {
+            Ok(_) => {
+                log::info!("maliit-keyboard process launched");
+                return Ok(());
+            }
+            Err(e) => {
+                log::warn!("Failed to launch maliit-keyboard: {}", e);
+            }
+        }
+
+        // Method 4: DBus call to Steam directly (Gaming Mode)
         log::info!("Trying: dbus-send to Steam");
         let dbus_result = Command::new("dbus-send")
             .args([
@@ -344,7 +350,7 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Method 3: xdg-open with steam:// URL (Gaming Mode fallback)
+        // Method 5: xdg-open with steam:// URL (Gaming Mode fallback)
         log::info!("Trying: xdg-open steam://open/keyboard");
         let result = Command::new("xdg-open")
             .arg("steam://open/keyboard")
@@ -371,57 +377,48 @@ pub fn show_keyboard() -> Result<(), String> {
             }
         }
 
-        // Method 4: qdbus for KWin virtual keyboard (Desktop Mode alternative - Plasma 6)
-        log::info!("Trying: qdbus org.kde.KWin VirtualKeyboard.setEnabled (Plasma 6)");
-        let qdbus_result = Command::new("qdbus")
-            .args([
-                "org.kde.KWin",
-                "/org/kde/KWin/VirtualKeyboard",
-                "org.kde.kwin.VirtualKeyboard.setEnabled",
-                "true",
-            ])
-            .output();
+        // Method 6: Try launching CoreKeyboard (SteamOS specific on-screen keyboard)
+        log::info!("Trying: launch CoreKeyboard");
+        let corekb_result = Command::new("CoreKeyboard")
+            .spawn();
 
-        match qdbus_result {
-            Ok(output) => {
-                log::info!(
-                    "qdbus KWin keyboard executed - status: {:?}, stderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                if output.status.success() {
-                    log::info!("KWin virtual keyboard enabled via qdbus");
-                    return Ok(());
-                }
+        match corekb_result {
+            Ok(_) => {
+                log::info!("CoreKeyboard process launched");
+                return Ok(());
             }
             Err(e) => {
-                log::warn!("Failed to execute qdbus for KWin: {}", e);
+                log::warn!("Failed to launch CoreKeyboard: {}", e);
             }
         }
 
-        // Method 5: Try Maliit keyboard (fallback for some systems)
-        log::info!("Trying: dbus-send to Maliit");
-        let maliit_result = Command::new("dbus-send")
-            .args([
-                "--type=method_call",
-                "--dest=org.maliit.server",
-                "/org/maliit/server/address",
-                "org.maliit.Server.Address.activateContext",
-            ])
-            .output();
+        // Method 7: Try onboard (common Linux on-screen keyboard)
+        log::info!("Trying: launch onboard");
+        let onboard_result = Command::new("onboard")
+            .spawn();
 
-        match maliit_result {
-            Ok(output) => {
-                log::info!(
-                    "Maliit dbus-send executed - status: {:?}",
-                    output.status
-                );
-                if output.status.success() {
-                    return Ok(());
-                }
+        match onboard_result {
+            Ok(_) => {
+                log::info!("onboard process launched");
+                return Ok(());
             }
             Err(e) => {
-                log::warn!("Failed to execute Maliit dbus-send: {}", e);
+                log::warn!("Failed to launch onboard: {}", e);
+            }
+        }
+
+        // Method 8: Try squeekboard (Phosh/mobile Linux keyboard)
+        log::info!("Trying: launch squeekboard");
+        let squeek_result = Command::new("squeekboard")
+            .spawn();
+
+        match squeek_result {
+            Ok(_) => {
+                log::info!("squeekboard process launched");
+                return Ok(());
+            }
+            Err(e) => {
+                log::warn!("Failed to launch squeekboard: {}", e);
             }
         }
 
@@ -437,7 +434,7 @@ pub fn show_keyboard() -> Result<(), String> {
 }
 
 /// Hide the virtual keyboard (Steam Deck / SteamOS)
-/// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (KDE virtual keyboard)
+/// Supports both Gaming Mode (Steam keyboard) and Desktop Mode (various methods)
 #[tauri::command]
 pub fn hide_keyboard() -> Result<(), String> {
     log::info!("hide_keyboard command invoked");
@@ -446,67 +443,43 @@ pub fn hide_keyboard() -> Result<(), String> {
     {
         use std::process::Command;
 
-        // Method 1: KWin virtual keyboard via busctl (Desktop Mode - Plasma 6)
-        log::info!("Trying: busctl call to KWin to disable keyboard (Plasma 6)");
-        let kwin_result = Command::new("busctl")
+        // Method 1: Try kglobalaccel to invoke the KDE virtual keyboard shortcut (toggle off)
+        log::info!("Trying: kglobalaccel invokeShortcut for virtual keyboard toggle (hide)");
+        let _ = Command::new("qdbus")
             .args([
-                "--user",
-                "call",
-                "org.kde.KWin",
-                "/org/kde/KWin/VirtualKeyboard",
-                "org.kde.kwin.VirtualKeyboard",
-                "setEnabled",
-                "b",
-                "false",
+                "org.kde.kglobalaccel",
+                "/component/kwin",
+                "org.kde.kglobalaccel.Component.invokeShortcut",
+                "Toggle Virtual Keyboard",
             ])
             .output();
 
-        match kwin_result {
-            Ok(output) => {
-                log::info!(
-                    "busctl KWin disable (Plasma 6) executed - status: {:?}",
-                    output.status
-                );
-                if output.status.success() {
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to execute busctl for KWin (Plasma 6): {}", e);
-            }
-        }
-
-        // Method 2: KWin virtual keyboard via busctl (older Plasma 5 path)
-        log::info!("Trying: busctl call to KWin to disable keyboard (Plasma 5)");
-        let kwin_p5_result = Command::new("busctl")
+        // Method 2: Try to hide via org.kde.keyboard
+        log::info!("Trying: qdbus org.kde.keyboard hideVirtualKeyboard");
+        let _ = Command::new("qdbus")
             .args([
-                "--user",
-                "call",
-                "org.kde.KWin",
-                "/VirtualKeyboard",
-                "org.kde.kwin.VirtualKeyboard",
-                "setEnabled",
-                "b",
-                "false",
+                "org.kde.keyboard",
+                "/modules/keyboard",
+                "org.kde.KeyboardModule.hideVirtualKeyboard",
             ])
             .output();
 
-        match kwin_p5_result {
-            Ok(output) => {
-                log::info!(
-                    "busctl KWin disable (Plasma 5) executed - status: {:?}",
-                    output.status
-                );
-                if output.status.success() {
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to execute busctl for KWin (Plasma 5): {}", e);
-            }
-        }
+        // Method 3: Kill any running on-screen keyboard processes
+        log::info!("Trying: pkill keyboard processes");
+        let _ = Command::new("pkill")
+            .args(["-f", "maliit-keyboard"])
+            .output();
+        let _ = Command::new("pkill")
+            .args(["-f", "onboard"])
+            .output();
+        let _ = Command::new("pkill")
+            .args(["-f", "squeekboard"])
+            .output();
+        let _ = Command::new("pkill")
+            .args(["-f", "CoreKeyboard"])
+            .output();
 
-        // Method 2: Try steam:// URL to close keyboard (Gaming Mode)
+        // Method 4: Try steam:// URL to close keyboard (Gaming Mode)
         log::info!("Trying: xdg-open steam://close/keyboard");
         let result = Command::new("xdg-open")
             .arg("steam://close/keyboard")
