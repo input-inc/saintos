@@ -20,6 +20,38 @@
 @layer base {
   html, body {
     @apply h-full m-0 p-0 overflow-hidden;
+    /* Prevent text selection during touch scrolling */
+    -webkit-user-select: none;
+    user-select: none;
+    /* Enable touch scrolling */
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Allow text selection only in input fields */
+  input, textarea, [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+    touch-action: auto;
+  }
+
+  /* Ensure scrollable containers work properly with touch */
+  .overflow-y-auto, .overflow-auto, [class*="overflow-y-scroll"] {
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Prevent tap highlighting that interferes with scrolling */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Main content scrolling - ensure touch events work for scrolling */
+  main {
+    touch-action: pan-y;
+  }
+
+  main > div {
+    touch-action: pan-y;
   }
 
   ::-webkit-scrollbar {
@@ -80,6 +112,13 @@
 
   .status-connecting {
     @apply bg-saint-warning animate-pulse;
+  }
+
+  /* Touch-friendly scrollable content */
+  .touch-scroll {
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
 
   /* Material Icons size variants */

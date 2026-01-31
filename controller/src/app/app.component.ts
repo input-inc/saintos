@@ -91,7 +91,7 @@ interface TrackBattery {
         @if (presetPanelActive()) {
           <app-preset-panel></app-preset-panel>
         } @else {
-          <div class="h-full overflow-auto">
+          <div class="h-full overflow-auto touch-scroll">
             <router-outlet></router-outlet>
           </div>
         }

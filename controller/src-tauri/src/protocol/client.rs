@@ -208,7 +208,29 @@ async fn connect_ws<R: Runtime>(
         .await
         .map_err(|e| format!("WebSocket connection failed: {}", e))?;
 
-    tracing::info!("WebSocket connected, authenticating...");
+    tracing::info!("WebSocket connected, waiting for server greeting...");
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // First, wait for the server's "connected" message
+    let connected_msg = tokio::time::timeout(Duration::from_secs(10), read.next())
+        .await
+        .map_err(|_| "Connection timeout".to_string())?
+        .ok_or_else(|| "Connection closed".to_string())?
+        .map_err(|e| format!("WebSocket error: {}", e))?;
+
+    if let Message::Text(text) = connected_msg {
+        let msg = IncomingMessage::from_json(&text)
+            .map_err(|e| format!("Invalid server message: {}", e))?;
+
+        if msg.msg_type != "connected" {
+            return Err(format!("Expected 'connected' message, got '{}'", msg.msg_type));
+        }
+
+        tracing::info!("Received server greeting, authenticating...");
+    } else {
+        return Err("Unexpected message type from server".to_string());
+    }
 
     {
         let mut s = state.write();
@@ -216,14 +238,14 @@ async fn connect_ws<R: Runtime>(
     }
     emit_state(app_handle, &state.read());
 
-    let (mut write, mut read) = ws_stream.split();
-
+    // Now send authentication
     let auth_msg = OutgoingMessage::auth(password);
     write
         .send(Message::Text(auth_msg.to_json()))
         .await
         .map_err(|e| format!("Failed to send auth: {}", e))?;
 
+    // Wait for auth_result
     let auth_result = tokio::time::timeout(Duration::from_secs(10), read.next())
         .await
         .map_err(|_| "Auth timeout".to_string())?

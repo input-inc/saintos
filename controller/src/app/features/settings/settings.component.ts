@@ -9,7 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
   standalone: true,
   imports: [CommonModule, FormsModule],
   template: `
-    <div class="p-6 space-y-6">
+    <div class="p-6 space-y-6 h-full overflow-y-auto touch-scroll">
       <!-- Connection Settings -->
       <div class="card">
         <h2 class="text-lg font-semibold mb-4">Connection</h2>
