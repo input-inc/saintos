@@ -263,14 +263,17 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
       useMouseEvents: true,  // Also keep mouse events for desktop testing
     });
 
-    // Debug: Add a test click listener to verify events reach the container
+    // Manually handle button clicks since simple-keyboard's event binding isn't working
     this.keyboardContainer.nativeElement.addEventListener('click', (e) => {
       const target = e.target as HTMLElement;
-      console.log('[VirtualKeyboard] Container click event:', target.tagName, target.className, target.textContent?.trim());
-    });
-    this.keyboardContainer.nativeElement.addEventListener('touchend', (e) => {
-      const target = e.target as HTMLElement;
-      console.log('[VirtualKeyboard] Container touchend event:', target.tagName, target.className, target.textContent?.trim());
+      const button = target.closest('.hg-button') as HTMLElement;
+      if (button) {
+        const key = button.getAttribute('data-skbtn');
+        console.log('[VirtualKeyboard] Button clicked:', key);
+        if (key) {
+          this.ngZone.run(() => this.handleKeyPress(key));
+        }
+      }
     });
 
     // Set initial value
@@ -291,16 +294,54 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
   }
 
   private onKeyPress(button: string): void {
-    if (button === '{shift}') {
+    // This is called by simple-keyboard's internal handler (if it works)
+    this.handleKeyPress(button);
+  }
+
+  /**
+   * Handle a key press - called either by simple-keyboard or our manual click handler
+   */
+  private handleKeyPress(key: string): void {
+    console.log('[VirtualKeyboard] handleKeyPress:', key);
+
+    // Handle special keys
+    if (key === '{shift}') {
       this.toggleShift();
-    } else if (button === '{symbols}') {
+      return;
+    }
+    if (key === '{symbols}') {
       this.currentLayout.set('symbols');
       this.keyboard?.setOptions({ layoutName: 'symbols' });
-    } else if (button === '{abc}') {
+      return;
+    }
+    if (key === '{abc}') {
       this.currentLayout.set('default');
       this.keyboard?.setOptions({ layoutName: 'default' });
-    } else if (button === '{enter}') {
+      return;
+    }
+    if (key === '{enter}') {
       this.onDone();
+      return;
+    }
+    if (key === '{backspace}') {
+      this.onBackspace();
+      return;
+    }
+    if (key === '{space}') {
+      this.onSpace();
+      return;
+    }
+
+    // Regular key - append to input
+    const newValue = this.inputValue() + key;
+    this.inputValue.set(newValue);
+    this.keyboard?.setInput(newValue);
+    console.log('[VirtualKeyboard] New value:', newValue);
+
+    // Auto-unshift after typing a letter in shift mode
+    if (this.currentLayout() === 'shift') {
+      this.currentLayout.set('default');
+      this.keyboard?.setOptions({ layoutName: 'default' });
     }
   }
 
