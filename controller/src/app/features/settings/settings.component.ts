@@ -246,10 +246,11 @@ export class SettingsComponent {
   }
 
   async connect(): Promise<void> {
-    // Save config (without password)
+    // Save config (including password for auto-connect)
     localStorage.setItem('saint-controller-config', JSON.stringify({
       host: this.config.host,
-      port: this.config.port
+      port: this.config.port,
+      password: this.config.password
     }));
 
     try {

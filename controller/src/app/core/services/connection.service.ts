@@ -27,6 +27,7 @@ export interface ConnectionState {
 })
 export class ConnectionService implements OnDestroy {
   private subscriptions: Subscription[] = [];
+  private static readonly CONFIG_KEY = 'saint-controller-config';
 
   private connectionState = signal<ConnectionState>({
     status: ConnectionStatus.Disconnected
@@ -38,6 +39,50 @@ export class ConnectionService implements OnDestroy {
 
   constructor(private tauri: TauriService) {
     this.subscribeToConnectionEvents();
+    // Attempt auto-connect after a short delay to let the app initialize
+    setTimeout(() => this.autoConnect(), 500);
+  }
+
+  /**
+   * Get saved connection config from localStorage.
+   */
+  getSavedConfig(): ConnectionConfig | null {
+    const saved = localStorage.getItem(ConnectionService.CONFIG_KEY);
+    if (!saved) return null;
+
+    try {
+      const parsed = JSON.parse(saved);
+      if (parsed.host && parsed.port) {
+        return {
+          host: parsed.host,
+          port: parsed.port,
+          password: parsed.password || ''
+        };
+      }
+    } catch {
+      // Ignore parse errors
+    }
+    return null;
+  }
+
+  /**
+   * Attempt to auto-connect using saved credentials.
+   * Only connects if a password is saved (indicates user wants auto-connect).
+   */
+  async autoConnect(): Promise<void> {
+    const config = this.getSavedConfig();
+    if (!config || !config.password) {
+      console.log('[ConnectionService] No saved credentials for auto-connect');
+      return;
+    }
+
+    console.log('[ConnectionService] Attempting auto-connect to', config.host);
+    try {
+      await this.connect(config);
+    } catch (err) {
+      console.error('[ConnectionService] Auto-connect failed:', err);
+      // Don't throw - auto-connect failure is not critical
+    }
   }
 
   private subscribeToConnectionEvents(): void {
