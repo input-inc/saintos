@@ -263,18 +263,7 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
       useMouseEvents: true,  // Also keep mouse events for desktop testing
     });
 
-    // Manually handle button clicks since simple-keyboard's event binding isn't working
-    this.keyboardContainer.nativeElement.addEventListener('click', (e) => {
-      const target = e.target as HTMLElement;
-      const button = target.closest('.hg-button') as HTMLElement;
-      if (button) {
-        const key = button.getAttribute('data-skbtn');
-        console.log('[VirtualKeyboard] Button clicked:', key);
-        if (key) {
-          this.ngZone.run(() => this.handleKeyPress(key));
-        }
-      }
-    });
+    // Note: simple-keyboard's onKeyPress callback handles button clicks
 
     // Set initial value
     this.keyboard.setInput(this.inputValue());
