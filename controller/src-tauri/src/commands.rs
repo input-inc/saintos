@@ -243,52 +243,42 @@ pub fn show_keyboard() -> Result<(), String> {
 
         log::info!("Platform: Linux - attempting to open virtual keyboard");
 
-        // Method 1: Launch maliit (Desktop Mode - SteamOS has this installed)
-        // Need to start maliit-server first, then activate the keyboard
+        // Method 1: Simulate the Steam Deck X button press using ydotool
+        // On SteamOS Desktop Mode, the X button triggers the on-screen keyboard
+        // ydotool works on Wayland (which SteamOS uses)
+        log::info!("Trying: ydotool to simulate keyboard toggle key");
 
-        // Check if maliit-server is already running
-        let server_check = Command::new("pgrep")
-            .args(["-x", "maliit-server"])
+        // First, try ydotoold daemon (needs to be running for ydotool to work)
+        let ydotool_result = Command::new("ydotool")
+            .args(["key", "200:1", "200:0"])  // KEY_PROG1 (200) - often used for special functions
             .output();
 
-        let server_running = server_check
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if !server_running {
-            log::info!("maliit-server not running, starting it...");
-            let server_start = Command::new("maliit-server")
-                .spawn();
-
-            match server_start {
-                Ok(_) => {
-                    log::info!("maliit-server started");
-                    // Give it time to initialize
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                Err(e) => {
-                    log::warn!("Failed to start maliit-server: {}", e);
-                }
-            }
-        } else {
-            log::info!("maliit-server already running");
-        }
-
-        // Now activate the keyboard via DBus
-        log::info!("Trying: activate maliit keyboard via DBus");
-        let maliit_activate = Command::new("dbus-send")
-            .args([
-                "--type=method_call",
-                "--dest=org.maliit.server",
-                "/org/maliit/server/address",
-                "org.maliit.Server.Address.activateContext",
-            ])
-            .output();
-
-        match maliit_activate {
+        match ydotool_result {
             Ok(output) => {
                 log::info!(
-                    "maliit activateContext - status: {:?}, stderr: {}",
+                    "ydotool executed - status: {:?}, stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if output.status.success() {
+                    log::info!("ydotool key sent");
+                    // Don't return - this might not be the right key
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to execute ydotool: {}", e);
+            }
+        }
+
+        // Method 2: Try the steam-osk script if it exists (SteamOS-specific)
+        log::info!("Trying: steam-osk command");
+        let steam_osk = Command::new("steam-osk")
+            .output();
+
+        match steam_osk {
+            Ok(output) => {
+                log::info!(
+                    "steam-osk executed - status: {:?}, stderr: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stderr)
                 );
@@ -297,22 +287,25 @@ pub fn show_keyboard() -> Result<(), String> {
                 }
             }
             Err(e) => {
-                log::warn!("Failed to activate maliit via DBus: {}", e);
+                log::warn!("steam-osk not found: {}", e);
             }
         }
 
-        // Fallback: try launching maliit-keyboard directly
-        log::info!("Trying: launch maliit-keyboard directly");
-        let maliit_launch = Command::new("maliit-keyboard")
-            .spawn();
+        // Method 3: Try steam-im-modules keyboard activation
+        log::info!("Trying: steam-im keyboard activation");
+        let steam_im = Command::new("sh")
+            .args(["-c", "steam-runtime-launch-client --list-client-apps 2>/dev/null | head -1"])
+            .output();
 
-        match maliit_launch {
-            Ok(_) => {
-                log::info!("maliit-keyboard process launched successfully");
-                return Ok(());
+        match steam_im {
+            Ok(output) => {
+                log::info!(
+                    "steam-im check - status: {:?}",
+                    output.status
+                );
             }
             Err(e) => {
-                log::warn!("Failed to launch maliit-keyboard: {}", e);
+                log::warn!("steam-im check failed: {}", e);
             }
         }
 
