@@ -306,17 +306,9 @@ impl SteamDeckHidReader {
 
         thread::sleep(Duration::from_millis(50));
 
-        // Alternative: Try clearing steam mappings to get raw input
-        let mut clear_mappings = [0u8; 64];
-        clear_mappings[0] = STEAM_FEATURE_REPORT_CLEAR_MAPPINGS; // 0x81
-        clear_mappings[1] = 0x00;
-
-        match device.send_feature_report(&clear_mappings) {
-            Ok(_) => log::info!("Sent clear mappings feature report"),
-            Err(e) => log::warn!("Failed to send clear mappings: {} (this may be expected)", e),
-        }
-
-        thread::sleep(Duration::from_millis(50));
+        // NOTE: We intentionally do NOT send the "clear mappings" (0x81) feature report here.
+        // That would disable Steam Input's button mappings, breaking features like
+        // X button → "Show Keyboard" in Desktop Mode.
 
         // Request settings to confirm device is responsive
         let mut get_settings = [0u8; 64];
