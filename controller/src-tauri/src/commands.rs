@@ -234,7 +234,7 @@ pub fn log_frontend(level: String, message: String, context: Option<String>) {
 /// Show the virtual keyboard (Steam Deck / SteamOS)
 /// Works in both Gaming Mode and Desktop Mode by invoking Steam directly
 #[tauri::command]
-pub fn show_keyboard() -> Result<(), String> {
+pub fn show_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
     log::info!("show_keyboard command invoked");
 
     #[cfg(target_os = "linux")]
@@ -243,8 +243,14 @@ pub fn show_keyboard() -> Result<(), String> {
 
         log::info!("Platform: Linux - opening Steam keyboard");
 
-        // Primary method: Call steam with steam://open/keyboard URL
-        // This works in both Gaming Mode and Desktop Mode
+        // First, exit fullscreen so the keyboard can appear on top
+        log::info!("Exiting fullscreen to allow keyboard overlay");
+        let _ = window.set_fullscreen(false);
+
+        // Small delay to let the window state change
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Open the keyboard
         log::info!("Trying: steam steam://open/keyboard");
         let result = Command::new("steam")
             .arg("steam://open/keyboard")
@@ -299,6 +305,7 @@ pub fn show_keyboard() -> Result<(), String> {
 
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = &window; // Silence unused warning
         log::info!("show_keyboard called on non-Linux platform (no-op)");
         Ok(())
     }
@@ -307,7 +314,7 @@ pub fn show_keyboard() -> Result<(), String> {
 /// Hide the virtual keyboard (Steam Deck / SteamOS)
 /// Works in both Gaming Mode and Desktop Mode by invoking Steam directly
 #[tauri::command]
-pub fn hide_keyboard() -> Result<(), String> {
+pub fn hide_keyboard(window: tauri::WebviewWindow) -> Result<(), String> {
     log::info!("hide_keyboard command invoked");
 
     #[cfg(target_os = "linux")]
@@ -323,21 +330,25 @@ pub fn hide_keyboard() -> Result<(), String> {
         match result {
             Ok(_) => {
                 log::info!("Steam keyboard close command sent successfully");
-                return Ok(());
             }
             Err(e) => {
                 log::warn!("Failed to execute steam close command: {}", e);
             }
         }
 
-        // Steam keyboard typically closes automatically when input loses focus
-        // But we try to close it explicitly just in case
-        log::warn!("Steam close command failed - keyboard may close on its own");
+        // Small delay before restoring fullscreen
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Restore fullscreen
+        log::info!("Restoring fullscreen");
+        let _ = window.set_fullscreen(true);
+
         Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = &window; // Silence unused warning
         log::info!("hide_keyboard called on non-Linux platform (no-op)");
         Ok(())
     }
