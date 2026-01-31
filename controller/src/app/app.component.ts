@@ -5,6 +5,7 @@ import { Subscription } from 'rxjs';
 import { ConnectionService, ConnectionStatus } from './core/services/connection.service';
 import { InputService, ButtonEvent } from './core/services/input.service';
 import { BindingsService, DigitalInput } from './core/services/bindings.service';
+import { KeyboardService } from './core/services/keyboard.service';
 import { VirtualJoystickComponent, JoystickPosition } from './shared/components/virtual-joystick/virtual-joystick.component';
 import { PresetPanelComponent } from './shared/components/preset-panel/preset-panel.component';
 
@@ -497,7 +498,8 @@ export class AppComponent implements OnInit, OnDestroy {
   constructor(
     public connectionService: ConnectionService,
     public inputService: InputService,
-    public bindingsService: BindingsService
+    public bindingsService: BindingsService,
+    private keyboardService: KeyboardService
   ) {
     // Apply saved UI scale on startup
     const savedScale = localStorage.getItem('saint-controller-ui-scale');
@@ -521,6 +523,12 @@ export class AppComponent implements OnInit, OnDestroy {
     const digitalInput = this.buttonMap[event.button];
     if (!digitalInput) {
       console.log('Unknown button:', event.button);
+      return;
+    }
+
+    // When a text field is focused, don't process X button - let Steam handle it for keyboard
+    if (digitalInput === 'x' && this.keyboardService.isTextFieldFocused()) {
+      console.log('X button pressed while text field focused - letting Steam handle for keyboard');
       return;
     }
 

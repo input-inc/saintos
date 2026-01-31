@@ -92,6 +92,14 @@ export class KeyboardService {
   }
 
   /**
+   * Check if a text input is currently focused.
+   * Used to determine if button presses should be passed through for keyboard use.
+   */
+  isTextFieldFocused(): boolean {
+    return this.isTextInput(document.activeElement as HTMLElement);
+  }
+
+  /**
    * Check if an element is a text input that would benefit from a keyboard.
    */
   private isTextInput(element: HTMLElement | null): boolean {
