@@ -28,7 +28,7 @@ import { invoke } from '@tauri-apps/api/core';
               <input type="number" class="input w-full"
                      [(ngModel)]="config.port"
                      [disabled]="connectionService.isConnected()"
-                     placeholder="9090">
+                     placeholder="80">
             </div>
           </div>
 
@@ -172,7 +172,7 @@ import { invoke } from '@tauri-apps/api/core';
 export class SettingsComponent {
   config: ConnectionConfig = {
     host: 'localhost',
-    port: 9090,
+    port: 80,
     password: ''
   };
 
