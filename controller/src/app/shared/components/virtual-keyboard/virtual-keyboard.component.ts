@@ -6,9 +6,9 @@ import {
   ViewChild,
   AfterViewInit,
   signal,
-  computed,
   effect,
   inject,
+  NgZone,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import Keyboard from 'simple-keyboard';
@@ -168,6 +168,7 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
   @ViewChild('keyboardContainer') keyboardContainer!: ElementRef<HTMLDivElement>;
 
   keyboardService = inject(KeyboardService);
+  private ngZone = inject(NgZone);
 
   private keyboard: Keyboard | null = null;
   private currentLayout = signal<KeyboardLayout>('default');
@@ -177,7 +178,12 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
   // Track visibility to init/destroy keyboard
   private visibilityEffect = effect(() => {
     const visible = this.keyboardService.isVisible();
+    console.log('[VirtualKeyboard] visibility changed:', visible);
     if (visible) {
+      // Get the current input value when keyboard becomes visible
+      const initialValue = this.keyboardService.getCurrentInputValue();
+      console.log('[VirtualKeyboard] initial value:', initialValue);
+      this.inputValue.set(initialValue);
       // Small delay to ensure DOM is ready
       setTimeout(() => this.initKeyboard(), 50);
     } else {
@@ -186,9 +192,7 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
   });
 
   ngOnInit(): void {
-    // Initialize with current input value if available
-    const initialValue = this.keyboardService.getCurrentInputValue();
-    this.inputValue.set(initialValue);
+    // Initial value is now set in the visibility effect
   }
 
   ngAfterViewInit(): void {
@@ -202,54 +206,62 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
   private initKeyboard(): void {
     if (this.keyboard || !this.keyboardContainer?.nativeElement) return;
 
-    this.keyboard = new Keyboard(this.keyboardContainer.nativeElement, {
-      onChange: (input) => this.onInputChange(input),
-      onKeyPress: (button) => this.onKeyPress(button),
-      layout: {
-        default: [
-          '1 2 3 4 5 6 7 8 9 0',
-          'q w e r t y u i o p',
-          'a s d f g h j k l',
-          '{shift} z x c v b n m {backspace}',
-          '{symbols} {space} . {enter}'
-        ],
-        shift: [
-          '1 2 3 4 5 6 7 8 9 0',
-          'Q W E R T Y U I O P',
-          'A S D F G H J K L',
-          '{shift} Z X C V B N M {backspace}',
-          '{symbols} {space} . {enter}'
-        ],
-        symbols: [
-          '! @ # $ % ^ & * ( )',
-          '- _ = + [ ] { } |',
-          '; : \' " , . < > ?',
-          '{shift} / \\ ~ ` {backspace}',
-          '{abc} {space} . {enter}'
-        ],
-        'symbols-shift': [
-          '1 2 3 4 5 6 7 8 9 0',
-          '€ £ ¥ © ® ™ § ¶ •',
-          '° ± × ÷ ≠ ≈ ∞ µ',
-          '{shift} … – — « » {backspace}',
-          '{abc} {space} . {enter}'
-        ]
-      },
-      display: {
-        '{backspace}': '⌫',
-        '{enter}': '↵',
-        '{shift}': '⇧',
-        '{space}': ' ',
-        '{symbols}': '?123',
-        '{abc}': 'ABC'
-      },
-      theme: 'simple-keyboard hg-theme-default',
-      physicalKeyboardHighlight: true,
-      physicalKeyboardHighlightPress: true,
-    });
+    // Run keyboard creation outside Angular zone for performance,
+    // but wrap callbacks to run inside zone for change detection
+    this.ngZone.runOutsideAngular(() => {
+      this.keyboard = new Keyboard(this.keyboardContainer.nativeElement, {
+        onChange: (input) => {
+          this.ngZone.run(() => this.onInputChange(input));
+        },
+        onKeyPress: (button) => {
+          this.ngZone.run(() => this.onKeyPress(button));
+        },
+        layout: {
+          default: [
+            '1 2 3 4 5 6 7 8 9 0',
+            'q w e r t y u i o p',
+            'a s d f g h j k l',
+            '{shift} z x c v b n m {backspace}',
+            '{symbols} {space} . {enter}'
+          ],
+          shift: [
+            '1 2 3 4 5 6 7 8 9 0',
+            'Q W E R T Y U I O P',
+            'A S D F G H J K L',
+            '{shift} Z X C V B N M {backspace}',
+            '{symbols} {space} . {enter}'
+          ],
+          symbols: [
+            '! @ # $ % ^ & * ( )',
+            '- _ = + [ ] { } |',
+            '; : \' " , . < > ?',
+            '{shift} / \\ ~ ` {backspace}',
+            '{abc} {space} . {enter}'
+          ],
+          'symbols-shift': [
+            '1 2 3 4 5 6 7 8 9 0',
+            '€ £ ¥ © ® ™ § ¶ •',
+            '° ± × ÷ ≠ ≈ ∞ µ',
+            '{shift} … – — « » {backspace}',
+            '{abc} {space} . {enter}'
+          ]
+        },
+        display: {
+          '{backspace}': '⌫',
+          '{enter}': '↵',
+          '{shift}': '⇧',
+          '{space}': ' ',
+          '{symbols}': '?123',
+          '{abc}': 'ABC'
+        },
+        theme: 'simple-keyboard hg-theme-default',
+        physicalKeyboardHighlight: true,
+        physicalKeyboardHighlightPress: true,
+      });
 
-    // Set initial value
-    this.keyboard.setInput(this.inputValue());
+      // Set initial value
+      this.keyboard.setInput(this.inputValue());
+    });
   }
 
   private destroyKeyboard(): void {
@@ -260,6 +272,7 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
   }
 
   private onInputChange(input: string): void {
+    console.log('[VirtualKeyboard] onChange:', input);
     this.inputValue.set(input);
   }
 
