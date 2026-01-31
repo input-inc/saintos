@@ -140,39 +140,70 @@ fi
 echo "${BLUE}========================================${NC}"
 echo ""
 
-# Start fswatch if in watch mode
+# Run the server (with optional watch mode)
 if $_SAINT_WATCH_MODE; then
-    echo "${YELLOW}Starting file watcher for auto-rebuild...${NC}"
-    echo "Watching: saint_server/, saint_common/"
+    echo "${YELLOW}Watch mode enabled - server will restart on file changes${NC}"
+    echo "Watching: saint_server/, saint_common/, web/"
+    echo "Press Ctrl+C to stop"
     echo ""
 
-    # Start fswatch in background
-    fswatch -o "$SAINT_OS_DIR/saint_server" "$SAINT_OS_DIR/saint_common" | while read; do
-        echo ""
-        echo "${YELLOW}[$(date +%H:%M:%S)] Changes detected, rebuilding...${NC}"
-        "$_SAINT_CONDA_BIN/colcon" build --symlink-install 2>&1 | grep -E "(Starting|Finished|Failed|error:|warning:)" || true
-        echo "${GREEN}[$(date +%H:%M:%S)] Rebuild complete${NC}"
-    done &
-    _SAINT_FSWATCH_PID=$!
+    # Track server PID for cleanup
+    _SAINT_SERVER_PID=""
 
-    # Cleanup function
+    # Cleanup function for Ctrl+C
     _saint_cleanup() {
         echo ''
-        echo 'Stopping file watcher...'
-        kill $_SAINT_FSWATCH_PID 2>/dev/null
+        echo "${YELLOW}Stopping server...${NC}"
+        if [[ -n "$_SAINT_SERVER_PID" ]]; then
+            kill $_SAINT_SERVER_PID 2>/dev/null
+            wait $_SAINT_SERVER_PID 2>/dev/null
+        fi
+        # Kill any lingering fswatch
+        pkill -f "fswatch.*saint_server" 2>/dev/null
+        echo "${GREEN}Server stopped.${NC}"
+        # Return instead of exit since we're sourcing
+        return 0
     }
     trap _saint_cleanup INT TERM
-fi
 
-# Run the server
-echo "${GREEN}Starting SAINT.OS server...${NC}"
-echo ""
-# Ensure PATH includes conda bin for subprocesses (python3, etc.)
-PATH="$_SAINT_CONDA_BIN:$PATH" "$_SAINT_CONDA_BIN/ros2" launch saint_os saint_server.launch.py
+    # Loop to restart server when changes detected
+    while true; do
+        echo "${GREEN}[$(date +%H:%M:%S)] Starting SAINT.OS server...${NC}"
+        echo ""
 
-# Cleanup if watch mode
-if $_SAINT_WATCH_MODE; then
-    kill $_SAINT_FSWATCH_PID 2>/dev/null
+        # Start the server in background
+        PATH="$_SAINT_CONDA_BIN:$PATH" "$_SAINT_CONDA_BIN/ros2" launch saint_os saint_server.launch.py &
+        _SAINT_SERVER_PID=$!
+
+        # Wait for file changes (fswatch blocks until a change is detected)
+        # -1 means exit after first event batch
+        fswatch -1 "$SAINT_OS_DIR/saint_server" "$SAINT_OS_DIR/saint_common" "$SAINT_OS_DIR/web" >/dev/null 2>&1
+        _FSWATCH_EXIT=$?
+
+        # Check if fswatch was interrupted (Ctrl+C)
+        if [[ $_FSWATCH_EXIT -ne 0 ]]; then
+            break
+        fi
+
+        echo ""
+        echo "${YELLOW}[$(date +%H:%M:%S)] Changes detected, restarting server...${NC}"
+
+        # Kill the server
+        kill $_SAINT_SERVER_PID 2>/dev/null
+        wait $_SAINT_SERVER_PID 2>/dev/null
+
+        # Rebuild
+        echo "${YELLOW}Rebuilding...${NC}"
+        "$_SAINT_CONDA_BIN/colcon" build --symlink-install 2>&1 | grep -E "(Starting|Finished|Failed|error:|warning:)" || true
+        echo "${GREEN}[$(date +%H:%M:%S)] Rebuild complete${NC}"
+        echo ""
+    done
+else
+    # Run the server normally (no watch)
+    echo "${GREEN}Starting SAINT.OS server...${NC}"
+    echo ""
+    # Ensure PATH includes conda bin for subprocesses (python3, etc.)
+    PATH="$_SAINT_CONDA_BIN:$PATH" "$_SAINT_CONDA_BIN/ros2" launch saint_os saint_server.launch.py
 fi
 
 # Clean up variables
