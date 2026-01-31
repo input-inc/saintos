@@ -243,19 +243,34 @@ pub fn show_keyboard() -> Result<(), String> {
 
         log::info!("Platform: Linux - opening Steam keyboard");
 
-        // Open the keyboard via steam:// URL - works in both modes
-        log::info!("Trying: steam steam://open/keyboard");
-        let result = Command::new("steam")
-            .arg("steam://open/keyboard")
+        // Open the keyboard via steam:// URL - run through shell for proper environment
+        log::info!("Trying: steam steam://open/keyboard (via shell)");
+        let result = Command::new("sh")
+            .args(["-c", "steam steam://open/keyboard"])
             .spawn();
 
         match result {
             Ok(_) => {
-                log::info!("Steam keyboard command sent successfully");
-                return Ok(());
+                log::info!("Steam keyboard command sent via shell");
+                // Don't return yet - this may not work in Desktop Mode
             }
             Err(e) => {
-                log::warn!("Failed to execute steam command: {}", e);
+                log::warn!("Failed to execute steam command via shell: {}", e);
+            }
+        }
+
+        // Also try xdg-open as fallback (might work differently)
+        log::info!("Also trying: xdg-open steam://open/keyboard");
+        let xdg_result = Command::new("xdg-open")
+            .arg("steam://open/keyboard")
+            .spawn();
+
+        match xdg_result {
+            Ok(_) => {
+                log::info!("xdg-open keyboard command sent");
+            }
+            Err(e) => {
+                log::warn!("Failed to execute xdg-open: {}", e);
             }
         }
 
