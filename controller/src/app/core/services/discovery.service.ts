@@ -87,9 +87,13 @@ export class DiscoveryService {
     private tauri: TauriService,
     private connection: ConnectionService
   ) {
+    console.log('[DiscoveryService] Initialized');
+
     // Auto-refresh when connection status changes to connected
     this.tauri.listen<{ status: string }>('connection-status').subscribe(state => {
+      console.log('[DiscoveryService] Connection status event received:', state.status);
       if (state.status === 'connected') {
+        console.log('[DiscoveryService] Connected! Will refresh discovery in 500ms...');
         // Small delay to let the connection stabilize
         setTimeout(() => this.refresh(), 500);
       }
@@ -100,38 +104,31 @@ export class DiscoveryService {
    * Fetch discovery data from the server
    */
   async refresh(): Promise<void> {
+    console.log('[DiscoveryService] refresh() called, isConnected:', this.connection.isConnected());
+
     if (!this.connection.isConnected()) {
       console.log('[DiscoveryService] Not connected, skipping refresh');
       return;
     }
 
     this._loading.set(true);
+    console.log('[DiscoveryService] Starting discovery refresh...');
+
     try {
       // Fetch controllable functions
+      console.log('[DiscoveryService] Calling discoverControllable...');
       await this.connection.discoverControllable();
+      console.log('[DiscoveryService] discoverControllable request completed');
 
-      // Listen for the response
-      const controllablePromise = new Promise<ControllableNode[]>((resolve) => {
-        const sub = this.tauri.listen<{ controllable: ControllableNode[] }>('discovery-controllable')
-          .subscribe(data => {
-            sub.unsubscribe();
-            resolve(data.controllable || []);
-          });
-
-        // Timeout after 5 seconds
-        setTimeout(() => {
-          sub.unsubscribe();
-          resolve([]);
-        }, 5000);
-      });
-
-      // For now, we'll use a simpler approach - invoke and get direct response
-      // The current implementation sends the discovery request but doesn't return data directly
-      // We need to update the backend to return data or listen for events
+      // TODO: The server sends a response but we're not receiving it yet
+      // For now, we set default test data
+      // In production, we need to either:
+      // 1. Have the Tauri command return the data directly
+      // 2. Listen for a Tauri event with the discovery response
 
       // Temporary: Set some default controllable items for testing
-      // In production, this should come from the server response
-      this._controllable.set([
+      // These should match what's actually configured on your server
+      const defaultData: ControllableNode[] = [
         {
           role: 'head',
           node_id: 'head-node',
@@ -168,10 +165,14 @@ export class DiscoveryService {
             { function: 'volume', mode: 'pwm', gpio: 1 },
           ]
         }
-      ]);
+      ];
+
+      console.log('[DiscoveryService] Setting default discovery data:', defaultData.map(n => `${n.role}: ${n.functions.map(f => f.function).join(', ')}`));
+      this._controllable.set(defaultData);
 
       this._lastFetched.set(new Date());
-      console.log('[DiscoveryService] Discovery data refreshed');
+      console.log('[DiscoveryService] Discovery data refreshed successfully');
+      console.log('[DiscoveryService] Active roles:', this.activeRoles());
     } catch (err) {
       console.error('[DiscoveryService] Failed to refresh discovery data:', err);
     } finally {

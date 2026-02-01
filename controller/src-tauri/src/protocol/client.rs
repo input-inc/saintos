@@ -127,11 +127,14 @@ impl WebSocketClient {
 
     /// High-level control using role + function (preferred)
     pub fn send_function_control(&self, role: &str, function: &str, value: Value) -> Result<(), String> {
+        log::debug!("send_function_control called: role={}, function={}, value={}", role, function, value);
+
         // Throttle commands
         {
             let mut last_time = self.last_command_time.write();
             let elapsed = last_time.elapsed();
             if elapsed < Duration::from_millis(THROTTLE_MS) {
+                log::trace!("Throttled function control for {}:{}", role, function);
                 return Ok(());
             }
             *last_time = Instant::now();
@@ -141,36 +144,65 @@ impl WebSocketClient {
             .command_tx
             .read()
             .clone()
-            .ok_or_else(|| "Not connected".to_string())?;
+            .ok_or_else(|| {
+                log::warn!("send_function_control: Not connected");
+                "Not connected".to_string()
+            })?;
 
         let msg = OutgoingMessage::control_function(role, function, value);
+        log::info!("Sending function control: {}:{} = {}", role, function, msg.to_json());
 
         tx.blocking_send(msg)
-            .map_err(|e| format!("Failed to queue function control: {}", e))
+            .map_err(|e| {
+                log::error!("Failed to queue function control: {}", e);
+                format!("Failed to queue function control: {}", e)
+            })
     }
 
     /// Request discovery of available roles
     pub fn request_discover_roles(&self) -> Result<(), String> {
+        log::info!("Requesting role discovery from server...");
+
         let tx = self
             .command_tx
             .read()
             .clone()
-            .ok_or_else(|| "Not connected".to_string())?;
+            .ok_or_else(|| {
+                log::warn!("request_discover_roles: Not connected");
+                "Not connected".to_string()
+            })?;
 
-        tx.blocking_send(OutgoingMessage::discover_roles())
-            .map_err(|e| format!("Failed to send discovery request: {}", e))
+        let msg = OutgoingMessage::discover_roles();
+        log::debug!("Sending discover_roles: {}", msg.to_json());
+
+        tx.blocking_send(msg)
+            .map_err(|e| {
+                log::error!("Failed to send discovery request: {}", e);
+                format!("Failed to send discovery request: {}", e)
+            })
     }
 
     /// Request discovery of controllable functions
     pub fn request_discover_controllable(&self) -> Result<(), String> {
+        log::info!("Requesting controllable functions discovery from server...");
+
         let tx = self
             .command_tx
             .read()
             .clone()
-            .ok_or_else(|| "Not connected".to_string())?;
+            .ok_or_else(|| {
+                log::warn!("request_discover_controllable: Not connected");
+                "Not connected".to_string()
+            })?;
 
-        tx.blocking_send(OutgoingMessage::discover_controllable())
-            .map_err(|e| format!("Failed to send discovery request: {}", e))
+        let msg = OutgoingMessage::discover_controllable();
+        log::debug!("Sending discover_controllable: {}", msg.to_json());
+
+        tx.blocking_send(msg)
+            .map_err(|e| {
+                log::error!("Failed to send discovery request: {}", e);
+                format!("Failed to send discovery request: {}", e)
+            })
     }
 
     /// Send emergency stop command (bypasses throttling)
@@ -339,8 +371,12 @@ async fn handle_connection<R: Runtime>(
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        // Log all incoming messages at info level for debugging
+                        tracing::info!("Received from server: {}", text);
                         if let Ok(incoming) = IncomingMessage::from_json(&text) {
-                            tracing::debug!("Received: {:?}", incoming);
+                            tracing::debug!("Parsed message: type={}, status={:?}", incoming.msg_type, incoming.status);
+                        } else {
+                            tracing::warn!("Failed to parse incoming message");
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
@@ -374,10 +410,13 @@ async fn handle_connection<R: Runtime>(
 
             cmd = command_rx.recv() => {
                 if let Some(cmd) = cmd {
-                    if let Err(e) = write.send(Message::Text(cmd.to_json())).await {
+                    let json = cmd.to_json();
+                    tracing::info!("Sending to server: {}", json);
+                    if let Err(e) = write.send(Message::Text(json)).await {
                         tracing::error!("Failed to send command: {}", e);
                         return true;
                     }
+                    tracing::debug!("Command sent successfully");
                 }
             }
 

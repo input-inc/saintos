@@ -88,6 +88,7 @@ export class ConnectionService implements OnDestroy {
   private subscribeToConnectionEvents(): void {
     this.subscriptions.push(
       this.tauri.listen<ConnectionState>('connection-status').subscribe(state => {
+        console.log('[ConnectionService] Connection status changed:', state.status, state.error || '');
         this.connectionState.set(state);
       })
     );
@@ -139,9 +140,17 @@ export class ConnectionService implements OnDestroy {
    */
   async sendFunctionControl(role: string, functionName: string, value: unknown): Promise<void> {
     if (!this.isConnected()) {
+      console.warn('[ConnectionService] sendFunctionControl called but not connected');
       throw new Error('Not connected');
     }
-    await this.tauri.invoke('send_function_control', { role, function: functionName, value });
+    console.log('[ConnectionService] sendFunctionControl:', { role, function: functionName, value });
+    try {
+      await this.tauri.invoke('send_function_control', { role, function: functionName, value });
+      console.log('[ConnectionService] sendFunctionControl success');
+    } catch (err) {
+      console.error('[ConnectionService] sendFunctionControl error:', err);
+      throw err;
+    }
   }
 
   /**
@@ -149,9 +158,17 @@ export class ConnectionService implements OnDestroy {
    */
   async discoverRoles(): Promise<void> {
     if (!this.isConnected()) {
+      console.warn('[ConnectionService] discoverRoles called but not connected');
       throw new Error('Not connected');
     }
-    await this.tauri.invoke('discover_roles');
+    console.log('[ConnectionService] Requesting role discovery...');
+    try {
+      await this.tauri.invoke('discover_roles');
+      console.log('[ConnectionService] discoverRoles request sent');
+    } catch (err) {
+      console.error('[ConnectionService] discoverRoles error:', err);
+      throw err;
+    }
   }
 
   /**
@@ -159,9 +176,17 @@ export class ConnectionService implements OnDestroy {
    */
   async discoverControllable(): Promise<void> {
     if (!this.isConnected()) {
+      console.warn('[ConnectionService] discoverControllable called but not connected');
       throw new Error('Not connected');
     }
-    await this.tauri.invoke('discover_controllable');
+    console.log('[ConnectionService] Requesting controllable functions discovery...');
+    try {
+      await this.tauri.invoke('discover_controllable');
+      console.log('[ConnectionService] discoverControllable request sent');
+    } catch (err) {
+      console.error('[ConnectionService] discoverControllable error:', err);
+      throw err;
+    }
   }
 
   async emergencyStop(): Promise<void> {
