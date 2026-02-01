@@ -105,14 +105,19 @@ impl WebSocketClient {
 
     /// Legacy command using node_id + pin_id (deprecated)
     pub fn send_command(&self, node_id: &str, pin_id: u32, value: Value) -> Result<(), String> {
+        // Per-target throttle key
+        let throttle_key = format!("{}:{}", node_id, pin_id);
+
         // Throttle commands
         {
-            let mut last_time = self.last_command_time.write();
-            let elapsed = last_time.elapsed();
-            if elapsed < Duration::from_millis(THROTTLE_MS) {
-                return Ok(());
+            let mut times = self.last_command_times.write();
+            let now = Instant::now();
+            if let Some(last_time) = times.get(&throttle_key) {
+                if now.duration_since(*last_time) < Duration::from_millis(THROTTLE_MS) {
+                    return Ok(());
+                }
             }
-            *last_time = Instant::now();
+            times.insert(throttle_key, now);
         }
 
         let tx = self
