@@ -211,9 +211,13 @@ impl InputMapper {
 
                     // Send command if:
                     // 1. Value changed significantly (delta > 0.001), OR
-                    // 2. Value is non-zero (keep sending for continuous control)
+                    // 2. Value is non-zero (keep sending for continuous control), OR
+                    // 3. Value just returned to zero (send final stop command)
                     // The WebSocket client throttles at 50ms to prevent flooding
-                    let should_send = delta > 0.001 || modified.abs() > 0.001;
+                    let value_changed = delta > 0.001;
+                    let value_active = modified.abs() > 0.001;
+                    let returned_to_zero = last.abs() > 0.001 && modified.abs() <= 0.001;
+                    let should_send = value_changed || value_active || returned_to_zero;
 
                     if should_send {
                         self.last_analog_values.insert(key, modified);
