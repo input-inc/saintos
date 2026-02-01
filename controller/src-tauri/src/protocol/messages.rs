@@ -116,7 +116,7 @@ impl OutgoingMessage {
 /// Incoming message from the SAINT.OS server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncomingMessage {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub msg_type: String,
     #[serde(default)]
     pub status: Option<String>,

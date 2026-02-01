@@ -193,12 +193,9 @@ export class SettingsComponent {
     // Check initial devtools state
     this.checkDevtoolsState();
 
-    // Load saved UI scale
-    const savedScale = localStorage.getItem('saint-controller-ui-scale');
-    if (savedScale) {
-      this.uiScale = parseFloat(savedScale);
-      this.applyScale(this.uiScale);
-    }
+    // Load saved UI scale and apply it via Tauri
+    this.initializeScale();
+
     // Load saved config from localStorage
     const saved = localStorage.getItem('saint-controller-config');
     if (saved) {
@@ -207,6 +204,21 @@ export class SettingsComponent {
         this.config = { ...this.config, ...parsed };
       } catch {
         // Ignore parse errors
+      }
+    }
+  }
+
+  private async initializeScale(): Promise<void> {
+    // First, try to get the current zoom level from the webview
+    try {
+      const currentZoom = await invoke<number>('get_zoom');
+      this.uiScale = currentZoom;
+    } catch {
+      // If we can't get current zoom, check localStorage
+      const savedScale = localStorage.getItem('saint-controller-ui-scale');
+      if (savedScale) {
+        this.uiScale = parseFloat(savedScale);
+        await this.applyScale(this.uiScale);
       }
     }
   }
@@ -308,9 +320,15 @@ export class SettingsComponent {
     this.applyScale(scaleValue);
   }
 
-  private applyScale(scale: number): void {
-    // Apply scale to the root HTML element using CSS zoom
-    // This scales the entire UI uniformly
-    document.documentElement.style.zoom = scale.toString();
+  private async applyScale(scale: number): Promise<void> {
+    // Use Tauri's webview zoom to scale the entire UI including native controls
+    try {
+      await invoke('set_zoom', { scale });
+      console.log(`[Settings] Zoom set to ${scale * 100}%`);
+    } catch (err) {
+      console.error('[Settings] Failed to set zoom via Tauri:', err);
+      // Fallback to CSS zoom if Tauri command fails
+      document.documentElement.style.zoom = scale.toString();
+    }
   }
 }

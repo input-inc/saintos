@@ -234,6 +234,19 @@ pub fn is_devtools_open(window: WebviewWindow) -> bool {
     window.is_devtools_open()
 }
 
+/// Set the webview zoom level (1.0 = 100%, 1.5 = 150%, etc.)
+#[tauri::command]
+pub fn set_zoom(window: WebviewWindow, scale: f64) -> Result<(), String> {
+    log::info!("Setting zoom level to {}%", scale * 100.0);
+    window.set_zoom(scale).map_err(|e| format!("Failed to set zoom: {}", e))
+}
+
+/// Get the current webview zoom level
+#[tauri::command]
+pub fn get_zoom(window: WebviewWindow) -> Result<f64, String> {
+    window.zoom().map_err(|e| format!("Failed to get zoom: {}", e))
+}
+
 /// Quit the application
 #[tauri::command]
 pub fn quit_app<R: Runtime>(app_handle: AppHandle<R>) {

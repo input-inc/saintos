@@ -45,6 +45,22 @@ pub fn run() {
                 }
             }
 
+            // Set default zoom level for Steam Deck (1280x800 display)
+            // The frontend will override this with saved user preference
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    // Check if we're likely on Steam Deck by looking for gaming mode
+                    let is_steam_deck = std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok()
+                        || std::env::var("SteamDeck").is_ok();
+
+                    if is_steam_deck {
+                        log::info!("Steam Deck detected, setting default zoom to 125%");
+                        let _ = window.set_zoom(1.25);
+                    }
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -66,6 +82,8 @@ pub fn run() {
             commands::open_devtools,
             commands::close_devtools,
             commands::is_devtools_open,
+            commands::set_zoom,
+            commands::get_zoom,
             commands::quit_app,
             commands::log_frontend,
             commands::show_keyboard,
