@@ -127,14 +127,11 @@ impl WebSocketClient {
 
     /// High-level control using role + function (preferred)
     pub fn send_function_control(&self, role: &str, function: &str, value: Value) -> Result<(), String> {
-        log::debug!("send_function_control called: role={}, function={}, value={}", role, function, value);
-
         // Throttle commands
         {
             let mut last_time = self.last_command_time.write();
             let elapsed = last_time.elapsed();
             if elapsed < Duration::from_millis(THROTTLE_MS) {
-                log::trace!("Throttled function control for {}:{}", role, function);
                 return Ok(());
             }
             *last_time = Instant::now();
@@ -144,19 +141,25 @@ impl WebSocketClient {
             .command_tx
             .read()
             .clone()
-            .ok_or_else(|| {
-                log::warn!("send_function_control: Not connected");
-                "Not connected".to_string()
-            })?;
+            .ok_or_else(|| "Not connected".to_string())?;
 
         let msg = OutgoingMessage::control_function(role, function, value);
-        log::info!("Sending function control: {}:{} = {}", role, function, msg.to_json());
 
-        tx.blocking_send(msg)
-            .map_err(|e| {
-                log::error!("Failed to queue function control: {}", e);
-                format!("Failed to queue function control: {}", e)
-            })
+        // Use try_send to avoid blocking - drop command if channel is full
+        match tx.try_send(msg) {
+            Ok(()) => {
+                log::trace!("Sent: {}:{} = {}", role, function, value);
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Channel full, drop this command (next one will go through)
+                log::trace!("Channel full, dropped command for {}:{}", role, function);
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err("Connection closed".to_string())
+            }
+        }
     }
 
     /// Request discovery of available roles

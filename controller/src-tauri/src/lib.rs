@@ -52,12 +52,7 @@ pub fn run() {
                     for event in events {
                         match event {
                             ActionEvent::Command(cmd) => {
-                                // Log command being sent
-                                log::debug!(
-                                    "Sending command: role={}, function={}, value={}",
-                                    cmd.role, cmd.function, cmd.value
-                                );
-                                // Send control command to server
+                                // Send control command to server (logging is at trace level in client)
                                 if let Err(e) = state_for_processing.ws_client.send_function_control(
                                     &cmd.role,
                                     &cmd.function,
