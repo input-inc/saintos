@@ -209,17 +209,12 @@ export class SettingsComponent {
   }
 
   private async initializeScale(): Promise<void> {
-    // First, try to get the current zoom level from the webview
-    try {
-      const currentZoom = await invoke<number>('get_zoom');
-      this.uiScale = currentZoom;
-    } catch {
-      // If we can't get current zoom, check localStorage
-      const savedScale = localStorage.getItem('saint-controller-ui-scale');
-      if (savedScale) {
-        this.uiScale = parseFloat(savedScale);
-        await this.applyScale(this.uiScale);
-      }
+    // Load saved scale from localStorage and apply it
+    // Note: Tauri 2.x doesn't have a zoom getter, so localStorage is our source of truth
+    const savedScale = localStorage.getItem('saint-controller-ui-scale');
+    if (savedScale) {
+      this.uiScale = parseFloat(savedScale);
+      await this.applyScale(this.uiScale);
     }
   }
 

@@ -242,9 +242,12 @@ pub fn set_zoom(window: WebviewWindow, scale: f64) -> Result<(), String> {
 }
 
 /// Get the current webview zoom level
+/// Note: Tauri 2.x doesn't provide a getter, so we track it in localStorage on the frontend
 #[tauri::command]
-pub fn get_zoom(window: WebviewWindow) -> Result<f64, String> {
-    window.zoom().map_err(|e| format!("Failed to get zoom: {}", e))
+pub fn get_zoom() -> Result<f64, String> {
+    // Tauri 2.x WebviewWindow doesn't have a zoom() getter
+    // Return default; frontend tracks actual value in localStorage
+    Ok(1.0)
 }
 
 /// Quit the application
