@@ -3,6 +3,8 @@ use crate::input::manager::InputState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
 /// Mapped command ready to send to the server using role/function abstraction
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,13 @@ pub struct PanelState {
     pub current_page: usize,
 }
 
+/// Saved profiles structure for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedProfiles {
+    profiles: Vec<BindingProfile>,
+    active_profile_id: String,
+}
+
 /// Maps input state to commands and actions based on bindings
 pub struct InputMapper {
     profiles: Vec<BindingProfile>,
@@ -58,15 +67,68 @@ pub struct InputMapper {
 
 impl InputMapper {
     pub fn new() -> Self {
+        // Try to load profiles from disk, fall back to defaults
+        let (profiles, active_profile_id) = Self::load_profiles_from_disk()
+            .unwrap_or_else(|| {
+                log::info!("No saved profiles found, using defaults");
+                (vec![super::presets::create_default_profile()], "default".to_string())
+            });
+
         Self {
-            profiles: vec![super::presets::create_default_profile()],
-            active_profile_id: "default".to_string(),
+            profiles,
+            active_profile_id,
             last_analog_values: HashMap::new(),
             last_button_states: HashMap::new(),
             panel_state: PanelState::default(),
             cycle_indices: HashMap::new(),
             toggle_states: HashMap::new(),
             modifier_values: HashMap::new(),
+        }
+    }
+
+    /// Get the profiles config file path
+    fn get_profiles_path() -> Option<PathBuf> {
+        dirs::data_dir().map(|p| p.join("com.saintos.controller").join("profiles.json"))
+    }
+
+    /// Load profiles from disk
+    fn load_profiles_from_disk() -> Option<(Vec<BindingProfile>, String)> {
+        let path = Self::get_profiles_path()?;
+        if !path.exists() {
+            return None;
+        }
+
+        let content = fs::read_to_string(&path).ok()?;
+        let saved: SavedProfiles = serde_json::from_str(&content).ok()?;
+        log::info!("Loaded {} profiles from {:?}", saved.profiles.len(), path);
+        Some((saved.profiles, saved.active_profile_id))
+    }
+
+    /// Save profiles to disk
+    pub fn save_profiles_to_disk(&self) {
+        if let Some(path) = Self::get_profiles_path() {
+            // Ensure directory exists
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+
+            let saved = SavedProfiles {
+                profiles: self.profiles.clone(),
+                active_profile_id: self.active_profile_id.clone(),
+            };
+
+            match serde_json::to_string_pretty(&saved) {
+                Ok(json) => {
+                    if let Err(e) = fs::write(&path, json) {
+                        log::error!("Failed to save profiles to {:?}: {}", path, e);
+                    } else {
+                        log::info!("Saved {} profiles to {:?}", self.profiles.len(), path);
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to serialize profiles: {}", e);
+                }
+            }
         }
     }
 
@@ -83,11 +145,15 @@ impl InputMapper {
                 .map(|p| p.id.clone())
                 .unwrap_or_default();
         }
+        // Persist to disk
+        self.save_profiles_to_disk();
     }
 
     pub fn set_active_profile(&mut self, profile_id: &str) {
         if self.profiles.iter().any(|p| p.id == profile_id) {
             self.active_profile_id = profile_id.to_string();
+            // Persist to disk
+            self.save_profiles_to_disk();
         }
     }
 
@@ -143,7 +209,13 @@ impl InputMapper {
                     let last = self.last_analog_values.get(&key).copied().unwrap_or(0.0);
                     let delta = (modified - last).abs();
 
-                    if delta > 0.001 {
+                    // Send command if:
+                    // 1. Value changed significantly (delta > 0.001), OR
+                    // 2. Value is non-zero (keep sending for continuous control)
+                    // The WebSocket client throttles at 50ms to prevent flooding
+                    let should_send = delta > 0.001 || modified.abs() > 0.001;
+
+                    if should_send {
                         self.last_analog_values.insert(key, modified);
 
                         events.push(ActionEvent::Command(MappedCommand {
