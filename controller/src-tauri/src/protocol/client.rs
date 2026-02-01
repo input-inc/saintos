@@ -127,8 +127,14 @@ impl WebSocketClient {
 
     /// High-level control using role + function (preferred)
     pub fn send_function_control(&self, role: &str, function: &str, value: Value) -> Result<(), String> {
-        // Throttle commands
-        {
+        // Check if this is a "stop" command (value near zero) - these bypass throttle
+        let is_stop_command = match &value {
+            Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
+            _ => false,
+        };
+
+        // Throttle commands (but not stop commands - those are critical)
+        if !is_stop_command {
             let mut last_time = self.last_command_time.write();
             let elapsed = last_time.elapsed();
             if elapsed < Duration::from_millis(THROTTLE_MS) {
