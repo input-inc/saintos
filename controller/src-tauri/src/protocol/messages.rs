@@ -25,16 +25,65 @@ impl OutgoingMessage {
         }
     }
 
+    /// Legacy command using node_id + pin_id (deprecated)
     pub fn command(node_id: &str, pin_id: u32, value: Value) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
-            msg_type: "command".to_string(),
-            action: "set_value".to_string(),
+            msg_type: "control".to_string(),
+            action: "set_pin_value".to_string(),
             params: Some(serde_json::json!({
                 "node_id": node_id,
-                "pin_id": pin_id,
+                "gpio": pin_id,
                 "value": value
             })),
+            password: None,
+        }
+    }
+
+    /// High-level control using role + function (preferred)
+    pub fn control_function(role: &str, function: &str, value: Value) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "control".to_string(),
+            action: "set_function_value".to_string(),
+            params: Some(serde_json::json!({
+                "role": role,
+                "function": function,
+                "value": value
+            })),
+            password: None,
+        }
+    }
+
+    /// Discovery request to get available roles
+    pub fn discover_roles() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "discovery".to_string(),
+            action: "get_roles".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// Discovery request to get active roles (roles assigned to nodes)
+    pub fn discover_active_roles() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "discovery".to_string(),
+            action: "get_active_roles".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// Discovery request to get controllable functions
+    pub fn discover_controllable() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "discovery".to_string(),
+            action: "get_controllable_functions".to_string(),
+            params: None,
             password: None,
         }
     }

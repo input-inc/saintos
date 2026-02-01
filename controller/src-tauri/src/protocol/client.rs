@@ -101,6 +101,7 @@ impl WebSocketClient {
         s.error = None;
     }
 
+    /// Legacy command using node_id + pin_id (deprecated)
     pub fn send_command(&self, node_id: &str, pin_id: u32, value: Value) -> Result<(), String> {
         // Throttle commands
         {
@@ -122,6 +123,54 @@ impl WebSocketClient {
 
         tx.blocking_send(msg)
             .map_err(|e| format!("Failed to queue command: {}", e))
+    }
+
+    /// High-level control using role + function (preferred)
+    pub fn send_function_control(&self, role: &str, function: &str, value: Value) -> Result<(), String> {
+        // Throttle commands
+        {
+            let mut last_time = self.last_command_time.write();
+            let elapsed = last_time.elapsed();
+            if elapsed < Duration::from_millis(THROTTLE_MS) {
+                return Ok(());
+            }
+            *last_time = Instant::now();
+        }
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+
+        let msg = OutgoingMessage::control_function(role, function, value);
+
+        tx.blocking_send(msg)
+            .map_err(|e| format!("Failed to queue function control: {}", e))
+    }
+
+    /// Request discovery of available roles
+    pub fn request_discover_roles(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+
+        tx.blocking_send(OutgoingMessage::discover_roles())
+            .map_err(|e| format!("Failed to send discovery request: {}", e))
+    }
+
+    /// Request discovery of controllable functions
+    pub fn request_discover_controllable(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+
+        tx.blocking_send(OutgoingMessage::discover_controllable())
+            .map_err(|e| format!("Failed to send discovery request: {}", e))
     }
 
     /// Send emergency stop command (bypasses throttling)

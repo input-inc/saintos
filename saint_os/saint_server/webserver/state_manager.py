@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Callable, Tuple
 
 # Timeout for considering a node offline (no announcements received)
-NODE_TIMEOUT_SECONDS = 5.0
+# Increased from 5.0 to 10.0 to handle network jitter and temporary disconnects
+# Nodes announce at 1Hz, so 10s allows for multiple missed announcements
+NODE_TIMEOUT_SECONDS = 10.0
+
+# Grace period before marking a node as truly offline (prevents flapping)
+NODE_OFFLINE_GRACE_SECONDS = 3.0
 
 
 # =============================================================================
@@ -239,6 +244,8 @@ class NodeInfo:
     runtime_state: Optional[NodeRuntimeState] = None
     # Tracking
     last_seen: float = field(default_factory=time.time)
+    # Grace period tracking - when we first detected potential disconnect
+    going_offline_at: Optional[float] = None
 
 
 @dataclass
@@ -389,7 +396,16 @@ class StateManager:
         node.firmware_build = data.get("fw_build", node.firmware_build)
         node.uptime_seconds = data.get("uptime", node.uptime_seconds)
         node.last_seen = time.time()
+
+        # Clear any pending offline state and mark online
+        was_offline = not node.online
         node.online = True
+        node.going_offline_at = None
+
+        # Log reconnection
+        if was_offline:
+            name = node.display_name or node.node_id
+            self._log_activity(f"Node reconnected: {name}", "info")
 
         return is_new
 
@@ -397,22 +413,57 @@ class StateManager:
         """
         Check for nodes that have timed out (stopped announcing).
 
+        Uses a two-phase approach:
+        1. When timeout is first detected, start a grace period
+        2. Only mark offline after grace period expires (prevents flapping)
+
         Returns list of node_ids that went offline.
         """
         now = time.time()
         timed_out = []
 
+        def check_node(node: NodeInfo, is_adopted: bool) -> bool:
+            """Check a single node. Returns True if node went offline."""
+            if not node.online:
+                return False
+
+            time_since_seen = now - node.last_seen
+
+            if time_since_seen <= NODE_TIMEOUT_SECONDS:
+                # Node is responding normally - clear any pending offline state
+                node.going_offline_at = None
+                return False
+
+            # Node has exceeded timeout
+            if node.going_offline_at is None:
+                # First detection - start grace period
+                node.going_offline_at = now
+                if self.logger:
+                    name = node.display_name or node.node_id
+                    self.logger.debug(
+                        f"Node {name} timeout detected, starting grace period"
+                    )
+                return False
+
+            # Check if grace period has expired
+            grace_elapsed = now - node.going_offline_at
+            if grace_elapsed < NODE_OFFLINE_GRACE_SECONDS:
+                return False
+
+            # Grace period expired - mark offline
+            node.online = False
+            node.going_offline_at = None
+            return True
+
         # Check unadopted nodes
         for node_id, node in list(self.state.unadopted_nodes.items()):
-            if node.online and (now - node.last_seen) > NODE_TIMEOUT_SECONDS:
-                node.online = False
+            if check_node(node, is_adopted=False):
                 timed_out.append(node_id)
                 self._log_activity(f"Node offline: {node_id}", "warn")
 
         # Check adopted nodes
         for node_id, node in self.state.adopted_nodes.items():
-            if node.online and (now - node.last_seen) > NODE_TIMEOUT_SECONDS:
-                node.online = False
+            if check_node(node, is_adopted=True):
                 timed_out.append(node_id)
                 self._log_activity(
                     f"Adopted node offline: {node.display_name or node_id}", "warn"
@@ -1095,6 +1146,78 @@ class StateManager:
                 })
 
         return result
+
+    # =========================================================================
+    # Role-based Lookup Methods
+    # =========================================================================
+
+    def get_node_by_role(self, role: str) -> Optional[NodeInfo]:
+        """
+        Find an adopted node by its role.
+
+        Args:
+            role: The role name (e.g., 'head', 'tracks')
+
+        Returns:
+            NodeInfo if found, None otherwise
+        """
+        for node in self.state.adopted_nodes.values():
+            if node.role == role:
+                return node
+        return None
+
+    def get_nodes_by_role(self, role: str) -> List[NodeInfo]:
+        """
+        Find all adopted nodes with a specific role.
+
+        Args:
+            role: The role name (e.g., 'head', 'tracks')
+
+        Returns:
+            List of NodeInfo objects with the specified role
+        """
+        return [node for node in self.state.adopted_nodes.values() if node.role == role]
+
+    def get_gpio_for_function(self, node_id: str, logical_name: str) -> Optional[int]:
+        """
+        Find the GPIO pin number for a logical function on a node.
+
+        Args:
+            node_id: The node identifier
+            logical_name: The logical function name (e.g., 'eye_left_lr', 'left_velocity')
+
+        Returns:
+            GPIO pin number if found, None otherwise
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.pin_config:
+            return None
+
+        for gpio, config in node.pin_config.pins.items():
+            if config.logical_name == logical_name:
+                return gpio
+        return None
+
+    def resolve_function_to_pin(self, role: str, function: str) -> Optional[Tuple[str, int]]:
+        """
+        Resolve a role + function to node_id + GPIO.
+
+        Args:
+            role: The role name (e.g., 'head', 'tracks')
+            function: The logical function name (e.g., 'eye_left_lr', 'left_velocity')
+
+        Returns:
+            Tuple of (node_id, gpio) if found, None otherwise
+        """
+        node = self.get_node_by_role(role)
+        if not node:
+            return None
+
+        gpio = self.get_gpio_for_function(node.node_id, function)
+        if gpio is None:
+            return None
+
+        return (node.node_id, gpio)
 
     # =========================================================================
     # Firmware Management Methods

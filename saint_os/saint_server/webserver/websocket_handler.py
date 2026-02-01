@@ -443,6 +443,7 @@ class WebSocketHandler:
             'subscribe': self._handle_subscribe,
             'router': self._handle_router,
             'control': self._handle_control,
+            'discovery': self._handle_discovery,
             'livelink': self._handle_livelink,
             'ros': self._handle_ros,
             'file': self._handle_file,
@@ -746,6 +747,46 @@ class WebSocketHandler:
             else:
                 return {"status": "error", "message": "Firmware update not available"}
 
+        # Server Settings Actions
+        elif action == 'get_settings':
+            try:
+                from saint_server.config import config_to_dict
+                settings = config_to_dict()
+                return {"status": "ok", "data": settings}
+            except Exception as e:
+                self.log('error', f'Failed to get settings: {e}')
+                return {"status": "error", "message": f"Failed to get settings: {e}"}
+
+        elif action == 'set_settings':
+            try:
+                from saint_server.config import update_config_from_dict, save_config, get_config
+
+                settings = params.get('settings', {})
+                if not settings:
+                    return {"status": "error", "message": "Missing settings data"}
+
+                # Update in-memory config
+                update_config_from_dict(settings)
+
+                # Save to file
+                if save_config():
+                    # Update local auth settings if changed
+                    config = get_config()
+                    self._auth_password = config.websocket.password
+                    self._auth_timeout = config.websocket.auth_timeout
+
+                    await self.broadcast_activity('Server settings updated (restart required for some changes)', 'info')
+                    return {
+                        "status": "ok",
+                        "message": "Settings saved. Some changes require a server restart.",
+                        "data": {"restart_required": True}
+                    }
+                else:
+                    return {"status": "error", "message": "Failed to save settings to file"}
+            except Exception as e:
+                self.log('error', f'Failed to save settings: {e}')
+                return {"status": "error", "message": f"Failed to save settings: {e}"}
+
         else:
             return {"status": "error", "message": f"Unknown management action: {action}"}
 
@@ -845,6 +886,58 @@ class WebSocketHandler:
 
             return {"status": "ok", "data": {"throttled": throttled, "count": len(pins)}}
 
+        elif action == 'set_function_value':
+            # High-level control: role + function instead of node_id + gpio
+            role = params.get('role')
+            function = params.get('function')
+            value = params.get('value')
+
+            if not role or not function or value is None:
+                return {"status": "error", "message": "Missing role, function, or value"}
+
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                return {"status": "error", "message": "Invalid value type"}
+
+            # Resolve role + function to node_id + gpio
+            result = self.state_manager.resolve_function_to_pin(role, function)
+            if not result:
+                return {
+                    "status": "error",
+                    "message": f"Could not resolve role '{role}' function '{function}' to a pin"
+                }
+
+            node_id, gpio = result
+
+            # Check throttle
+            now = time.time() * 1000  # ms
+            last_send = self._control_throttle.get(node_id, 0)
+            if now - last_send < CONTROL_THROTTLE_MS:
+                # Throttled - still update desired state but don't send to node
+                self.state_manager.update_pin_desired(node_id, gpio, value)
+                await self._broadcast_pin_state(node_id)
+                return {"status": "ok", "message": "Throttled", "data": {"throttled": True}}
+
+            # Update desired state
+            self.state_manager.update_pin_desired(node_id, gpio, value)
+
+            # Send to node via ROS2
+            if self._send_control_callback:
+                self._send_control_callback(node_id, gpio, value)
+                self._control_throttle[node_id] = now
+
+            # Broadcast updated state to all subscribers
+            await self._broadcast_pin_state(node_id)
+
+            return {
+                "status": "ok",
+                "data": {
+                    "throttled": False,
+                    "resolved": {"node_id": node_id, "gpio": gpio}
+                }
+            }
+
         elif action == 'get_runtime_state':
             node_id = params.get('node_id')
             if not node_id:
@@ -866,6 +959,79 @@ class WebSocketHandler:
 
         else:
             return {"status": "error", "message": f"Unknown control action: {action}"}
+
+    async def _handle_discovery(self, client: WebSocketClient, action: str, params: dict) -> dict:
+        """
+        Handle discovery messages for roles and functions.
+
+        This allows the controller to discover available roles and their
+        logical functions without hardcoding node IDs or GPIO pins.
+        """
+        if action == 'get_roles':
+            # Return all available role definitions
+            roles = []
+            for role_def in self.role_manager.get_all_roles():
+                roles.append(role_def.to_dict())
+            return {"status": "ok", "data": {"roles": roles}}
+
+        elif action == 'get_role':
+            # Return a specific role definition
+            role_name = params.get('role')
+            if not role_name:
+                return {"status": "error", "message": "Missing role parameter"}
+
+            role_def = self.role_manager.get_role(role_name)
+            if not role_def:
+                return {"status": "error", "message": f"Role not found: {role_name}"}
+
+            return {"status": "ok", "data": role_def.to_dict()}
+
+        elif action == 'get_active_roles':
+            # Return roles that are currently assigned to adopted nodes
+            active_roles = []
+            for node in self.state_manager.state.adopted_nodes.values():
+                if node.role:
+                    role_def = self.role_manager.get_role(node.role)
+                    if role_def:
+                        active_roles.append({
+                            "role": node.role,
+                            "node_id": node.node_id,
+                            "display_name": node.display_name or node.node_id,
+                            "online": node.online,
+                            "definition": role_def.to_dict(),
+                        })
+            return {"status": "ok", "data": {"active_roles": active_roles}}
+
+        elif action == 'get_controllable_functions':
+            # Return functions that are currently configured on adopted nodes
+            # This is what the controller needs to know what it can actually control
+            controllable = []
+            for node in self.state_manager.state.adopted_nodes.values():
+                if not node.role or not node.pin_config:
+                    continue
+
+                node_functions = []
+                for gpio, config in node.pin_config.pins.items():
+                    if config.logical_name and config.mode in ('pwm', 'servo', 'digital_out'):
+                        node_functions.append({
+                            "function": config.logical_name,
+                            "mode": config.mode,
+                            "gpio": gpio,  # Include for debugging, controller doesn't need this
+                        })
+
+                if node_functions:
+                    controllable.append({
+                        "role": node.role,
+                        "node_id": node.node_id,
+                        "display_name": node.display_name or node.node_id,
+                        "online": node.online,
+                        "functions": node_functions,
+                    })
+
+            return {"status": "ok", "data": {"controllable": controllable}}
+
+        else:
+            return {"status": "error", "message": f"Unknown discovery action: {action}"}
 
     async def _handle_livelink(self, client: WebSocketClient, action: str, params: dict) -> dict:
         """Handle LiveLink management messages."""

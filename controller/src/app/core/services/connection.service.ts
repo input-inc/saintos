@@ -124,11 +124,44 @@ export class ConnectionService implements OnDestroy {
     }
   }
 
-  async sendCommand(target: string, value: unknown): Promise<void> {
+  /**
+   * Send a legacy command using node_id + pin_id (deprecated)
+   */
+  async sendCommand(nodeId: string, pinId: number, value: unknown): Promise<void> {
     if (!this.isConnected()) {
       throw new Error('Not connected');
     }
-    await this.tauri.invoke('send_command', { target, value });
+    await this.tauri.invoke('send_command', { nodeId, pinId, value });
+  }
+
+  /**
+   * Send a function control command using role + function (preferred)
+   */
+  async sendFunctionControl(role: string, functionName: string, value: unknown): Promise<void> {
+    if (!this.isConnected()) {
+      throw new Error('Not connected');
+    }
+    await this.tauri.invoke('send_function_control', { role, function: functionName, value });
+  }
+
+  /**
+   * Request discovery of available roles from the server
+   */
+  async discoverRoles(): Promise<void> {
+    if (!this.isConnected()) {
+      throw new Error('Not connected');
+    }
+    await this.tauri.invoke('discover_roles');
+  }
+
+  /**
+   * Request discovery of controllable functions from the server
+   */
+  async discoverControllable(): Promise<void> {
+    if (!this.isConnected()) {
+      throw new Error('Not connected');
+    }
+    await this.tauri.invoke('discover_controllable');
   }
 
   async emergencyStop(): Promise<void> {

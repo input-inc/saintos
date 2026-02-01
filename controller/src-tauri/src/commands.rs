@@ -76,7 +76,7 @@ pub fn set_active_profile(state: State<'_, AppState>, profile_id: String) {
     state.mapper.write().set_active_profile(&profile_id);
 }
 
-/// Send a command to the server
+/// Send a command to the server (legacy - uses node_id + pin_id)
 #[tauri::command]
 pub fn send_command(
     state: State<'_, AppState>,
@@ -85,6 +85,29 @@ pub fn send_command(
     value: Value,
 ) -> Result<(), String> {
     state.ws_client.send_command(&node_id, pin_id, value)
+}
+
+/// Send a function control command (preferred - uses role + function)
+#[tauri::command]
+pub fn send_function_control(
+    state: State<'_, AppState>,
+    role: String,
+    function: String,
+    value: Value,
+) -> Result<(), String> {
+    state.ws_client.send_function_control(&role, &function, value)
+}
+
+/// Request discovery of available roles from the server
+#[tauri::command]
+pub fn discover_roles(state: State<'_, AppState>) -> Result<(), String> {
+    state.ws_client.request_discover_roles()
+}
+
+/// Request discovery of controllable functions from the server
+#[tauri::command]
+pub fn discover_controllable(state: State<'_, AppState>) -> Result<(), String> {
+    state.ws_client.request_discover_controllable()
 }
 
 /// Check if a gamepad is connected
