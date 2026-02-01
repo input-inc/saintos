@@ -3,6 +3,7 @@ use crate::input::InputManager;
 use crate::protocol::{ConnectionState, WebSocketClient};
 use parking_lot::RwLock;
 use serde_json::Value;
+use std::sync::Arc;
 use tauri::{AppHandle, Runtime, State, WebviewWindow};
 
 pub struct AppState {
@@ -31,7 +32,7 @@ impl Default for AppState {
 #[tauri::command]
 pub fn connect<R: Runtime + 'static>(
     app_handle: AppHandle<R>,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     host: String,
     port: u16,
     password: String,
@@ -41,45 +42,45 @@ pub fn connect<R: Runtime + 'static>(
 
 /// Disconnect from the server
 #[tauri::command]
-pub fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
+pub fn disconnect(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.ws_client.disconnect();
     Ok(())
 }
 
 /// Get current connection status
 #[tauri::command]
-pub fn get_connection_status(state: State<'_, AppState>) -> ConnectionState {
+pub fn get_connection_status(state: State<'_, Arc<AppState>>) -> ConnectionState {
     state.ws_client.state()
 }
 
 /// Get current input state (gamepad + gyro)
 #[tauri::command]
-pub fn get_input_state(state: State<'_, AppState>) -> crate::input::manager::InputState {
+pub fn get_input_state(state: State<'_, Arc<AppState>>) -> crate::input::manager::InputState {
     state.input_manager.get_state()
 }
 
 /// Get all binding profiles
 #[tauri::command]
-pub fn get_binding_profiles(state: State<'_, AppState>) -> Vec<BindingProfile> {
+pub fn get_binding_profiles(state: State<'_, Arc<AppState>>) -> Vec<BindingProfile> {
     state.mapper.read().get_profiles().to_vec()
 }
 
 /// Set binding profiles
 #[tauri::command]
-pub fn set_binding_profiles(state: State<'_, AppState>, profiles: Vec<BindingProfile>) {
+pub fn set_binding_profiles(state: State<'_, Arc<AppState>>, profiles: Vec<BindingProfile>) {
     state.mapper.write().set_profiles(profiles);
 }
 
 /// Set active binding profile
 #[tauri::command]
-pub fn set_active_profile(state: State<'_, AppState>, profile_id: String) {
+pub fn set_active_profile(state: State<'_, Arc<AppState>>, profile_id: String) {
     state.mapper.write().set_active_profile(&profile_id);
 }
 
 /// Send a command to the server (legacy - uses node_id + pin_id)
 #[tauri::command]
 pub fn send_command(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     node_id: String,
     pin_id: u32,
     value: Value,
@@ -90,7 +91,7 @@ pub fn send_command(
 /// Send a function control command (preferred - uses role + function)
 #[tauri::command]
 pub fn send_function_control(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     role: String,
     function: String,
     value: Value,
@@ -100,31 +101,31 @@ pub fn send_function_control(
 
 /// Request discovery of available roles from the server
 #[tauri::command]
-pub fn discover_roles(state: State<'_, AppState>) -> Result<(), String> {
+pub fn discover_roles(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.ws_client.request_discover_roles()
 }
 
 /// Request discovery of controllable functions from the server
 #[tauri::command]
-pub fn discover_controllable(state: State<'_, AppState>) -> Result<(), String> {
+pub fn discover_controllable(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.ws_client.request_discover_controllable()
 }
 
 /// Check if a gamepad is connected
 #[tauri::command]
-pub fn is_gamepad_connected(state: State<'_, AppState>) -> bool {
+pub fn is_gamepad_connected(state: State<'_, Arc<AppState>>) -> bool {
     state.input_manager.is_gamepad_connected()
 }
 
 /// Send emergency stop command
 #[tauri::command]
-pub fn emergency_stop(state: State<'_, AppState>) -> Result<(), String> {
+pub fn emergency_stop(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.ws_client.send_emergency_stop()
 }
 
 /// Activate a preset by ID
 #[tauri::command]
-pub fn activate_preset(state: State<'_, AppState>, preset_id: String) -> Result<(), String> {
+pub fn activate_preset(state: State<'_, Arc<AppState>>, preset_id: String) -> Result<(), String> {
     let mapper = state.mapper.read();
     let profile = mapper
         .active_profile()

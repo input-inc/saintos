@@ -3,7 +3,11 @@ mod commands;
 mod input;
 mod protocol;
 
+use bindings::mapper::ActionEvent;
 use commands::AppState;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind, RotationStrategy};
 
@@ -24,12 +28,65 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let state = AppState::new();
+            let state = Arc::new(AppState::new());
 
-            // Start input polling
+            // Start input polling (emits input-state events to frontend for UI)
             let app_handle = app.handle().clone();
-            state.input_manager.start(app_handle, 16); // 60Hz polling
+            state.input_manager.start(app_handle.clone(), 16); // 60Hz polling
 
+            // Start input processing loop (processes bindings and sends commands)
+            let state_for_processing = state.clone();
+            thread::spawn(move || {
+                log::info!("Input processing thread started");
+                loop {
+                    // Get current input state
+                    let input_state = state_for_processing.input_manager.get_state();
+
+                    // Process through mapper to generate action events
+                    let events = {
+                        let mut mapper = state_for_processing.mapper.write();
+                        mapper.process(&input_state)
+                    };
+
+                    // Handle each action event
+                    for event in events {
+                        match event {
+                            ActionEvent::Command(cmd) => {
+                                // Log command being sent
+                                log::debug!(
+                                    "Sending command: role={}, function={}, value={}",
+                                    cmd.role, cmd.function, cmd.value
+                                );
+                                // Send control command to server
+                                if let Err(e) = state_for_processing.ws_client.send_function_control(
+                                    &cmd.role,
+                                    &cmd.function,
+                                    cmd.value,
+                                ) {
+                                    // Only log errors, don't spam for "not connected"
+                                    if !e.contains("Not connected") {
+                                        log::error!("Failed to send command: {}", e);
+                                    }
+                                }
+                            }
+                            ActionEvent::EStop => {
+                                log::warn!("E-STOP triggered!");
+                                let _ = state_for_processing.ws_client.send_emergency_stop();
+                            }
+                            // UI events are handled by frontend via action-event emission
+                            _ => {
+                                if let Err(e) = app_handle.emit("action-event", &event) {
+                                    log::error!("Failed to emit action event: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    thread::sleep(Duration::from_millis(16)); // ~60Hz processing
+                }
+            });
+
+            // Use Arc for state management
             app.manage(state);
 
             // Log the log file location
