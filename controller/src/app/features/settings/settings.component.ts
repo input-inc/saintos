@@ -214,8 +214,12 @@ export class SettingsComponent {
     const savedScale = localStorage.getItem('saint-controller-ui-scale');
     if (savedScale) {
       this.uiScale = parseFloat(savedScale);
-      await this.applyScale(this.uiScale);
+    } else {
+      // No saved preference - use default (1.0 for most platforms)
+      // Could detect Steam Deck here and use 1.25 as default if needed
+      this.uiScale = 1.0;
     }
+    await this.applyScale(this.uiScale);
   }
 
   isConnecting(): boolean {
