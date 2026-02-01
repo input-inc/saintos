@@ -147,10 +147,7 @@ impl WebSocketClient {
 
         // Use try_send to avoid blocking - drop command if channel is full
         match tx.try_send(msg) {
-            Ok(()) => {
-                log::trace!("Sent: {}:{} = {}", role, function, value);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 // Channel full, drop this command (next one will go through)
                 log::trace!("Channel full, dropped command for {}:{}", role, function);
