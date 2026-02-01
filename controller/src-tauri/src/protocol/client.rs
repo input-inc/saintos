@@ -2,6 +2,7 @@ use super::messages::{ConnectionState, ConnectionStatus, IncomingMessage, Outgoi
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -19,7 +20,8 @@ pub struct WebSocketClient {
     state: Arc<RwLock<ConnectionState>>,
     command_tx: Arc<RwLock<Option<mpsc::Sender<OutgoingMessage>>>>,
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
-    last_command_time: Arc<RwLock<Instant>>,
+    /// Per-target throttle timers (key = "role:function")
+    last_command_times: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 impl WebSocketClient {
@@ -28,7 +30,7 @@ impl WebSocketClient {
             state: Arc::new(RwLock::new(ConnectionState::default())),
             command_tx: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
-            last_command_time: Arc::new(RwLock::new(Instant::now() - Duration::from_secs(1))),
+            last_command_times: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -133,14 +135,19 @@ impl WebSocketClient {
             _ => false,
         };
 
+        // Per-target throttle key
+        let throttle_key = format!("{}:{}", role, function);
+
         // Throttle commands (but not stop commands - those are critical)
         if !is_stop_command {
-            let mut last_time = self.last_command_time.write();
-            let elapsed = last_time.elapsed();
-            if elapsed < Duration::from_millis(THROTTLE_MS) {
-                return Ok(());
+            let mut times = self.last_command_times.write();
+            let now = Instant::now();
+            if let Some(last_time) = times.get(&throttle_key) {
+                if now.duration_since(*last_time) < Duration::from_millis(THROTTLE_MS) {
+                    return Ok(());
+                }
             }
-            *last_time = Instant::now();
+            times.insert(throttle_key, now);
         }
 
         let tx = self
