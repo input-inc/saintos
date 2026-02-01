@@ -1,4 +1,4 @@
-import { Component, signal } from '@angular/core';
+import { Component, signal, computed, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import {
@@ -16,6 +16,7 @@ import {
   InputTransform,
   ModifierEffect
 } from '../../core/services/bindings.service';
+import { DiscoveryService } from '../../core/services/discovery.service';
 
 type TabId = 'analog' | 'digital' | 'panels' | 'settings';
 
@@ -339,13 +340,23 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
                 <div class="grid grid-cols-2 gap-4">
                   <div>
                     <label class="block text-sm text-saint-text-muted mb-1">Role</label>
-                    <input type="text" class="input w-full" [(ngModel)]="analogForm.targetRole"
-                           placeholder="e.g., head, tracks">
+                    <select class="input w-full" [(ngModel)]="analogForm.targetRole"
+                            (ngModelChange)="onRoleChange()">
+                      <option value="">-- Select Role --</option>
+                      @for (role of availableRoles(); track role) {
+                        <option [value]="role">{{ role }}</option>
+                      }
+                    </select>
                   </div>
                   <div>
                     <label class="block text-sm text-saint-text-muted mb-1">Function</label>
-                    <input type="text" class="input w-full" [(ngModel)]="analogForm.targetFunction"
-                           placeholder="e.g., pan, linear_velocity">
+                    <select class="input w-full" [(ngModel)]="analogForm.targetFunction"
+                            [disabled]="!analogForm.targetRole">
+                      <option value="">-- Select Function --</option>
+                      @for (fn of availableFunctionsForSelectedRole(); track fn) {
+                        <option [value]="fn">{{ fn }}</option>
+                      }
+                    </select>
                   </div>
                 </div>
                 <div>
@@ -510,13 +521,23 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
                   <div class="grid grid-cols-2 gap-4">
                     <div>
                       <label class="block text-sm text-saint-text-muted mb-1">Role</label>
-                      <input type="text" class="input w-full" [(ngModel)]="digitalForm.role"
-                             placeholder="e.g., head, tracks">
+                      <select class="input w-full" [(ngModel)]="digitalForm.role"
+                              (ngModelChange)="onDigitalRoleChange()">
+                        <option value="">-- Select Role --</option>
+                        @for (role of availableRoles(); track role) {
+                          <option [value]="role">{{ role }}</option>
+                        }
+                      </select>
                     </div>
                     <div>
                       <label class="block text-sm text-saint-text-muted mb-1">Function</label>
-                      <input type="text" class="input w-full" [(ngModel)]="digitalForm.function"
-                             placeholder="e.g., pan, linear_velocity">
+                      <select class="input w-full" [(ngModel)]="digitalForm.function"
+                              [disabled]="!digitalForm.role">
+                        <option value="">-- Select Function --</option>
+                        @for (fn of availableFunctionsForDigitalRole(); track fn) {
+                          <option [value]="fn">{{ fn }}</option>
+                        }
+                      </select>
                     </div>
                   </div>
                   <div>
@@ -592,7 +613,38 @@ export class BindingsComponent {
   readonly digitalActionTypes = DIGITAL_ACTION_TYPES;
   readonly navigateDirections = NAVIGATE_DIRECTIONS;
 
-  constructor(public bindingsService: BindingsService) {}
+  // Discovery-based role/function lists
+  readonly availableRoles = computed(() => this.discoveryService.activeRoles());
+
+  constructor(
+    public bindingsService: BindingsService,
+    public discoveryService: DiscoveryService
+  ) {
+    // Refresh discovery data when component initializes
+    this.discoveryService.refresh();
+  }
+
+  // Get functions available for the currently selected role in analog form
+  availableFunctionsForSelectedRole(): string[] {
+    if (!this.analogForm.targetRole) return [];
+    return this.discoveryService.getFunctionsForRole(this.analogForm.targetRole);
+  }
+
+  // Get functions available for the currently selected role in digital form
+  availableFunctionsForDigitalRole(): string[] {
+    if (!this.digitalForm.role) return [];
+    return this.discoveryService.getFunctionsForRole(this.digitalForm.role);
+  }
+
+  // When analog role changes, reset function selection
+  onRoleChange(): void {
+    this.analogForm.targetFunction = '';
+  }
+
+  // When digital role changes, reset function selection
+  onDigitalRoleChange(): void {
+    this.digitalForm.function = '';
+  }
 
   // Computed helpers
   profileDescription(): string | undefined {
