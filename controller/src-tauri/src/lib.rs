@@ -8,7 +8,7 @@ use commands::AppState;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_log::{Target, TargetKind, RotationStrategy};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
