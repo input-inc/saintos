@@ -92,7 +92,7 @@ impl OutgoingMessage {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             msg_type: "subscribe".to_string(),
-            action: "topics".to_string(),
+            action: "subscribe".to_string(),
             params: Some(serde_json::json!({ "topics": topics })),
             password: None,
         }
