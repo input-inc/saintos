@@ -44,7 +44,8 @@ objc2-game-controller = { version = "0.2", features = ["GCController", "GCExtend
 block2 = "0.5"
 
 [profile.release]
-strip = true
+# Note: Don't use strip = true, it removes symbols Tauri needs for __TAURI_BUNDLE_TYPE
+strip = false
 lto = true
 codegen-units = 1
 panic = "abort"

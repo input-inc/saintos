@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// Mapped command ready to send to the server
+/// Mapped command ready to send to the server using role/function abstraction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MappedCommand {
-    pub node_id: String,
-    pub pin_id: u32,
+    pub role: String,
+    pub function: String,
     pub value: Value,
 }
 
@@ -147,8 +147,8 @@ impl InputMapper {
                         self.last_analog_values.insert(key, modified);
 
                         events.push(ActionEvent::Command(MappedCommand {
-                            node_id: target.node_id.clone(),
-                            pin_id: target.pin_id,
+                            role: target.role.clone(),
+                            function: target.function.clone(),
                             value: Value::from(modified),
                         }));
                     }
@@ -262,8 +262,8 @@ impl InputMapper {
                 }
                 DigitalAction::DirectControl { target, value } => {
                     events.push(ActionEvent::Command(MappedCommand {
-                        node_id: target.node_id.clone(),
-                        pin_id: target.pin_id,
+                        role: target.role.clone(),
+                        function: target.function.clone(),
                         value: Value::from(*value),
                     }));
                 }

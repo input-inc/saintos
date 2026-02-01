@@ -139,10 +139,8 @@ pub enum ModifierEffect {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlTarget {
-    #[serde(rename = "nodeId")]
-    pub node_id: String,
-    #[serde(rename = "pinId")]
-    pub pin_id: u32,
+    pub role: String,
+    pub function: String,
     /// Human-readable name
     pub name: Option<String>,
 }
@@ -233,10 +231,8 @@ pub struct ServoPresetData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServoPosition {
-    #[serde(rename = "nodeId")]
-    pub node_id: String,
-    #[serde(rename = "pinId")]
-    pub pin_id: u32,
+    pub role: String,
+    pub function: String,
     pub value: f32,
 }
 

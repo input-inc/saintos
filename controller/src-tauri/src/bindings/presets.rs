@@ -13,8 +13,8 @@ pub fn create_default_profile() -> BindingProfile {
             input: AnalogInput::LeftStickX,
             action: AnalogAction::DirectControl {
                 target: ControlTarget {
-                    node_id: "track".to_string(),
-                    pin_id: 1, // angular velocity
+                    role: "tracks".to_string(),
+                    function: "angular_velocity".to_string(),
                     name: Some("Track Angular".to_string()),
                 },
                 transform: InputTransform {
@@ -30,8 +30,8 @@ pub fn create_default_profile() -> BindingProfile {
             input: AnalogInput::LeftStickY,
             action: AnalogAction::DirectControl {
                 target: ControlTarget {
-                    node_id: "track".to_string(),
-                    pin_id: 0, // linear velocity
+                    role: "tracks".to_string(),
+                    function: "linear_velocity".to_string(),
                     name: Some("Track Linear".to_string()),
                 },
                 transform: InputTransform {
@@ -48,8 +48,8 @@ pub fn create_default_profile() -> BindingProfile {
             input: AnalogInput::RightStickX,
             action: AnalogAction::DirectControl {
                 target: ControlTarget {
-                    node_id: "head".to_string(),
-                    pin_id: 0, // pan
+                    role: "head".to_string(),
+                    function: "pan".to_string(),
                     name: Some("Head Pan".to_string()),
                 },
                 transform: InputTransform {
@@ -65,8 +65,8 @@ pub fn create_default_profile() -> BindingProfile {
             input: AnalogInput::RightStickY,
             action: AnalogAction::DirectControl {
                 target: ControlTarget {
-                    node_id: "head".to_string(),
-                    pin_id: 1, // tilt
+                    role: "head".to_string(),
+                    function: "tilt".to_string(),
                     name: Some("Head Tilt".to_string()),
                 },
                 transform: InputTransform {

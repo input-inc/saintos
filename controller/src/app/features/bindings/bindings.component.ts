@@ -155,7 +155,7 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
                   <div class="mt-3 pt-3 border-t border-saint-border grid grid-cols-4 gap-4 text-sm">
                     <div>
                       <span class="text-saint-text-muted">Target:</span>
-                      <span class="ml-1">{{ binding.action.target.name || binding.action.target.nodeId }}</span>
+                      <span class="ml-1">{{ binding.action.target.name || (binding.action.target.role + ':' + binding.action.target.function) }}</span>
                     </div>
                     <div>
                       <span class="text-saint-text-muted">Deadzone:</span>
@@ -338,12 +338,14 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
               @if (analogForm.actionType === 'direct_control') {
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label class="block text-sm text-saint-text-muted mb-1">Target Node</label>
-                    <input type="text" class="input w-full" [(ngModel)]="analogForm.targetNodeId">
+                    <label class="block text-sm text-saint-text-muted mb-1">Role</label>
+                    <input type="text" class="input w-full" [(ngModel)]="analogForm.targetRole"
+                           placeholder="e.g., head, tracks">
                   </div>
                   <div>
-                    <label class="block text-sm text-saint-text-muted mb-1">Target Pin</label>
-                    <input type="number" class="input w-full" [(ngModel)]="analogForm.targetPinId">
+                    <label class="block text-sm text-saint-text-muted mb-1">Function</label>
+                    <input type="text" class="input w-full" [(ngModel)]="analogForm.targetFunction"
+                           placeholder="e.g., pan, linear_velocity">
                   </div>
                 </div>
                 <div>
@@ -507,12 +509,14 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
                 @case ('direct_control') {
                   <div class="grid grid-cols-2 gap-4">
                     <div>
-                      <label class="block text-sm text-saint-text-muted mb-1">Target Node</label>
-                      <input type="text" class="input w-full" [(ngModel)]="digitalForm.nodeId">
+                      <label class="block text-sm text-saint-text-muted mb-1">Role</label>
+                      <input type="text" class="input w-full" [(ngModel)]="digitalForm.role"
+                             placeholder="e.g., head, tracks">
                     </div>
                     <div>
-                      <label class="block text-sm text-saint-text-muted mb-1">Target Pin</label>
-                      <input type="number" class="input w-full" [(ngModel)]="digitalForm.pinId">
+                      <label class="block text-sm text-saint-text-muted mb-1">Function</label>
+                      <input type="text" class="input w-full" [(ngModel)]="digitalForm.function"
+                             placeholder="e.g., pan, linear_velocity">
                     </div>
                   </div>
                   <div>
@@ -552,8 +556,8 @@ export class BindingsComponent {
   analogForm = {
     input: 'left_stick_x' as AnalogInput,
     actionType: 'direct_control' as 'direct_control' | 'modifier',
-    targetNodeId: '',
-    targetPinId: 0,
+    targetRole: '',
+    targetFunction: '',
     targetName: '',
     deadzone: 0.1,
     scale: 1.0,
@@ -576,8 +580,8 @@ export class BindingsComponent {
     direction: 'next_item' as NavigateDirection,
     targetId: '',
     cycleValues: '',
-    nodeId: '',
-    pinId: 0,
+    role: '',
+    function: '',
     value: 1.0
   };
 
@@ -621,7 +625,7 @@ export class BindingsComponent {
 
   formatAnalogAction(action: AnalogAction): string {
     if (action.type === 'direct_control') {
-      return `Direct Control → ${action.target.name || action.target.nodeId}:${action.target.pinId}`;
+      return `Direct Control → ${action.target.name || `${action.target.role}:${action.target.function}`}`;
     }
     if (action.type === 'modifier') {
       switch (action.effect.type) {
@@ -642,7 +646,7 @@ export class BindingsComponent {
       case 'select_panel_item': return 'Select Panel Item';
       case 'toggle_output': return `Toggle: ${action.target_id}`;
       case 'cycle_output': return `Cycle: ${action.target_id} (${action.values.join(', ')})`;
-      case 'direct_control': return `Direct Control → ${action.target.nodeId}:${action.target.pinId} = ${action.value}`;
+      case 'direct_control': return `Direct Control → ${action.target.role}:${action.target.function} = ${action.value}`;
       case 'e_stop': return 'Emergency Stop';
       case 'none': return 'None';
     }
@@ -675,8 +679,8 @@ export class BindingsComponent {
     this.analogForm = {
       input: 'left_stick_x',
       actionType: 'direct_control',
-      targetNodeId: '',
-      targetPinId: 0,
+      targetRole: '',
+      targetFunction: '',
       targetName: '',
       deadzone: 0.1,
       scale: 1.0,
@@ -695,8 +699,8 @@ export class BindingsComponent {
     this.analogForm.actionType = binding.action.type;
 
     if (binding.action.type === 'direct_control') {
-      this.analogForm.targetNodeId = binding.action.target.nodeId;
-      this.analogForm.targetPinId = binding.action.target.pinId;
+      this.analogForm.targetRole = binding.action.target.role;
+      this.analogForm.targetFunction = binding.action.target.function;
       this.analogForm.targetName = binding.action.target.name || '';
       this.analogForm.deadzone = binding.action.transform.deadzone;
       this.analogForm.scale = binding.action.transform.scale;
@@ -722,8 +726,8 @@ export class BindingsComponent {
       action = {
         type: 'direct_control',
         target: {
-          nodeId: this.analogForm.targetNodeId,
-          pinId: this.analogForm.targetPinId,
+          role: this.analogForm.targetRole,
+          function: this.analogForm.targetFunction,
           name: this.analogForm.targetName || undefined
         },
         transform: {
@@ -797,8 +801,8 @@ export class BindingsComponent {
       direction: 'next_item',
       targetId: '',
       cycleValues: '',
-      nodeId: '',
-      pinId: 0,
+      role: '',
+      function: '',
       value: 1.0
     };
   }
@@ -826,8 +830,8 @@ export class BindingsComponent {
         this.digitalForm.cycleValues = binding.action.values.join(', ');
         break;
       case 'direct_control':
-        this.digitalForm.nodeId = binding.action.target.nodeId;
-        this.digitalForm.pinId = binding.action.target.pinId;
+        this.digitalForm.role = binding.action.target.role;
+        this.digitalForm.function = binding.action.target.function;
         this.digitalForm.value = binding.action.value;
         break;
     }
@@ -865,7 +869,7 @@ export class BindingsComponent {
       case 'direct_control':
         action = {
           type: 'direct_control',
-          target: { nodeId: this.digitalForm.nodeId, pinId: this.digitalForm.pinId },
+          target: { role: this.digitalForm.role, function: this.digitalForm.function },
           value: this.digitalForm.value
         };
         break;

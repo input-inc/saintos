@@ -137,11 +137,11 @@ pub fn activate_preset(state: State<'_, AppState>, preset_id: String) -> Result<
     // Execute the preset based on its type
     match &preset.data {
         crate::bindings::config::PresetData::Servo(servo_data) => {
-            // Send servo positions
+            // Send servo positions using role/function abstraction
             for position in &servo_data.positions {
-                state.ws_client.send_command(
-                    &position.node_id,
-                    position.pin_id,
+                state.ws_client.send_function_control(
+                    &position.role,
+                    &position.function,
                     serde_json::Value::from(position.value),
                 )?;
             }
@@ -151,10 +151,10 @@ pub fn activate_preset(state: State<'_, AppState>, preset_id: String) -> Result<
             log::info!("Playing animation preset: {} ({} keyframes)", preset_id, anim_data.keyframes.len());
         }
         crate::bindings::config::PresetData::Sound(sound_data) => {
-            // Send sound play command
-            state.ws_client.send_command(
+            // Send sound play command using role/function abstraction
+            state.ws_client.send_function_control(
                 "sound",
-                0,
+                "play",
                 serde_json::json!({
                     "soundId": sound_data.sound_id,
                     "volume": sound_data.volume,

@@ -31,8 +31,8 @@ export type NavigateDirection = 'up' | 'down' | 'left' | 'right' | 'next_item' |
 // ============================================================================
 
 export interface ControlTarget {
-  nodeId: string;
-  pinId: number;
+  role: string;
+  function: string;
   name?: string;
 }
 
@@ -90,8 +90,8 @@ export type EasingType = 'linear' | 'ease_in' | 'ease_out' | 'ease_in_out';
 export type PanelLayout = 'grid' | 'list';
 
 export interface ServoPosition {
-  nodeId: string;
-  pinId: number;
+  role: string;
+  function: string;
   value: number;
 }
 
@@ -173,8 +173,8 @@ export interface BindingProfile {
 // ============================================================================
 
 export interface MappedCommand {
-  node_id: string;
-  pin_id: number;
+  role: string;
+  function: string;
   value: unknown;
 }
 
@@ -533,7 +533,7 @@ export class BindingsService {
           input: 'left_stick_x',
           action: {
             type: 'direct_control',
-            target: { nodeId: 'track', pinId: 1, name: 'Track Angular' },
+            target: { role: 'tracks', function: 'angular_velocity', name: 'Track Angular' },
             transform: { deadzone: 0.1, scale: 1.0, expo: 1.0, invert: false }
           },
           enabled: true
@@ -542,7 +542,7 @@ export class BindingsService {
           input: 'left_stick_y',
           action: {
             type: 'direct_control',
-            target: { nodeId: 'track', pinId: 0, name: 'Track Linear' },
+            target: { role: 'tracks', function: 'linear_velocity', name: 'Track Linear' },
             transform: { deadzone: 0.1, scale: 1.0, expo: 1.0, invert: false }
           },
           enabled: true
@@ -551,7 +551,7 @@ export class BindingsService {
           input: 'right_stick_x',
           action: {
             type: 'direct_control',
-            target: { nodeId: 'head', pinId: 0, name: 'Head Pan' },
+            target: { role: 'head', function: 'pan', name: 'Head Pan' },
             transform: { deadzone: 0.05, scale: 0.8, expo: 1.0, invert: false }
           },
           enabled: true
@@ -560,7 +560,7 @@ export class BindingsService {
           input: 'right_stick_y',
           action: {
             type: 'direct_control',
-            target: { nodeId: 'head', pinId: 1, name: 'Head Tilt' },
+            target: { role: 'head', function: 'tilt', name: 'Head Tilt' },
             transform: { deadzone: 0.05, scale: 0.8, expo: 1.0, invert: false }
           },
           enabled: true
