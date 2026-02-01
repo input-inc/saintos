@@ -375,6 +375,33 @@ async fn handle_connection<R: Runtime>(
                         tracing::info!("Received from server: {}", text);
                         if let Ok(incoming) = IncomingMessage::from_json(&text) {
                             tracing::debug!("Parsed message: type={}, status={:?}", incoming.msg_type, incoming.status);
+
+                            // Forward discovery responses to the frontend
+                            if incoming.status.as_deref() == Some("ok") {
+                                if let Some(ref data) = incoming.data {
+                                    // Check for controllable functions response
+                                    if data.get("controllable").is_some() {
+                                        tracing::info!("Emitting discovery-controllable event to frontend");
+                                        if let Err(e) = app_handle.emit("discovery-controllable", data) {
+                                            tracing::error!("Failed to emit discovery-controllable: {}", e);
+                                        }
+                                    }
+                                    // Check for roles response
+                                    if data.get("roles").is_some() {
+                                        tracing::info!("Emitting discovery-roles event to frontend");
+                                        if let Err(e) = app_handle.emit("discovery-roles", data) {
+                                            tracing::error!("Failed to emit discovery-roles: {}", e);
+                                        }
+                                    }
+                                    // Check for active roles response
+                                    if data.get("active_roles").is_some() {
+                                        tracing::info!("Emitting discovery-active-roles event to frontend");
+                                        if let Err(e) = app_handle.emit("discovery-active-roles", data) {
+                                            tracing::error!("Failed to emit discovery-active-roles: {}", e);
+                                        }
+                                    }
+                                }
+                            }
                         } else {
                             tracing::warn!("Failed to parse incoming message");
                         }

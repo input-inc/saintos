@@ -89,6 +89,24 @@ export class DiscoveryService {
   ) {
     console.log('[DiscoveryService] Initialized');
 
+    // Listen for discovery responses from the server (forwarded by Rust backend)
+    this.tauri.listen<{ controllable: ControllableNode[] }>('discovery-controllable').subscribe(data => {
+      console.log('[DiscoveryService] Received discovery-controllable event:', data);
+      if (data && data.controllable) {
+        console.log('[DiscoveryService] Setting controllable data from server:',
+          data.controllable.map(n => `${n.role}: ${n.functions?.map(f => f.function).join(', ') || 'no functions'}`));
+        this._controllable.set(data.controllable);
+        this._lastFetched.set(new Date());
+      }
+    });
+
+    this.tauri.listen<{ roles: RoleDefinition[] }>('discovery-roles').subscribe(data => {
+      console.log('[DiscoveryService] Received discovery-roles event:', data);
+      if (data && data.roles) {
+        this._roles.set(data.roles);
+      }
+    });
+
     // Auto-refresh when connection status changes to connected
     this.tauri.listen<{ status: string }>('connection-status').subscribe(state => {
       console.log('[DiscoveryService] Connection status event received:', state.status);
@@ -115,69 +133,81 @@ export class DiscoveryService {
     console.log('[DiscoveryService] Starting discovery refresh...');
 
     try {
-      // Fetch controllable functions
+      // Request controllable functions from server
+      // The response will come via the 'discovery-controllable' event (handled in constructor)
       console.log('[DiscoveryService] Calling discoverControllable...');
       await this.connection.discoverControllable();
-      console.log('[DiscoveryService] discoverControllable request completed');
+      console.log('[DiscoveryService] discoverControllable request sent, waiting for server response via event...');
 
-      // TODO: The server sends a response but we're not receiving it yet
-      // For now, we set default test data
-      // In production, we need to either:
-      // 1. Have the Tauri command return the data directly
-      // 2. Listen for a Tauri event with the discovery response
+      // Also request roles
+      console.log('[DiscoveryService] Calling discoverRoles...');
+      await this.connection.discoverRoles();
+      console.log('[DiscoveryService] discoverRoles request sent');
 
-      // Temporary: Set some default controllable items for testing
-      // These should match what's actually configured on your server
-      const defaultData: ControllableNode[] = [
-        {
-          role: 'head',
-          node_id: 'head-node',
-          display_name: 'Head Controller',
-          online: true,
-          functions: [
-            { function: 'pan', mode: 'servo', gpio: 0 },
-            { function: 'tilt', mode: 'servo', gpio: 1 },
-            { function: 'eye_left_lr', mode: 'servo', gpio: 2 },
-            { function: 'eye_left_ud', mode: 'servo', gpio: 3 },
-            { function: 'eye_right_lr', mode: 'servo', gpio: 4 },
-            { function: 'eye_right_ud', mode: 'servo', gpio: 5 },
-            { function: 'eyelid_left', mode: 'servo', gpio: 6 },
-            { function: 'eyelid_right', mode: 'servo', gpio: 7 },
-          ]
-        },
-        {
-          role: 'tracks',
-          node_id: 'tracks-node',
-          display_name: 'Track Drive',
-          online: true,
-          functions: [
-            { function: 'linear_velocity', mode: 'pwm', gpio: 0 },
-            { function: 'angular_velocity', mode: 'pwm', gpio: 1 },
-          ]
-        },
-        {
-          role: 'sound',
-          node_id: 'sound-node',
-          display_name: 'Sound System',
-          online: true,
-          functions: [
-            { function: 'play', mode: 'digital_out', gpio: 0 },
-            { function: 'volume', mode: 'pwm', gpio: 1 },
-          ]
+      // The actual data will arrive via Tauri events and be handled by the listeners in constructor
+      // Set a timeout to set default data if server doesn't respond
+      setTimeout(() => {
+        if (this._controllable().length === 0) {
+          console.warn('[DiscoveryService] No data received from server after 3s, using fallback defaults');
+          this.setFallbackData();
         }
-      ];
+      }, 3000);
 
-      console.log('[DiscoveryService] Setting default discovery data:', defaultData.map(n => `${n.role}: ${n.functions.map(f => f.function).join(', ')}`));
-      this._controllable.set(defaultData);
-
-      this._lastFetched.set(new Date());
-      console.log('[DiscoveryService] Discovery data refreshed successfully');
-      console.log('[DiscoveryService] Active roles:', this.activeRoles());
     } catch (err) {
       console.error('[DiscoveryService] Failed to refresh discovery data:', err);
+      // Use fallback data on error
+      this.setFallbackData();
     } finally {
       this._loading.set(false);
     }
+  }
+
+  /**
+   * Set fallback data when server doesn't respond
+   */
+  private setFallbackData(): void {
+    const fallbackData: ControllableNode[] = [
+      {
+        role: 'head',
+        node_id: 'head-node',
+        display_name: 'Head Controller',
+        online: true,
+        functions: [
+          { function: 'pan', mode: 'servo', gpio: 0 },
+          { function: 'tilt', mode: 'servo', gpio: 1 },
+          { function: 'eye_left_lr', mode: 'servo', gpio: 2 },
+          { function: 'eye_left_ud', mode: 'servo', gpio: 3 },
+          { function: 'eye_right_lr', mode: 'servo', gpio: 4 },
+          { function: 'eye_right_ud', mode: 'servo', gpio: 5 },
+          { function: 'eyelid_left', mode: 'servo', gpio: 6 },
+          { function: 'eyelid_right', mode: 'servo', gpio: 7 },
+        ]
+      },
+      {
+        role: 'tracks',
+        node_id: 'tracks-node',
+        display_name: 'Track Drive',
+        online: true,
+        functions: [
+          { function: 'linear_velocity', mode: 'pwm', gpio: 0 },
+          { function: 'angular_velocity', mode: 'pwm', gpio: 1 },
+        ]
+      },
+      {
+        role: 'sound',
+        node_id: 'sound-node',
+        display_name: 'Sound System',
+        online: true,
+        functions: [
+          { function: 'play', mode: 'digital_out', gpio: 0 },
+          { function: 'volume', mode: 'pwm', gpio: 1 },
+        ]
+      }
+    ];
+
+    console.log('[DiscoveryService] Setting fallback data:', fallbackData.map(n => `${n.role}: ${n.functions.map(f => f.function).join(', ')}`));
+    this._controllable.set(fallbackData);
+    this._lastFetched.set(new Date());
   }
 
   /**
