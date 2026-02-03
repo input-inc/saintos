@@ -969,123 +969,317 @@
 
             <!-- Settings Page -->
             <section id="page-settings" class="page">
-                <h2 class="text-2xl font-bold text-white mb-6">Settings</h2>
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold text-white">Settings</h2>
+                    <div class="flex items-center gap-3">
+                        <span id="settings-save-status" class="text-sm text-slate-500"></span>
+                        <button id="settings-save-btn" class="btn-primary flex items-center gap-2 opacity-50 cursor-not-allowed" disabled>
+                            <span class="material-icons text-sm">save</span>
+                            Save Changes
+                        </button>
+                    </div>
+                </div>
 
-                <!-- Firmware Section -->
-                <div class="card mb-6">
-                    <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                        <span class="material-icons text-cyan-400">memory</span>
-                        Node Firmware (RP2040)
-                    </h3>
-                    <p class="text-sm text-slate-400 mb-4">Firmware for Feather RP2040 + Ethernet FeatherWing nodes</p>
+                <!-- Settings Sub-tabs -->
+                <div class="border-b border-slate-700 mb-6">
+                    <nav class="flex gap-1" id="settings-tabs">
+                        <button class="settings-tab active" data-settings-tab="server">
+                            <span class="material-icons text-sm">dns</span>
+                            Server
+                        </button>
+                        <button class="settings-tab" data-settings-tab="interface">
+                            <span class="material-icons text-sm">display_settings</span>
+                            Interface
+                        </button>
+                        <button class="settings-tab" data-settings-tab="livelink">
+                            <span class="material-icons text-sm">face</span>
+                            LiveLink
+                        </button>
+                        <button class="settings-tab" data-settings-tab="firmware">
+                            <span class="material-icons text-sm">memory</span>
+                            Firmware
+                        </button>
+                    </nav>
+                </div>
 
-                    <div class="space-y-4">
-                        <!-- Simulation Build -->
-                        <div class="bg-slate-800/50 rounded-lg p-4">
-                            <div class="flex items-start justify-between">
-                                <div class="flex items-center gap-2">
-                                    <span class="material-icons text-cyan-400">computer</span>
-                                    <h4 class="font-medium text-white">Simulation Build</h4>
-                                </div>
-                                <span id="settings-fw-sim-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
-                                    Checking...
-                                </span>
-                            </div>
-                            <p class="text-xs text-slate-500 mt-1 ml-8">For Renode simulated nodes</p>
-                            <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                <!-- Server Settings Tab -->
+                <div id="settings-panel-server" class="settings-panel active">
+                    <!-- Server Identity -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-cyan-400">badge</span>
+                            Identity
+                        </h3>
+                        <div>
+                            <label for="settings-server-name" class="block text-sm font-medium text-slate-300 mb-1">Server Name</label>
+                            <input type="text" id="settings-server-name" class="input-field w-full max-w-md" placeholder="SAINT-01">
+                            <p class="text-xs text-slate-500 mt-1">Display name for this server instance</p>
+                        </div>
+                    </div>
+
+                    <!-- WebSocket, Network, ROS Bridge - horizontal layout -->
+                    <div class="flex flex-wrap gap-6 mb-6">
+                        <!-- WebSocket Settings -->
+                        <div class="card flex-1 min-w-[280px]">
+                            <h3 class="text-base font-semibold text-white mb-4 flex items-center gap-2">
+                                <span class="material-icons text-violet-400 text-lg">lock</span>
+                                WebSocket
+                            </h3>
+                            <div class="space-y-4">
                                 <div>
-                                    <span class="text-slate-500">Version:</span>
-                                    <span id="settings-fw-sim-version" class="text-white ml-2">--</span>
+                                    <label for="settings-ws-password" class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+                                    <input type="password" id="settings-ws-password" class="input-field w-full" placeholder="Empty = disabled">
+                                    <p class="text-xs text-slate-500 mt-1">Clients must authenticate with this password. Leave empty to disable.</p>
                                 </div>
                                 <div>
-                                    <span class="text-slate-500">Git Hash:</span>
-                                    <span id="settings-fw-sim-hash" class="text-white ml-2 font-mono text-xs">--</span>
-                                </div>
-                                <div class="col-span-2">
-                                    <span class="text-slate-500">Build Date:</span>
-                                    <span id="settings-fw-sim-build" class="text-white ml-2">--</span>
+                                    <label for="settings-ws-auth-timeout" class="block text-sm font-medium text-slate-300 mb-1">Auth Timeout (sec)</label>
+                                    <input type="number" id="settings-ws-auth-timeout" class="input-field w-24" min="1" max="60" step="1" value="10">
+                                    <p class="text-xs text-slate-500 mt-1">How long clients have to authenticate after connecting</p>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Hardware Build -->
-                        <div class="bg-slate-800/50 rounded-lg p-4">
-                            <div class="flex items-start justify-between">
-                                <div class="flex items-center gap-2">
-                                    <span class="material-icons text-violet-400">developer_board</span>
-                                    <h4 class="font-medium text-white">Hardware Build</h4>
+                        <!-- Network Settings -->
+                        <div class="card flex-1 min-w-[280px]">
+                            <h3 class="text-base font-semibold text-white mb-4 flex items-center gap-2">
+                                <span class="material-icons text-emerald-400 text-lg">language</span>
+                                Network
+                            </h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label for="settings-web-port" class="block text-sm font-medium text-slate-300 mb-1">Web Port</label>
+                                    <input type="number" id="settings-web-port" class="input-field w-24" min="1" max="65535" value="80">
+                                    <p class="text-xs text-slate-500 mt-1">Port for the web UI and API (requires restart)</p>
                                 </div>
-                                <span id="settings-fw-hw-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
-                                    Checking...
-                                </span>
+                                <div>
+                                    <label for="settings-ws-port" class="block text-sm font-medium text-slate-300 mb-1">WebSocket Port</label>
+                                    <input type="number" id="settings-ws-port" class="input-field w-24" min="1" max="65535" placeholder="Same">
+                                    <p class="text-xs text-slate-500 mt-1">Separate port for WebSocket connections. Leave empty to use web port.</p>
+                                </div>
                             </div>
-                            <p class="text-xs text-slate-500 mt-1 ml-8">For physical RP2040 devices</p>
-                            <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                        </div>
+
+                        <!-- ROS Bridge Settings -->
+                        <div class="card flex-1 min-w-[280px]">
+                            <h3 class="text-base font-semibold text-white mb-4 flex items-center gap-2">
+                                <span class="material-icons text-orange-400 text-lg">sync_alt</span>
+                                ROS Bridge
+                            </h3>
+                            <div class="space-y-4">
                                 <div>
-                                    <span class="text-slate-500">Version:</span>
-                                    <span id="settings-fw-hw-version" class="text-white ml-2">--</span>
-                                </div>
-                                <div>
-                                    <span class="text-slate-500">Git Hash:</span>
-                                    <span id="settings-fw-hw-hash" class="text-white ml-2 font-mono text-xs">--</span>
-                                </div>
-                                <div class="col-span-2">
-                                    <span class="text-slate-500">Build Date:</span>
-                                    <span id="settings-fw-hw-build" class="text-white ml-2">--</span>
+                                    <label for="settings-ros-throttle" class="block text-sm font-medium text-slate-300 mb-1">Command Throttle (ms)</label>
+                                    <input type="number" id="settings-ros-throttle" class="input-field w-24" min="10" max="1000" step="10" value="50">
+                                    <p class="text-xs text-slate-500 mt-1">Minimum interval between control commands (prevents flooding)</p>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Pi 5 Firmware Section -->
-                <div class="card mb-6">
-                    <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                        <span class="material-icons text-rose-400">memory</span>
-                        Node Firmware (Raspberry Pi 5)
-                    </h3>
-                    <p class="text-sm text-slate-400 mb-4">Firmware for Raspberry Pi 5 nodes with GPIO control</p>
-
-                    <div class="space-y-4">
-                        <!-- Pi 5 Build -->
-                        <div class="bg-slate-800/50 rounded-lg p-4">
-                            <div class="flex items-start justify-between">
-                                <div class="flex items-center gap-2">
-                                    <span class="material-icons text-rose-400">developer_board</span>
-                                    <h4 class="font-medium text-white">Production Build</h4>
+                <!-- Interface Settings Tab -->
+                <div id="settings-panel-interface" class="settings-panel">
+                    <!-- Display Preferences -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-amber-400">thermostat</span>
+                            Temperature Display
+                        </h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Temperature Unit</label>
+                                <div class="flex items-center gap-4">
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="temp-unit" id="temp-unit-celsius" value="celsius" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500" checked>
+                                        <span class="text-sm text-slate-300">Celsius (°C)</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="temp-unit" id="temp-unit-fahrenheit" value="fahrenheit" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500">
+                                        <span class="text-sm text-slate-300">Fahrenheit (°F)</span>
+                                    </label>
                                 </div>
-                                <span id="settings-fw-rpi5-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
-                                    Checking...
-                                </span>
+                                <p class="text-xs text-slate-500 mt-1">How temperatures are displayed throughout the interface</p>
                             </div>
-                            <p class="text-xs text-slate-500 mt-1 ml-8">For Raspberry Pi 5 devices</p>
-                            <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
-                                <div>
-                                    <span class="text-slate-500">Version:</span>
-                                    <span id="settings-fw-rpi5-version" class="text-white ml-2">--</span>
-                                </div>
-                                <div>
-                                    <span class="text-slate-500">Package:</span>
-                                    <span id="settings-fw-rpi5-package" class="text-white ml-2 font-mono text-xs">--</span>
-                                </div>
-                                <div class="col-span-2">
-                                    <span class="text-slate-500">Build Date:</span>
-                                    <span id="settings-fw-rpi5-build" class="text-white ml-2">--</span>
+                        </div>
+                    </div>
+
+                    <!-- Theme Settings (placeholder for future) -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-purple-400">palette</span>
+                            Appearance
+                        </h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Theme</label>
+                                <div class="flex items-center gap-4">
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="theme" value="dark" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500" checked>
+                                        <span class="text-sm text-slate-300">Dark</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer opacity-50">
+                                        <input type="radio" name="theme" value="light" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500" disabled>
+                                        <span class="text-sm text-slate-300">Light (coming soon)</span>
+                                    </label>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Server Settings -->
-                <div class="card">
-                    <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                        <span class="material-icons text-cyan-400">settings</span>
-                        Server Settings
-                    </h3>
-                    <div class="flex flex-col items-center justify-center py-8 text-center">
-                        <span class="material-icons icon-lg text-slate-600 mb-4">construction</span>
-                        <p class="text-slate-500">Additional configuration options coming soon...</p>
+                <!-- LiveLink Settings Tab -->
+                <div id="settings-panel-livelink" class="settings-panel">
+                    <!-- LiveLink Connection -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-pink-400">face</span>
+                            LiveLink Receiver
+                        </h3>
+                        <p class="text-sm text-slate-400 mb-4">Receive face animation data from Unreal Engine LiveLink sources</p>
+                        <div class="space-y-4">
+                            <div class="flex items-center gap-3">
+                                <label class="relative inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" id="settings-livelink-enabled" class="sr-only peer">
+                                    <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600"></div>
+                                </label>
+                                <span class="text-sm font-medium text-slate-300">Enable LiveLink Receiver</span>
+                            </div>
+                            <div>
+                                <label for="settings-livelink-port" class="block text-sm font-medium text-slate-300 mb-1">UDP Port</label>
+                                <input type="number" id="settings-livelink-port" class="input-field w-32" min="1024" max="65535" value="11111">
+                                <p class="text-xs text-slate-500 mt-1">Port for receiving LiveLink packets (requires restart)</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- LiveLink Status -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-pink-400">monitoring</span>
+                            Status
+                        </h3>
+                        <div class="space-y-3">
+                            <div class="flex items-center justify-between py-2 border-b border-slate-700">
+                                <span class="text-sm text-slate-400">Connection</span>
+                                <span id="settings-livelink-status" class="text-sm text-slate-300">--</span>
+                            </div>
+                            <div class="flex items-center justify-between py-2 border-b border-slate-700">
+                                <span class="text-sm text-slate-400">Active Sources</span>
+                                <span id="settings-livelink-sources" class="text-sm text-slate-300">--</span>
+                            </div>
+                            <div class="flex items-center justify-between py-2">
+                                <span class="text-sm text-slate-400">Packets/sec</span>
+                                <span id="settings-livelink-rate" class="text-sm text-slate-300">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Firmware Settings Tab -->
+                <div id="settings-panel-firmware" class="settings-panel">
+                    <!-- RP2040 Firmware Section -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-cyan-400">memory</span>
+                            RP2040 Firmware
+                        </h3>
+                        <p class="text-sm text-slate-400 mb-4">Firmware for Feather RP2040 + Ethernet FeatherWing nodes</p>
+
+                        <div class="space-y-4">
+                            <!-- Simulation Build -->
+                            <div class="bg-slate-800/50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <span class="material-icons text-cyan-400">computer</span>
+                                        <h4 class="font-medium text-white">Simulation Build</h4>
+                                    </div>
+                                    <span id="settings-fw-sim-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
+                                        Checking...
+                                    </span>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1 ml-8">For Renode simulated nodes</p>
+                                <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                                    <div>
+                                        <span class="text-slate-500">Version:</span>
+                                        <span id="settings-fw-sim-version" class="text-white ml-2">--</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-slate-500">Build ID:</span>
+                                        <span id="settings-fw-sim-hash" class="text-white ml-2 font-mono text-xs">--</span>
+                                    </div>
+                                    <div class="col-span-2">
+                                        <span class="text-slate-500">Build Date:</span>
+                                        <span id="settings-fw-sim-build" class="text-white ml-2">--</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Hardware Build -->
+                            <div class="bg-slate-800/50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <span class="material-icons text-violet-400">developer_board</span>
+                                        <h4 class="font-medium text-white">Hardware Build</h4>
+                                    </div>
+                                    <span id="settings-fw-hw-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
+                                        Checking...
+                                    </span>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1 ml-8">For physical RP2040 devices</p>
+                                <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                                    <div>
+                                        <span class="text-slate-500">Version:</span>
+                                        <span id="settings-fw-hw-version" class="text-white ml-2">--</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-slate-500">Build ID:</span>
+                                        <span id="settings-fw-hw-hash" class="text-white ml-2 font-mono text-xs">--</span>
+                                    </div>
+                                    <div class="col-span-2">
+                                        <span class="text-slate-500">Build Date:</span>
+                                        <span id="settings-fw-hw-build" class="text-white ml-2">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Pi 5 Firmware Section -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-rose-400">memory</span>
+                            Raspberry Pi 5 Firmware
+                        </h3>
+                        <p class="text-sm text-slate-400 mb-4">Firmware for Raspberry Pi 5 nodes with GPIO control</p>
+
+                        <div class="space-y-4">
+                            <!-- Pi 5 Build -->
+                            <div class="bg-slate-800/50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <span class="material-icons text-rose-400">developer_board</span>
+                                        <h4 class="font-medium text-white">Production Build</h4>
+                                    </div>
+                                    <span id="settings-fw-rpi5-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
+                                        Checking...
+                                    </span>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1 ml-8">For Raspberry Pi 5 devices</p>
+                                <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                                    <div>
+                                        <span class="text-slate-500">Version:</span>
+                                        <span id="settings-fw-rpi5-version" class="text-white ml-2">--</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-slate-500">Package:</span>
+                                        <span id="settings-fw-rpi5-package" class="text-white ml-2 font-mono text-xs">--</span>
+                                    </div>
+                                    <div class="col-span-2">
+                                        <span class="text-slate-500">Build Date:</span>
+                                        <span id="settings-fw-rpi5-build" class="text-white ml-2">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -1146,6 +1340,35 @@
             color: #22d3ee;
             background-color: rgba(30, 41, 59, 0.5);
             border-bottom-color: #22d3ee;
+        }
+
+        /* Settings Sub-tabs */
+        .settings-tab {
+            display: flex;
+            align-items: center;
+            gap: 0.375rem;
+            padding: 0.625rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #94a3b8;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            margin-bottom: -1px;
+        }
+        .settings-tab:hover {
+            color: white;
+            background-color: rgba(51, 65, 85, 0.3);
+        }
+        .settings-tab.active {
+            color: #22d3ee;
+            border-bottom-color: #22d3ee;
+        }
+        .settings-panel {
+            display: none;
+        }
+        .settings-panel.active {
+            display: block;
+            animation: fadeIn 0.2s ease-out;
         }
 
         /* Cards */
@@ -1493,6 +1716,106 @@
         /* ADC Bar Animation */
         .adc-bar {
             transition: width 0.1s ease-out;
+        }
+
+        /* Virtual Stick Visualization */
+        .stick-container {
+            position: relative;
+            width: 120px;
+            height: 120px;
+            background: #0f172a;
+            border-radius: 50%;
+            border: 2px solid #334155;
+        }
+        .stick-container.active {
+            border-color: #22d3ee;
+        }
+        .stick-knob {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background: #475569;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            transition: all 0.05s ease-out;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        .stick-knob.active {
+            background: #22d3ee;
+        }
+        .stick-crosshair {
+            position: absolute;
+            background: #334155;
+        }
+        .stick-crosshair.horizontal {
+            width: 100%;
+            height: 1px;
+            top: 50%;
+            left: 0;
+        }
+        .stick-crosshair.vertical {
+            width: 1px;
+            height: 100%;
+            top: 0;
+            left: 50%;
+        }
+        .stick-label {
+            position: absolute;
+            font-size: 10px;
+            color: #64748b;
+        }
+        .stick-label.top { top: 4px; left: 50%; transform: translateX(-50%); }
+        .stick-label.bottom { bottom: 4px; left: 50%; transform: translateX(-50%); }
+        .stick-label.left { left: 4px; top: 50%; transform: translateY(-50%); }
+        .stick-label.right { right: 4px; top: 50%; transform: translateY(-50%); }
+
+        /* Track Drive Control */
+        .track-stick-container {
+            position: relative;
+            width: 140px;
+            height: 140px;
+            background: #0f172a;
+            border-radius: 50%;
+            border: 2px solid #334155;
+            cursor: pointer;
+        }
+        .track-stick-container.active {
+            border-color: #22d3ee;
+        }
+        .track-stick-knob {
+            position: absolute;
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #475569, #334155);
+            border-radius: 50%;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            transition: left 0.05s ease-out, top 0.05s ease-out;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(255,255,255,0.1);
+        }
+        .track-stick-knob.active {
+            background: linear-gradient(135deg, #22d3ee, #0891b2);
+            transition: none;
+        }
+        .track-stick-crosshair {
+            position: absolute;
+            background: #334155;
+        }
+        .track-stick-crosshair.horizontal {
+            width: 100%;
+            height: 1px;
+            top: 50%;
+            left: 0;
+        }
+        .track-stick-crosshair.vertical {
+            width: 1px;
+            height: 100%;
+            top: 0;
+            left: 50%;
+        }
+        .track-bar-fill {
+            transition: height 0.075s ease-out, background-color 0.1s;
         }
 
         /* Control Node Panel */

@@ -50,6 +50,14 @@ export type ModifierEffect =
 
 export type AnalogAction =
   | { type: 'direct_control'; target: ControlTarget; transform: InputTransform }
+  | {
+      type: 'differential_drive';
+      role: string;
+      left_function: string;
+      right_function: string;
+      throttle_transform: InputTransform;
+      turn_transform: InputTransform;
+    }
   | { type: 'modifier'; effect: ModifierEffect };
 
 export type DigitalAction =
@@ -529,21 +537,16 @@ export class BindingsService {
       description: 'Standard robot control layout',
       isDefault: true,
       analogBindings: [
-        {
-          input: 'left_stick_x',
-          action: {
-            type: 'direct_control',
-            target: { role: 'tracks', function: 'angular_velocity', name: 'Track Angular' },
-            transform: { deadzone: 0.1, scale: 1.0, expo: 1.0, invert: false }
-          },
-          enabled: true
-        },
+        // Left stick - differential drive for tracks with channel mixing
         {
           input: 'left_stick_y',
           action: {
-            type: 'direct_control',
-            target: { role: 'tracks', function: 'linear_velocity', name: 'Track Linear' },
-            transform: { deadzone: 0.1, scale: 1.0, expo: 1.0, invert: false }
+            type: 'differential_drive',
+            role: 'tracks',
+            left_function: 'left_velocity',
+            right_function: 'right_velocity',
+            throttle_transform: { deadzone: 0.1, scale: 1.0, expo: 1.0, invert: false },
+            turn_transform: { deadzone: 0.1, scale: 1.0, expo: 1.0, invert: false }
           },
           enabled: true
         },

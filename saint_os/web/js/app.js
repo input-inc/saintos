@@ -13,6 +13,48 @@ class SaintApp {
         this.activityLog = [];
         this.currentNodeId = null;  // Currently viewed node
         this.currentNodeInfo = null;
+
+        // Refresh interval for node detail page
+        this.nodeDetailRefreshInterval = null;
+        this.nodeDetailRefreshRate = 2000;  // Refresh every 2 seconds
+
+        // Load display preferences
+        this.temperatureUnit = localStorage.getItem('saint_temp_unit') || 'celsius';
+
+        // Settings dirty tracking
+        this.settingsOriginalValues = {};
+        this.settingsDirty = false;
+    }
+
+    /**
+     * Format temperature based on user preference.
+     * @param {number} celsius - Temperature in Celsius
+     * @returns {string} Formatted temperature string
+     */
+    formatTemperature(celsius) {
+        if (celsius === null || celsius === undefined || isNaN(celsius)) {
+            return '--';
+        }
+
+        if (this.temperatureUnit === 'fahrenheit') {
+            const fahrenheit = (celsius * 9 / 5) + 32;
+            return `${fahrenheit.toFixed(1)}°F`;
+        }
+        return `${celsius.toFixed(1)}°C`;
+    }
+
+    /**
+     * Set temperature unit preference.
+     * @param {string} unit - 'celsius' or 'fahrenheit'
+     */
+    setTemperatureUnit(unit) {
+        this.temperatureUnit = unit;
+        localStorage.setItem('saint_temp_unit', unit);
+
+        // Update any displayed temperatures
+        if (this.currentNodeInfo) {
+            this.updateNodeOverview();
+        }
     }
 
     /**
@@ -28,6 +70,22 @@ class SaintApp {
         const settings = window.saintWS.getSettings();
         document.getElementById('login-host').value = settings.host || '';
         document.getElementById('login-password').value = settings.password || '';
+
+        // Check if we're reloading after a server restart - auto-reconnect
+        const reloadState = window.saintWS.getReloadState();
+        if (reloadState && reloadState.autoReconnect && settings.host) {
+            console.log('Auto-reconnecting after reload, restoring page:', reloadState.page);
+            this.pendingPage = reloadState.page;  // Save page to restore after connect
+
+            // Show reconnecting status on login screen
+            document.getElementById('login-status').innerHTML =
+                '<span class="inline-block w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mr-2"></span>' +
+                'Reconnecting after server restart...';
+            document.getElementById('login-status').classList.remove('hidden');
+            document.getElementById('login-btn').disabled = true;
+
+            window.saintWS.connect(settings.host);
+        }
     }
 
     /**
@@ -100,8 +158,13 @@ class SaintApp {
         document.getElementById('login-screen').classList.add('hidden');
         document.getElementById('app').classList.remove('hidden');
 
-        // Show initial page based on URL hash
-        const hash = window.location.hash.slice(1) || 'dashboard';
+        // Use pending page from reload state, or fall back to URL hash
+        let hash = window.location.hash.slice(1) || 'dashboard';
+        if (this.pendingPage) {
+            hash = this.pendingPage.replace('#', '');
+            window.location.hash = this.pendingPage;  // Update URL to match
+            this.pendingPage = null;
+        }
 
         // Check for special URL hashes
         if (hash.startsWith('node/')) {
@@ -239,6 +302,14 @@ class SaintApp {
             });
         });
 
+        // Settings sub-tab switching
+        document.querySelectorAll('.settings-tab').forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                const tabName = e.currentTarget.dataset.settingsTab;
+                this.switchSettingsTab(tabName);
+            });
+        });
+
         // Node control buttons
         document.getElementById('btn-node-restart')?.addEventListener('click', () => {
             this.restartNode();
@@ -288,6 +359,11 @@ class SaintApp {
             if (window.liveLinkManager) {
                 window.liveLinkManager.unsubscribe();
             }
+        }
+
+        // Stop node detail refresh when leaving that page
+        if (this.currentPage === 'node-detail' && pageId !== 'node-detail') {
+            this.stopNodeDetailRefresh();
         }
 
         // Update navigation
@@ -382,9 +458,10 @@ class SaintApp {
      * Load settings page data.
      */
     async loadSettingsPageData() {
+        const ws = window.saintWS;
+
         // Load firmware build info
         try {
-            const ws = window.saintWS;
             const result = await ws.management('get_firmware_builds', {});
 
             // Update simulation build info (RP2040)
@@ -397,6 +474,300 @@ class SaintApp {
             this.updatePi5FirmwareDisplay(result.rpi5);
         } catch (error) {
             console.error('Failed to load firmware builds:', error);
+        }
+
+        // Load server settings
+        try {
+            const result = await ws.management('get_settings', {});
+            this.populateSettingsForm(result);
+        } catch (error) {
+            console.error('Failed to load settings:', error);
+        }
+
+        // Load local display preferences
+        this.loadDisplayPreferences();
+
+        // Set up save button handler
+        this.setupSettingsSaveHandler();
+    }
+
+    /**
+     * Load and set display preferences from localStorage.
+     */
+    loadDisplayPreferences() {
+        // Temperature unit
+        const celsiusRadio = document.getElementById('temp-unit-celsius');
+        const fahrenheitRadio = document.getElementById('temp-unit-fahrenheit');
+
+        if (celsiusRadio && fahrenheitRadio) {
+            if (this.temperatureUnit === 'fahrenheit') {
+                fahrenheitRadio.checked = true;
+            } else {
+                celsiusRadio.checked = true;
+            }
+
+            // Add event listeners (only once)
+            if (!celsiusRadio.hasAttribute('data-listener-set')) {
+                celsiusRadio.setAttribute('data-listener-set', 'true');
+                celsiusRadio.addEventListener('change', () => {
+                    if (celsiusRadio.checked) {
+                        this.setTemperatureUnit('celsius');
+                    }
+                });
+            }
+
+            if (!fahrenheitRadio.hasAttribute('data-listener-set')) {
+                fahrenheitRadio.setAttribute('data-listener-set', 'true');
+                fahrenheitRadio.addEventListener('change', () => {
+                    if (fahrenheitRadio.checked) {
+                        this.setTemperatureUnit('fahrenheit');
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * Populate settings form with current values.
+     */
+    populateSettingsForm(settings) {
+        // Server settings
+        const serverName = document.getElementById('settings-server-name');
+        if (serverName && settings.server) {
+            serverName.value = settings.server.name || '';
+        }
+
+        // WebSocket settings
+        const wsPassword = document.getElementById('settings-ws-password');
+        const wsAuthTimeout = document.getElementById('settings-ws-auth-timeout');
+        if (settings.websocket) {
+            if (wsPassword) wsPassword.value = settings.websocket.password || '';
+            if (wsAuthTimeout) wsAuthTimeout.value = settings.websocket.auth_timeout || 10;
+        }
+
+        // Network settings
+        const webPort = document.getElementById('settings-web-port');
+        const wsPort = document.getElementById('settings-ws-port');
+        if (settings.network) {
+            if (webPort) webPort.value = settings.network.web_port || 80;
+            if (wsPort) wsPort.value = settings.network.websocket_port || '';
+        }
+
+        // ROS Bridge settings
+        const rosThrottle = document.getElementById('settings-ros-throttle');
+        if (rosThrottle && settings.ros_bridge) {
+            rosThrottle.value = settings.ros_bridge.throttle_ms || 50;
+        }
+
+        // LiveLink settings
+        const llEnabled = document.getElementById('settings-livelink-enabled');
+        const llPort = document.getElementById('settings-livelink-port');
+        if (settings.livelink) {
+            if (llEnabled) llEnabled.checked = settings.livelink.enabled !== false;
+            if (llPort) llPort.value = settings.livelink.port || 11111;
+        }
+
+        // Store original values for dirty tracking
+        this.settingsOriginalValues = this.getSettingsFormValues();
+        this.settingsDirty = false;
+        this.updateSettingsSaveButton();
+
+        // Set up dirty tracking listeners
+        this.setupSettingsDirtyTracking();
+    }
+
+    /**
+     * Get current values from settings form.
+     */
+    getSettingsFormValues() {
+        // Get temperature unit from radio buttons
+        const tempUnitCelsius = document.getElementById('temp-unit-celsius');
+        const tempUnit = tempUnitCelsius?.checked ? 'celsius' : 'fahrenheit';
+
+        return {
+            serverName: document.getElementById('settings-server-name')?.value || '',
+            wsPassword: document.getElementById('settings-ws-password')?.value || '',
+            wsAuthTimeout: document.getElementById('settings-ws-auth-timeout')?.value || '10',
+            webPort: document.getElementById('settings-web-port')?.value || '80',
+            wsPort: document.getElementById('settings-ws-port')?.value || '',
+            rosThrottle: document.getElementById('settings-ros-throttle')?.value || '50',
+            llEnabled: document.getElementById('settings-livelink-enabled')?.checked ?? true,
+            llPort: document.getElementById('settings-livelink-port')?.value || '11111',
+            tempUnit: tempUnit,
+        };
+    }
+
+    /**
+     * Set up dirty tracking for settings form inputs.
+     */
+    setupSettingsDirtyTracking() {
+        const inputs = [
+            'settings-server-name',
+            'settings-ws-password',
+            'settings-ws-auth-timeout',
+            'settings-web-port',
+            'settings-ws-port',
+            'settings-ros-throttle',
+            'settings-livelink-port',
+        ];
+
+        inputs.forEach(id => {
+            const el = document.getElementById(id);
+            if (el && !el.hasAttribute('data-dirty-listener')) {
+                el.setAttribute('data-dirty-listener', 'true');
+                el.addEventListener('input', () => this.checkSettingsDirty());
+            }
+        });
+
+        // Checkbox needs change event
+        const llEnabled = document.getElementById('settings-livelink-enabled');
+        if (llEnabled && !llEnabled.hasAttribute('data-dirty-listener')) {
+            llEnabled.setAttribute('data-dirty-listener', 'true');
+            llEnabled.addEventListener('change', () => this.checkSettingsDirty());
+        }
+
+        // Radio buttons need change event
+        const tempRadios = ['temp-unit-celsius', 'temp-unit-fahrenheit'];
+        tempRadios.forEach(id => {
+            const el = document.getElementById(id);
+            if (el && !el.hasAttribute('data-dirty-listener')) {
+                el.setAttribute('data-dirty-listener', 'true');
+                el.addEventListener('change', () => this.checkSettingsDirty());
+            }
+        });
+    }
+
+    /**
+     * Check if settings have changed from original values.
+     */
+    checkSettingsDirty() {
+        const current = this.getSettingsFormValues();
+        const original = this.settingsOriginalValues;
+
+        this.settingsDirty = (
+            current.serverName !== original.serverName ||
+            current.wsPassword !== original.wsPassword ||
+            current.wsAuthTimeout !== original.wsAuthTimeout ||
+            current.webPort !== original.webPort ||
+            current.wsPort !== original.wsPort ||
+            current.rosThrottle !== original.rosThrottle ||
+            current.llEnabled !== original.llEnabled ||
+            current.llPort !== original.llPort ||
+            current.tempUnit !== original.tempUnit
+        );
+
+        this.updateSettingsSaveButton();
+    }
+
+    /**
+     * Update save button state based on dirty status.
+     */
+    updateSettingsSaveButton() {
+        const saveBtn = document.getElementById('settings-save-btn');
+        if (!saveBtn) return;
+
+        if (this.settingsDirty) {
+            saveBtn.disabled = false;
+            saveBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+            saveBtn.innerHTML = '<span class="material-icons text-sm">save</span> Save Changes';
+        } else {
+            saveBtn.disabled = true;
+            saveBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            saveBtn.innerHTML = '<span class="material-icons text-sm">check</span> Saved';
+        }
+    }
+
+    /**
+     * Set up the settings save button handler.
+     */
+    setupSettingsSaveHandler() {
+        const saveBtn = document.getElementById('settings-save-btn');
+        if (!saveBtn || saveBtn.hasAttribute('data-handler-set')) return;
+
+        saveBtn.setAttribute('data-handler-set', 'true');
+        saveBtn.addEventListener('click', () => this.saveSettings());
+    }
+
+    /**
+     * Collect settings from form and save to server.
+     */
+    async saveSettings() {
+        const saveBtn = document.getElementById('settings-save-btn');
+        const statusEl = document.getElementById('settings-save-status');
+
+        // Disable button and show saving status
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<span class="material-icons text-sm animate-spin">refresh</span> Saving...';
+        statusEl.textContent = '';
+        statusEl.className = 'text-sm text-slate-500';
+
+        // Collect values from form
+        const settings = {
+            server: {
+                name: document.getElementById('settings-server-name')?.value || 'SAINT-01',
+            },
+            websocket: {
+                password: document.getElementById('settings-ws-password')?.value || null,
+                auth_timeout: parseFloat(document.getElementById('settings-ws-auth-timeout')?.value) || 10,
+            },
+            network: {
+                web_port: parseInt(document.getElementById('settings-web-port')?.value) || 80,
+                websocket_port: parseInt(document.getElementById('settings-ws-port')?.value) || null,
+            },
+            ros_bridge: {
+                throttle_ms: parseInt(document.getElementById('settings-ros-throttle')?.value) || 50,
+            },
+            livelink: {
+                enabled: document.getElementById('settings-livelink-enabled')?.checked ?? true,
+                port: parseInt(document.getElementById('settings-livelink-port')?.value) || 11111,
+            },
+        };
+
+        // Handle empty password
+        if (!settings.websocket.password) {
+            settings.websocket.password = null;
+        }
+
+        // Handle empty websocket port
+        if (!settings.network.websocket_port || isNaN(settings.network.websocket_port)) {
+            settings.network.websocket_port = null;
+        }
+
+        // Save client-side preferences to localStorage
+        const tempUnitCelsius = document.getElementById('temp-unit-celsius');
+        const newTempUnit = tempUnitCelsius?.checked ? 'celsius' : 'fahrenheit';
+        this.setTemperatureUnit(newTempUnit);
+
+        try {
+            const ws = window.saintWS;
+            const result = await ws.management('set_settings', { settings });
+
+            // Show success
+            saveBtn.innerHTML = '<span class="material-icons text-sm">check</span> Saved';
+            statusEl.textContent = result.message || 'Settings saved successfully';
+            statusEl.className = 'text-sm text-emerald-400';
+
+            // Mark as clean - update original values to current
+            this.settingsOriginalValues = this.getSettingsFormValues();
+            this.settingsDirty = false;
+
+            // Reset button after delay
+            setTimeout(() => {
+                this.updateSettingsSaveButton();
+                statusEl.textContent = '';
+            }, 2000);
+        } catch (error) {
+            console.error('Failed to save settings:', error);
+
+            // Show error
+            saveBtn.innerHTML = '<span class="material-icons text-sm">error</span> Failed';
+            statusEl.textContent = error.message || 'Failed to save settings';
+            statusEl.className = 'text-sm text-red-400';
+
+            // Reset button after delay (keep dirty state)
+            setTimeout(() => {
+                this.updateSettingsSaveButton();
+            }, 3000);
         }
     }
 
@@ -864,8 +1235,52 @@ class SaintApp {
             if (typeof pinConfigManager !== 'undefined') {
                 await pinConfigManager.loadNodeData(this.currentNodeId, this.currentNodeInfo);
             }
+
+            // Start periodic refresh for live data
+            this.startNodeDetailRefresh();
         } catch (error) {
             console.error('Failed to load node detail:', error);
+        }
+    }
+
+    /**
+     * Start periodic refresh of node detail data.
+     */
+    startNodeDetailRefresh() {
+        // Clear any existing interval
+        this.stopNodeDetailRefresh();
+
+        this.nodeDetailRefreshInterval = setInterval(async () => {
+            if (!this.currentNodeId || this.currentPage !== 'node-detail') {
+                this.stopNodeDetailRefresh();
+                return;
+            }
+
+            try {
+                const ws = window.saintWS;
+                if (!ws || !ws.connected) return;
+
+                const adoptedResult = await ws.management('list_adopted');
+                const updatedNode = (adoptedResult.nodes || []).find(n => n.node_id === this.currentNodeId);
+
+                if (updatedNode) {
+                    this.currentNodeInfo = updatedNode;
+                    this.updateNodeOnlineStatus(updatedNode.online);
+                    this.updateNodeOverview();
+                }
+            } catch (error) {
+                console.error('Failed to refresh node detail:', error);
+            }
+        }, this.nodeDetailRefreshRate);
+    }
+
+    /**
+     * Stop periodic refresh of node detail data.
+     */
+    stopNodeDetailRefresh() {
+        if (this.nodeDetailRefreshInterval) {
+            clearInterval(this.nodeDetailRefreshInterval);
+            this.nodeDetailRefreshInterval = null;
         }
     }
 
@@ -907,7 +1322,7 @@ class SaintApp {
             info.uptime_seconds ? this.formatUptime(info.uptime_seconds) : '--';
 
         document.getElementById('node-stat-temp').textContent =
-            info.cpu_temp ? `${info.cpu_temp.toFixed(1)}°C` : '--';
+            this.formatTemperature(info.cpu_temp);
         document.getElementById('node-stat-state').textContent = info.state || 'Unknown';
         document.getElementById('node-stat-lastseen').textContent =
             info.last_seen ? new Date(info.last_seen * 1000).toLocaleString() : '--';
@@ -978,6 +1393,29 @@ class SaintApp {
         if (tabId === 'state' && this.currentNodeId) {
             this.loadStateTabControls();
         }
+    }
+
+    /**
+     * Switch settings sub-tab.
+     */
+    switchSettingsTab(tabId) {
+        // Update tab buttons
+        document.querySelectorAll('.settings-tab').forEach(tab => {
+            if (tab.dataset.settingsTab === tabId) {
+                tab.classList.add('active');
+            } else {
+                tab.classList.remove('active');
+            }
+        });
+
+        // Update tab panels
+        document.querySelectorAll('.settings-panel').forEach(panel => {
+            if (panel.id === `settings-panel-${tabId}`) {
+                panel.classList.add('active');
+            } else {
+                panel.classList.remove('active');
+            }
+        });
     }
 
     /**

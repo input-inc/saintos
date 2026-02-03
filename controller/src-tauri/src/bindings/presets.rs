@@ -8,33 +8,21 @@ pub fn create_default_profile() -> BindingProfile {
 
     // Analog bindings
     profile.analog_bindings = vec![
-        // Left stick - movement
+        // Left stick - differential drive for tracks
+        // Uses channel mixing: left = throttle + turn, right = throttle - turn
         AnalogBinding {
-            input: AnalogInput::LeftStickX,
-            action: AnalogAction::DirectControl {
-                target: ControlTarget {
-                    role: "tracks".to_string(),
-                    function: "angular_velocity".to_string(),
-                    name: Some("Track Angular".to_string()),
-                },
-                transform: InputTransform {
+            input: AnalogInput::LeftStickY,  // Bind to Y axis, both X and Y are used
+            action: AnalogAction::DifferentialDrive {
+                role: "tracks".to_string(),
+                left_function: "left_velocity".to_string(),
+                right_function: "right_velocity".to_string(),
+                throttle_transform: InputTransform {
                     deadzone: 0.1,
                     scale: 1.0,
                     expo: 1.0,
                     invert: false,
                 },
-            },
-            enabled: true,
-        },
-        AnalogBinding {
-            input: AnalogInput::LeftStickY,
-            action: AnalogAction::DirectControl {
-                target: ControlTarget {
-                    role: "tracks".to_string(),
-                    function: "linear_velocity".to_string(),
-                    name: Some("Track Linear".to_string()),
-                },
-                transform: InputTransform {
+                turn_transform: InputTransform {
                     deadzone: 0.1,
                     scale: 1.0,
                     expo: 1.0,

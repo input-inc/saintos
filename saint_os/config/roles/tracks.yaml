@@ -3,6 +3,18 @@ role: tracks
 display_name: "Track Drive System"
 description: "Controls the left and right track motors for locomotion"
 
+# Control type tells the controller how to map inputs to this role
+# - differential_drive: 2D stick with channel mixing (Y=throttle, X=turn -> left/right)
+# - single_axis: Simple 1D control (slider or trigger)
+# - dual_axis: Independent X/Y control (pan/tilt)
+control_type: differential_drive
+
+# For differential_drive, specify which functions are left/right
+drive_config:
+  left_function: left_velocity
+  right_function: right_velocity
+  # Mixing: left = throttle + turn, right = throttle - turn
+
 logical_functions:
   - name: left_velocity
     display_name: "Left Track Velocity"

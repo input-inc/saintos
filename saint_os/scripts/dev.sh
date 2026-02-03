@@ -17,6 +17,94 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# CRITICAL: Save the original system PATH at the VERY START before anything can corrupt it
+# This ensures we have access to basic commands like env, dirname, etc.
+if [[ -z "$_SAINT_SYSTEM_PATH" ]]; then
+    # First run - save the current PATH as the system baseline
+    _SAINT_SYSTEM_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+fi
+# Always ensure basic system paths are available
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+# Use absolute paths for critical commands (PATH can be corrupted by ROS2 workspace sourcing)
+DATE=/bin/date
+SLEEP=/bin/sleep
+FIND=/usr/bin/find
+TOUCH=/usr/bin/touch
+MKTEMP=/usr/bin/mktemp
+GREP=/usr/bin/grep
+HEAD=/usr/bin/head
+LSOF=/usr/sbin/lsof
+KILL=/bin/kill
+XARGS=/usr/bin/xargs
+
+# ===========================================================================
+# Cleanup function - kill any lingering processes from previous runs
+# ===========================================================================
+_saint_kill_previous() {
+    local killed=false
+
+    # Kill any previous saint_server processes
+    local pids=$(pgrep -f "saint_server" 2>/dev/null)
+    if [[ -n "$pids" ]]; then
+        echo "${YELLOW}Stopping previous saint_server processes...${NC}"
+        echo "$pids" | $XARGS $KILL 2>/dev/null
+        killed=true
+    fi
+
+    # Kill any previous server_node.py processes
+    pids=$(pgrep -f "server_node.py" 2>/dev/null)
+    if [[ -n "$pids" ]]; then
+        echo "${YELLOW}Stopping previous server_node processes...${NC}"
+        echo "$pids" | $XARGS $KILL 2>/dev/null
+        killed=true
+    fi
+
+    # Kill any lingering fswatch processes for saint_os
+    pids=$(pgrep -f "fswatch.*saint" 2>/dev/null)
+    if [[ -n "$pids" ]]; then
+        echo "${YELLOW}Stopping previous fswatch processes...${NC}"
+        echo "$pids" | $XARGS $KILL 2>/dev/null
+        killed=true
+    fi
+
+    # Kill any ros2 launch processes for saint_os
+    pids=$(pgrep -f "ros2.*launch.*saint" 2>/dev/null)
+    if [[ -n "$pids" ]]; then
+        echo "${YELLOW}Stopping previous ros2 launch processes...${NC}"
+        echo "$pids" | $XARGS $KILL 2>/dev/null
+        killed=true
+    fi
+
+    # Kill processes holding our ports (80 for web, 11111 for LiveLink)
+    for port in 80 11111; do
+        pids=$($LSOF -ti :$port 2>/dev/null)
+        if [[ -n "$pids" ]]; then
+            echo "${YELLOW}Killing processes holding port $port...${NC}"
+            echo "$pids" | $XARGS $KILL 2>/dev/null
+            killed=true
+        fi
+    done
+
+    # Give processes time to release ports
+    if $killed; then
+        $SLEEP 1
+        # Force kill any remaining processes
+        pgrep -f "saint_server" 2>/dev/null | $XARGS $KILL -9 2>/dev/null
+        pgrep -f "server_node.py" 2>/dev/null | $XARGS $KILL -9 2>/dev/null
+        # Force kill anything still on ports
+        for port in 80 11111; do
+            $LSOF -ti :$port 2>/dev/null | $XARGS $KILL -9 2>/dev/null
+        done
+        $SLEEP 0.5
+        echo "${GREEN}Previous processes stopped.${NC}"
+        echo ""
+    fi
+}
+
+# Run cleanup before starting
+_saint_kill_previous
+
 
 # Get the directory where this script lives
 # ${(%):-%x} gives the path to the sourced script in zsh
@@ -71,14 +159,14 @@ else
     echo "${GREEN}Conda environment:${NC} ros2_env"
 fi
 
-# Save conda bin path before workspace sourcing can disrupt it
+# Save the FULL PATH before workspace sourcing can disrupt it
 _SAINT_CONDA_BIN="$CONDA_PREFIX/bin"
-export PATH="$_SAINT_CONDA_BIN:$PATH"
+_SAINT_SAVED_PATH="$PATH"
 echo ""
 
 # Build the workspace
 echo "${YELLOW}Building workspace...${NC}"
-"$_SAINT_CONDA_BIN/colcon" build --symlink-install
+PATH="$_SAINT_CONDA_BIN:$PATH" "$_SAINT_CONDA_BIN/colcon" build --symlink-install
 if [[ $? -ne 0 ]]; then
     echo "${RED}Build failed!${NC}"
     return 1
@@ -90,8 +178,8 @@ echo ""
 echo "${YELLOW}Sourcing workspace...${NC}"
 source install/setup.zsh
 
-# Re-ensure conda bin is on PATH (workspace sourcing can disrupt it)
-export PATH="$_SAINT_CONDA_BIN:$PATH"
+# CRITICAL: Restore the full PATH - workspace sourcing can completely break it
+export PATH="$_SAINT_SAVED_PATH"
 
 echo "${GREEN}Workspace sourced!${NC}"
 echo ""
@@ -140,71 +228,168 @@ fi
 echo "${BLUE}========================================${NC}"
 echo ""
 
+# Flag to prevent double cleanup
+_SAINT_CLEANUP_DONE=false
+
+# Define cleanup function at top level so it's always available
+_saint_dev_cleanup() {
+    # Prevent running cleanup twice
+    if $_SAINT_CLEANUP_DONE; then
+        return 0
+    fi
+    _SAINT_CLEANUP_DONE=true
+
+    echo ''
+    echo "${YELLOW}Stopping server...${NC}"
+
+    # Remove marker file to signal polling loop to exit
+    if [[ -n "$_SAINT_MARKER_FILE" ]]; then
+        /bin/rm -f "$_SAINT_MARKER_FILE" 2>/dev/null
+    fi
+
+    # Kill the tracked server PID if set
+    if [[ -n "$_SAINT_SERVER_PID" ]]; then
+        /bin/kill $_SAINT_SERVER_PID 2>/dev/null
+        wait $_SAINT_SERVER_PID 2>/dev/null
+    fi
+
+    # Kill any child processes (server_node, webserver, etc.)
+    pkill -f "saint_server" 2>/dev/null
+    pkill -f "server_node.py" 2>/dev/null
+
+    # Give time for graceful shutdown
+    /bin/sleep 0.5
+
+    # Force kill any remaining
+    pkill -9 -f "saint_server" 2>/dev/null
+    pkill -9 -f "server_node.py" 2>/dev/null
+
+    # Kill anything holding our ports
+    /usr/sbin/lsof -ti :80 2>/dev/null | /usr/bin/xargs /bin/kill -9 2>/dev/null
+    /usr/sbin/lsof -ti :11111 2>/dev/null | /usr/bin/xargs /bin/kill -9 2>/dev/null
+
+    echo "${GREEN}Server stopped.${NC}"
+
+    # Reset the trap
+    trap - INT TERM
+
+    return 0
+}
+
+# Final cleanup - call this at the very end to unset everything
+_saint_final_cleanup() {
+    # Unset all variables and functions
+    unset _SAINT_WATCH_MODE _SAINT_AGENT_PATH _SAINT_AGENT_SEARCH_PATHS _SAINT_CONDA_BIN _SAINT_SERVER_PID _SAINT_SAVED_PATH _SAINT_MARKER_FILE _SAINT_CHANGES_DETECTED _SAINT_CLEANUP_DONE _SAINT_SYSTEM_PATH DATE SLEEP FIND TOUCH MKTEMP GREP HEAD LSOF KILL XARGS 2>/dev/null
+    unset -f _saint_kill_previous _saint_dev_cleanup _saint_final_cleanup 2>/dev/null
+}
+
+# Set trap to use our cleanup function
+trap _saint_dev_cleanup INT TERM
+
 # Run the server (with optional watch mode)
 if $_SAINT_WATCH_MODE; then
     echo "${YELLOW}Watch mode enabled - server will restart on file changes${NC}"
-    echo "Watching: saint_server/, saint_common/, web/"
+    echo "Watching: saint_server/, saint_common/, web/ (polling every 2s)"
     echo "Press Ctrl+C to stop"
     echo ""
 
     # Track server PID for cleanup
     _SAINT_SERVER_PID=""
 
-    # Cleanup function for Ctrl+C
-    _saint_cleanup() {
-        echo ''
-        echo "${YELLOW}Stopping server...${NC}"
-        if [[ -n "$_SAINT_SERVER_PID" ]]; then
-            kill $_SAINT_SERVER_PID 2>/dev/null
-            wait $_SAINT_SERVER_PID 2>/dev/null
-        fi
-        # Kill any lingering fswatch
-        pkill -f "fswatch.*saint_server" 2>/dev/null
-        echo "${GREEN}Server stopped.${NC}"
-        # Return instead of exit since we're sourcing
-        return 0
-    }
-    trap _saint_cleanup INT TERM
+    # Create a marker file for change detection
+    _SAINT_MARKER_FILE=$($MKTEMP)
+    $TOUCH "$_SAINT_MARKER_FILE"
 
     # Loop to restart server when changes detected
     while true; do
-        echo "${GREEN}[$(date +%H:%M:%S)] Starting SAINT.OS server...${NC}"
+        echo "${GREEN}[$(/bin/date +%H:%M:%S)] Starting SAINT.OS server...${NC}"
         echo ""
 
         # Start the server in background
         PATH="$_SAINT_CONDA_BIN:$PATH" "$_SAINT_CONDA_BIN/ros2" launch saint_os saint_server.launch.py &
         _SAINT_SERVER_PID=$!
 
-        # Wait for file changes (fswatch blocks until a change is detected)
-        # -1 means exit after first event batch
-        fswatch -1 "$SAINT_OS_DIR/saint_server" "$SAINT_OS_DIR/saint_common" "$SAINT_OS_DIR/web" >/dev/null 2>&1
-        _FSWATCH_EXIT=$?
+        # Poll for file changes (check every 2 seconds)
+        _SAINT_CHANGES_DETECTED=false
+        while true; do
+            /bin/sleep 2
 
-        # Check if fswatch was interrupted (Ctrl+C)
-        if [[ $_FSWATCH_EXIT -ne 0 ]]; then
+            # Check if we should exit (cleanup removes marker file)
+            if [[ ! -f "$_SAINT_MARKER_FILE" ]]; then
+                break 2  # Break out of both loops
+            fi
+
+            # Check if server process died unexpectedly
+            if ! kill -0 $_SAINT_SERVER_PID 2>/dev/null; then
+                echo ""
+                echo "${RED}[$(/bin/date +%H:%M:%S)] Server process died unexpectedly${NC}"
+                _SAINT_CHANGES_DETECTED=true
+                break
+            fi
+
+            # Check for modified files using find -newer (exclude server_config.yaml to prevent restart on settings save)
+            if $FIND "$SAINT_OS_DIR/saint_server" "$SAINT_OS_DIR/saint_common" "$SAINT_OS_DIR/web" \
+                -type f \( -name "*.py" -o -name "*.js" -o -name "*.html" -o -name "*.css" -o -name "*.yaml" \) \
+                ! -name "server_config.yaml" \
+                -newer "$_SAINT_MARKER_FILE" 2>/dev/null | $HEAD -1 | $GREP -q .; then
+                _SAINT_CHANGES_DETECTED=true
+                break
+            fi
+        done
+
+        # Check if we should exit (cleanup removes marker file)
+        if [[ ! -f "$_SAINT_MARKER_FILE" ]]; then
             break
         fi
 
-        echo ""
-        echo "${YELLOW}[$(date +%H:%M:%S)] Changes detected, restarting server...${NC}"
+        if $_SAINT_CHANGES_DETECTED; then
+            echo ""
+            echo "${YELLOW}[$(/bin/date +%H:%M:%S)] Changes detected, restarting server...${NC}"
 
-        # Kill the server
-        kill $_SAINT_SERVER_PID 2>/dev/null
-        wait $_SAINT_SERVER_PID 2>/dev/null
+            # Kill the main server process
+            $KILL $_SAINT_SERVER_PID 2>/dev/null
+            wait $_SAINT_SERVER_PID 2>/dev/null
 
-        # Rebuild
-        echo "${YELLOW}Rebuilding...${NC}"
-        "$_SAINT_CONDA_BIN/colcon" build --symlink-install 2>&1 | grep -E "(Starting|Finished|Failed|error:|warning:)" || true
-        echo "${GREEN}[$(date +%H:%M:%S)] Rebuild complete${NC}"
-        echo ""
+            # Kill all child processes that hold ports (webserver, LiveLink, etc.)
+            pkill -f "saint_server" 2>/dev/null
+            pkill -f "server_node.py" 2>/dev/null
+            $SLEEP 0.5
+
+            # Force kill any remaining
+            pkill -9 -f "saint_server" 2>/dev/null
+            pkill -9 -f "server_node.py" 2>/dev/null
+
+            # Kill anything holding our ports
+            $LSOF -ti :80 2>/dev/null | $XARGS $KILL -9 2>/dev/null
+            $LSOF -ti :11111 2>/dev/null | $XARGS $KILL -9 2>/dev/null
+            $SLEEP 0.5
+
+            # Update marker file timestamp
+            $TOUCH "$_SAINT_MARKER_FILE"
+
+            # Rebuild
+            echo "${YELLOW}Rebuilding...${NC}"
+            PATH="$_SAINT_CONDA_BIN:$PATH" "$_SAINT_CONDA_BIN/colcon" build --symlink-install 2>&1 | $GREP -E "(Starting|Finished|Failed|error:|warning:)" || true
+            echo "${GREEN}[$(/bin/date +%H:%M:%S)] Rebuild complete${NC}"
+            echo ""
+        fi
     done
+
+    # Clean up marker file
+    /bin/rm -f "$_SAINT_MARKER_FILE" 2>/dev/null
+
+    # Clean up after loop exits (safe to call multiple times)
+    _saint_dev_cleanup
+    _saint_final_cleanup
 else
     # Run the server normally (no watch)
     echo "${GREEN}Starting SAINT.OS server...${NC}"
     echo ""
+
     # Ensure PATH includes conda bin for subprocesses (python3, etc.)
     PATH="$_SAINT_CONDA_BIN:$PATH" "$_SAINT_CONDA_BIN/ros2" launch saint_os saint_server.launch.py
-fi
 
-# Clean up variables
-unset _SAINT_WATCH_MODE _SAINT_AGENT_PATH _SAINT_AGENT_SEARCH_PATHS _SAINT_FSWATCH_PID _SAINT_CONDA_BIN
+    # Clean up after server exits normally (safe to call multiple times)
+    _saint_dev_cleanup
+    _saint_final_cleanup
+fi

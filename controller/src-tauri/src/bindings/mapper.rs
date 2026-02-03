@@ -229,6 +229,83 @@ impl InputMapper {
                         }));
                     }
                 }
+                AnalogAction::DifferentialDrive {
+                    role,
+                    left_function,
+                    right_function,
+                    throttle_transform,
+                    turn_transform,
+                } => {
+                    // Get both stick axes based on which axis this binding is for
+                    // DifferentialDrive should be bound to the Y axis (throttle) of a stick
+                    let (throttle_raw, turn_raw) = match &binding.input {
+                        AnalogInput::LeftStickY => (
+                            input.gamepad.left_stick.y,
+                            input.gamepad.left_stick.x,
+                        ),
+                        AnalogInput::RightStickY => (
+                            input.gamepad.right_stick.y,
+                            input.gamepad.right_stick.x,
+                        ),
+                        // If bound to X axis, swap the interpretation
+                        AnalogInput::LeftStickX => (
+                            input.gamepad.left_stick.y,
+                            input.gamepad.left_stick.x,
+                        ),
+                        AnalogInput::RightStickX => (
+                            input.gamepad.right_stick.y,
+                            input.gamepad.right_stick.x,
+                        ),
+                        // Triggers don't make sense for differential drive
+                        _ => continue,
+                    };
+
+                    // Apply transforms
+                    let throttle = self.apply_modifiers(throttle_transform.apply(throttle_raw));
+                    let turn = self.apply_modifiers(turn_transform.apply(turn_raw));
+
+                    // Channel mixing: left = throttle + turn, right = throttle - turn
+                    let mut left = throttle + turn;
+                    let mut right = throttle - turn;
+
+                    // Normalize if either exceeds bounds (proportional scaling)
+                    let max_val = left.abs().max(right.abs());
+                    if max_val > 1.0 {
+                        left /= max_val;
+                        right /= max_val;
+                    }
+
+                    // Check if we should send (same logic as DirectControl but for the combined values)
+                    let key_left = format!("{}_{}", role, left_function);
+                    let key_right = format!("{}_{}", role, right_function);
+                    let last_left = self.last_analog_values.get(&key_left).copied().unwrap_or(0.0);
+                    let last_right = self.last_analog_values.get(&key_right).copied().unwrap_or(0.0);
+
+                    let delta_left = (left - last_left).abs();
+                    let delta_right = (right - last_right).abs();
+                    let any_changed = delta_left > 0.001 || delta_right > 0.001;
+                    let any_active = left.abs() > 0.001 || right.abs() > 0.001;
+                    let returned_to_zero = (last_left.abs() > 0.001 || last_right.abs() > 0.001)
+                        && left.abs() <= 0.001 && right.abs() <= 0.001;
+                    let should_send = any_changed || any_active || returned_to_zero;
+
+                    if should_send {
+                        self.last_analog_values.insert(key_left, left);
+                        self.last_analog_values.insert(key_right, right);
+
+                        // Send both left and right commands
+                        events.push(ActionEvent::Command(MappedCommand {
+                            role: role.clone(),
+                            function: left_function.clone(),
+                            value: Value::from(left),
+                        }));
+                        events.push(ActionEvent::Command(MappedCommand {
+                            role: role.clone(),
+                            function: right_function.clone(),
+                            value: Value::from(right),
+                        }));
+                    }
+                }
                 AnalogAction::Modifier { effect } => {
                     // Store modifier value for use by other bindings
                     match effect {

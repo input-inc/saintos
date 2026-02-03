@@ -69,6 +69,21 @@ pub enum AnalogAction {
         target: ControlTarget,
         transform: InputTransform,
     },
+    /// Differential drive - channel mixing for tank drive
+    /// Takes stick X (turn) and Y (throttle) and outputs to left/right motors
+    /// Mixing: left = throttle + turn, right = throttle - turn
+    DifferentialDrive {
+        /// Role name (e.g., "tracks")
+        role: String,
+        /// Function name for left motor (e.g., "left_velocity")
+        left_function: String,
+        /// Function name for right motor (e.g., "right_velocity")
+        right_function: String,
+        /// Transform applied to throttle (Y axis)
+        throttle_transform: InputTransform,
+        /// Transform applied to turn (X axis)
+        turn_transform: InputTransform,
+    },
     /// Modifier - affects other inputs while active
     Modifier {
         effect: ModifierEffect,

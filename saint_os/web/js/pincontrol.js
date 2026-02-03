@@ -12,6 +12,21 @@ class PinControlManager {
         this.container = null;  // DOM container for this instance's controls
         this.controlThrottleMs = 50;  // Match server throttle
         this.lastSendTime = {};  // gpio -> timestamp
+        this.visualizationModes = {};  // gpio -> 'slider' | 'stick'
+        this.stickPairings = {};  // Store X/Y pairings for stick mode
+
+        // UI update throttling - prevents DOM thrashing from high-frequency updates
+        this._uiUpdatePending = false;
+        this._uiUpdateThrottleMs = 16;  // ~60fps max
+        this._lastUiUpdate = 0;
+        this._pendingPinUpdates = new Map();  // gpio -> pin data (only update changed pins)
+
+        // DOM element cache for frequently updated elements (cleared on renderControls)
+        this._elementCache = new Map();  // gpio -> {item, slider, display, syncIndicator, ...}
+
+        // Active stick references for drag handling
+        this._activeStick = null;
+        this._activeTrackStick = null;
 
         // Bind methods
         this.handleStateUpdate = this.handleStateUpdate.bind(this);
@@ -102,11 +117,86 @@ class PinControlManager {
 
     /**
      * Handle state update from server.
+     * Uses throttled updates to prevent DOM thrashing from high-frequency messages.
      */
     handleStateUpdate(data) {
-        console.log('PinControlManager: handleStateUpdate:', data);
         this.runtimeState = data;
-        this.updateUI();
+
+        // Queue pins for update
+        if (data && data.pins) {
+            for (const pin of data.pins) {
+                this._pendingPinUpdates.set(pin.gpio, pin);
+            }
+        }
+
+        // Throttle UI updates using requestAnimationFrame
+        this._scheduleUiUpdate();
+    }
+
+    /**
+     * Schedule a throttled UI update.
+     */
+    _scheduleUiUpdate() {
+        if (this._uiUpdatePending) return;
+
+        const now = performance.now();
+        const elapsed = now - this._lastUiUpdate;
+
+        if (elapsed >= this._uiUpdateThrottleMs) {
+            // Enough time has passed, update immediately via rAF
+            this._uiUpdatePending = true;
+            requestAnimationFrame(() => {
+                this._performUiUpdate();
+            });
+        } else {
+            // Schedule update after remaining throttle time
+            this._uiUpdatePending = true;
+            setTimeout(() => {
+                requestAnimationFrame(() => {
+                    this._performUiUpdate();
+                });
+            }, this._uiUpdateThrottleMs - elapsed);
+        }
+    }
+
+    /**
+     * Perform the actual UI update (called via requestAnimationFrame).
+     */
+    _performUiUpdate() {
+        this._uiUpdatePending = false;
+        this._lastUiUpdate = performance.now();
+
+        // Update only the pins that changed
+        if (this._pendingPinUpdates.size > 0) {
+            this._updateChangedPins();
+
+            // Check if any track drive controls need updating
+            this._updateTrackDriveControls();
+
+            this._pendingPinUpdates.clear();
+        }
+
+        // Update stale indicator and last update time (less frequent)
+        this._updateStatusIndicators();
+    }
+
+    /**
+     * Update any track drive controls based on pending pin updates.
+     */
+    _updateTrackDriveControls() {
+        if (!this.container) return;
+
+        // Find all track drive controls
+        const trackControls = this.container.querySelectorAll('.track-drive-control');
+        for (const control of trackControls) {
+            const leftGpio = parseInt(control.dataset.leftGpio);
+            const rightGpio = parseInt(control.dataset.rightGpio);
+
+            // Check if either track pin was updated
+            if (this._pendingPinUpdates.has(leftGpio) || this._pendingPinUpdates.has(rightGpio)) {
+                this.updateTrackDriveFromState(leftGpio, rightGpio);
+            }
+        }
     }
 
     /**
@@ -119,6 +209,9 @@ class PinControlManager {
             console.warn('PinControlManager: No container provided');
             return;
         }
+
+        // Clear element cache since we're re-rendering
+        this._clearElementCache();
 
         // Store container reference for scoped queries in updateUI
         this.container = container;
@@ -146,10 +239,33 @@ class PinControlManager {
         const digitalInPins = pins.filter(p => p.mode === 'digital_in');
         const adcPins = pins.filter(p => p.mode === 'adc');
 
+        // Detect track drive pairs (left_velocity + right_velocity)
+        const leftTrack = pwmPins.find(p => p.logical_name === 'left_velocity');
+        const rightTrack = pwmPins.find(p => p.logical_name === 'right_velocity');
+        const hasTrackDrive = leftTrack && rightTrack;
+
+        // Filter out track pins from regular PWM if we have a pair
+        const regularPwmPins = hasTrackDrive
+            ? pwmPins.filter(p => p.logical_name !== 'left_velocity' && p.logical_name !== 'right_velocity')
+            : pwmPins;
+
         let html = '';
 
-        // PWM Controls
-        if (pwmPins.length > 0) {
+        // Track Drive Control (combined left/right with mixing)
+        if (hasTrackDrive) {
+            html += `
+                <div class="control-section mb-6">
+                    <h4 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                        <span class="material-icons icon-sm text-cyan-400">swap_horiz</span>
+                        Track Drive
+                    </h4>
+                    ${this.renderTrackDriveControl(leftTrack, rightTrack)}
+                </div>
+            `;
+        }
+
+        // PWM Controls (non-track)
+        if (regularPwmPins.length > 0) {
             html += `
                 <div class="control-section mb-6">
                     <h4 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
@@ -157,7 +273,7 @@ class PinControlManager {
                         PWM Outputs
                     </h4>
                     <div class="space-y-3">
-                        ${pwmPins.map(p => this.renderPWMSlider(p)).join('')}
+                        ${regularPwmPins.map(p => this.renderPWMSlider(p)).join('')}
                     </div>
                 </div>
             `;
@@ -238,24 +354,64 @@ class PinControlManager {
     renderPWMSlider(pin) {
         const gpio = pin.gpio;
         const name = pin.logical_name || `GPIO ${gpio}`;
+        const mode = this.visualizationModes[gpio] || 'slider';
 
         return `
             <div class="control-item bg-slate-900/50 rounded-lg p-3" data-gpio="${gpio}" data-mode="pwm">
                 <div class="flex items-center justify-between mb-2">
                     <span class="text-sm font-medium text-white">${name}</span>
                     <div class="flex items-center gap-2">
+                        <select class="viz-mode-select text-xs bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-slate-300"
+                                data-gpio="${gpio}" title="Visualization mode">
+                            <option value="slider" ${mode === 'slider' ? 'selected' : ''}>Slider</option>
+                            <option value="stick" ${mode === 'stick' ? 'selected' : ''}>Stick</option>
+                        </select>
                         <span class="pin-sync-indicator w-2 h-2 rounded-full bg-slate-500" title="Sync status"></span>
-                        <span class="pin-value-display text-sm text-cyan-400 font-mono w-12 text-right">0%</span>
+                        <span class="pin-value-display text-sm text-cyan-400 font-mono w-16 text-right">50%</span>
                     </div>
                 </div>
-                <input type="range" min="0" max="100" value="0" step="1"
-                       class="pin-slider pwm-slider w-full"
-                       data-gpio="${gpio}">
-                <div class="flex justify-between mt-1">
-                    <span class="text-xs text-slate-500">0%</span>
-                    <span class="text-xs text-slate-500">GPIO ${gpio}</span>
-                    <span class="text-xs text-slate-500">100%</span>
+                <div class="viz-slider-container" data-gpio="${gpio}" ${mode !== 'slider' ? 'style="display:none"' : ''}>
+                    <input type="range" min="0" max="100" value="50" step="1"
+                           class="pin-slider pwm-slider w-full"
+                           data-gpio="${gpio}">
+                    <div class="flex justify-between mt-1">
+                        <span class="text-xs text-slate-500">0%</span>
+                        <span class="text-xs text-slate-500">50% (center)</span>
+                        <span class="text-xs text-slate-500">100%</span>
+                    </div>
                 </div>
+                <div class="viz-stick-container flex justify-center" data-gpio="${gpio}" ${mode !== 'stick' ? 'style="display:none"' : ''}>
+                    ${this.renderStickVisualization(gpio, 'pwm')}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Render stick visualization for a control.
+     * Shows current value as a position on a 2D circle.
+     * For single-axis controls, X represents the value (0-100 maps to -1 to 1).
+     */
+    renderStickVisualization(gpio, mode) {
+        const maxVal = mode === 'servo' ? 180 : 100;
+        const midVal = maxVal / 2;
+
+        return `
+            <div class="stick-wrapper flex flex-col items-center gap-2">
+                <div class="stick-container" data-gpio="${gpio}" data-max="${maxVal}">
+                    <div class="stick-crosshair horizontal"></div>
+                    <div class="stick-crosshair vertical"></div>
+                    <div class="stick-knob" data-gpio="${gpio}" style="left: 50%; top: 50%;"></div>
+                    <span class="stick-label top">${maxVal}</span>
+                    <span class="stick-label bottom">0</span>
+                    <span class="stick-label left">-</span>
+                    <span class="stick-label right">+</span>
+                </div>
+                <div class="text-xs text-slate-400">
+                    <span>X: <span class="stick-x-value font-mono text-cyan-400" data-gpio="${gpio}">0</span></span>
+                    <span class="ml-2">Y: <span class="stick-y-value font-mono text-violet-400" data-gpio="${gpio}">0</span></span>
+                </div>
+                <div class="text-xs text-slate-500">Click/drag to control</div>
             </div>
         `;
     }
@@ -266,23 +422,34 @@ class PinControlManager {
     renderServoSlider(pin) {
         const gpio = pin.gpio;
         const name = pin.logical_name || `GPIO ${gpio}`;
+        const mode = this.visualizationModes[gpio] || 'slider';
 
         return `
             <div class="control-item bg-slate-900/50 rounded-lg p-3" data-gpio="${gpio}" data-mode="servo">
                 <div class="flex items-center justify-between mb-2">
                     <span class="text-sm font-medium text-white">${name}</span>
                     <div class="flex items-center gap-2">
+                        <select class="viz-mode-select text-xs bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-slate-300"
+                                data-gpio="${gpio}" title="Visualization mode">
+                            <option value="slider" ${mode === 'slider' ? 'selected' : ''}>Slider</option>
+                            <option value="stick" ${mode === 'stick' ? 'selected' : ''}>Stick</option>
+                        </select>
                         <span class="pin-sync-indicator w-2 h-2 rounded-full bg-slate-500" title="Sync status"></span>
-                        <span class="pin-value-display text-sm text-violet-400 font-mono w-12 text-right">90&deg;</span>
+                        <span class="pin-value-display text-sm text-violet-400 font-mono w-16 text-right">90&deg;</span>
                     </div>
                 </div>
-                <input type="range" min="0" max="180" value="90" step="1"
-                       class="pin-slider servo-slider w-full"
-                       data-gpio="${gpio}">
-                <div class="flex justify-between mt-1">
-                    <span class="text-xs text-slate-500">0&deg;</span>
-                    <span class="text-xs text-slate-500">GPIO ${gpio}</span>
-                    <span class="text-xs text-slate-500">180&deg;</span>
+                <div class="viz-slider-container" data-gpio="${gpio}" ${mode !== 'slider' ? 'style="display:none"' : ''}>
+                    <input type="range" min="0" max="180" value="90" step="1"
+                           class="pin-slider servo-slider w-full"
+                           data-gpio="${gpio}">
+                    <div class="flex justify-between mt-1">
+                        <span class="text-xs text-slate-500">0&deg;</span>
+                        <span class="text-xs text-slate-500">90&deg; (center)</span>
+                        <span class="text-xs text-slate-500">180&deg;</span>
+                    </div>
+                </div>
+                <div class="viz-stick-container flex justify-center" data-gpio="${gpio}" ${mode !== 'stick' ? 'style="display:none"' : ''}>
+                    ${this.renderStickVisualization(gpio, 'servo')}
                 </div>
             </div>
         `;
@@ -361,6 +528,58 @@ class PinControlManager {
     }
 
     /**
+     * Render Track Drive control with joystick and channel mixing.
+     * Shows a 2D stick for direction input and vertical bars for left/right track output.
+     */
+    renderTrackDriveControl(leftPin, rightPin) {
+        const leftGpio = leftPin.gpio;
+        const rightGpio = rightPin.gpio;
+
+        return `
+            <div class="track-drive-control bg-slate-900/50 rounded-lg p-4"
+                 data-left-gpio="${leftGpio}" data-right-gpio="${rightGpio}">
+                <div class="flex items-center gap-6">
+                    <!-- Left Track Bar -->
+                    <div class="track-bar-container flex flex-col items-center gap-1">
+                        <span class="text-xs text-slate-400 font-medium">L</span>
+                        <div class="track-bar-wrapper relative h-32 w-8 bg-slate-800 rounded-lg overflow-hidden border border-slate-700">
+                            <div class="track-bar-fill absolute bottom-1/2 left-0 right-0 bg-cyan-500 transition-all duration-75"
+                                 data-track="left" style="height: 0%; transform: translateY(50%);"></div>
+                            <div class="track-bar-center absolute left-0 right-0 top-1/2 h-px bg-slate-600"></div>
+                        </div>
+                        <span class="track-bar-value text-xs font-mono text-cyan-400" data-track="left">0%</span>
+                    </div>
+
+                    <!-- Joystick Control -->
+                    <div class="track-stick-wrapper flex flex-col items-center gap-2">
+                        <div class="track-stick-container" data-left-gpio="${leftGpio}" data-right-gpio="${rightGpio}">
+                            <div class="track-stick-crosshair horizontal"></div>
+                            <div class="track-stick-crosshair vertical"></div>
+                            <div class="track-stick-knob"></div>
+                        </div>
+                        <div class="text-xs text-slate-400 flex gap-4">
+                            <span>Throttle: <span class="track-throttle-value font-mono text-violet-400">0.00</span></span>
+                            <span>Turn: <span class="track-turn-value font-mono text-amber-400">0.00</span></span>
+                        </div>
+                    </div>
+
+                    <!-- Right Track Bar -->
+                    <div class="track-bar-container flex flex-col items-center gap-1">
+                        <span class="text-xs text-slate-400 font-medium">R</span>
+                        <div class="track-bar-wrapper relative h-32 w-8 bg-slate-800 rounded-lg overflow-hidden border border-slate-700">
+                            <div class="track-bar-fill absolute bottom-1/2 left-0 right-0 bg-cyan-500 transition-all duration-75"
+                                 data-track="right" style="height: 0%; transform: translateY(50%);"></div>
+                            <div class="track-bar-center absolute left-0 right-0 top-1/2 h-px bg-slate-600"></div>
+                        </div>
+                        <span class="track-bar-value text-xs font-mono text-cyan-400" data-track="right">0%</span>
+                    </div>
+                </div>
+                <p class="text-xs text-slate-500 mt-3 text-center">Drag stick to control. Y = throttle, X = turn.</p>
+            </div>
+        `;
+    }
+
+    /**
      * Attach event listeners to controls.
      */
     attachEventListeners(container) {
@@ -377,6 +596,382 @@ class PinControlManager {
                 this.onToggleClick(e.currentTarget);
             });
         });
+
+        // Track drive stick controls
+        container.querySelectorAll('.track-stick-container').forEach(stick => {
+            stick.addEventListener('mousedown', (e) => {
+                this.onTrackStickStart(stick, e);
+            });
+            stick.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                this.onTrackStickStart(stick, e.touches[0]);
+            });
+        });
+
+        // Visualization mode dropdowns
+        container.querySelectorAll('.viz-mode-select').forEach(select => {
+            select.addEventListener('change', (e) => {
+                this.onVisualizationModeChange(e.target);
+            });
+        });
+
+        // Stick containers - mouse events
+        container.querySelectorAll('.stick-container').forEach(stick => {
+            stick.addEventListener('mousedown', (e) => {
+                this.onStickStart(stick, e);
+            });
+        });
+
+        // Global mouse events for stick dragging
+        document.addEventListener('mousemove', (e) => {
+            if (this._activeStick) {
+                this.onStickMove(this._activeStick, e);
+            }
+            if (this._activeTrackStick) {
+                this.onTrackStickMove(this._activeTrackStick, e);
+            }
+        });
+        document.addEventListener('mouseup', () => {
+            if (this._activeTrackStick) {
+                this.onTrackStickEnd(this._activeTrackStick);
+            }
+            this._activeStick = null;
+            this._activeTrackStick = null;
+        });
+
+        // Global touch events for track stick
+        document.addEventListener('touchmove', (e) => {
+            if (this._activeTrackStick) {
+                this.onTrackStickMove(this._activeTrackStick, e.touches[0]);
+            }
+        });
+        document.addEventListener('touchend', () => {
+            if (this._activeTrackStick) {
+                this.onTrackStickEnd(this._activeTrackStick);
+            }
+            this._activeTrackStick = null;
+        });
+    }
+
+    /**
+     * Handle visualization mode change.
+     */
+    onVisualizationModeChange(select) {
+        const gpio = parseInt(select.dataset.gpio);
+        const mode = select.value;
+        this.visualizationModes[gpio] = mode;
+
+        // Find the container and toggle visibility
+        const container = select.closest('.control-item');
+        const sliderContainer = container.querySelector(`.viz-slider-container[data-gpio="${gpio}"]`);
+        const stickContainer = container.querySelector(`.viz-stick-container[data-gpio="${gpio}"]`);
+
+        if (mode === 'slider') {
+            sliderContainer.style.display = '';
+            stickContainer.style.display = 'none';
+        } else {
+            sliderContainer.style.display = 'none';
+            stickContainer.style.display = '';
+            // Update stick position with current value
+            this.updateStickPosition(gpio);
+        }
+    }
+
+    /**
+     * Handle stick mousedown.
+     */
+    onStickStart(stick, event) {
+        event.preventDefault();
+        this._activeStick = stick;
+        stick.classList.add('active');
+        stick.querySelector('.stick-knob').classList.add('active');
+        this.onStickMove(stick, event);
+    }
+
+    /**
+     * Handle stick mousemove.
+     */
+    onStickMove(stick, event) {
+        const rect = stick.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const maxRadius = rect.width / 2 - 20; // Account for knob size
+
+        let deltaX = event.clientX - centerX;
+        let deltaY = centerY - event.clientY; // Invert Y so up is positive
+
+        // Clamp to circle
+        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+        if (distance > maxRadius) {
+            deltaX = (deltaX / distance) * maxRadius;
+            deltaY = (deltaY / distance) * maxRadius;
+        }
+
+        // Calculate normalized values (-1 to 1)
+        const normalizedX = deltaX / maxRadius;
+        const normalizedY = deltaY / maxRadius;
+
+        // Update knob position
+        const knob = stick.querySelector('.stick-knob');
+        knob.style.left = `${50 + (normalizedX * 40)}%`;
+        knob.style.top = `${50 - (normalizedY * 40)}%`;
+
+        // Get max value and convert to native range
+        const gpio = parseInt(stick.dataset.gpio);
+        const maxVal = parseInt(stick.dataset.max) || 100;
+        const midVal = maxVal / 2;
+
+        // For stick mode: X controls the value
+        // Map -1 to 1 -> 0 to maxVal
+        const value = midVal + (normalizedX * midVal);
+
+        // Update value displays
+        const xDisplay = stick.parentElement.querySelector(`.stick-x-value[data-gpio="${gpio}"]`);
+        const yDisplay = stick.parentElement.querySelector(`.stick-y-value[data-gpio="${gpio}"]`);
+        if (xDisplay) xDisplay.textContent = normalizedX.toFixed(2);
+        if (yDisplay) yDisplay.textContent = normalizedY.toFixed(2);
+
+        // Update the main value display
+        const item = stick.closest('.control-item');
+        const display = item.querySelector('.pin-value-display');
+        const mode = item.dataset.mode;
+        if (display) {
+            if (mode === 'servo') {
+                display.textContent = `${Math.round(value)}°`;
+            } else {
+                display.textContent = `${Math.round(value)}%`;
+            }
+        }
+
+        // Also update the slider to stay in sync
+        const slider = item.querySelector('.pin-slider');
+        if (slider) {
+            slider.value = value;
+        }
+
+        // Send to server
+        this.throttledSend(gpio, value);
+    }
+
+    /**
+     * Update stick position based on current value.
+     */
+    updateStickPosition(gpio) {
+        const searchRoot = this.container || document;
+        const stick = searchRoot.querySelector(`.stick-container[data-gpio="${gpio}"]`);
+        if (!stick) return;
+
+        const maxVal = parseInt(stick.dataset.max) || 100;
+        const midVal = maxVal / 2;
+
+        // Get current value from runtime state
+        let value = midVal;
+        if (this.runtimeState && this.runtimeState.pins) {
+            const pin = this.runtimeState.pins.find(p => p.gpio === gpio);
+            if (pin) {
+                value = pin.actual !== undefined ? pin.actual : (pin.desired || midVal);
+            }
+        }
+
+        // Convert value to normalized X (-1 to 1)
+        const normalizedX = (value - midVal) / midVal;
+
+        // Update knob position
+        const knob = stick.querySelector('.stick-knob');
+        if (knob) {
+            knob.style.left = `${50 + (normalizedX * 40)}%`;
+            knob.style.top = '50%'; // Y stays centered for single-axis control
+        }
+
+        // Update value displays
+        const xDisplay = stick.parentElement?.querySelector(`.stick-x-value[data-gpio="${gpio}"]`);
+        if (xDisplay) xDisplay.textContent = normalizedX.toFixed(2);
+    }
+
+    /**
+     * Handle track stick mousedown/touchstart.
+     */
+    onTrackStickStart(stick, event) {
+        event.preventDefault();
+        this._activeTrackStick = stick;
+        stick.classList.add('active');
+        stick.querySelector('.track-stick-knob').classList.add('active');
+        this.onTrackStickMove(stick, event);
+    }
+
+    /**
+     * Handle track stick move with channel mixing.
+     * Y axis = throttle (forward/back), X axis = turn (left/right)
+     * Mixing: left = throttle + turn, right = throttle - turn
+     */
+    onTrackStickMove(stick, event) {
+        const rect = stick.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const maxRadius = rect.width / 2 - 16;
+
+        let deltaX = event.clientX - centerX;
+        let deltaY = centerY - event.clientY; // Invert Y so up is positive (forward)
+
+        // Clamp to circle
+        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+        if (distance > maxRadius) {
+            deltaX = (deltaX / distance) * maxRadius;
+            deltaY = (deltaY / distance) * maxRadius;
+        }
+
+        // Calculate normalized values (-1 to 1)
+        const turn = deltaX / maxRadius;      // X = turn (right is positive)
+        const throttle = deltaY / maxRadius;  // Y = throttle (forward is positive)
+
+        // Update knob position
+        const knob = stick.querySelector('.track-stick-knob');
+        knob.style.left = `${50 + (turn * 40)}%`;
+        knob.style.top = `${50 - (throttle * 40)}%`;
+
+        // Channel mixing: left = throttle + turn, right = throttle - turn
+        // Clamp to -1 to 1 range
+        let leftMix = throttle + turn;
+        let rightMix = throttle - turn;
+
+        // Normalize if either exceeds bounds (proportional scaling)
+        const maxMix = Math.max(Math.abs(leftMix), Math.abs(rightMix));
+        if (maxMix > 1) {
+            leftMix /= maxMix;
+            rightMix /= maxMix;
+        }
+
+        // Convert to PWM percentage (0-100, where 50 is neutral)
+        // -1 = 0%, 0 = 50%, 1 = 100%
+        const leftPwm = (leftMix + 1) * 50;
+        const rightPwm = (rightMix + 1) * 50;
+
+        // Update UI displays
+        const wrapper = stick.closest('.track-drive-control');
+        this.updateTrackBarDisplay(wrapper, 'left', leftMix, leftPwm);
+        this.updateTrackBarDisplay(wrapper, 'right', rightMix, rightPwm);
+
+        // Update throttle/turn displays
+        const throttleDisplay = wrapper.querySelector('.track-throttle-value');
+        const turnDisplay = wrapper.querySelector('.track-turn-value');
+        if (throttleDisplay) throttleDisplay.textContent = throttle.toFixed(2);
+        if (turnDisplay) turnDisplay.textContent = turn.toFixed(2);
+
+        // Send values to server
+        const leftGpio = parseInt(stick.dataset.leftGpio);
+        const rightGpio = parseInt(stick.dataset.rightGpio);
+        this.throttledSend(leftGpio, leftPwm);
+        this.throttledSend(rightGpio, rightPwm);
+    }
+
+    /**
+     * Handle track stick release - return to center (stop).
+     */
+    onTrackStickEnd(stick) {
+        stick.classList.remove('active');
+        const knob = stick.querySelector('.track-stick-knob');
+        if (knob) {
+            knob.classList.remove('active');
+            // Animate back to center
+            knob.style.left = '50%';
+            knob.style.top = '50%';
+        }
+
+        // Send neutral (stop) values
+        const leftGpio = parseInt(stick.dataset.leftGpio);
+        const rightGpio = parseInt(stick.dataset.rightGpio);
+        this.sendControlValue(leftGpio, 50);  // 50% = neutral
+        this.sendControlValue(rightGpio, 50);
+
+        // Update UI to show stopped
+        const wrapper = stick.closest('.track-drive-control');
+        this.updateTrackBarDisplay(wrapper, 'left', 0, 50);
+        this.updateTrackBarDisplay(wrapper, 'right', 0, 50);
+
+        const throttleDisplay = wrapper.querySelector('.track-throttle-value');
+        const turnDisplay = wrapper.querySelector('.track-turn-value');
+        if (throttleDisplay) throttleDisplay.textContent = '0.00';
+        if (turnDisplay) turnDisplay.textContent = '0.00';
+    }
+
+    /**
+     * Update track bar display (vertical progress bar showing power/direction).
+     */
+    updateTrackBarDisplay(wrapper, track, normalizedValue, pwmValue) {
+        const bar = wrapper.querySelector(`.track-bar-fill[data-track="${track}"]`);
+        const valueDisplay = wrapper.querySelector(`.track-bar-value[data-track="${track}"]`);
+
+        if (bar) {
+            // Bar height represents magnitude, position represents direction
+            const magnitude = Math.abs(normalizedValue) * 50; // 0-50% of container height
+            const isForward = normalizedValue >= 0;
+
+            if (isForward) {
+                // Bar grows upward from center
+                bar.style.height = `${magnitude}%`;
+                bar.style.bottom = '50%';
+                bar.style.top = 'auto';
+                bar.classList.remove('bg-rose-500');
+                bar.classList.add('bg-cyan-500');
+            } else {
+                // Bar grows downward from center
+                bar.style.height = `${magnitude}%`;
+                bar.style.top = '50%';
+                bar.style.bottom = 'auto';
+                bar.classList.remove('bg-cyan-500');
+                bar.classList.add('bg-rose-500');
+            }
+        }
+
+        if (valueDisplay) {
+            // Show signed percentage from center (e.g., +25%, -30%)
+            const signedPercent = Math.round((pwmValue - 50) * 2);
+            const sign = signedPercent >= 0 ? '+' : '';
+            valueDisplay.textContent = `${sign}${signedPercent}%`;
+        }
+    }
+
+    /**
+     * Update track drive display from runtime state.
+     */
+    updateTrackDriveFromState(leftGpio, rightGpio) {
+        const searchRoot = this.container || document;
+        const wrapper = searchRoot.querySelector(`.track-drive-control[data-left-gpio="${leftGpio}"]`);
+        if (!wrapper || this._activeTrackStick) return; // Don't update while dragging
+
+        let leftValue = 50, rightValue = 50;
+        if (this.runtimeState && this.runtimeState.pins) {
+            const leftPin = this.runtimeState.pins.find(p => p.gpio === leftGpio);
+            const rightPin = this.runtimeState.pins.find(p => p.gpio === rightGpio);
+            if (leftPin) leftValue = leftPin.actual !== undefined ? leftPin.actual : (leftPin.desired || 50);
+            if (rightPin) rightValue = rightPin.actual !== undefined ? rightPin.actual : (rightPin.desired || 50);
+        }
+
+        // Convert PWM (0-100) to normalized (-1 to 1)
+        const leftNorm = (leftValue - 50) / 50;
+        const rightNorm = (rightValue - 50) / 50;
+
+        this.updateTrackBarDisplay(wrapper, 'left', leftNorm, leftValue);
+        this.updateTrackBarDisplay(wrapper, 'right', rightNorm, rightValue);
+
+        // Reverse the mixing to show stick position
+        // left = throttle + turn, right = throttle - turn
+        // throttle = (left + right) / 2, turn = (left - right) / 2
+        const throttle = (leftNorm + rightNorm) / 2;
+        const turn = (leftNorm - rightNorm) / 2;
+
+        // Update stick knob position
+        const stick = wrapper.querySelector('.track-stick-container');
+        const knob = stick?.querySelector('.track-stick-knob');
+        if (knob) {
+            knob.style.left = `${50 + (turn * 40)}%`;
+            knob.style.top = `${50 - (throttle * 40)}%`;
+        }
+
+        const throttleDisplay = wrapper.querySelector('.track-throttle-value');
+        const turnDisplay = wrapper.querySelector('.track-turn-value');
+        if (throttleDisplay) throttleDisplay.textContent = throttle.toFixed(2);
+        if (turnDisplay) turnDisplay.textContent = turn.toFixed(2);
     }
 
     /**
@@ -482,13 +1077,164 @@ class PinControlManager {
     }
 
     /**
-     * Update UI with current runtime state.
+     * Get cached DOM elements for a pin, creating cache entry if needed.
      */
-    updateUI() {
-        if (!this.runtimeState || !this.runtimeState.pins) return;
+    _getCachedElements(gpio) {
+        if (this._elementCache.has(gpio)) {
+            return this._elementCache.get(gpio);
+        }
 
-        // Use scoped container if available, otherwise fall back to document
         const searchRoot = this.container || document;
+        const item = searchRoot.querySelector(`.control-item[data-gpio="${gpio}"]`);
+        if (!item) return null;
+
+        // Cache all frequently-accessed elements for this pin
+        const elements = {
+            item,
+            mode: item.dataset.mode,
+            slider: item.querySelector('.pin-slider'),
+            display: item.querySelector('.pin-value-display'),
+            syncIndicator: item.querySelector('.pin-sync-indicator'),
+            toggle: item.querySelector('.digital-toggle'),
+            indicator: item.querySelector('.digital-input-indicator'),
+            state: item.querySelector('.digital-input-state'),
+            voltageDisplay: item.querySelector('.adc-voltage'),
+            bar: item.querySelector('.adc-bar'),
+        };
+
+        this._elementCache.set(gpio, elements);
+        return elements;
+    }
+
+    /**
+     * Clear the DOM element cache.
+     */
+    _clearElementCache() {
+        this._elementCache.clear();
+    }
+
+    /**
+     * Update only the pins that have changed (optimized for high-frequency updates).
+     */
+    _updateChangedPins() {
+        for (const [gpio, pin] of this._pendingPinUpdates) {
+            const elements = this._getCachedElements(gpio);
+            if (!elements) continue;
+
+            this._updateSinglePinFast(elements, pin);
+        }
+    }
+
+    /**
+     * Update a single pin's UI elements using cached elements (fast path).
+     */
+    _updateSinglePinFast(elements, pin) {
+        const { item, mode, slider, display, syncIndicator, toggle, indicator, state, voltageDisplay, bar } = elements;
+
+        // Update sync indicator
+        if (syncIndicator) {
+            if (pin.synced) {
+                syncIndicator.classList.remove('bg-amber-500', 'animate-pulse');
+                syncIndicator.classList.add('bg-emerald-500');
+                syncIndicator.title = 'Synced';
+            } else {
+                syncIndicator.classList.remove('bg-emerald-500');
+                syncIndicator.classList.add('bg-amber-500', 'animate-pulse');
+                syncIndicator.title = 'Pending sync';
+            }
+        }
+
+        // Check for stale pin data
+        const pinAge = (Date.now() / 1000) - (pin.last_updated || 0);
+        const hasActualFeedback = pin.actual !== undefined;
+        const isStale = hasActualFeedback && pinAge > 2.0;
+
+        if (isStale) {
+            item.classList.add('opacity-60');
+        } else {
+            item.classList.remove('opacity-60');
+        }
+
+        // Update value based on mode
+        const actual = pin.actual !== undefined ? pin.actual : pin.desired;
+        if (actual === undefined) return;
+
+        switch (mode) {
+            case 'pwm':
+                if (slider && document.activeElement !== slider) {
+                    slider.value = actual;
+                }
+                if (display) {
+                    display.textContent = `${Math.round(actual)}%`;
+                }
+                if (this.visualizationModes[pin.gpio] === 'stick') {
+                    this.updateStickFromValue(pin.gpio, actual, 100);
+                }
+                break;
+            case 'servo':
+                if (slider && document.activeElement !== slider) {
+                    slider.value = actual;
+                }
+                if (display) {
+                    display.textContent = `${Math.round(actual)}\u00B0`;
+                }
+                if (this.visualizationModes[pin.gpio] === 'stick') {
+                    this.updateStickFromValue(pin.gpio, actual, 180);
+                }
+                break;
+            case 'digital_out':
+                if (toggle) {
+                    this.setToggleState(toggle, actual >= 0.5);
+                }
+                break;
+            case 'digital_in': {
+                const isHigh = actual >= 0.5;
+                if (indicator) {
+                    if (isHigh) {
+                        indicator.classList.remove('bg-slate-700');
+                        indicator.classList.add('bg-emerald-500');
+                    } else {
+                        indicator.classList.add('bg-slate-700');
+                        indicator.classList.remove('bg-emerald-500');
+                    }
+                }
+                if (state) {
+                    state.textContent = isHigh ? 'ON' : 'OFF';
+                    state.classList.toggle('text-white', isHigh);
+                    state.classList.toggle('text-slate-400', !isHigh);
+                }
+                break;
+            }
+            case 'adc': {
+                const voltage = pin.voltage !== undefined ? pin.voltage : actual;
+                if (voltageDisplay) {
+                    voltageDisplay.textContent = `${voltage.toFixed(2)}V`;
+                }
+                if (bar) {
+                    const percent = (voltage / 3.3) * 100;
+                    bar.style.width = `${Math.min(100, percent)}%`;
+                }
+                break;
+            }
+        }
+    }
+
+    /**
+     * Update a single pin's UI elements (fallback for initial render).
+     */
+    _updateSinglePin(item, pin) {
+        const elements = this._getCachedElements(pin.gpio);
+        if (elements) {
+            this._updateSinglePinFast(elements, pin);
+        }
+    }
+
+    /**
+     * Update status indicators (stale indicator, last update time).
+     * Called less frequently as part of the throttled update cycle.
+     */
+    _updateStatusIndicators() {
+        if (!this.runtimeState) return;
 
         // Update stale indicator (only in node detail page, not control page)
         const staleIndicator = document.getElementById('state-stale-indicator');
@@ -511,111 +1257,52 @@ class PinControlManager {
                 lastUpdateEl.textContent = new Date(lastFeedback * 1000).toLocaleTimeString();
             }
         }
+    }
 
+    /**
+     * Update UI with current runtime state (full update, used for initial render).
+     */
+    updateUI() {
+        if (!this.runtimeState || !this.runtimeState.pins) return;
+
+        // Use scoped container if available, otherwise fall back to document
+        const searchRoot = this.container || document;
+
+        // Update status indicators
+        this._updateStatusIndicators();
+
+        // Update all pins
         for (const pin of this.runtimeState.pins) {
-            // Use scoped search to find controls only within this instance's container
             const item = searchRoot.querySelector(`.control-item[data-gpio="${pin.gpio}"]`);
             if (!item) continue;
 
-            const mode = item.dataset.mode;
-            const syncIndicator = item.querySelector('.pin-sync-indicator');
-
-            // Update sync indicator
-            if (syncIndicator) {
-                if (pin.synced) {
-                    syncIndicator.classList.remove('bg-amber-500', 'animate-pulse');
-                    syncIndicator.classList.add('bg-emerald-500');
-                    syncIndicator.title = 'Synced';
-                } else {
-                    syncIndicator.classList.remove('bg-emerald-500');
-                    syncIndicator.classList.add('bg-amber-500', 'animate-pulse');
-                    syncIndicator.title = 'Pending sync';
-                }
-            }
-
-            // Check for stale pin data (no firmware feedback > 2s)
-            // Only mark as stale if we have actual values - if only desired values,
-            // firmware may not support feedback (e.g., simulation mode)
-            const pinAge = (Date.now() / 1000) - (pin.last_updated || 0);
-            const hasActualFeedback = pin.actual !== undefined;
-            const isStale = hasActualFeedback && pinAge > 2.0;
-
-            if (isStale) {
-                item.classList.add('opacity-60');
-            } else {
-                item.classList.remove('opacity-60');
-            }
-
-            // Update value based on mode
-            const actual = pin.actual !== undefined ? pin.actual : pin.desired;
-            if (actual === undefined) continue;
-
-            switch (mode) {
-                case 'pwm': {
-                    const slider = item.querySelector('.pin-slider');
-                    const display = item.querySelector('.pin-value-display');
-                    // Only update if not being dragged
-                    if (slider && document.activeElement !== slider) {
-                        slider.value = actual;
-                    }
-                    if (display) {
-                        display.textContent = `${Math.round(actual)}%`;
-                    }
-                    break;
-                }
-                case 'servo': {
-                    const slider = item.querySelector('.pin-slider');
-                    const display = item.querySelector('.pin-value-display');
-                    if (slider && document.activeElement !== slider) {
-                        slider.value = actual;
-                    }
-                    if (display) {
-                        display.textContent = `${Math.round(actual)}\u00B0`;
-                    }
-                    break;
-                }
-                case 'digital_out': {
-                    const toggle = item.querySelector('.digital-toggle');
-                    if (toggle) {
-                        this.setToggleState(toggle, actual >= 0.5);
-                    }
-                    break;
-                }
-                case 'digital_in': {
-                    const indicator = item.querySelector('.digital-input-indicator');
-                    const state = item.querySelector('.digital-input-state');
-                    const isHigh = actual >= 0.5;
-                    if (indicator) {
-                        if (isHigh) {
-                            indicator.classList.remove('bg-slate-700');
-                            indicator.classList.add('bg-emerald-500');
-                        } else {
-                            indicator.classList.add('bg-slate-700');
-                            indicator.classList.remove('bg-emerald-500');
-                        }
-                    }
-                    if (state) {
-                        state.textContent = isHigh ? 'ON' : 'OFF';
-                        state.classList.toggle('text-white', isHigh);
-                        state.classList.toggle('text-slate-400', !isHigh);
-                    }
-                    break;
-                }
-                case 'adc': {
-                    const voltage = pin.voltage !== undefined ? pin.voltage : actual;
-                    const voltageDisplay = item.querySelector('.adc-voltage');
-                    const bar = item.querySelector('.adc-bar');
-                    if (voltageDisplay) {
-                        voltageDisplay.textContent = `${voltage.toFixed(2)}V`;
-                    }
-                    if (bar) {
-                        const percent = (voltage / 3.3) * 100;
-                        bar.style.width = `${Math.min(100, percent)}%`;
-                    }
-                    break;
-                }
-            }
+            this._updateSinglePin(item, pin);
         }
+    }
+
+    /**
+     * Update stick visualization from a value.
+     */
+    updateStickFromValue(gpio, value, maxVal) {
+        const searchRoot = this.container || document;
+        const stick = searchRoot.querySelector(`.stick-container[data-gpio="${gpio}"]`);
+        if (!stick || this._activeStick === stick) return; // Don't update while dragging
+
+        const midVal = maxVal / 2;
+
+        // Convert value to normalized X (-1 to 1)
+        const normalizedX = (value - midVal) / midVal;
+
+        // Update knob position
+        const knob = stick.querySelector('.stick-knob');
+        if (knob) {
+            knob.style.left = `${50 + (normalizedX * 40)}%`;
+            knob.style.top = '50%';
+        }
+
+        // Update value displays
+        const xDisplay = stick.parentElement?.querySelector(`.stick-x-value[data-gpio="${gpio}"]`);
+        if (xDisplay) xDisplay.textContent = normalizedX.toFixed(2);
     }
 
     /**
@@ -627,6 +1314,10 @@ class PinControlManager {
             this.nodeId = null;
             this.runtimeState = null;
         }
+        this._activeStick = null;
+        this._activeTrackStick = null;
+        this._clearElementCache();
+        this._pendingPinUpdates.clear();
     }
 }
 

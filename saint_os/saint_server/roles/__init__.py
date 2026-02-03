@@ -24,12 +24,25 @@ class LogicalFunction:
 
 
 @dataclass
+class DriveConfig:
+    """Configuration for differential drive control."""
+    left_function: str = ""
+    right_function: str = ""
+
+
+@dataclass
 class RoleDefinition:
     """Complete definition of a node role."""
     role: str
     display_name: str
     description: str = ""
     logical_functions: List[LogicalFunction] = field(default_factory=list)
+    # Control type tells the controller how to map inputs
+    # - differential_drive: 2D stick with channel mixing (throttle/turn -> left/right)
+    # - single_axis: Simple 1D control
+    # - dual_axis: Independent X/Y control
+    control_type: str = "single_axis"
+    drive_config: Optional[DriveConfig] = None
 
     def get_function(self, name: str) -> Optional[LogicalFunction]:
         """Get a logical function by name."""
@@ -48,10 +61,11 @@ class RoleDefinition:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        return {
+        result = {
             "role": self.role,
             "display_name": self.display_name,
             "description": self.description,
+            "control_type": self.control_type,
             "logical_functions": [
                 {
                     "name": f.name,
@@ -65,6 +79,13 @@ class RoleDefinition:
                 for f in self.logical_functions
             ],
         }
+        # Include drive config for differential drive roles
+        if self.drive_config:
+            result["drive_config"] = {
+                "left_function": self.drive_config.left_function,
+                "right_function": self.drive_config.right_function,
+            }
+        return result
 
 
 class RoleManager:
@@ -137,11 +158,22 @@ class RoleManager:
             )
             functions.append(func)
 
+        # Parse drive config if present
+        drive_config = None
+        if 'drive_config' in data:
+            dc = data['drive_config']
+            drive_config = DriveConfig(
+                left_function=dc.get('left_function', ''),
+                right_function=dc.get('right_function', ''),
+            )
+
         return RoleDefinition(
             role=data.get('role'),
             display_name=data.get('display_name', data.get('role', '')),
             description=data.get('description', ''),
             logical_functions=functions,
+            control_type=data.get('control_type', 'single_axis'),
+            drive_config=drive_config,
         )
 
     def get_role(self, role_name: str) -> Optional[RoleDefinition]:
