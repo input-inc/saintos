@@ -170,6 +170,53 @@ void led_set_state(node_state_t state)
 }
 
 /**
+ * Flash LED to identify the node.
+ * Blocks for the duration of the flashing pattern.
+ *
+ * @param flash_count Number of flash sequences (default 5)
+ */
+void led_identify(uint8_t flash_count)
+{
+    if (flash_count == 0) flash_count = 5;
+
+    printf("LED identify: flashing %d times\n", flash_count);
+
+#ifdef SIMULATION
+    // In simulation, just print the identify request
+    printf("LED identify: [SIMULATION] Would flash white %d times\n", flash_count);
+    sleep_ms(flash_count * 400);  // Simulate timing
+#else
+    // Save current state to restore after
+    node_state_t saved_state = current_state;
+
+    // Flash white on/off pattern - distinctive and visible
+    for (uint8_t i = 0; i < flash_count; i++) {
+        // Bright white flash
+        set_neopixel(COLOR_WHITE, 255);
+        gpio_put(GPIO_D13, 1);
+        sleep_ms(150);
+
+        // Off
+        set_neopixel(COLOR_OFF, 0);
+        gpio_put(GPIO_D13, 0);
+        sleep_ms(150);
+
+        // Quick double-flash for distinctiveness
+        set_neopixel(COLOR_WHITE, 255);
+        gpio_put(GPIO_D13, 1);
+        sleep_ms(50);
+
+        set_neopixel(COLOR_OFF, 0);
+        gpio_put(GPIO_D13, 0);
+        sleep_ms(50);
+    }
+
+    // Restore previous state
+    current_state = saved_state;
+#endif
+}
+
+/**
  * Update LED animation.
  * Should be called from main loop.
  */

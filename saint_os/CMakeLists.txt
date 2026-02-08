@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.14...3.30)
 project(saint_os)
 
+# ==============================================================================
+# Python Compatibility Fix for CMake 3.27+
+# ==============================================================================
+# CMake 3.27+ removed FindPythonInterp/FindPythonLibs which ROS2 still uses.
+# Add our shim modules to CMAKE_MODULE_PATH to provide backwards compatibility.
+list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules")
+
 # Default to C++17
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)

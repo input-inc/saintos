@@ -137,4 +137,10 @@ int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node
  */
 void pin_control_update_state(void);
 
+/**
+ * Emergency stop - set all output pins to safe values.
+ * Sets all PWM and servo outputs to 0%, digital outputs to low.
+ */
+void pin_control_estop(void);
+
 #endif // PIN_CONTROL_H

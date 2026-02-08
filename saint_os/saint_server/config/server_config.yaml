@@ -3,29 +3,15 @@
 # This file configures the server's runtime behavior.
 # Restart the server after making changes.
 
-# Server identity
 server:
-  name: "SAINT-01"
-
-# WebSocket authentication
-# Clients must send this password in their first message after connecting
-# Set to null or remove to disable authentication
+  name: SAINT-01
 websocket:
-  password: 12345  # Set a password like "my_secret_password" to enable auth
-  # How long a client has to authenticate after connecting (seconds)
+  password: '12345'
   auth_timeout: 10.0
-
-# Network settings (can also be set via ROS parameters)
 network:
   web_port: 80
-  # websocket_port: 9090  # Uncomment to use separate WebSocket port
-
-# ROS Bridge settings
 ros_bridge:
-  # Command throttle interval in milliseconds
   throttle_ms: 50
-
-# LiveLink settings
 livelink:
   enabled: true
   port: 11111

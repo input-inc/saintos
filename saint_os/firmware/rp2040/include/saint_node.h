@@ -140,5 +140,6 @@ float hardware_get_cpu_temp(void);
 void led_init(void);
 void led_set_state(node_state_t state);
 void led_update(void);
+void led_identify(uint8_t flash_count);
 
 #endif // SAINT_NODE_H

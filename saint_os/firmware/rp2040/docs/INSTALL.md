@@ -56,7 +56,15 @@ Install the following on your development machine:
    export MICRO_ROS_PATH=~/micro_ros_raspberrypi_pico_sdk
    ```
 
-4. **SAINT.OS Messages**
+4. **WIZnet ioLibrary** (for W5500 Ethernet and DHCP)
+
+   The ioLibrary is included as a git submodule. Initialize it after cloning:
+   ```bash
+   cd saint_os/firmware/rp2040
+   git submodule update --init lib/ioLibrary_Driver
+   ```
+
+5. **SAINT.OS Messages**
 
    The firmware needs the SAINT.OS message definitions. Build them first:
    ```bash
@@ -66,32 +74,87 @@ Install the following on your development machine:
 
 ### Build Steps
 
-1. **Navigate to firmware directory**
-   ```bash
-   cd saint_os/firmware/rp2040
-   ```
+The firmware has two build modes:
+- **Hardware** (`SIMULATION=OFF`) - For real RP2040 boards with W5500 Ethernet, USB serial output
+- **Simulation** (`SIMULATION=ON`) - For Renode simulation with UDP transport, UART serial output
 
-2. **Create build directory**
-   ```bash
-   mkdir build && cd build
-   ```
+#### Building for Hardware (Real RP2040)
 
-3. **Configure with CMake**
-   ```bash
-   cmake .. \
-     -DPICO_SDK_PATH=$PICO_SDK_PATH \
-     -DMICRO_ROS_PATH=$MICRO_ROS_PATH
-   ```
+```bash
+cd saint_os/firmware/rp2040
 
-4. **Build**
-   ```bash
-   make -j$(nproc)
-   ```
+# Create hardware build directory
+mkdir -p build_hardware && cd build_hardware
 
-5. **Output files**
-   - `saint_node.uf2` - Drag-and-drop firmware file
-   - `saint_node.elf` - Debug symbols
-   - `saint_node.bin` - Raw binary
+# Configure for hardware
+# The node will automatically discover the SAINT server via UDP broadcast
+cmake .. \
+  -DPICO_SDK_PATH=$PICO_SDK_PATH \
+  -DSIMULATION=OFF
+
+# Build
+make -j4
+```
+
+Output: `build_hardware/saint_node.uf2`
+
+**Automatic Server Discovery:**
+
+The firmware automatically discovers the SAINT server on the local network:
+1. Node broadcasts a discovery request to UDP port 8889
+2. SAINT server responds with its IP address and agent port
+3. Node connects to the discovered server
+
+No hardcoded IP addresses required!
+
+**Optional Fallback Configuration:**
+
+If DHCP fails, the node uses a static IP fallback. You can customize these at build time:
+
+```bash
+cmake .. -DSIMULATION=OFF \
+  -DNODE_IP="192.168.1.200" \
+  -DGATEWAY_IP="192.168.1.1"
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `NODE_IP` | 192.168.1.200 | Static IP if DHCP fails |
+| `GATEWAY_IP` | 192.168.1.1 | Gateway if DHCP fails |
+
+#### Building for Simulation (Renode)
+
+```bash
+cd saint_os/firmware/rp2040
+
+# Create simulation build directory
+mkdir -p build_sim && cd build_sim
+
+# Configure for simulation
+cmake .. \
+  -DPICO_SDK_PATH=$PICO_SDK_PATH \
+  -DSIMULATION=ON
+
+# Build
+make -j4
+```
+
+Output: `build_sim/saint_node.elf` (used by Renode)
+
+#### Build Directory Convention
+
+| Directory | Mode | Serial Output | Network | Use Case |
+|-----------|------|---------------|---------|----------|
+| `build_hardware/` | SIMULATION=OFF | USB | W5500 Ethernet | Real hardware |
+| `build_sim/` | SIMULATION=ON | UART0 | UDP Bridge | Renode simulation |
+
+**Note:** Avoid using a generic `build/` directory - always use `build_hardware/` or `build_sim/` to prevent confusion.
+
+#### Output Files
+
+- `saint_node.uf2` - Drag-and-drop firmware file (hardware only)
+- `saint_node.elf` - ELF binary with debug symbols
+- `saint_node.bin` - Raw binary
 
 ---
 
@@ -106,7 +169,7 @@ Install the following on your development machine:
 
 2. A drive named `RPI-RP2` will appear on your computer
 
-3. Drag `saint_node.uf2` onto the `RPI-RP2` drive
+3. Drag `build_hardware/saint_node.uf2` onto the `RPI-RP2` drive
 
 4. The board will automatically reboot with the new firmware
 
@@ -117,7 +180,7 @@ Install the following on your development machine:
 sudo apt install picotool  # or brew install picotool
 
 # Flash (board must be in bootloader mode)
-picotool load saint_node.uf2
+picotool load build_hardware/saint_node.uf2
 picotool reboot
 ```
 
@@ -125,7 +188,7 @@ picotool reboot
 
 ```bash
 openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg \
-  -c "program saint_node.elf verify reset exit"
+  -c "program build_hardware/saint_node.elf verify reset exit"
 ```
 
 ---
@@ -217,11 +280,13 @@ source install/setup.bash
 
 ## Testing the Node
 
+### Hardware Testing
+
 1. **Connect hardware**
    - Ethernet cable from FeatherWing to network
    - USB cable for power (and serial debugging)
 
-2. **Monitor serial output**
+2. **Monitor USB serial output** (hardware build uses USB for stdio)
    ```bash
    # macOS
    screen /dev/tty.usbmodem* 115200
@@ -232,6 +297,22 @@ source install/setup.bash
    # Or use minicom
    minicom -D /dev/ttyACM0 -b 115200
    ```
+
+### Simulation Testing
+
+For simulation testing with Renode, see [SIMULATION.md](./SIMULATION.md).
+
+Quick start:
+```bash
+# Start Renode with the simulation script
+cd saint_os/firmware/rp2040/simulation/renode_rp2040
+renode run_saint_node.resc
+
+# In Renode console:
+start
+```
+
+The simulation build uses UART0 for serial output, which Renode displays in an analyzer window.
 
 3. **Expected output**
    ```
@@ -312,9 +393,11 @@ The onboard NeoPixel indicates node state:
 - Check agent logs for connection attempts
 
 ### Serial console not working
+- **Verify you're using the hardware build** - The hardware build (`build_hardware/`) outputs to USB serial. The simulation build (`build_sim/`) outputs to UART0 and won't show anything over USB.
 - Try different USB cable (some are charge-only)
 - Check device is enumerated: `ls /dev/tty*`
 - On macOS: `ls /dev/tty.usbmodem*`
+- Wait 2 seconds after boot - the firmware delays startup for USB enumeration
 
 ---
 

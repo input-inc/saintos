@@ -4,6 +4,7 @@ SAINT.OS State Manager
 Manages system state and provides data for WebSocket clients.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -229,6 +230,7 @@ class NodeInfo:
     ip_address: str = ""
     firmware_version: str = "0.0.0"
     firmware_build: str = ""  # Build timestamp
+    state: str = "UNKNOWN"  # Node state from firmware (UNADOPTED, ACTIVE, ERROR, etc.)
     online: bool = True
     cpu_temp: float = 0.0
     cpu_usage: float = 0.0
@@ -395,6 +397,8 @@ class StateManager:
         node.firmware_version = data.get("fw", node.firmware_version)
         node.firmware_build = data.get("fw_build", node.firmware_build)
         node.uptime_seconds = data.get("uptime", node.uptime_seconds)
+        node.cpu_temp = data.get("cpu_temp", node.cpu_temp)
+        node.state = data.get("state", node.state)
         node.last_seen = time.time()
 
         # Clear any pending offline state and mark online
@@ -544,15 +548,19 @@ class StateManager:
                 "firmware_version": node.firmware_version,
                 "firmware_build": node.firmware_build,
                 "online": node.online,
+                "cpu_temp": node.cpu_temp,
                 "cpu_usage": node.cpu_usage,
                 "memory_usage": node.memory_usage,
                 "uptime_seconds": node.uptime_seconds,
+                "state": node.state,
+                "last_seen": node.last_seen,
                 "has_capabilities": node.capabilities is not None,
                 "pin_config_status": node.pin_config.sync_status if node.pin_config else "unconfigured",
                 "firmware_update_available": fw_update_info["available"],
                 "firmware_update_message": fw_update_info["message"],
-                "server_firmware_version": server_fw.get("version"),
+                "server_firmware_version": server_fw.get("version_full") or server_fw.get("version"),
                 "server_firmware_build": server_fw.get("build_date"),
+                "server_firmware_hash": server_fw.get("file_hash"),
             }
             result.append(node_data)
         return result
@@ -571,6 +579,8 @@ class StateManager:
                 "cpu_usage": node.cpu_usage,
                 "memory_usage": node.memory_usage,
                 "uptime_seconds": node.uptime_seconds,
+                "state": node.state,
+                "last_seen": node.last_seen,
                 "online": node.online,
             }
             for node in self.state.unadopted_nodes.values()
@@ -702,6 +712,22 @@ class StateManager:
             self.logger.info(f"Stored {len(pins)} pin capabilities for node {node_id}")
         self._log_activity(f"Updated capabilities for node {node_id} ({len(pins)} pins)", "info")
         return True
+
+    def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+        """Get node info by ID (adopted or unadopted)."""
+        node = self.state.adopted_nodes.get(node_id) or self.state.unadopted_nodes.get(node_id)
+        if not node:
+            return None
+        return {
+            "node_id": node.node_id,
+            "hw": node.hardware_model,
+            "fw": node.firmware_version,
+            "ip": node.ip_address,
+            "mac": node.mac_address,
+            "display_name": node.display_name,
+            "role": node.role,
+            "online": node.online,
+        }
 
     def get_node_capabilities(self, node_id: str) -> Optional[Dict[str, Any]]:
         """Get capabilities for a node."""
@@ -1198,6 +1224,26 @@ class StateManager:
                 return gpio
         return None
 
+    def get_pin_mode(self, node_id: str, gpio: int) -> Optional[str]:
+        """
+        Get the mode of a specific pin.
+
+        Args:
+            node_id: The node identifier
+            gpio: The GPIO pin number
+
+        Returns:
+            Pin mode string (e.g., 'pwm', 'servo', 'digital_out') or None if not found
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.pin_config:
+            return None
+
+        config = node.pin_config.pins.get(gpio)
+        if config:
+            return config.mode
+        return None
+
     def resolve_function_to_pin(self, role: str, function: str) -> Optional[Tuple[str, int]]:
         """
         Resolve a role + function to node_id + GPIO.
@@ -1265,6 +1311,20 @@ class StateManager:
             return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
         return (0, 0, 0)
 
+    def _calculate_file_md5(self, file_path: str) -> Optional[str]:
+        """Calculate MD5 hash of a file."""
+        if not file_path or not os.path.isfile(file_path):
+            return None
+        try:
+            md5_hash = hashlib.md5()
+            with open(file_path, 'rb') as f:
+                # Read in chunks to handle large files
+                for chunk in iter(lambda: f.read(8192), b''):
+                    md5_hash.update(chunk)
+            return md5_hash.hexdigest()
+        except Exception:
+            return None
+
     def get_server_firmware_info(self) -> Dict[str, Any]:
         """
         Get the latest server firmware version and build info.
@@ -1273,6 +1333,7 @@ class StateManager:
             - version: Version string (e.g., "1.1.0")
             - version_full: Full version with git hash (e.g., "1.1.0-abc123-dirty")
             - git_hash: Git commit hash
+            - file_hash: MD5 hash of the firmware binary
             - build_date: Build date if available
             - elf_path: Path to ELF file (for simulation)
             - uf2_path: Path to UF2 file (for hardware)
@@ -1282,6 +1343,7 @@ class StateManager:
             "version": "0.0.0",
             "version_full": None,
             "git_hash": None,
+            "file_hash": None,
             "build_date": None,
             "elf_path": None,
             "uf2_path": None,
@@ -1311,8 +1373,14 @@ class StateManager:
                 mtime = os.path.getmtime(elf_path)
                 result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
 
+                # Calculate MD5 hash of the firmware binary
+                result["file_hash"] = self._calculate_file_md5(elf_path)
+
             if os.path.isfile(uf2_path):
                 result["uf2_path"] = uf2_path
+                # If we have UF2 but no ELF, calculate hash of UF2
+                if not result["file_hash"]:
+                    result["file_hash"] = self._calculate_file_md5(uf2_path)
 
             # Try to read version info from generated version.h
             version_h_path = os.path.join(build_dir, 'generated', 'version.h')
@@ -1455,6 +1523,9 @@ class StateManager:
         server_fw = self.get_server_firmware_info()
         node_version = node.firmware_version or "0.0.0"
         server_version = server_fw.get("version", "0.0.0")
+        # Use full version (with unix timestamp) for display if available
+        server_version_display = server_fw.get("version_full") or server_version
+        server_file_hash = server_fw.get("file_hash")
 
         node_tuple = self._parse_version(node_version)
         server_tuple = self._parse_version(server_version)
@@ -1462,36 +1533,57 @@ class StateManager:
         update_available = False
         message = ""
 
+        # Extract unix timestamp from version strings (format: "1.2.0-1738505432")
+        def extract_build_timestamp(version_str: str) -> int:
+            if not version_str or "-" not in version_str:
+                return 0
+            try:
+                suffix = version_str.split("-", 1)[1]
+                # Unix timestamp is all digits
+                if suffix.isdigit():
+                    return int(suffix)
+            except (IndexError, ValueError):
+                pass
+            return 0
+
+        node_build_ts = extract_build_timestamp(node_version)
+        server_build_ts = extract_build_timestamp(server_version_display)
+
         if not server_fw["available"]:
             message = "No firmware build available on server"
         elif server_tuple > node_tuple:
-            # Server has newer version number
+            # Server has newer semantic version number
             update_available = True
-            message = f"Update available: {node_version} → {server_version}"
+            message = f"Update available: {node_version} → {server_version_display}"
         elif server_tuple == node_tuple:
-            # Same version number - check if build is different
-            # Compare build timestamps if available
-            server_build = server_fw.get("build_date")
-            node_build = node.firmware_build  # Build timestamp from node announcement
-
-            if server_build and node_build:
-                # Server build is newer if its timestamp is later
-                # Node sends format: "2026-01-26 00:14:24"
-                # Server has format: "2026-01-26 00:17:53"
-                if server_build > node_build:
+            # Same semantic version - compare unix timestamps
+            if server_build_ts > 0 and node_build_ts > 0:
+                if server_build_ts > node_build_ts:
+                    update_available = True
+                    # Show file hash (truncated) if available for identification
+                    hash_info = f" [md5:{server_file_hash[:8]}]" if server_file_hash else ""
+                    message = f"Rebuild available: {node_version} → {server_version_display}{hash_info}"
+                elif server_build_ts == node_build_ts:
+                    message = "Firmware is up to date"
+                else:
+                    message = "Node firmware is newer than server"
+            else:
+                # Fallback to build date string comparison
+                server_build = server_fw.get("build_date")
+                node_build = node.firmware_build
+                if server_build and node_build and server_build > node_build:
                     update_available = True
                     message = f"Rebuild available: {node_build} → {server_build}"
                 else:
                     message = "Firmware is up to date"
-            else:
-                message = "Firmware is up to date"
         else:
             message = "Node firmware is newer than server"
 
         return {
             "available": update_available,
             "current_version": node_version,
-            "server_version": server_version,
+            "server_version": server_version_display,
+            "server_file_hash": server_file_hash,
             "server_build_date": server_fw.get("build_date"),
             "node_build_date": node.firmware_build if node else None,
             "message": message,

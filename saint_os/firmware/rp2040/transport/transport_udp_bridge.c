@@ -221,6 +221,10 @@ size_t transport_udp_bridge_read(
 
     uint32_t start = to_ms_since_boot(get_absolute_time());
 
+    // Poll interval - longer interval reduces memory writes that can
+    // overwhelm Renode's dirty address tracking
+    const int poll_interval_ms = 10;
+
     while (true) {
         // Trigger receive attempt
         UDP_WRITE32(UDP_REG_CONTROL, UDP_CTRL_RECV);
@@ -252,8 +256,8 @@ size_t transport_udp_bridge_read(
             break;
         }
 
-        // Small delay before retry
-        sleep_ms(1);
+        // Delay before retry - longer delay reduces Renode memory pressure
+        sleep_ms(poll_interval_ms);
     }
 
     // Timeout - not an error, just no data

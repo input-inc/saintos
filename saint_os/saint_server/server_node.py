@@ -29,6 +29,7 @@ from saint_server.roles import RoleManager
 from saint_server.livelink import LiveLinkReceiver, LiveLinkRouter
 from saint_server.livelink.receiver import LiveLinkConfig
 from saint_server.livelink.router import LiveLinkRoute, OutputMapping, MappingType
+from saint_server.discovery import DiscoveryService
 
 
 class SaintServerNode(Node):
@@ -46,6 +47,9 @@ class SaintServerNode(Node):
         self.declare_parameter('livelink_data_port', 54322)
         self.declare_parameter('rc_enabled', False)
         self.declare_parameter('rc_protocol', 'sbus')
+        self.declare_parameter('discovery_enabled', True)
+        self.declare_parameter('discovery_port', 8889)
+        self.declare_parameter('agent_port', 8888)
 
         # Get parameters
         self.server_name = self.get_parameter('server_name').value
@@ -76,6 +80,12 @@ class SaintServerNode(Node):
         self.livelink_receiver: Optional[LiveLinkReceiver] = None
         self.livelink_router: Optional[LiveLinkRouter] = None
         self._livelink_enabled = self.get_parameter('livelink_enabled').value
+
+        # Discovery service (helps nodes find the server)
+        self.discovery_service: Optional[DiscoveryService] = None
+        self._discovery_enabled = self.get_parameter('discovery_enabled').value
+        self._discovery_port = self.get_parameter('discovery_port').value
+        self._agent_port = self.get_parameter('agent_port').value
 
         # ROS Bridge for WebSocket-ROS communication
         self.ros_bridge = None
@@ -415,7 +425,64 @@ class SaintServerNode(Node):
         pub.publish(msg)
         self.get_logger().info(f'Sent factory reset command to {node_id}')
 
-    def send_firmware_update_command(self, node_id: str, simulation: bool = False):
+    def send_restart_command(self, node_id: str):
+        """Send restart command to a node via ROS2.
+
+        This tells the node to reboot itself.
+        """
+        import json
+
+        pub = self._ensure_node_control_publisher(node_id)
+
+        control_data = {
+            "action": "restart"
+        }
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+
+        pub.publish(msg)
+        self.get_logger().info(f'Sent restart command to {node_id}')
+
+    def send_identify_command(self, node_id: str):
+        """Send identify command to a node via ROS2.
+
+        This tells the node to blink its LED to help identify it physically.
+        """
+        import json
+
+        pub = self._ensure_node_control_publisher(node_id)
+
+        control_data = {
+            "action": "identify"
+        }
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+
+        pub.publish(msg)
+        self.get_logger().info(f'Sent identify command to {node_id}')
+
+    def send_estop_command(self, node_id: str):
+        """Send emergency stop command to a node via ROS2.
+
+        This tells the node to immediately stop all outputs (PWM, servo, digital).
+        """
+        import json
+
+        pub = self._ensure_node_control_publisher(node_id)
+
+        control_data = {
+            "action": "estop"
+        }
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+
+        pub.publish(msg)
+        self.get_logger().info(f'Sent emergency stop command to {node_id}')
+
+    def send_firmware_update_command(self, node_id: str, simulation: bool = False, force: bool = False):
         """Send firmware update command to a node via ROS2.
 
         This tells the node to:
@@ -424,6 +491,11 @@ class SaintServerNode(Node):
         3. For Pi 5: Download and install update package from server
 
         The actual update mechanism depends on the node type.
+
+        Args:
+            node_id: Target node ID
+            simulation: Whether this is a simulation build
+            force: If True, skip version comparison on node side
         """
         import json
 
@@ -435,12 +507,12 @@ class SaintServerNode(Node):
 
         if 'Raspberry Pi' in hw_type or 'rpi5' in hw_type.lower():
             # Pi 5 node - send download URL
-            self._send_rpi5_firmware_update(pub, node_id)
+            self._send_rpi5_firmware_update(pub, node_id, force)
         else:
             # RP2040 node - original behavior
-            self._send_rp2040_firmware_update(pub, node_id, simulation)
+            self._send_rp2040_firmware_update(pub, node_id, simulation, force)
 
-    def _send_rpi5_firmware_update(self, pub, node_id: str):
+    def _send_rpi5_firmware_update(self, pub, node_id: str, force: bool = False):
         """Send firmware update command to a Pi 5 node."""
         import json
 
@@ -463,15 +535,16 @@ class SaintServerNode(Node):
             "url": download_url,
             "checksum": fw_info.get("checksum"),
             "build_date": fw_info.get("build_date"),
+            "force": force,
         }
 
         msg = String()
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
-        self.get_logger().info(f'Sent Pi 5 firmware update command to {node_id} (version: {fw_info.get("version")})')
+        self.get_logger().info(f'Sent Pi 5 firmware update command to {node_id} (version: {fw_info.get("version")}, force: {force})')
 
-    def _send_rp2040_firmware_update(self, pub, node_id: str, simulation: bool):
+    def _send_rp2040_firmware_update(self, pub, node_id: str, simulation: bool, force: bool = False):
         """Send firmware update command to an RP2040 node."""
         import json
 
@@ -480,16 +553,17 @@ class SaintServerNode(Node):
 
         control_data = {
             "action": "firmware_update",
-            "version": fw_info.get("version", "0.0.0"),
+            "version": fw_info.get("version_full") or fw_info.get("version", "0.0.0"),
             "elf_path": fw_info.get("elf_path"),
             "build_date": fw_info.get("build_date"),
+            "force": force,
         }
 
         msg = String()
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
-        self.get_logger().info(f'Sent RP2040 firmware update command to {node_id} (version: {fw_info.get("version")})')
+        self.get_logger().info(f'Sent RP2040 firmware update command to {node_id} (version: {fw_info.get("version_full") or fw_info.get("version")}, force: {force})')
 
         # For simulation nodes, also trigger the node manager to install and restart
         if simulation:
@@ -789,10 +863,19 @@ class SaintServerNode(Node):
                     lambda node_id, gpio, value: self.send_control_command(node_id, gpio, value)
                 )
                 self.web_server.ws_handler.set_firmware_update_callback(
-                    lambda node_id, simulation: self.send_firmware_update_command(node_id, simulation)
+                    lambda node_id, simulation, force: self.send_firmware_update_command(node_id, simulation, force)
                 )
                 self.web_server.ws_handler.set_factory_reset_callback(
                     lambda node_id: self.send_factory_reset_command(node_id)
+                )
+                self.web_server.ws_handler.set_restart_node_callback(
+                    lambda node_id: self.send_restart_command(node_id)
+                )
+                self.web_server.ws_handler.set_identify_node_callback(
+                    lambda node_id: self.send_identify_command(node_id)
+                )
+                self.web_server.ws_handler.set_estop_node_callback(
+                    lambda node_id: self.send_estop_command(node_id)
                 )
 
                 # Initialize ROS Bridge for WebSocket-ROS communication
@@ -820,6 +903,32 @@ class SaintServerNode(Node):
         if self._livelink_enabled:
             await self._start_livelink()
 
+        # Start discovery service if enabled
+        if self._discovery_enabled:
+            await self._start_discovery()
+
+    async def _start_discovery(self):
+        """Start the node discovery service."""
+        try:
+            self.discovery_service = DiscoveryService(
+                agent_port=self._agent_port,
+                discovery_port=self._discovery_port,
+                logger=self.get_logger()
+            )
+            await self.discovery_service.start()
+            self.get_logger().info(
+                f'Discovery service started on UDP port {self._discovery_port} '
+                f'(agent port: {self._agent_port})'
+            )
+        except Exception as e:
+            self.get_logger().error(f'Failed to start discovery service: {e}')
+
+    async def _stop_discovery(self):
+        """Stop the discovery service."""
+        if self.discovery_service:
+            await self.discovery_service.stop()
+            self.discovery_service = None
+
     def _broadcast_activity(self, message: str, level: str):
         """Broadcast activity message to WebSocket clients."""
         if self.web_server and self.web_server.ws_handler:
@@ -845,6 +954,10 @@ class SaintServerNode(Node):
     async def stop_async_services(self):
         """Stop async services gracefully."""
         self.get_logger().info('Stopping async services...')
+
+        # Stop discovery service
+        if self.discovery_service:
+            await self._stop_discovery()
 
         # Stop LiveLink
         if self.livelink_receiver:

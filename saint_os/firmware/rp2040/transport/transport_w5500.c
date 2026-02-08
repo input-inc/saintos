@@ -2,6 +2,7 @@
  * SAINT.OS Node Firmware - W5500 Transport Implementation
  *
  * micro-ROS custom transport over W5500 ethernet using UDP.
+ * Uses WIZnet ioLibrary for DHCP and socket operations.
  */
 
 #include <stdio.h>
@@ -13,7 +14,12 @@
 
 #include "saint_node.h"
 #include "transport_w5500.h"
-#include "w5500_driver.h"
+#include "wizchip_port.h"
+
+// WIZnet ioLibrary
+#include "wizchip_conf.h"
+#include "socket.h"
+#include "dhcp.h"
 
 #include <uxr/client/transport.h>
 
@@ -21,11 +27,16 @@
 // Configuration
 // =============================================================================
 
-// Socket number to use for micro-ROS (W5500 has 8 sockets: 0-7)
-#define UROS_SOCKET         0
+// Socket allocation (W5500 has 8 sockets: 0-7)
+#define DHCP_SOCKET         6       // Socket for DHCP
+#define UROS_SOCKET         0       // Socket for micro-ROS
 
 // Local UDP port for micro-ROS client
 #define UROS_LOCAL_PORT     9999
+
+// DHCP configuration
+#define DHCP_TIMEOUT_MS     10000   // 10 second DHCP timeout
+#define DHCP_RETRY_COUNT    5       // Number of DHCP retries
 
 // =============================================================================
 // State Variables
@@ -36,43 +47,166 @@ static bool connected = false;
 
 static uint8_t mac_address[6] = {0};
 static uint8_t local_ip[4] = {0};
-static uint8_t agent_ip[4] = {192, 168, 1, 10};  // Default agent IP
-static uint16_t agent_port = 8888;               // Default agent port
+static uint8_t subnet_mask[4] = {255, 255, 255, 0};
+static uint8_t gateway[4] = {0};
+static uint8_t dns_server[4] = {0};
+static uint8_t agent_ip[4] = {0};
+static uint16_t agent_port = 8888;
+
+// DHCP buffer (must be at least 548 bytes)
+static uint8_t dhcp_buffer[548];
+
+// DHCP state
+static volatile bool dhcp_got_ip = false;
+static volatile uint32_t dhcp_timer_1s = 0;
 
 // =============================================================================
-// W5500 Hardware Interface
+// DHCP Callbacks
 // =============================================================================
 
-/**
- * Initialize W5500 SPI and reset chip.
- */
-static bool w5500_hw_init(void)
+static void dhcp_ip_assign(void)
 {
-    // Initialize SPI at 33MHz (W5500 max is 80MHz, but be conservative)
-    spi_init(ETH_SPI_PORT, 33000000);
-    spi_set_format(ETH_SPI_PORT, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+    getIPfromDHCP(local_ip);
+    getGWfromDHCP(gateway);
+    getSNfromDHCP(subnet_mask);
+    getDNSfromDHCP(dns_server);
 
-    // Configure SPI pins
-    gpio_set_function(ETH_PIN_SCK, GPIO_FUNC_SPI);
-    gpio_set_function(ETH_PIN_MOSI, GPIO_FUNC_SPI);
-    gpio_set_function(ETH_PIN_MISO, GPIO_FUNC_SPI);
+    // Apply network settings to W5500
+    setSIPR(local_ip);
+    setGAR(gateway);
+    setSUBR(subnet_mask);
 
-    // Configure CS pin (directly controlled, not SPI hardware CS)
-    gpio_init(ETH_PIN_CS);
-    gpio_set_dir(ETH_PIN_CS, GPIO_OUT);
-    gpio_put(ETH_PIN_CS, 1);  // Deselect
+    printf("DHCP assigned IP: %d.%d.%d.%d\n",
+           local_ip[0], local_ip[1], local_ip[2], local_ip[3]);
+    printf("  Gateway: %d.%d.%d.%d\n",
+           gateway[0], gateway[1], gateway[2], gateway[3]);
+    printf("  Subnet:  %d.%d.%d.%d\n",
+           subnet_mask[0], subnet_mask[1], subnet_mask[2], subnet_mask[3]);
 
-    // Configure and perform hardware reset
-    gpio_init(ETH_PIN_RST);
-    gpio_set_dir(ETH_PIN_RST, GPIO_OUT);
+    dhcp_got_ip = true;
+}
 
-    // Reset pulse
-    gpio_put(ETH_PIN_RST, 0);
-    sleep_ms(10);
-    gpio_put(ETH_PIN_RST, 1);
-    sleep_ms(50);
+static void dhcp_ip_update(void)
+{
+    printf("DHCP IP updated\n");
+    dhcp_ip_assign();
+}
 
-    return true;
+static void dhcp_ip_conflict(void)
+{
+    printf("DHCP IP conflict detected!\n");
+    dhcp_got_ip = false;
+}
+
+// =============================================================================
+// DHCP Timer (called from main loop)
+// =============================================================================
+
+static uint32_t last_tick_time = 0;
+
+static void dhcp_timer_tick(void)
+{
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - last_tick_time >= 1000) {
+        last_tick_time = now;
+        DHCP_time_handler();
+        dhcp_timer_1s++;
+    }
+}
+
+// =============================================================================
+// DHCP Process
+// =============================================================================
+
+static bool run_dhcp(uint32_t timeout_ms)
+{
+    printf("Starting DHCP...\n");
+
+    // Initialize DHCP
+    DHCP_init(DHCP_SOCKET, dhcp_buffer);
+    reg_dhcp_cbfunc(dhcp_ip_assign, dhcp_ip_update, dhcp_ip_conflict);
+
+    dhcp_got_ip = false;
+    dhcp_timer_1s = 0;
+    last_tick_time = to_ms_since_boot(get_absolute_time());
+
+    uint32_t start_time = to_ms_since_boot(get_absolute_time());
+
+    while (!dhcp_got_ip) {
+        // Run DHCP state machine
+        uint8_t dhcp_status = DHCP_run();
+
+        switch (dhcp_status) {
+            case DHCP_IP_ASSIGN:
+            case DHCP_IP_CHANGED:
+            case DHCP_IP_LEASED:
+                // Success!
+                printf("DHCP successful\n");
+                return true;
+
+            case DHCP_FAILED:
+                printf("DHCP failed\n");
+                return false;
+
+            case DHCP_STOPPED:
+                printf("DHCP stopped\n");
+                return false;
+
+            case DHCP_RUNNING:
+            default:
+                // Still in progress
+                break;
+        }
+
+        // Update DHCP timer
+        dhcp_timer_tick();
+
+        // Check timeout
+        uint32_t elapsed = to_ms_since_boot(get_absolute_time()) - start_time;
+        if (elapsed >= timeout_ms) {
+            printf("DHCP timeout after %lu ms\n", elapsed);
+            DHCP_stop();
+            return false;
+        }
+
+        // Small delay
+        sleep_ms(10);
+    }
+
+    return dhcp_got_ip;
+}
+
+// =============================================================================
+// Static IP Fallback
+// =============================================================================
+
+static void use_static_ip(void)
+{
+    printf("Using static IP fallback\n");
+
+    // Use compile-time defaults
+    local_ip[0] = DEFAULT_NODE_IP_0;
+    local_ip[1] = DEFAULT_NODE_IP_1;
+    local_ip[2] = DEFAULT_NODE_IP_2;
+    local_ip[3] = DEFAULT_NODE_IP_3;
+
+    gateway[0] = DEFAULT_GATEWAY_IP_0;
+    gateway[1] = DEFAULT_GATEWAY_IP_1;
+    gateway[2] = DEFAULT_GATEWAY_IP_2;
+    gateway[3] = DEFAULT_GATEWAY_IP_3;
+
+    subnet_mask[0] = 255;
+    subnet_mask[1] = 255;
+    subnet_mask[2] = 255;
+    subnet_mask[3] = 0;
+
+    // Apply to W5500
+    setSIPR(local_ip);
+    setGAR(gateway);
+    setSUBR(subnet_mask);
+
+    printf("Static IP: %d.%d.%d.%d\n",
+           local_ip[0], local_ip[1], local_ip[2], local_ip[3]);
 }
 
 // =============================================================================
@@ -81,17 +215,11 @@ static bool w5500_hw_init(void)
 
 bool transport_w5500_init(void)
 {
-    printf("Initializing W5500...\n");
+    printf("Initializing W5500 (ioLibrary)...\n");
 
-    // Initialize hardware
-    if (!w5500_hw_init()) {
-        printf("W5500 hardware init failed\n");
-        return false;
-    }
-
-    // Initialize W5500 driver
-    if (!w5500_init()) {
-        printf("W5500 driver init failed\n");
+    // Initialize platform (SPI, GPIO, callbacks)
+    if (!wizchip_port_init()) {
+        printf("W5500 platform init failed\n");
         return false;
     }
 
@@ -107,11 +235,13 @@ bool transport_w5500_init(void)
     }
 
     // Set MAC address in W5500
-    w5500_set_mac(mac_address);
+    setSHAR(mac_address);
 
-    printf("W5500 initialized\n");
+    printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+           mac_address[0], mac_address[1], mac_address[2],
+           mac_address[3], mac_address[4], mac_address[5]);
+
     initialized = true;
-
     return true;
 }
 
@@ -123,32 +253,29 @@ bool transport_w5500_connect(void)
 
     printf("Connecting to network...\n");
 
-    if (g_node.use_dhcp) {
-        // DHCP
-        printf("Requesting IP via DHCP...\n");
-
-        if (!w5500_dhcp_request(local_ip, 10000)) {  // 10 second timeout
-            printf("DHCP failed\n");
+    // Wait for link
+    int link_wait = 0;
+    while (!wizchip_port_link_up()) {
+        sleep_ms(100);
+        link_wait++;
+        if (link_wait > 50) {  // 5 second timeout
+            printf("No ethernet link\n");
             return false;
         }
-    } else {
-        // Static IP
-        memcpy(local_ip, g_node.static_ip, 4);
-        w5500_set_ip(local_ip);
-        w5500_set_subnet((uint8_t[]){255, 255, 255, 0});
-        w5500_set_gateway(g_node.gateway);
+    }
+    printf("Ethernet link detected\n");
+
+    // Try DHCP first
+    if (g_node.use_dhcp) {
+        if (run_dhcp(DHCP_TIMEOUT_MS)) {
+            connected = true;
+            return true;
+        }
+        printf("DHCP failed, falling back to static IP\n");
     }
 
-    printf("IP: %d.%d.%d.%d\n",
-           local_ip[0], local_ip[1], local_ip[2], local_ip[3]);
-
-    // Check link status
-    if (!w5500_get_link_status()) {
-        printf("No ethernet link\n");
-        return false;
-    }
-
-    printf("Ethernet connected\n");
+    // Static IP fallback
+    use_static_ip();
     connected = true;
 
     return true;
@@ -166,7 +293,7 @@ void transport_w5500_get_ip(uint8_t* ip)
 
 bool transport_w5500_is_connected(void)
 {
-    return connected && w5500_get_link_status();
+    return connected && wizchip_port_link_up();
 }
 
 void transport_w5500_set_agent(const uint8_t* ip, uint16_t port)
@@ -189,8 +316,9 @@ bool transport_w5500_open(struct uxrCustomTransport* transport)
     }
 
     // Open UDP socket for micro-ROS
-    if (!w5500_socket_open(UROS_SOCKET, W5500_SOCK_UDP, UROS_LOCAL_PORT)) {
-        printf("Failed to open UDP socket\n");
+    int8_t result = socket(UROS_SOCKET, Sn_MR_UDP, UROS_LOCAL_PORT, 0);
+    if (result != UROS_SOCKET) {
+        printf("Failed to open UDP socket: %d\n", result);
         return false;
     }
 
@@ -204,7 +332,7 @@ bool transport_w5500_close(struct uxrCustomTransport* transport)
 {
     (void)transport;
 
-    w5500_socket_close(UROS_SOCKET);
+    close(UROS_SOCKET);
     printf("micro-ROS transport closed\n");
 
     return true;
@@ -224,11 +352,7 @@ size_t transport_w5500_write(
     }
 
     // Send UDP packet to agent
-    int sent = w5500_socket_sendto(
-        UROS_SOCKET,
-        buf, len,
-        agent_ip, agent_port
-    );
+    int32_t sent = sendto(UROS_SOCKET, (uint8_t*)buf, len, agent_ip, agent_port);
 
     if (sent < 0) {
         *err = 1;
@@ -257,18 +381,14 @@ size_t transport_w5500_read(
     uint32_t start = to_ms_since_boot(get_absolute_time());
 
     while (true) {
-        int available = w5500_socket_available(UROS_SOCKET);
+        int32_t available = getSn_RX_RSR(UROS_SOCKET);
 
         if (available > 0) {
             // Read UDP packet
             uint8_t remote_ip[4];
             uint16_t remote_port;
 
-            int received = w5500_socket_recvfrom(
-                UROS_SOCKET,
-                buf, len,
-                remote_ip, &remote_port
-            );
+            int32_t received = recvfrom(UROS_SOCKET, buf, len, remote_ip, &remote_port);
 
             if (received > 0) {
                 *err = 0;

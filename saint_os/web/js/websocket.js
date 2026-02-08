@@ -19,6 +19,11 @@ class SaintWebSocket {
         this.serverName = null;
         this.clientId = null;
 
+        // Track if we've had a successful session (for auto-reload on reconnect)
+        this.hadSession = false;
+        this.readyEmitted = false;  // Track if 'ready' was emitted for current connection
+        this.autoReloadOnReconnect = true;
+
         // Load settings from localStorage
         this.settings = this.loadSettings();
     }
@@ -272,6 +277,7 @@ class SaintWebSocket {
         console.log('WebSocket connected');
         this.connected = true;
         this.reconnectAttempts = 0;
+        this.readyEmitted = false;  // Reset for new connection
         // Don't emit 'connected' yet - wait for server's connected message
     }
 
@@ -354,6 +360,28 @@ class SaintWebSocket {
     }
 
     _emit(type, data = null) {
+        // Handle auto-reload on reconnect (only process 'ready' once per connection)
+        if (type === 'ready') {
+            if (this.readyEmitted) {
+                // Already emitted 'ready' for this connection, ignore duplicate
+                return;
+            }
+            this.readyEmitted = true;
+
+            if (this.hadSession && this.autoReloadOnReconnect) {
+                console.log('Reconnected after session - reloading page for fresh code...');
+                // Save current state for restore after reload
+                this._saveStateForReload();
+                // Small delay to ensure connection is stable
+                setTimeout(() => {
+                    window.location.reload();
+                }, 100);
+                return;
+            }
+            // Mark that we've had a successful session
+            this.hadSession = true;
+        }
+
         if (this.messageHandlers.has(type)) {
             for (const handler of this.messageHandlers.get(type)) {
                 try {
@@ -380,6 +408,43 @@ class SaintWebSocket {
         setTimeout(() => {
             this.connect();
         }, delay);
+    }
+
+    /**
+     * Save current state before reload so we can restore it.
+     */
+    _saveStateForReload() {
+        const state = {
+            autoReconnect: true,
+            page: window.location.hash || '#dashboard',
+            timestamp: Date.now()
+        };
+        try {
+            sessionStorage.setItem('saint_reload_state', JSON.stringify(state));
+        } catch (e) {
+            console.warn('Failed to save reload state:', e);
+        }
+    }
+
+    /**
+     * Check if we should auto-reconnect after a reload.
+     * Returns the saved state if valid, null otherwise.
+     */
+    getReloadState() {
+        try {
+            const saved = sessionStorage.getItem('saint_reload_state');
+            if (saved) {
+                sessionStorage.removeItem('saint_reload_state');
+                const state = JSON.parse(saved);
+                // Only valid if saved within the last 30 seconds
+                if (Date.now() - state.timestamp < 30000) {
+                    return state;
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to load reload state:', e);
+        }
+        return null;
     }
 }
 

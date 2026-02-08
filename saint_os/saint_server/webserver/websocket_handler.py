@@ -27,6 +27,72 @@ if TYPE_CHECKING:
 
 # Throttle settings
 CONTROL_THROTTLE_MS = 50  # Minimum ms between control commands per node
+NEUTRAL_EPSILON = 0.02    # Values within this range of 0 are considered neutral/stop
+
+
+def is_neutral_value(value: float) -> bool:
+    """
+    Check if a value is at or near neutral (zero).
+
+    Neutral/stop values should always bypass throttling to ensure
+    motors stop immediately when the joystick is released.
+    """
+    return abs(value) <= NEUTRAL_EPSILON
+
+
+def translate_normalized_value(value: float, mode: str, input_range: str = 'bipolar') -> float:
+    """
+    Translate a normalized value to native range based on pin mode.
+
+    Controllers send normalized values:
+    - Joysticks/bipolar: -1.0 to 1.0 (centered at 0)
+    - Triggers/unipolar: 0.0 to 1.0
+
+    Firmware expects:
+    - PWM: 0-100 (percent)
+    - Servo: 0-180 (degrees)
+    - Digital: 0 or 1
+
+    Args:
+        value: Input value (-1.0 to 1.0 or 0.0 to 1.0)
+        mode: Pin mode ('pwm', 'servo', 'digital_out', etc.)
+        input_range: 'bipolar' (-1 to 1, default), 'unipolar' (0 to 1)
+
+    Returns:
+        Translated value in native range
+    """
+    # If value is already in native range (> 1 or < -1), pass through unchanged
+    if value > 1.0 or value < -1.0:
+        return value
+
+    mode_lower = mode.lower() if mode else ''
+
+    # Default to bipolar (joystick-style) for all normalized values
+    # This ensures symmetric behavior: -1→min, 0→center, 1→max
+    use_bipolar = (input_range != 'unipolar')
+
+    if mode_lower == 'pwm':
+        if use_bipolar:
+            # Bipolar/joystick: -1→0, 0→50, 1→100
+            return (value + 1.0) * 50.0
+        else:
+            # Unipolar/trigger: 0→0, 1→100
+            return value * 100.0
+
+    elif mode_lower == 'servo':
+        if use_bipolar:
+            # Bipolar/joystick: -1→0, 0→90, 1→180
+            return (value + 1.0) * 90.0
+        else:
+            # Unipolar/trigger: 0→0, 1→180
+            return value * 180.0
+
+    elif mode_lower == 'digital_out':
+        # Threshold at 0.5
+        return 1.0 if value >= 0.5 else 0.0
+
+    # Unknown mode - pass through
+    return value
 
 
 @dataclass
@@ -63,13 +129,23 @@ class WebSocketHandler:
 
         # Callback for triggering firmware update (set by server_node)
         # Signature: (node_id: str, simulation: bool) -> None
-        self._firmware_update_callback: Optional[Callable[[str, bool], None]] = None
+        self._firmware_update_callback: Optional[Callable[[str, bool, bool], None]] = None
 
         # Callback for sending factory reset to node (set by server_node)
         self._factory_reset_callback: Optional[Callable[[str], None]] = None
 
-        # Throttle tracking: node_id -> last_send_time
-        self._control_throttle: Dict[str, float] = {}
+        # Callback for sending restart command to node (set by server_node)
+        self._restart_node_callback: Optional[Callable[[str], None]] = None
+
+        # Callback for sending identify command to node (set by server_node)
+        self._identify_node_callback: Optional[Callable[[str], None]] = None
+
+        # Callback for sending estop command to node (set by server_node)
+        self._estop_node_callback: Optional[Callable[[str], None]] = None
+
+        # Throttle tracking: (node_id, gpio) -> last_send_time
+        # Per-gpio throttling allows controlling multiple pins simultaneously
+        self._control_throttle: Dict[tuple, float] = {}
 
         # LiveLink callbacks (set by server_node)
         self._livelink_get_status: Optional[Callable[[], Dict[str, Any]]] = None
@@ -110,13 +186,25 @@ class WebSocketHandler:
         """Set callback for sending control commands to nodes. Callback takes (node_id, gpio, value)."""
         self._send_control_callback = callback
 
-    def set_firmware_update_callback(self, callback: Callable[[str, bool], None]):
-        """Set callback for triggering firmware update. Callback takes (node_id, simulation)."""
+    def set_firmware_update_callback(self, callback: Callable[[str, bool, bool], None]):
+        """Set callback for triggering firmware update. Callback takes (node_id, simulation, force)."""
         self._firmware_update_callback = callback
 
     def set_factory_reset_callback(self, callback: Callable[[str], None]):
         """Set callback for sending factory reset to node. Callback takes (node_id)."""
         self._factory_reset_callback = callback
+
+    def set_restart_node_callback(self, callback: Callable[[str], None]):
+        """Set callback for sending restart command to node. Callback takes (node_id)."""
+        self._restart_node_callback = callback
+
+    def set_identify_node_callback(self, callback: Callable[[str], None]):
+        """Set callback for sending identify command to node. Callback takes (node_id)."""
+        self._identify_node_callback = callback
+
+    def set_estop_node_callback(self, callback: Callable[[str], None]):
+        """Set callback for sending emergency stop to node. Callback takes (node_id)."""
+        self._estop_node_callback = callback
 
     def set_livelink_callbacks(
         self,
@@ -400,8 +488,17 @@ class WebSocketHandler:
             })
             return
 
-        # Handle authentication message
+        # Log incoming messages (excluding high-frequency control messages at debug level)
         msg_type = message.get('type')
+        msg_action = message.get('action')
+        if msg_type == 'control':
+            # Log control messages at debug level to avoid spam
+            self.log('debug', f'[WS] Control: {msg_action} params={message.get("params")}')
+        elif msg_type != 'auth':
+            # Log other messages at info level
+            self.log('info', f'[WS] Received: type={msg_type} action={msg_action}')
+
+        # Handle authentication message
         if msg_type == 'auth':
             await self._handle_auth(client, message)
             return
@@ -574,6 +671,42 @@ class WebSocketHandler:
                 await self.broadcast_activity(f'Node {node_id} removed', 'info')
             return {"status": "ok" if result['success'] else "error", "data": result}
 
+        elif action == 'restart_node':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+
+            if self._restart_node_callback:
+                self._restart_node_callback(node_id)
+                await self.broadcast_activity(f'Restart command sent to node {node_id}', 'info')
+                return {"status": "ok", "data": {"message": "Restart command sent"}}
+            else:
+                return {"status": "error", "message": "Restart callback not configured"}
+
+        elif action == 'identify_node':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+
+            if self._identify_node_callback:
+                self._identify_node_callback(node_id)
+                await self.broadcast_activity(f'Identify command sent to node {node_id}', 'info')
+                return {"status": "ok", "data": {"message": "Identify command sent"}}
+            else:
+                return {"status": "error", "message": "Identify callback not configured"}
+
+        elif action == 'estop_node':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+
+            if self._estop_node_callback:
+                self._estop_node_callback(node_id)
+                await self.broadcast_activity(f'Emergency stop sent to node {node_id}', 'warning')
+                return {"status": "ok", "data": {"message": "Emergency stop command sent"}}
+            else:
+                return {"status": "error", "message": "Estop callback not configured"}
+
         # Pin Configuration Actions
         elif action == 'get_roles':
             roles = self.role_manager.get_roles_summary()
@@ -689,9 +822,9 @@ class WebSocketHandler:
             if not update_info["available"]:
                 return {"status": "error", "message": update_info["message"]}
 
-            # Trigger firmware update via callback (default to hardware update)
+            # Trigger firmware update via callback (default to hardware update, not forced)
             if self._firmware_update_callback:
-                self._firmware_update_callback(node_id, False)  # simulation=False
+                self._firmware_update_callback(node_id, False, False)  # simulation=False, force=False
                 await self.broadcast_activity(
                     f'Firmware update initiated for node {node_id}: '
                     f'{update_info["current_version"]} → {update_info["server_version"]}',
@@ -727,10 +860,10 @@ class WebSocketHandler:
             if not fw_info["available"]:
                 return {"status": "error", "message": f"No {build_type} firmware build found"}
 
-            # Trigger firmware update via callback
+            # Trigger firmware update via callback (forced)
             if self._firmware_update_callback:
                 is_simulation = (build_type == 'simulation')
-                self._firmware_update_callback(node_id, is_simulation)
+                self._firmware_update_callback(node_id, is_simulation, True)  # force=True
                 await self.broadcast_activity(
                     f'Force firmware update ({build_type}) initiated for node {node_id}: {fw_info.get("version_full") or fw_info.get("version")}',
                     'info'
@@ -834,28 +967,44 @@ class WebSocketHandler:
             except (ValueError, TypeError):
                 return {"status": "error", "message": "Invalid gpio or value type"}
 
-            # Check throttle
+            # Get pin mode and translate value from normalized (0-1) to native range
+            pin_mode = self.state_manager.get_pin_mode(node_id, gpio)
+            if pin_mode:
+                native_value = translate_normalized_value(value, pin_mode)
+            else:
+                native_value = value
+
+            # Check throttle (per-gpio to allow controlling multiple pins simultaneously)
+            # IMPORTANT: Neutral/stop values (input near 0) ALWAYS bypass throttle
+            # to ensure motors stop immediately when joystick is released
+            throttle_key = (node_id, gpio)
             now = time.time() * 1000  # ms
-            last_send = self._control_throttle.get(node_id, 0)
-            if now - last_send < CONTROL_THROTTLE_MS:
+            last_send = self._control_throttle.get(throttle_key, 0)
+            is_neutral = is_neutral_value(value)
+
+            if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
                 # Throttled - still update desired state but don't send to node
-                self.state_manager.update_pin_desired(node_id, gpio, value)
+                self.state_manager.update_pin_desired(node_id, gpio, native_value)
                 # Broadcast updated state to all subscribers
                 await self._broadcast_pin_state(node_id)
+                self.log('debug', f'[Control] THROTTLED {node_id} GPIO {gpio}: {native_value:.1f}')
                 return {"status": "ok", "message": "Throttled", "data": {"throttled": True}}
 
             # Update desired state
-            self.state_manager.update_pin_desired(node_id, gpio, value)
+            self.state_manager.update_pin_desired(node_id, gpio, native_value)
 
             # Send to node via ROS2
             if self._send_control_callback:
-                self._send_control_callback(node_id, gpio, value)
-                self._control_throttle[node_id] = now
+                self._send_control_callback(node_id, gpio, native_value)
+                self._control_throttle[throttle_key] = now
+                bypass_note = ' [STOP]' if is_neutral else ''
+                self.log('info', f'[Control] SENT{bypass_note} {node_id} GPIO {gpio}: '
+                         f'input={value:.3f} -> native={native_value:.1f} (mode={pin_mode or "none"})')
 
             # Broadcast updated state to all subscribers
             await self._broadcast_pin_state(node_id)
 
-            return {"status": "ok", "data": {"throttled": False}}
+            return {"status": "ok", "data": {"throttled": False, "native_value": native_value}}
 
         elif action == 'set_pin_values':
             # Batch update multiple pins
@@ -865,26 +1014,41 @@ class WebSocketHandler:
             if not node_id or not pins:
                 return {"status": "error", "message": "Missing node_id or pins"}
 
-            # Check throttle
             now = time.time() * 1000
-            last_send = self._control_throttle.get(node_id, 0)
-            throttled = now - last_send < CONTROL_THROTTLE_MS
+            sent_count = 0
+            throttled_count = 0
 
             for pin_data in pins:
                 try:
                     gpio = int(pin_data.get('gpio'))
                     value = float(pin_data.get('value'))
-                    self.state_manager.update_pin_desired(node_id, gpio, value)
 
-                    if not throttled and self._send_control_callback:
-                        self._send_control_callback(node_id, gpio, value)
+                    # Translate value from normalized (0-1) to native range
+                    pin_mode = self.state_manager.get_pin_mode(node_id, gpio)
+                    if pin_mode:
+                        native_value = translate_normalized_value(value, pin_mode)
+                    else:
+                        native_value = value
+
+                    self.state_manager.update_pin_desired(node_id, gpio, native_value)
+
+                    # Check per-gpio throttle
+                    # IMPORTANT: Neutral/stop values ALWAYS bypass throttle
+                    throttle_key = (node_id, gpio)
+                    last_send = self._control_throttle.get(throttle_key, 0)
+                    is_neutral = is_neutral_value(value)
+
+                    if is_neutral or now - last_send >= CONTROL_THROTTLE_MS:
+                        if self._send_control_callback:
+                            self._send_control_callback(node_id, gpio, native_value)
+                            self._control_throttle[throttle_key] = now
+                            sent_count += 1
+                    else:
+                        throttled_count += 1
                 except (ValueError, TypeError, AttributeError):
                     continue
 
-            if not throttled:
-                self._control_throttle[node_id] = now
-
-            return {"status": "ok", "data": {"throttled": throttled, "count": len(pins)}}
+            return {"status": "ok", "data": {"sent": sent_count, "throttled": throttled_count, "count": len(pins)}}
 
         elif action == 'set_function_value':
             # High-level control: role + function instead of node_id + gpio
@@ -910,22 +1074,40 @@ class WebSocketHandler:
 
             node_id, gpio = result
 
-            # Check throttle
+            # Get pin mode and translate value from normalized (0-1) to native range
+            pin_mode = self.state_manager.get_pin_mode(node_id, gpio)
+            if pin_mode:
+                native_value = translate_normalized_value(value, pin_mode)
+            else:
+                native_value = value
+
+            # Check throttle (per-gpio to allow controlling multiple pins simultaneously)
+            # IMPORTANT: Neutral/stop values (input near 0) ALWAYS bypass throttle
+            # to ensure motors stop immediately when joystick is released
+            throttle_key = (node_id, gpio)
             now = time.time() * 1000  # ms
-            last_send = self._control_throttle.get(node_id, 0)
-            if now - last_send < CONTROL_THROTTLE_MS:
+            last_send = self._control_throttle.get(throttle_key, 0)
+            is_neutral = is_neutral_value(value)
+
+            if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
                 # Throttled - still update desired state but don't send to node
-                self.state_manager.update_pin_desired(node_id, gpio, value)
+                self.state_manager.update_pin_desired(node_id, gpio, native_value)
                 await self._broadcast_pin_state(node_id)
+                # Log throttled commands at debug level only
+                self.log('debug', f'[Control] THROTTLED {role}/{function} GPIO {gpio}: {native_value:.1f}')
                 return {"status": "ok", "message": "Throttled", "data": {"throttled": True}}
 
             # Update desired state
-            self.state_manager.update_pin_desired(node_id, gpio, value)
+            self.state_manager.update_pin_desired(node_id, gpio, native_value)
 
             # Send to node via ROS2
             if self._send_control_callback:
-                self._send_control_callback(node_id, gpio, value)
-                self._control_throttle[node_id] = now
+                self._send_control_callback(node_id, gpio, native_value)
+                self._control_throttle[throttle_key] = now
+                # Log at info level only when actually sending to node
+                bypass_note = ' [STOP]' if is_neutral else ''
+                self.log('info', f'[Control] SENT{bypass_note} {role}/{function} -> {node_id} GPIO {gpio}: '
+                         f'input={value:.3f} -> native={native_value:.1f} (mode={pin_mode or "none"})')
 
             # Broadcast updated state to all subscribers
             await self._broadcast_pin_state(node_id)
@@ -934,7 +1116,8 @@ class WebSocketHandler:
                 "status": "ok",
                 "data": {
                     "throttled": False,
-                    "resolved": {"node_id": node_id, "gpio": gpio}
+                    "resolved": {"node_id": node_id, "gpio": gpio},
+                    "native_value": native_value
                 }
             }
 

@@ -28,6 +28,22 @@ sysbus LoadELF $global.FIRMWARE
 sysbus.cpu0 VectorTableOffset 0x00000000
 sysbus.cpu1 VectorTableOffset 0x00000000
 
+# =============================================================================
+# Optimizations for software stack testing (reduces memory overhead)
+# These settings trade hardware accuracy for reduced memory usage and better
+# performance under heavy message load (e.g., continuous joystick commands)
+# =============================================================================
+
+# Increase quantum significantly - reduces multicore sync overhead
+# Higher value = fewer synchronization points = less memory tracking
+# Default is very small; 0.001 (1ms virtual time) works well for software testing
+emulation SetGlobalQuantum "0.001"
+
+# Set lower MIPS to reduce instruction throughput and memory operations
+# Counterintuitively, lower MIPS = faster host execution, less memory pressure
+sysbus.cpu0 PerformanceInMips 50
+sysbus.cpu1 PerformanceInMips 50
+
 # Show UART0 for debug output
 showAnalyzer sysbus.uart0
 

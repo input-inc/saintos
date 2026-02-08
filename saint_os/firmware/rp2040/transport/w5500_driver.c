@@ -239,15 +239,16 @@ bool w5500_dhcp_request(uint8_t* ip_out, uint32_t timeout_ms)
 
     printf("DHCP not fully implemented - using static IP fallback\n");
 
-    // Fallback: use a default IP
-    ip_out[0] = 192;
-    ip_out[1] = 168;
-    ip_out[2] = 1;
-    ip_out[3] = 100;
+    // Fallback: use default IP configured at build time via CMake
+    // Use: cmake .. -DNODE_IP="192.168.x.x" -DGATEWAY_IP="192.168.x.1"
+    ip_out[0] = DEFAULT_NODE_IP_0;
+    ip_out[1] = DEFAULT_NODE_IP_1;
+    ip_out[2] = DEFAULT_NODE_IP_2;
+    ip_out[3] = DEFAULT_NODE_IP_3;
 
     w5500_set_ip(ip_out);
     w5500_set_subnet((uint8_t[]){255, 255, 255, 0});
-    w5500_set_gateway((uint8_t[]){192, 168, 1, 1});
+    w5500_set_gateway((uint8_t[]){DEFAULT_GATEWAY_IP_0, DEFAULT_GATEWAY_IP_1, DEFAULT_GATEWAY_IP_2, DEFAULT_GATEWAY_IP_3});
 
     return true;
 }

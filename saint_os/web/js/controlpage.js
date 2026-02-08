@@ -193,13 +193,13 @@ class ControlPage {
     async toggleNode(nodeId) {
         const panel = this.container.querySelector(`[data-node-id="${nodeId}"]`);
         const content = document.getElementById(`control-content-${nodeId}`);
-        const arrow = panel.querySelector('svg');
+        const arrow = panel.querySelector('.material-icons');
 
         if (this.expandedNodes.has(nodeId)) {
             // Collapse
             this.expandedNodes.delete(nodeId);
             content.classList.add('hidden');
-            arrow.classList.remove('rotate-180');
+            if (arrow) arrow.classList.remove('rotate-180');
 
             // Unsubscribe from state updates
             this.unsubscribeNode(nodeId);
@@ -207,7 +207,7 @@ class ControlPage {
             // Expand
             this.expandedNodes.add(nodeId);
             content.classList.remove('hidden');
-            arrow.classList.add('rotate-180');
+            if (arrow) arrow.classList.add('rotate-180');
 
             // Load controls
             await this.loadNodeControls(nodeId);

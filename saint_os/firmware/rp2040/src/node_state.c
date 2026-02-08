@@ -50,19 +50,21 @@ void node_state_init(void)
 
     // Default server configuration (micro-ROS agent)
 #ifdef SIMULATION
-    // Simulation: agent runs on localhost
+    // Simulation: agent runs on localhost (no discovery in simulation)
     g_node.server_ip[0] = 127;
     g_node.server_ip[1] = 0;
     g_node.server_ip[2] = 0;
     g_node.server_ip[3] = 1;
+    g_node.server_port = 8888;
 #else
-    // Hardware: agent runs on network server
-    g_node.server_ip[0] = 192;
-    g_node.server_ip[1] = 168;
-    g_node.server_ip[2] = 1;
-    g_node.server_ip[3] = 10;
+    // Hardware: server IP will be discovered via UDP broadcast
+    // Initialize to zeros - will be set by discover_server()
+    g_node.server_ip[0] = 0;
+    g_node.server_ip[1] = 0;
+    g_node.server_ip[2] = 0;
+    g_node.server_ip[3] = 0;
+    g_node.server_port = 0;
 #endif
-    g_node.server_port = 8888;  // micro-ROS agent port
 
     // Initialize flash storage
     if (!flash_storage_init()) {

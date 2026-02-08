@@ -333,6 +333,46 @@ void pin_control_update_state(void)
     }
 }
 
+void pin_control_estop(void)
+{
+    printf("ESTOP: Setting all outputs to safe values\n");
+
+    // Get all configured pins
+    uint8_t count;
+    const pin_config_t* configs = pin_config_get_all(&count);
+
+    for (uint8_t i = 0; i < count; i++) {
+        const pin_config_t* cfg = &configs[i];
+
+        switch (cfg->mode) {
+            case PIN_MODE_PWM:
+                // Set PWM to 0%
+                pin_control_set_pwm(cfg->gpio, 0.0f);
+                printf("ESTOP: GPIO %d (PWM) -> 0%%\n", cfg->gpio);
+                break;
+
+            case PIN_MODE_SERVO:
+                // Set servo to center position (90 degrees) for safety
+                // Some servos may be safer at 0, but center is generally safe
+                pin_control_set_servo(cfg->gpio, 90.0f);
+                printf("ESTOP: GPIO %d (Servo) -> 90 deg (center)\n", cfg->gpio);
+                break;
+
+            case PIN_MODE_DIGITAL_OUT:
+                // Set digital outputs low
+                pin_control_set_digital(cfg->gpio, false);
+                printf("ESTOP: GPIO %d (Digital Out) -> LOW\n", cfg->gpio);
+                break;
+
+            default:
+                // Input pins don't need ESTOP handling
+                break;
+        }
+    }
+
+    printf("ESTOP: Complete\n");
+}
+
 bool pin_control_apply_json(const char* json, size_t json_len)
 {
     if (!json || json_len == 0) return false;

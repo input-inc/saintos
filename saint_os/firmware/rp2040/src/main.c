@@ -30,6 +30,7 @@
 #include "version.h"
 #include "pin_config.h"
 #include "pin_control.h"
+#include "flash_storage.h"
 
 // Transport selection based on build mode
 #ifdef SIMULATION
@@ -60,6 +61,7 @@
 #define TRANSPORT_SET_AGENT(ip, port) transport_w5500_set_agent(ip, port)
 #define TRANSPORT_GET_IP(ip)   transport_w5500_get_ip(ip)
 #define TRANSPORT_GET_MAC(mac) transport_w5500_get_mac(mac)
+#include "discovery.h"
 #endif
 
 // =============================================================================
@@ -109,6 +111,22 @@ static bool capabilities_requested = false;
 
 // State publish interval
 #define STATE_PUBLISH_INTERVAL_MS 100   // 10Hz
+
+// Connection monitoring
+#define CONNECTION_CHECK_INTERVAL_MS 5000   // Check every 5 seconds
+#define CONNECTION_TIMEOUT_MS        15000  // Consider disconnected after 15s
+#define MAX_RECONNECT_ATTEMPTS       10     // Max consecutive failures before error state
+// Note: RECONNECT_DELAY_MS is defined in saint_node.h
+
+static uint32_t last_successful_comm = 0;   // Timestamp of last successful communication
+static uint32_t last_connection_check = 0;  // Timestamp of last connection check
+static uint32_t reconnect_attempts = 0;     // Consecutive reconnect attempts
+static bool agent_connected = false;        // Agent connection state
+
+// Forward declarations for connection monitoring
+static void mark_agent_communication(void);
+static bool check_agent_connection(void);
+static bool init_micro_ros(void);
 
 // =============================================================================
 // Subscription Callbacks
@@ -178,9 +196,34 @@ static void config_subscription_callback(const void* msgin)
 }
 
 /**
+ * Extract unix timestamp from version string (format: "1.2.0-1738505432")
+ * Returns 0 if not found or invalid.
+ */
+static uint32_t extract_version_timestamp(const char* version)
+{
+    if (!version) return 0;
+
+    // Find the dash separator
+    const char* dash = strchr(version, '-');
+    if (!dash) return 0;
+
+    // Parse the number after the dash
+    uint32_t timestamp = 0;
+    const char* p = dash + 1;
+    while (*p >= '0' && *p <= '9') {
+        timestamp = timestamp * 10 + (*p - '0');
+        p++;
+    }
+
+    return timestamp;
+}
+
+/**
  * Handle firmware update command.
  * For simulation: triggers a clean exit so Renode can restart with new firmware.
  * For hardware: triggers watchdog reset to enter bootloader mode.
+ *
+ * If "force" is false, compares version timestamps and only updates if server is newer.
  */
 static void handle_firmware_update(const char* json, size_t len)
 {
@@ -190,9 +233,15 @@ static void handle_firmware_update(const char* json, size_t len)
         return;
     }
 
-    // Parse version from command (optional, for logging)
+    // Parse force flag from command (default false)
+    bool force_update = false;
+    if (strstr(json, "\"force\":true") || strstr(json, "\"force\": true")) {
+        force_update = true;
+    }
+
+    // Parse version from command
     const char* version_str = strstr(json, "\"version\"");
-    char new_version[32] = "unknown";
+    char new_version[48] = "unknown";
 
     if (version_str) {
         version_str = strchr(version_str, ':');
@@ -215,7 +264,38 @@ static void handle_firmware_update(const char* json, size_t len)
     printf("FIRMWARE UPDATE REQUESTED\n");
     printf("====================================\n");
     printf("  Current version: %s\n", FIRMWARE_VERSION_FULL);
-    printf("  New version: %s\n", new_version);
+    printf("  Server version:  %s\n", new_version);
+    printf("  Force update:    %s\n", force_update ? "YES" : "NO");
+
+    // If not forced, compare version timestamps
+    if (!force_update) {
+        uint32_t current_ts = FIRMWARE_BUILD_UNIX;
+        uint32_t server_ts = extract_version_timestamp(new_version);
+
+        printf("  Current build:   %lu\n", (unsigned long)current_ts);
+        printf("  Server build:    %lu\n", (unsigned long)server_ts);
+
+        if (server_ts == 0) {
+            printf("====================================\n");
+            printf("Cannot parse server version timestamp.\n");
+            printf("Use force update to override.\n");
+            printf("====================================\n\n");
+            return;
+        }
+
+        if (server_ts <= current_ts) {
+            printf("====================================\n");
+            printf("Firmware is already up to date.\n");
+            printf("Use force update to override.\n");
+            printf("====================================\n\n");
+            return;
+        }
+
+        printf("  -> Server has newer build, proceeding with update\n");
+    } else {
+        printf("  -> Force update enabled, skipping version check\n");
+    }
+
     printf("====================================\n");
     printf("Rebooting for firmware update...\n\n");
 
@@ -295,6 +375,56 @@ static void control_subscription_callback(const void* msgin)
         led_set_state(NODE_STATE_UNADOPTED);
 
         printf("Factory reset complete - node is now UNADOPTED\n");
+        printf("====================================\n\n");
+        return;
+    }
+
+    // Check for restart command
+    if (strstr(msg->data.data, "\"action\":\"restart\"") ||
+        strstr(msg->data.data, "\"action\": \"restart\"")) {
+        printf("\n");
+        printf("====================================\n");
+        printf("RESTART REQUESTED\n");
+        printf("====================================\n");
+        printf("Rebooting in 500ms...\n");
+
+        sleep_ms(500);
+
+        // Use watchdog to reset the device
+        watchdog_enable(1, 1);  // 1ms timeout, pause on debug
+        while (1) {
+            tight_loop_contents();
+        }
+        // Never returns
+    }
+
+    // Check for identify command
+    if (strstr(msg->data.data, "\"action\":\"identify\"") ||
+        strstr(msg->data.data, "\"action\": \"identify\"")) {
+        printf("\n");
+        printf("====================================\n");
+        printf("IDENTIFY REQUESTED\n");
+        printf("====================================\n");
+
+        // Flash LED to help locate this node
+        led_identify(5);  // 5 flash sequences
+
+        printf("Identify complete\n");
+        printf("====================================\n\n");
+        return;
+    }
+
+    // Check for emergency stop command
+    if (strstr(msg->data.data, "\"action\":\"estop\"") ||
+        strstr(msg->data.data, "\"action\": \"estop\"")) {
+        printf("\n");
+        printf("====================================\n");
+        printf("EMERGENCY STOP ACTIVATED\n");
+        printf("====================================\n");
+
+        // Set all outputs to safe values
+        pin_control_estop();
+
         printf("====================================\n\n");
         return;
     }
@@ -400,6 +530,9 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         return;
     }
 
+    // Get CPU temperature
+    float cpu_temp = hardware_get_cpu_temp();
+
     // Build announcement JSON string
     snprintf(announcement_buffer, sizeof(announcement_buffer),
         "{"
@@ -410,7 +543,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"fw\":\"%s\","
         "\"fw_build\":\"%s\","
         "\"state\":\"%s\","
-        "\"uptime\":%lu"
+        "\"uptime\":%lu,"
+        "\"cpu_temp\":%.1f"
         "}",
         g_node.node_id,
         g_node.mac_address[0], g_node.mac_address[1],
@@ -422,7 +556,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         FIRMWARE_VERSION_FULL,
         FIRMWARE_BUILD_TIMESTAMP,
         node_state_to_string(g_node.state),
-        g_node.uptime_ms / 1000
+        g_node.uptime_ms / 1000,
+        cpu_temp
     );
 
     announcement_msg.data.data = announcement_buffer;
@@ -430,7 +565,9 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     announcement_msg.data.capacity = sizeof(announcement_buffer);
 
     rcl_ret_t ret = rcl_publish(&announcement_pub, &announcement_msg, NULL);
-    if (ret != RCL_RET_OK) {
+    if (ret == RCL_RET_OK) {
+        mark_agent_communication();
+    } else {
         printf("Announce publish failed: %d\n", ret);
     }
 }
@@ -673,6 +810,102 @@ static void cleanup_micro_ros(void)
     rclc_support_fini(&support);
 }
 
+/**
+ * Mark successful communication with agent.
+ * Call this when we successfully send or receive data.
+ */
+static void mark_agent_communication(void)
+{
+    last_successful_comm = to_ms_since_boot(get_absolute_time());
+    if (!agent_connected) {
+        agent_connected = true;
+        reconnect_attempts = 0;
+        printf("Agent connection established\n");
+    }
+}
+
+/**
+ * Check agent connection health and attempt reconnect if needed.
+ * Returns true if connected and healthy, false if reconnecting.
+ */
+static bool check_agent_connection(void)
+{
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    // Only check periodically
+    if (now - last_connection_check < CONNECTION_CHECK_INTERVAL_MS) {
+        return agent_connected;
+    }
+    last_connection_check = now;
+
+    // Check transport layer connection
+    if (!TRANSPORT_CONNECTED()) {
+        printf("Transport disconnected\n");
+        agent_connected = false;
+    }
+
+    // Check for communication timeout
+    if (agent_connected && last_successful_comm > 0) {
+        if (now - last_successful_comm > CONNECTION_TIMEOUT_MS) {
+            printf("Agent communication timeout (no response for %lu ms)\n",
+                   now - last_successful_comm);
+            agent_connected = false;
+        }
+    }
+
+    // If disconnected, attempt to reconnect
+    if (!agent_connected) {
+        reconnect_attempts++;
+
+        if (reconnect_attempts > MAX_RECONNECT_ATTEMPTS) {
+            // Too many failures - enter error state
+            printf("Max reconnect attempts exceeded (%d), entering ERROR state\n",
+                   MAX_RECONNECT_ATTEMPTS);
+            node_set_state(NODE_STATE_ERROR);
+            led_set_state(NODE_STATE_ERROR);
+            return false;
+        }
+
+        printf("Reconnect attempt %lu/%d...\n", reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
+        led_set_state(NODE_STATE_CONNECTING);
+
+        // Wait before reconnect
+        sleep_ms(RECONNECT_DELAY_MS);
+
+        // Try to reconnect transport
+        if (!TRANSPORT_CONNECTED()) {
+            if (!TRANSPORT_CONNECT()) {
+                printf("Transport reconnect failed\n");
+                return false;
+            }
+        }
+
+        // Reinitialize micro-ROS
+        printf("Reinitializing micro-ROS...\n");
+        cleanup_micro_ros();
+        sleep_ms(500);
+
+        if (!init_micro_ros()) {
+            printf("micro-ROS reinitialization failed\n");
+            return false;
+        }
+
+        // Success!
+        agent_connected = true;
+        last_successful_comm = now;
+        reconnect_attempts = 0;
+
+        // Restore LED state
+        led_set_state(g_node.state);
+        printf("Reconnected successfully!\n");
+
+        // Re-publish capabilities so server knows we're back
+        capabilities_requested = true;
+    }
+
+    return agent_connected;
+}
+
 // =============================================================================
 // Main Function
 // =============================================================================
@@ -792,7 +1025,22 @@ int main(void)
            g_node.static_ip[0], g_node.static_ip[1],
            g_node.static_ip[2], g_node.static_ip[3]);
 
-    // Set agent address from config
+#ifndef SIMULATION
+    // Discover the SAINT server via UDP broadcast
+    printf("Discovering SAINT server...\n");
+    if (!discover_server(g_node.server_ip, &g_node.server_port, 2000, 10)) {
+        printf("ERROR: Could not discover SAINT server!\n");
+        printf("Make sure the server is running on the same network.\n");
+        node_set_state(NODE_STATE_ERROR);
+        led_set_state(NODE_STATE_ERROR);
+        while (1) {
+            led_update();
+            sleep_ms(100);
+        }
+    }
+#endif
+
+    // Set agent address (discovered or from config for simulation)
     TRANSPORT_SET_AGENT(g_node.server_ip, g_node.server_port);
     printf("Agent: %d.%d.%d.%d:%d\n",
            g_node.server_ip[0], g_node.server_ip[1],
@@ -834,6 +1082,10 @@ int main(void)
     }
     printf("========================================\n");
 
+    // Initialize connection tracking
+    last_successful_comm = to_ms_since_boot(get_absolute_time());
+    agent_connected = true;
+
     // Main loop
     static uint32_t last_status_print = 0;
     while (1) {
@@ -846,13 +1098,24 @@ int main(void)
         // Update LED
         led_update();
 
+        // Check agent connection and reconnect if needed
+        if (g_node.state != NODE_STATE_ERROR) {
+            if (!check_agent_connection()) {
+                // Reconnecting - skip normal processing
+                sleep_ms(100);
+                continue;
+            }
+        }
+
         // Spin micro-ROS executor (process timers and callbacks)
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
 
         // Periodic status print (every 10 seconds)
         if (now - last_status_print >= 10000) {
-            printf("[%lu] Node running, state: %s, caps_requested: %d\n",
-                   now / 1000, node_state_to_string(g_node.state), capabilities_requested);
+            printf("[%lu] Node running, state: %s, agent: %s, caps_requested: %d\n",
+                   now / 1000, node_state_to_string(g_node.state),
+                   agent_connected ? "connected" : "disconnected",
+                   capabilities_requested);
             last_status_print = now;
         }
 

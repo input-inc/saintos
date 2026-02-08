@@ -197,25 +197,44 @@ bool flash_storage_load(flash_storage_data_t* data)
     return true;
 }
 
+// Calculate how many flash pages we need for the storage structure
+// Flash pages are 256 bytes, sector is 4KB
+#define STORAGE_SIZE_PAGES  ((sizeof(flash_storage_data_t) + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE)
+#define STORAGE_SIZE_BYTES  (STORAGE_SIZE_PAGES * FLASH_PAGE_SIZE)
+
 bool flash_storage_save(const flash_storage_data_t* data)
 {
     if (!storage_initialized || !data) return false;
 
-    // Prepare data with proper alignment (flash page is 256 bytes)
-    uint8_t buffer[FLASH_PAGE_SIZE] __attribute__((aligned(4)));
+    printf("Flash storage: preparing to save (%zu bytes, %d pages)...\n",
+           sizeof(flash_storage_data_t), STORAGE_SIZE_PAGES);
+
+    // Prepare data with proper alignment
+    // Use static buffer to avoid stack overflow (struct is ~835 bytes, needs 4 pages)
+    static uint8_t buffer[STORAGE_SIZE_BYTES] __attribute__((aligned(4)));
     memset(buffer, 0xFF, sizeof(buffer));
     memcpy(buffer, data, sizeof(flash_storage_data_t));
+
+    // Flash operations disable interrupts for ~100-400ms which can disrupt
+    // network communication. We need to handle this carefully.
+
+    // Give any pending network operations time to complete
+    sleep_ms(50);
 
     // Disable interrupts during flash operations
     uint32_t interrupts = save_and_disable_interrupts();
 
-    // Erase sector
+    // Erase sector (this is the slow part - can take 50-400ms)
     flash_range_erase(FLASH_TARGET_OFFSET, FLASH_SECTOR_SIZE);
 
-    // Write data
-    flash_range_program(FLASH_TARGET_OFFSET, buffer, FLASH_PAGE_SIZE);
+    // Write all pages needed for the data structure
+    flash_range_program(FLASH_TARGET_OFFSET, buffer, STORAGE_SIZE_BYTES);
 
     restore_interrupts(interrupts);
+
+    // Allow network stack to recover after long interrupt-disabled period
+    // The W5500 may have received packets that need processing
+    sleep_ms(100);
 
     printf("Flash storage: saved config\n");
     return true;

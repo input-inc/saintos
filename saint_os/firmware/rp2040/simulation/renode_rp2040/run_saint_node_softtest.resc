@@ -1,0 +1,66 @@
+# SAINT.OS Node Simulation Script - Software Test Mode (Single Core)
+#
+# This simulation is optimized for testing the software stack with minimal
+# memory overhead. It runs only CPU0 and disables CPU1 entirely, which
+# eliminates multicore synchronization overhead.
+#
+# Use this when you need to run continuous high-frequency commands
+# (like joystick input) without hitting memory limits.
+#
+# NOTE: Some features requiring multicore (PIO, etc.) may not work correctly.
+#
+# Usage:
+#   renode run_saint_node_softtest.resc
+#
+
+$machine_name?="saint_node"
+$platform_file?=$ORIGIN/boards/adafruit_feather_rp2040.repl
+$node_udp_port?=9999
+
+include $ORIGIN/boards/initialize_adafruit_feather.resc
+
+# Load the SAINT node firmware
+$global.FIRMWARE?=@/Users/hackman/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/rp2040/build_sim/saint_node.elf
+
+sysbus LoadELF $global.FIRMWARE
+
+# Set vector table to bootrom - it handles jump to flash
+sysbus.cpu0 VectorTableOffset 0x00000000
+
+# =============================================================================
+# SINGLE CORE MODE - Maximum performance, minimum memory usage
+# =============================================================================
+
+# Disable CPU1 entirely - eliminates all multicore sync overhead
+sysbus.cpu1 IsHalted true
+
+# Aggressive quantum for single-core operation
+emulation SetGlobalQuantum "0.01"
+
+# Low MIPS for reduced memory pressure
+sysbus.cpu0 PerformanceInMips 25
+
+# Show UART0 for debug output
+showAnalyzer sysbus.uart0
+
+logLevel 3 sysbus.uart0
+
+echo "=============================================="
+echo "SAINT.OS Node - SOFTWARE TEST MODE"
+echo "=============================================="
+echo ""
+echo "WARNING: Running in single-core mode!"
+echo "  - CPU1 is disabled"
+echo "  - Some multicore features may not work"
+echo "  - Use run_saint_node.resc for full simulation"
+echo ""
+echo "Network Configuration:"
+echo "  UDP Bridge: Enabled at 0x50300000"
+echo "  Local Port: $node_udp_port (configurable)"
+echo "  Agent: 192.168.1.10:8888 (default)"
+echo ""
+echo "Commands:"
+echo "  start              - Start simulation"
+echo "  pause              - Pause simulation"
+echo "  quit               - Exit Renode"
+echo ""
