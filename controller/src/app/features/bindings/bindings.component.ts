@@ -312,13 +312,13 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
 
       <!-- Analog Binding Editor Modal -->
       @if (showAnalogEditor()) {
-        <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div class="card w-full max-w-lg mx-4">
-            <h3 class="text-lg font-semibold mb-4">
+        <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div class="card w-full max-w-lg flex flex-col max-h-full">
+            <h3 class="text-lg font-semibold mb-4 shrink-0">
               {{ isNewBinding() ? 'Add Analog Binding' : 'Edit Analog Binding' }}
             </h3>
 
-            <div class="space-y-4">
+            <div class="space-y-4 overflow-y-auto min-h-0">
               <div>
                 <label class="block text-sm text-saint-text-muted mb-1">Input</label>
                 <select class="input w-full" [(ngModel)]="analogForm.input">
@@ -428,7 +428,7 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
               }
             </div>
 
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="flex justify-end gap-3 mt-6 shrink-0">
               <button class="btn btn-secondary" (click)="cancelEdit()">Cancel</button>
               <button class="btn btn-primary" (click)="saveAnalogBinding()">Save</button>
             </div>
@@ -438,13 +438,13 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
 
       <!-- Digital Binding Editor Modal -->
       @if (showDigitalEditor()) {
-        <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div class="card w-full max-w-lg mx-4">
-            <h3 class="text-lg font-semibold mb-4">
+        <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div class="card w-full max-w-lg flex flex-col max-h-full">
+            <h3 class="text-lg font-semibold mb-4 shrink-0">
               {{ isNewBinding() ? 'Add Digital Binding' : 'Edit Digital Binding' }}
             </h3>
 
-            <div class="space-y-4">
+            <div class="space-y-4 overflow-y-auto min-h-0">
               <div class="grid grid-cols-2 gap-4">
                 <div>
                   <label class="block text-sm text-saint-text-muted mb-1">Input</label>
@@ -548,7 +548,7 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
               }
             </div>
 
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="flex justify-end gap-3 mt-6 shrink-0">
               <button class="btn btn-secondary" (click)="cancelEdit()">Cancel</button>
               <button class="btn btn-primary" (click)="saveDigitalBinding()">Save</button>
             </div>

@@ -72,12 +72,15 @@ type KeyboardLayout = 'default' | 'shift' | 'symbols' | 'symbols-shift';
     .keyboard-container {
       width: 100%;
       max-width: 900px;
+      max-height: calc(100% - 1rem);
       background: #1e293b;
       border-radius: 1rem 1rem 0 0;
       border: 1px solid #334155;
       border-bottom: none;
-      overflow: hidden;
+      overflow-y: auto;
       box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
     }
 
     .input-preview {
@@ -90,6 +93,7 @@ type KeyboardLayout = 'default' | 'shift' | 'symbols' | 'symbols-shift';
       min-height: 3.5rem;
       display: flex;
       align-items: center;
+      flex-shrink: 0;
     }
 
     .preview-text {
@@ -111,6 +115,9 @@ type KeyboardLayout = 'default' | 'shift' | 'symbols' | 'symbols-shift';
     .keyboard-wrapper {
       padding: 0.75rem;
       touch-action: manipulation;
+      overflow-y: auto;
+      min-height: 0;
+      flex: 1;
     }
 
     .keyboard-toolbar {
@@ -120,6 +127,7 @@ type KeyboardLayout = 'default' | 'shift' | 'symbols' | 'symbols-shift';
       padding: 0.75rem 1rem;
       background: #0f172a;
       border-top: 1px solid #334155;
+      flex-shrink: 0;
     }
 
     .toolbar-spacer {
