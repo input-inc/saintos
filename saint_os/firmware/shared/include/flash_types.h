@@ -1,0 +1,84 @@
+/**
+ * SAINT.OS Firmware - Shared Flash Storage Types
+ *
+ * Platform-agnostic storage structures, magic numbers, and helper function declarations.
+ */
+
+#ifndef FLASH_TYPES_H
+#define FLASH_TYPES_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "saint_types.h"
+
+// =============================================================================
+// Storage Configuration
+// =============================================================================
+
+#define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
+#define FLASH_STORAGE_VERSION   2
+
+#define FLASH_PIN_CONFIG_MAX_PINS     16
+#define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
+#define FLASH_PIN_CONFIG_VERSION      1
+
+// =============================================================================
+// Pin Configuration Storage Structure
+// =============================================================================
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t pin_count;
+    uint8_t reserved_hdr[2];
+    struct __attribute__((packed)) {
+        uint8_t gpio;
+        uint8_t mode;
+        char logical_name[FLASH_PIN_CONFIG_MAX_NAME_LEN];
+        uint32_t param1;
+        uint16_t param2;
+        uint8_t reserved_pin[2];
+    } pins[FLASH_PIN_CONFIG_MAX_PINS];
+} flash_pin_config_t;
+
+// =============================================================================
+// Main Storage Structure
+// =============================================================================
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t crc;
+
+    char node_id[32];
+    node_role_t role;
+    char display_name[64];
+
+    bool use_dhcp;
+    uint8_t static_ip[4];
+    uint8_t subnet_mask[4];
+    uint8_t gateway[4];
+    uint8_t server_ip[4];
+    uint16_t server_port;
+
+    flash_pin_config_t pin_config;
+
+    uint8_t reserved[32];
+
+} flash_storage_data_t;
+
+// =============================================================================
+// Function Declarations
+// =============================================================================
+
+// Per-platform implementations
+bool flash_storage_init(void);
+bool flash_storage_load(flash_storage_data_t* data);
+bool flash_storage_save(const flash_storage_data_t* data);
+bool flash_storage_erase(void);
+bool flash_storage_has_config(void);
+
+// Shared helpers (implemented in shared/src/flash_helpers.c)
+void flash_storage_from_node(flash_storage_data_t* data, const saint_node_config_t* node);
+void flash_storage_to_node(const flash_storage_data_t* data, saint_node_config_t* node);
+
+#endif // FLASH_TYPES_H

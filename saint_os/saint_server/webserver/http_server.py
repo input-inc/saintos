@@ -21,7 +21,7 @@ class WebServer:
     """HTTP server for static files and WebSocket endpoint."""
 
     # Supported firmware types
-    FIRMWARE_TYPES = ['rp2040', 'rpi5']
+    FIRMWARE_TYPES = ['rp2040', 'rpi5', 'teensy41']
 
     def __init__(
         self,

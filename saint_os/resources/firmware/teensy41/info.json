@@ -1,0 +1,19 @@
+{
+    "name": "Teensy 4.1",
+    "type": "teensy41",
+    "description": "PJRC Teensy 4.1 (iMXRT1062, Cortex-M7, built-in Ethernet)",
+    "architecture": "arm-cortex-m7",
+    "communication": "micro-ros",
+    "transport": "NativeEthernet UDP",
+    "simulation": "renode",
+    "build_system": "platformio",
+    "features": [
+        "Built-in Ethernet PHY",
+        "600MHz Cortex-M7",
+        "~40 GPIO pins",
+        "ADC (14 channels)",
+        "PWM (most digital pins)",
+        "EEPROM (4284 bytes)",
+        "micro-ROS over UDP"
+    ]
+}

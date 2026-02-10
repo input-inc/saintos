@@ -1,0 +1,83 @@
+// Teensy 4.1 (iMXRT1062) Platform for Renode
+// Cortex-M7 based microcontroller
+
+// Flash (8MB via FlexSPI)
+flash: Memory.MappedMemory @ sysbus 0x60000000
+    size: 0x800000
+
+// ITCM (Instruction Tightly Coupled Memory - 512KB)
+itcm: Memory.MappedMemory @ sysbus 0x00000000
+    size: 0x80000
+
+// DTCM (Data Tightly Coupled Memory - 512KB)
+dtcm: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x80000
+
+// OCRAM (On-Chip RAM - 512KB)
+ocram: Memory.MappedMemory @ sysbus 0x20200000
+    size: 0x80000
+
+// OCRAM2 (Additional On-Chip RAM - 512KB)
+ocram2: Memory.MappedMemory @ sysbus 0x20280000
+    size: 0x80000
+
+cpu0: CPU.CortexM @ sysbus
+    cpuType: "cortex-m7"
+    nvic: nvic0
+
+nvic0: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration {
+        address: 0xe000e000;
+        cpu: cpu0
+    }
+    systickFrequency: 600000000
+    -> cpu0@0
+
+// LPUART1 for debug output (pins 24/25 on Teensy, default Serial1)
+lpuart1: UART.PL011 @ sysbus 0x40184000
+
+// GPIO ports (simplified for simulation)
+gpio1: Memory.MappedMemory @ sysbus 0x401B8000
+    size: 0x4000
+
+gpio2: Memory.MappedMemory @ sysbus 0x401BC000
+    size: 0x4000
+
+// GPT1 timer
+gpt1: Memory.MappedMemory @ sysbus 0x401EC000
+    size: 0x4000
+
+// GPT2 timer
+gpt2: Memory.MappedMemory @ sysbus 0x401F0000
+    size: 0x4000
+
+// Pit timer (for millis() etc)
+pit: Memory.MappedMemory @ sysbus 0x40084000
+    size: 0x4000
+
+// CCM (Clock Controller Module)
+ccm: Memory.MappedMemory @ sysbus 0x400FC000
+    size: 0x8000
+
+// IOMUXC (for pin muxing)
+iomuxc: Memory.MappedMemory @ sysbus 0x401F8000
+    size: 0x4000
+
+// OCOTP (for unique ID)
+ocotp: Memory.MappedMemory @ sysbus 0x401F4000
+    size: 0x4000
+
+// USB (stubbed)
+usb1: Memory.MappedMemory @ sysbus 0x402E0000
+    size: 0x4000
+
+// DWT for cycle counting
+dwt: Miscellaneous.DWT @ sysbus 0xE0001000
+    frequency: 600000000
+
+// Shared simulation peripherals (same as RP2040)
+// UDP Bridge for network simulation
+udp_bridge: Network.UDPBridge @ sysbus 0x50300000
+
+// Persistent Storage for node configuration
+persistent_storage: Storage.PersistentStorage @ sysbus 0x50400000
+    nodeId: "default"

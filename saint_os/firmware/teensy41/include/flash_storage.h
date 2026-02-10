@@ -1,5 +1,5 @@
 /**
- * SAINT.OS Node Firmware - RP2040 Flash Storage
+ * SAINT.OS Node Firmware - Teensy 4.1 Flash Storage
  */
 
 #ifndef FLASH_STORAGE_H

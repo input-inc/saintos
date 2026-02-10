@@ -1,0 +1,48 @@
+# SAINT.OS Teensy 4.1 Node Simulation Script
+#
+# Usage:
+#   renode run_saint_node.resc
+#
+# Variables (set before including):
+#   $machine_name  - Machine name (default: "saint_node")
+#   $node_udp_port - UDP port for bridge (default: 9999)
+
+$machine_name?="saint_node"
+$platform_file?=$ORIGIN/../boards/teensy41.repl
+$node_udp_port?=9999
+
+include $ORIGIN/../cores/initialize_peripherals.resc
+
+machine LoadPlatformDescription $platform_file
+
+# Load firmware
+$global.FIRMWARE?=@/Users/hackman/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/teensy41/.pio/build/simulation/firmware.elf
+
+sysbus LoadELF $global.FIRMWARE
+
+# Set vector table
+cpu0 VectorTableOffset 0x60000000
+
+# Performance settings for software testing
+emulation SetGlobalQuantum "0.001"
+cpu0 PerformanceInMips 100
+
+# Show UART for debug output
+showAnalyzer sysbus.lpuart1
+
+logLevel 3 sysbus.lpuart1
+
+echo "=============================================="
+echo "SAINT.OS Teensy 4.1 Node Simulation Ready"
+echo "=============================================="
+echo ""
+echo "Network Configuration:"
+echo "  UDP Bridge: Enabled at 0x50300000"
+echo "  Local Port: $node_udp_port (configurable)"
+echo "  Agent: 192.168.1.10:8888 (default)"
+echo ""
+echo "Commands:"
+echo "  start              - Start simulation"
+echo "  pause              - Pause simulation"
+echo "  quit               - Exit Renode"
+echo ""

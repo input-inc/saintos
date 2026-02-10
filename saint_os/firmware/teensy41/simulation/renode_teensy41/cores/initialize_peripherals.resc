@@ -1,0 +1,12 @@
+# Teensy 4.1 Peripheral Initialization for Renode
+# Loads shared C# peripherals (UDPBridge and PersistentStorage) from RP2040 simulation
+
+mach create $machine_name
+
+# Load shared network peripheral (UDP Bridge)
+include $ORIGIN/../../../../rp2040/simulation/renode_rp2040/emulation/peripherals/network/udp_bridge.cs
+EnsureTypeIsLoaded "Antmicro.Renode.Peripherals.Network.UDPBridge"
+
+# Load shared storage peripheral (Persistent Storage)
+include $ORIGIN/../../../../rp2040/simulation/renode_rp2040/emulation/peripherals/storage/persistent_storage.cs
+EnsureTypeIsLoaded "Antmicro.Renode.Peripherals.Storage.PersistentStorage"

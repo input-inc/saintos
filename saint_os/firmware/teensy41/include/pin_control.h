@@ -1,5 +1,5 @@
 /**
- * SAINT.OS Node Firmware - RP2040 Pin Control
+ * SAINT.OS Node Firmware - Teensy 4.1 Pin Control
  */
 
 #ifndef PIN_CONTROL_H

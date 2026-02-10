@@ -2,10 +2,10 @@
 """
 SAINT.OS Unified Node Simulation Manager
 
-Manages simulated nodes for both RP2040 (via Renode) and Raspberry Pi 5 (native Python).
+Manages simulated nodes for RP2040 (via Renode), Teensy 4.1 (via Renode), and Raspberry Pi 5 (native Python).
 
 Usage:
-    ./node_manager.py create <node_id> --type <rp2040|rpi5> [options]
+    ./node_manager.py create <node_id> --type <rp2040|rpi5|teensy41> [options]
     ./node_manager.py start <node_id>
     ./node_manager.py run <node_id>              # Start + follow logs (Ctrl+C detaches)
     ./node_manager.py stop <node_id>
@@ -17,8 +17,9 @@ Usage:
     ./node_manager.py stop-all [--type TYPE]
 
 Node Types:
-    rp2040  - Simulated via Renode (micro-ROS, requires micro-ROS agent)
-    rpi5    - Native Python process (full ROS2, no agent needed)
+    rp2040    - Simulated via Renode (micro-ROS, requires micro-ROS agent)
+    teensy41  - Simulated via Renode (micro-ROS over UDP, requires micro-ROS agent)
+    rpi5      - Native Python process (full ROS2, no agent needed)
 """
 
 import argparse
@@ -35,12 +36,13 @@ from typing import Dict, Any, Optional, List
 
 
 class NodeManager:
-    """Unified manager for RP2040 and Pi 5 simulated nodes."""
+    """Unified manager for RP2040, Teensy 4.1, and Pi 5 simulated nodes."""
 
     # Node types
     TYPE_RP2040 = "rp2040"
     TYPE_RPI5 = "rpi5"
-    VALID_TYPES = [TYPE_RP2040, TYPE_RPI5]
+    TYPE_TEENSY41 = "teensy41"
+    VALID_TYPES = [TYPE_RP2040, TYPE_RPI5, TYPE_TEENSY41]
 
     def __init__(self):
         # Base directories
@@ -59,6 +61,13 @@ class NodeManager:
         self.rp2040_build_dir = self.rp2040_dir / "build_sim"
         self.rp2040_storage_dir = self.script_dir / "rp2040_storage"
         self.rp2040_scripts_dir = self.script_dir / "rp2040_scripts"
+
+        # Teensy 4.1 specific paths
+        self.teensy41_dir = self.firmware_dir / "teensy41"
+        self.renode_teensy41_path = self.teensy41_dir / "simulation" / "renode_teensy41"
+        self.teensy41_build_dir = self.teensy41_dir / ".pio" / "build" / "simulation"
+        self.teensy41_storage_dir = self.script_dir / "teensy41_storage"
+        self.teensy41_scripts_dir = self.script_dir / "teensy41_scripts"
 
         # Pi 5 specific paths
         self.rpi5_dir = self.firmware_dir / "rpi5"
@@ -154,6 +163,8 @@ class NodeManager:
         self.logs_dir.mkdir(exist_ok=True)
         self.rp2040_storage_dir.mkdir(exist_ok=True)
         self.rp2040_scripts_dir.mkdir(exist_ok=True)
+        self.teensy41_storage_dir.mkdir(exist_ok=True)
+        self.teensy41_scripts_dir.mkdir(exist_ok=True)
         self.rpi5_config_dir.mkdir(exist_ok=True)
 
     # =========================================================================
@@ -187,6 +198,8 @@ class NodeManager:
         # Type-specific setup
         if node_type == self.TYPE_RP2040:
             success = self._create_rp2040(node_id, node, udp_port)
+        elif node_type == self.TYPE_TEENSY41:
+            success = self._create_teensy41(node_id, node, udp_port)
         else:
             success = self._create_rpi5(node_id, node, role, display_name)
 
@@ -219,6 +232,8 @@ class NodeManager:
         # Type-specific start
         if node["type"] == self.TYPE_RP2040:
             return self._start_rp2040(node_id, node, foreground=foreground)
+        elif node["type"] == self.TYPE_TEENSY41:
+            return self._start_teensy41(node_id, node, foreground=foreground)
         else:
             return self._start_rpi5(node_id, node)
 
@@ -284,6 +299,10 @@ class NodeManager:
             storage_path = self.rp2040_storage_dir / f"{node_id}.bin"
             if storage_path.exists():
                 storage_path.unlink()
+        elif node["type"] == self.TYPE_TEENSY41:
+            storage_path = self.teensy41_storage_dir / f"{node_id}.bin"
+            if storage_path.exists():
+                storage_path.unlink()
         else:
             config_dir = self.rpi5_config_dir / node_id
             if config_dir.exists():
@@ -311,6 +330,13 @@ class NodeManager:
         if node["type"] == self.TYPE_RP2040:
             storage_path = self.rp2040_storage_dir / f"{node_id}.bin"
             script_path = self.rp2040_scripts_dir / f"{node_id}.resc"
+            if storage_path.exists():
+                storage_path.unlink()
+            if script_path.exists():
+                script_path.unlink()
+        elif node["type"] == self.TYPE_TEENSY41:
+            storage_path = self.teensy41_storage_dir / f"{node_id}.bin"
+            script_path = self.teensy41_scripts_dir / f"{node_id}.resc"
             if storage_path.exists():
                 storage_path.unlink()
             if script_path.exists():
@@ -506,7 +532,7 @@ class NodeManager:
             return
 
         # Determine which log file(s) to show based on node type
-        if node["type"] == self.TYPE_RP2040:
+        if node["type"] in (self.TYPE_RP2040, self.TYPE_TEENSY41):
             renode_log = self.logs_dir / f"{node_id}_renode.log"
             main_log = self.logs_dir / f"{node_id}.log"
 
@@ -762,6 +788,168 @@ start
             return False
 
     # =========================================================================
+    # Teensy 4.1 Specific
+    # =========================================================================
+
+    def _create_teensy41(self, node_id: str, node: Dict, udp_port: Optional[int]) -> bool:
+        """Create Teensy 4.1 node configuration."""
+        # Assign UDP port
+        if udp_port is None:
+            udp_port = self.state["next_udp_port"]
+            self.state["next_udp_port"] = udp_port - 1
+
+        node["udp_port"] = udp_port
+
+        # Generate Renode script
+        script_content = self._generate_teensy41_resc(node_id, udp_port)
+        script_path = self.teensy41_scripts_dir / f"{node_id}.resc"
+
+        with open(script_path, 'w') as f:
+            f.write(script_content)
+
+        print(f"  UDP Port: {udp_port}")
+        print(f"  Script: {script_path}")
+        return True
+
+    def _generate_teensy41_resc(self, node_id: str, udp_port: int) -> str:
+        """Generate Renode script for Teensy 4.1 node."""
+        firmware_path = self.teensy41_build_dir / "firmware.elf"
+
+        return f'''# SAINT.OS Teensy 4.1 Node: {node_id}
+# Auto-generated by node_manager.py
+
+$machine_name="{node_id}"
+
+path add @{self.renode_teensy41_path}
+
+# Include peripheral C# definitions and create machine
+include @{self.renode_teensy41_path}/cores/initialize_peripherals.resc
+
+# Load standard platform
+machine LoadPlatformDescription @{self.renode_teensy41_path}/boards/teensy41.repl
+
+# Configure peripherals for this specific node
+sysbus.persistent_storage StoragePath "{self.teensy41_storage_dir}"
+sysbus.persistent_storage NodeId "{node_id}"
+sysbus.udp_bridge LocalPort {udp_port}
+
+# Load firmware
+sysbus LoadELF @{firmware_path}
+
+# Show UART output in Renode console (required for --console mode)
+showAnalyzer sysbus.uart0
+
+# Log all UART output at highest verbosity
+logLevel -1 sysbus.uart0
+
+echo "SAINT.OS Teensy 4.1 Node: {node_id}"
+echo "  UDP Port: {udp_port}"
+echo "  Storage: {self.teensy41_storage_dir}/{node_id}.bin"
+
+start
+'''
+
+    def _start_teensy41(self, node_id: str, node: Dict, foreground: bool = False) -> bool:
+        """Start a Teensy 4.1 node in Renode.
+
+        Args:
+            node_id: Node identifier
+            node: Node state dict
+            foreground: If True, run in foreground with output to terminal.
+                        If False, run in background with output to log file.
+        """
+        script_path = self.teensy41_scripts_dir / f"{node_id}.resc"
+
+        if not script_path.exists():
+            print(f"Error: Renode script not found: {script_path}")
+            return False
+
+        if not os.path.exists(self.renode_path):
+            print(f"Error: Renode not found at: {self.renode_path}")
+            print("Set RENODE_PATH environment variable or install Renode")
+            return False
+
+        # Check firmware
+        firmware_path = self.teensy41_build_dir / "firmware.elf"
+        if not firmware_path.exists():
+            print(f"Error: Firmware not found: {firmware_path}")
+            print("Build firmware with: cd firmware/teensy41 && pio run -e simulation")
+            return False
+
+        log_file = self.logs_dir / f"{node_id}.log"
+        # Use --disable-xwt for headless operation (no GUI)
+        cmd = [self.renode_path, "--disable-xwt", "--console", str(script_path)]
+
+        try:
+            if foreground:
+                # Run in foreground - output goes directly to terminal
+                print(f"\n{'='*60}")
+                print(f"Starting Teensy 4.1 node '{node_id}' in foreground")
+                print(f"  UDP Port: {node['udp_port']}")
+                print(f"  Press Ctrl+C to stop")
+                print(f"  Requires: micro-ROS agent on port 8888")
+                print(f"{'='*60}\n")
+
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=sys.stdout,
+                    stderr=sys.stderr,
+                    stdin=sys.stdin,
+                )
+
+                node["pid"] = proc.pid
+                node["status"] = "running"
+                node["started"] = datetime.now().isoformat()
+                self._save_state()
+
+                try:
+                    proc.wait()
+                except KeyboardInterrupt:
+                    print("\n\nStopping node...")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+
+                node["pid"] = None
+                node["status"] = "stopped"
+                self._save_state()
+                return True
+            else:
+                # Run in background - output goes to log file
+                with open(log_file, 'a') as log:
+                    log.write(f"\n{'='*60}\n")
+                    log.write(f"Starting Teensy 4.1 node at {datetime.now().isoformat()}\n")
+                    log.write(f"{'='*60}\n")
+                    log.flush()
+
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        stdin=subprocess.DEVNULL,
+                    )
+
+                node["pid"] = proc.pid
+                node["status"] = "running"
+                node["started"] = datetime.now().isoformat()
+                self._save_state()
+
+                print(f"Started Teensy 4.1 node '{node_id}' (PID: {proc.pid})")
+                print(f"  UDP Port: {node['udp_port']}")
+                print(f"  Log: {log_file}")
+                print(f"  Requires: ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888")
+                return True
+
+        except Exception as e:
+            print(f"Error starting node: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    # =========================================================================
     # Pi 5 Specific
     # =========================================================================
 
@@ -931,6 +1119,7 @@ def main():
         epilog="""
 Node Types:
   rp2040    RP2040 microcontroller (Renode + micro-ROS)
+  teensy41  Teensy 4.1 microcontroller (Renode + micro-ROS over UDP)
   rpi5      Raspberry Pi 5 (native Python + ROS2)
 
 Examples:

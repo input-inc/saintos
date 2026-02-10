@@ -96,6 +96,7 @@ target_include_directories(wiznet_iolibrary PUBLIC
     ${IOLIBRARY_PATH}/Ethernet/W5500
     ${IOLIBRARY_PATH}/Internet/DHCP
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../shared/include
     ${CMAKE_SOURCE_DIR}/transport
 )
 
@@ -116,7 +117,8 @@ target_link_libraries(wiznet_iolibrary
 # Common source files
 set(SAINT_NODE_SOURCES
     src/main.c
-    src/node_state.c
+    ../shared/src/node_state.c
+    ../shared/src/flash_helpers.c
     src/hardware.c
     src/led_status.c
     src/pico_clock.c
@@ -127,7 +129,7 @@ set(SAINT_NODE_SOURCES
 
 # Add transport based on build mode
 if(SIMULATION)
-    list(APPEND SAINT_NODE_SOURCES transport/transport_udp_bridge.c)
+    list(APPEND SAINT_NODE_SOURCES ../shared/src/transport_udp_bridge.c)
 else()
     list(APPEND SAINT_NODE_SOURCES transport/transport_w5500.c)
     list(APPEND SAINT_NODE_SOURCES src/discovery.c)
@@ -140,6 +142,7 @@ add_dependencies(saint_node generate_version)
 
 target_include_directories(saint_node PUBLIC
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../shared/include
     ${CMAKE_BINARY_DIR}/generated
     ${MICRO_ROS_PATH}/libmicroros/include
     ${IOLIBRARY_PATH}/Ethernet
