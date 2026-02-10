@@ -28,6 +28,7 @@
 #define PIN_CAP_MAESTRO_SERVO   0x200
 #define PIN_CAP_SYREN_MOTOR     0x400
 #define PIN_CAP_FAS100_SENSOR   0x800
+#define PIN_CAP_ROBOCLAW_MOTOR  0x1000
 
 // Convenience combinations
 #define PIN_CAP_GPIO            (PIN_CAP_DIGITAL_IN | PIN_CAP_DIGITAL_OUT)
@@ -52,7 +53,8 @@ typedef enum {
     PIN_MODE_RESERVED,
     PIN_MODE_MAESTRO_SERVO,
     PIN_MODE_SYREN_MOTOR,
-    PIN_MODE_FAS100_SENSOR
+    PIN_MODE_FAS100_SENSOR,
+    PIN_MODE_ROBOCLAW_MOTOR
 } pin_mode_t;
 
 // =============================================================================
@@ -123,6 +125,11 @@ typedef struct {
         struct {
             uint8_t poll_interval_ms;
         } fas100;
+        struct {
+            uint8_t address;
+            uint8_t deadband;
+            uint16_t max_current_ma;
+        } roboclaw;
     } params;
 } pin_config_t;
 
@@ -177,6 +184,8 @@ bool pin_config_set_maestro_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t
                                     uint16_t neutral_us, uint16_t speed, uint16_t acceleration,
                                     uint16_t home_us);
 bool pin_config_set_fas100_params(uint8_t gpio, uint8_t poll_interval_ms);
+bool pin_config_set_roboclaw_params(uint8_t gpio, uint8_t address, uint8_t deadband,
+                                     uint16_t max_current_ma);
 void pin_config_apply_hardware(void);
 const char* pin_mode_to_string(pin_mode_t mode);
 pin_mode_t pin_mode_from_string(const char* str);

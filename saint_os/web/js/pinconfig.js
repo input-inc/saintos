@@ -68,6 +68,10 @@ class PinConfigManager {
             modalSyrenTimeout: document.getElementById('modal-syren-timeout'),
             modalFas100Params: document.getElementById('modal-fas100-params'),
             modalFas100PollInterval: document.getElementById('modal-fas100-poll-interval'),
+            modalRoboclawParams: document.getElementById('modal-roboclaw-params'),
+            modalRoboclawAddress: document.getElementById('modal-roboclaw-address'),
+            modalRoboclawDeadband: document.getElementById('modal-roboclaw-deadband'),
+            modalRoboclawMaxCurrent: document.getElementById('modal-roboclaw-max-current'),
         };
     }
 
@@ -374,6 +378,7 @@ class PinConfigManager {
             'maestro_servo': 'maestro_servo',
             'syren_motor': 'syren_motor',
             'fas100_sensor': 'fas100_sensor',
+            'roboclaw_motor': 'roboclaw_motor',
         };
         const required = modeMap[mode] || mode;
         return caps.includes(required);
@@ -492,6 +497,7 @@ class PinConfigManager {
             { value: 'maestro_servo', label: 'Maestro Servo', cap: 'maestro_servo' },
             { value: 'syren_motor', label: 'SyRen Motor', cap: 'syren_motor' },
             { value: 'fas100_sensor', label: 'FAS100 Sensor', cap: 'fas100_sensor' },
+            { value: 'roboclaw_motor', label: 'RoboClaw Motor', cap: 'roboclaw_motor' },
         ];
 
         for (const opt of modeOptions) {
@@ -546,6 +552,11 @@ class PinConfigManager {
         // FAS100 params
         this.elements.modalFas100PollInterval.value = config.poll_interval_ms || 50;
 
+        // RoboClaw params
+        this.elements.modalRoboclawAddress.value = config.address || 128;
+        this.elements.modalRoboclawDeadband.value = config.deadband || 0;
+        this.elements.modalRoboclawMaxCurrent.value = config.max_current_ma || 0;
+
         // Update parameter visibility
         this.updateModalParams(config.mode || '');
 
@@ -572,6 +583,7 @@ class PinConfigManager {
         this.elements.modalMaestroParams.classList.add('hidden');
         this.elements.modalSyrenParams.classList.add('hidden');
         this.elements.modalFas100Params.classList.add('hidden');
+        this.elements.modalRoboclawParams.classList.add('hidden');
 
         // Show relevant section
         if (mode === 'pwm') {
@@ -586,6 +598,8 @@ class PinConfigManager {
             this.elements.modalSyrenParams.classList.remove('hidden');
         } else if (mode === 'fas100_sensor') {
             this.elements.modalFas100Params.classList.remove('hidden');
+        } else if (mode === 'roboclaw_motor') {
+            this.elements.modalRoboclawParams.classList.remove('hidden');
         }
     }
 
@@ -632,6 +646,10 @@ class PinConfigManager {
                 config.timeout_ms = parseInt(this.elements.modalSyrenTimeout.value) || 0;
             } else if (mode === 'fas100_sensor') {
                 config.poll_interval_ms = parseInt(this.elements.modalFas100PollInterval.value) || 50;
+            } else if (mode === 'roboclaw_motor') {
+                config.address = parseInt(this.elements.modalRoboclawAddress.value) || 128;
+                config.deadband = parseInt(this.elements.modalRoboclawDeadband.value) || 0;
+                config.max_current_ma = parseInt(this.elements.modalRoboclawMaxCurrent.value) || 0;
             }
 
             this.pinConfig[gpio] = config;

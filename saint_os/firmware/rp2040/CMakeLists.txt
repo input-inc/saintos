@@ -128,6 +128,7 @@ set(SAINT_NODE_SOURCES
     src/pin_control.c
     src/syren_driver.c
     src/fas100_driver.c
+    src/roboclaw_driver.c
 )
 
 # Add transport based on build mode

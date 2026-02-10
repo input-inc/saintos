@@ -774,6 +774,25 @@
                                 </div>
                                 <p class="text-xs text-slate-500">How often to poll the FAS100 sensor. Default 50ms. Min 20ms.</p>
                             </div>
+
+                            <!-- RoboClaw Motor Parameters (conditional) -->
+                            <div id="modal-roboclaw-params" class="hidden space-y-3">
+                                <div class="grid grid-cols-3 gap-3">
+                                    <div>
+                                        <label class="block text-xs text-slate-400 mb-1">Address</label>
+                                        <input type="number" id="modal-roboclaw-address" class="input-field w-full" value="128" min="128" max="135">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs text-slate-400 mb-1">Deadband</label>
+                                        <input type="number" id="modal-roboclaw-deadband" class="input-field w-full" value="0" min="0" max="127">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs text-slate-400 mb-1">Max Current (mA)</label>
+                                        <input type="number" id="modal-roboclaw-max-current" class="input-field w-full" value="0" min="0" max="60000">
+                                    </div>
+                                </div>
+                                <p class="text-xs text-slate-500">Address: 128-135 (0x80-0x87). Max Current: 0 = unlimited. 5 channels per unit (motor, encoder, voltage, current, temp).</p>
+                            </div>
                         </div>
 
                         <div class="flex items-center gap-3 mt-6">
