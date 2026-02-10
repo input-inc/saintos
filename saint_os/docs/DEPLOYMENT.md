@@ -238,7 +238,12 @@ The micro-ROS agent can use significant CPU. If needed:
 
 For production deployments:
 
-1. **Change default passwords**
+1. **Change the default password** — The web interface password defaults to `12345`. Change it in `saint_server/config/server_config.yaml`:
+   ```yaml
+   websocket:
+     password: 'your-secure-password'
+   ```
+   Restart the server after editing. The password can also be changed at runtime from the web UI settings.
 2. **Use HTTPS** for web interface (requires reverse proxy like nginx)
 3. **Restrict network access** with firewall rules
 4. **Keep system updated** with security patches

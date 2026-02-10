@@ -13,6 +13,7 @@
 extern "C" {
 #include "pin_control.h"
 #include "pin_config.h"
+#include "maestro_driver.h"
 }
 
 // =============================================================================
@@ -137,6 +138,32 @@ bool pin_control_set_value(uint8_t gpio, float value)
 
         case PIN_MODE_DIGITAL_OUT:
             return pin_control_set_digital(gpio, value >= 0.5f);
+
+        case PIN_MODE_MAESTRO_SERVO:
+        {
+            // value is angle in degrees (0-180)
+            uint8_t channel = gpio - MAESTRO_VIRTUAL_GPIO_BASE;
+            if (channel >= MAESTRO_MAX_CHANNELS) return false;
+
+            float angle = value;
+            if (angle < 0.0f) angle = 0.0f;
+            if (angle > 180.0f) angle = 180.0f;
+
+            const maestro_channel_config_t* mcfg = maestro_get_channel_config(channel);
+            if (!mcfg) return false;
+
+            uint16_t target = maestro_angle_to_target(angle, mcfg);
+            bool ok = maestro_set_target(channel, target);
+
+            // Store runtime value (angle)
+            pin_runtime_value_t* rv = find_or_create_runtime(gpio);
+            if (rv) {
+                rv->value = angle;
+                rv->last_updated = millis();
+            }
+
+            return ok;
+        }
 
         default:
             Serial.printf("Pin control: GPIO %d mode %s not controllable\n",
@@ -302,6 +329,31 @@ void pin_control_update_state(void)
                 pin_control_read_digital(cfg->gpio);
                 break;
 
+            case PIN_MODE_MAESTRO_SERVO:
+            {
+                // Read actual position from Maestro
+                if (maestro_is_connected()) {
+                    uint8_t channel = cfg->gpio - MAESTRO_VIRTUAL_GPIO_BASE;
+                    uint16_t pos_qus = maestro_get_position(channel);
+                    if (pos_qus > 0) {
+                        const maestro_channel_config_t* mcfg = maestro_get_channel_config(channel);
+                        if (mcfg && mcfg->max_pulse_us > mcfg->min_pulse_us) {
+                            float pulse_us = pos_qus / 4.0f;
+                            float angle = (pulse_us - mcfg->min_pulse_us) /
+                                          (float)(mcfg->max_pulse_us - mcfg->min_pulse_us) * 180.0f;
+                            if (angle < 0.0f) angle = 0.0f;
+                            if (angle > 180.0f) angle = 180.0f;
+                            pin_runtime_value_t* rv = find_or_create_runtime(cfg->gpio);
+                            if (rv) {
+                                rv->value = angle;
+                                rv->last_updated = millis();
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+
             default:
                 break;
         }
@@ -332,6 +384,10 @@ void pin_control_estop(void)
                 Serial.printf("ESTOP: GPIO %d (Servo) -> 90 deg (center)\n", cfg->gpio);
                 break;
 
+            case PIN_MODE_MAESTRO_SERVO:
+                // Maestro channels handled below via go_home
+                break;
+
             case PIN_MODE_DIGITAL_OUT:
                 // Set digital outputs low
                 pin_control_set_digital(cfg->gpio, false);
@@ -342,6 +398,12 @@ void pin_control_estop(void)
                 // Input pins don't need ESTOP handling
                 break;
         }
+    }
+
+    // Send all Maestro channels to home positions
+    if (maestro_is_connected()) {
+        maestro_go_home();
+        Serial.printf("ESTOP: Maestro -> go home\n");
     }
 
     Serial.printf("ESTOP: Complete\n");

@@ -22,6 +22,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -36,6 +37,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -67,6 +69,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -84,6 +87,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -98,6 +102,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -129,6 +134,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -191,6 +197,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -205,6 +212,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -222,6 +230,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -236,6 +245,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -253,6 +263,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -267,6 +278,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -284,6 +296,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -298,6 +311,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -312,6 +326,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -326,6 +341,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -343,6 +359,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -357,6 +374,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -374,6 +392,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -391,6 +410,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500
@@ -405,6 +425,7 @@ logical_functions:
     compatible_modes:
       - servo
       - pwm
+      - maestro_servo
     default_params:
       pwm_frequency: 50
       min_pulse_us: 500

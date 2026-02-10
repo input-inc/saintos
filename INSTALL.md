@@ -461,6 +461,22 @@ ros2 run saint_os saint_server --ros-args \
     -p websocket_port:=9090
 ```
 
+### Server Password
+
+The web interface requires a password for WebSocket connections. The default password is `12345`.
+
+To change it, edit `saint_os/saint_server/config/server_config.yaml`:
+
+```yaml
+websocket:
+  password: 'your-new-password'
+  auth_timeout: 10.0
+```
+
+Restart the server after changing the password. You can also change the password at runtime from the web interface — the new password will be written back to `server_config.yaml` automatically.
+
+To disable authentication entirely, remove the `password` line or set it to an empty string.
+
 ### Using Launch Files
 
 ```bash
@@ -639,7 +655,7 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 After successful installation:
 
 1. Review the [SAINT_OS_SPEC.md](SAINT_OS_SPEC.md) for system architecture
-2. Configure the server in `saint_os/config/server.yaml`
+2. Configure the server in `saint_os/saint_server/config/server_config.yaml`
 3. Set up your network (internal Ethernet + external WiFi)
 4. Access the web administration interface at `http://<server-ip>/`
 

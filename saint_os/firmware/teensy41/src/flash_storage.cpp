@@ -77,6 +77,9 @@ bool flash_storage_load(flash_storage_data_t* data)
             mutable_data->pin_config.version = FLASH_PIN_CONFIG_VERSION;
             mutable_data->pin_config.pin_count = 0;
         }
+        if (mutable_data->version <= 2) {
+            memset(&mutable_data->maestro_config, 0, sizeof(mutable_data->maestro_config));
+        }
         mutable_data->version = FLASH_STORAGE_VERSION;
     }
 
@@ -166,6 +169,9 @@ bool flash_storage_load(flash_storage_data_t* data)
             memset(&data->pin_config, 0, sizeof(data->pin_config));
             data->pin_config.version = FLASH_PIN_CONFIG_VERSION;
             data->pin_config.pin_count = 0;
+        }
+        if (data->version <= 2) {
+            memset(&data->maestro_config, 0, sizeof(data->maestro_config));
         }
         data->version = FLASH_STORAGE_VERSION;
     }

@@ -46,6 +46,7 @@ class PinCapability:
             'i2c_scl': 'i2c_scl',
             'uart_tx': 'uart_tx',
             'uart_rx': 'uart_rx',
+            'maestro_servo': 'maestro_servo',
         }
         required_cap = mode_map.get(mode, mode)
         return required_cap in self.capabilities
@@ -1137,7 +1138,7 @@ class StateManager:
         if not node or not node.pin_config:
             return []
 
-        controllable_modes = {'pwm', 'servo', 'digital_out'}
+        controllable_modes = {'pwm', 'servo', 'digital_out', 'maestro_servo'}
         result = []
 
         for gpio, config in node.pin_config.pins.items():

@@ -49,6 +49,13 @@ class PinConfigManager {
             modalDigitalInParams: document.getElementById('modal-digital-in-params'),
             modalPullUp: document.getElementById('modal-pull-up'),
             modalPullDown: document.getElementById('modal-pull-down'),
+            modalMaestroParams: document.getElementById('modal-maestro-params'),
+            modalMaestroMinPulse: document.getElementById('modal-maestro-min-pulse'),
+            modalMaestroMaxPulse: document.getElementById('modal-maestro-max-pulse'),
+            modalMaestroNeutral: document.getElementById('modal-maestro-neutral'),
+            modalMaestroHome: document.getElementById('modal-maestro-home'),
+            modalMaestroSpeed: document.getElementById('modal-maestro-speed'),
+            modalMaestroAccel: document.getElementById('modal-maestro-accel'),
         };
     }
 
@@ -336,6 +343,7 @@ class PinConfigManager {
             'pwm': 'pwm',
             'servo': 'pwm',
             'adc': 'adc',
+            'maestro_servo': 'maestro_servo',
         };
         const required = modeMap[mode] || mode;
         return caps.includes(required);
@@ -451,6 +459,7 @@ class PinConfigManager {
             { value: 'pwm', label: 'PWM Output', cap: 'pwm' },
             { value: 'servo', label: 'Servo', cap: 'pwm' },
             { value: 'adc', label: 'Analog Input', cap: 'adc' },
+            { value: 'maestro_servo', label: 'Maestro Servo', cap: 'maestro_servo' },
         ];
 
         for (const opt of modeOptions) {
@@ -469,6 +478,14 @@ class PinConfigManager {
         this.elements.modalPwmFreq.value = config.pwm_frequency || 50;
         this.elements.modalPullUp.checked = config.pull_up || false;
         this.elements.modalPullDown.checked = config.pull_down || false;
+
+        // Maestro params
+        this.elements.modalMaestroMinPulse.value = config.min_pulse_us || 992;
+        this.elements.modalMaestroMaxPulse.value = config.max_pulse_us || 2000;
+        this.elements.modalMaestroNeutral.value = config.neutral_us || 1500;
+        this.elements.modalMaestroHome.value = config.home_us || 0;
+        this.elements.modalMaestroSpeed.value = config.speed || 0;
+        this.elements.modalMaestroAccel.value = config.acceleration || 0;
 
         // Update parameter visibility
         this.updateModalParams(config.mode || '');
@@ -492,12 +509,15 @@ class PinConfigManager {
         // Hide all param sections
         this.elements.modalPwmParams.classList.add('hidden');
         this.elements.modalDigitalInParams.classList.add('hidden');
+        this.elements.modalMaestroParams.classList.add('hidden');
 
         // Show relevant section
         if (mode === 'pwm' || mode === 'servo') {
             this.elements.modalPwmParams.classList.remove('hidden');
         } else if (mode === 'digital_in') {
             this.elements.modalDigitalInParams.classList.remove('hidden');
+        } else if (mode === 'maestro_servo') {
+            this.elements.modalMaestroParams.classList.remove('hidden');
         }
     }
 
@@ -527,6 +547,13 @@ class PinConfigManager {
             } else if (mode === 'digital_in') {
                 config.pull_up = this.elements.modalPullUp.checked;
                 config.pull_down = this.elements.modalPullDown.checked;
+            } else if (mode === 'maestro_servo') {
+                config.min_pulse_us = parseInt(this.elements.modalMaestroMinPulse.value) || 992;
+                config.max_pulse_us = parseInt(this.elements.modalMaestroMaxPulse.value) || 2000;
+                config.neutral_us = parseInt(this.elements.modalMaestroNeutral.value) || 1500;
+                config.home_us = parseInt(this.elements.modalMaestroHome.value) || 0;
+                config.speed = parseInt(this.elements.modalMaestroSpeed.value) || 0;
+                config.acceleration = parseInt(this.elements.modalMaestroAccel.value) || 0;
             }
 
             this.pinConfig[gpio] = config;

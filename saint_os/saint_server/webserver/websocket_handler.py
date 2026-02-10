@@ -87,6 +87,14 @@ def translate_normalized_value(value: float, mode: str, input_range: str = 'bipo
             # Unipolar/trigger: 0→0, 1→180
             return value * 180.0
 
+    elif mode_lower == 'maestro_servo':
+        if use_bipolar:
+            # Bipolar/joystick: -1→0, 0→90, 1→180
+            return (value + 1.0) * 90.0
+        else:
+            # Unipolar/trigger: 0→0, 1→180
+            return value * 180.0
+
     elif mode_lower == 'digital_out':
         # Threshold at 0.5
         return 1.0 if value >= 0.5 else 0.0

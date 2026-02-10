@@ -13,6 +13,7 @@ extern "C" {
 #include "pin_config.h"
 #include "pin_control.h"
 #include "flash_storage.h"
+#include "maestro_driver.h"
 }
 
 #include <rcl/rcl.h>
@@ -346,7 +347,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"fw_build\":\"%s\","
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
-        "\"cpu_temp\":%.1f"
+        "\"cpu_temp\":%.1f,"
+        "\"maestro_connected\":%s"
         "}",
         g_node.node_id,
         g_node.mac_address[0], g_node.mac_address[1],
@@ -359,7 +361,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         FIRMWARE_BUILD_TIMESTAMP,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
-        cpu_temp
+        cpu_temp,
+        maestro_is_connected() ? "true" : "false"
     );
 
     announcement_msg.data.data = announcement_buffer;
@@ -572,6 +575,9 @@ void setup()
     // Initialize pin control
     pin_control_init();
 
+    // Initialize Maestro USB host driver
+    maestro_init();
+
     // Initialize hardware
     hardware_init();
 
@@ -688,6 +694,9 @@ void loop()
 
     // Update LED
     led_update();
+
+    // Poll Maestro USB host
+    maestro_update();
 
     // Error state - just blink LED
     if (g_node.state == NODE_STATE_ERROR) {

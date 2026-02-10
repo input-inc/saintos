@@ -16,7 +16,7 @@
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   2
+#define FLASH_STORAGE_VERSION   3
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
@@ -41,6 +41,25 @@ typedef struct __attribute__((packed)) {
 } flash_pin_config_t;
 
 // =============================================================================
+// Maestro Servo Controller Configuration
+// =============================================================================
+
+#define FLASH_MAESTRO_MAX_CHANNELS 24
+
+typedef struct __attribute__((packed)) {
+    uint8_t channel_count;
+    uint8_t reserved_m[3];
+    struct __attribute__((packed)) {
+        uint16_t min_pulse_us;
+        uint16_t max_pulse_us;
+        uint16_t neutral_us;
+        uint16_t speed;
+        uint16_t acceleration;
+        uint16_t home_us;
+    } channels[FLASH_MAESTRO_MAX_CHANNELS];
+} flash_maestro_config_t;
+
+// =============================================================================
 // Main Storage Structure
 // =============================================================================
 
@@ -61,6 +80,8 @@ typedef struct __attribute__((packed)) {
     uint16_t server_port;
 
     flash_pin_config_t pin_config;
+
+    flash_maestro_config_t maestro_config;
 
     uint8_t reserved[32];
 

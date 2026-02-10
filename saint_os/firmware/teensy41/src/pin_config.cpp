@@ -14,6 +14,7 @@ extern "C" {
 #include "pin_config.h"
 #include "flash_storage.h"
 #include "saint_node.h"
+#include "maestro_driver.h"
 }
 
 // =============================================================================
@@ -69,6 +70,32 @@ static const pin_definition_t available_pins[] = {
     { 39, "A15", PIN_CAP_GPIO | PIN_CAP_ADC },
     { 40, "A16", PIN_CAP_GPIO | PIN_CAP_ADC },
     { 41, "A17", PIN_CAP_GPIO | PIN_CAP_ADC },
+
+    // Maestro virtual pins (channels 0-23, GPIO 200-223)
+    { 200, "M0",  PIN_CAP_MAESTRO_SERVO },
+    { 201, "M1",  PIN_CAP_MAESTRO_SERVO },
+    { 202, "M2",  PIN_CAP_MAESTRO_SERVO },
+    { 203, "M3",  PIN_CAP_MAESTRO_SERVO },
+    { 204, "M4",  PIN_CAP_MAESTRO_SERVO },
+    { 205, "M5",  PIN_CAP_MAESTRO_SERVO },
+    { 206, "M6",  PIN_CAP_MAESTRO_SERVO },
+    { 207, "M7",  PIN_CAP_MAESTRO_SERVO },
+    { 208, "M8",  PIN_CAP_MAESTRO_SERVO },
+    { 209, "M9",  PIN_CAP_MAESTRO_SERVO },
+    { 210, "M10", PIN_CAP_MAESTRO_SERVO },
+    { 211, "M11", PIN_CAP_MAESTRO_SERVO },
+    { 212, "M12", PIN_CAP_MAESTRO_SERVO },
+    { 213, "M13", PIN_CAP_MAESTRO_SERVO },
+    { 214, "M14", PIN_CAP_MAESTRO_SERVO },
+    { 215, "M15", PIN_CAP_MAESTRO_SERVO },
+    { 216, "M16", PIN_CAP_MAESTRO_SERVO },
+    { 217, "M17", PIN_CAP_MAESTRO_SERVO },
+    { 218, "M18", PIN_CAP_MAESTRO_SERVO },
+    { 219, "M19", PIN_CAP_MAESTRO_SERVO },
+    { 220, "M20", PIN_CAP_MAESTRO_SERVO },
+    { 221, "M21", PIN_CAP_MAESTRO_SERVO },
+    { 222, "M22", PIN_CAP_MAESTRO_SERVO },
+    { 223, "M23", PIN_CAP_MAESTRO_SERVO },
 };
 
 #define AVAILABLE_PIN_COUNT (sizeof(available_pins) / sizeof(available_pins[0]))
@@ -112,7 +139,8 @@ static const char* mode_strings[] = {
     [PIN_MODE_I2C_SCL]      = "i2c_scl",
     [PIN_MODE_UART_TX]      = "uart_tx",
     [PIN_MODE_UART_RX]      = "uart_rx",
-    [PIN_MODE_RESERVED]     = "reserved",
+    [PIN_MODE_RESERVED]      = "reserved",
+    [PIN_MODE_MAESTRO_SERVO] = "maestro_servo",
 };
 
 #define MODE_STRING_COUNT (sizeof(mode_strings) / sizeof(mode_strings[0]))
@@ -196,6 +224,8 @@ static bool is_mode_compatible(uint16_t capabilities, pin_mode_t mode)
             return (capabilities & PIN_CAP_UART_TX) != 0;
         case PIN_MODE_UART_RX:
             return (capabilities & PIN_CAP_UART_RX) != 0;
+        case PIN_MODE_MAESTRO_SERVO:
+            return (capabilities & PIN_CAP_MAESTRO_SERVO) != 0;
         default:
             return false;
     }
@@ -315,6 +345,10 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
         if (pin->capabilities & PIN_CAP_UART_RX) {
             caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
                 "%s\"uart_rx\"", caps_len > 0 ? "," : "");
+        }
+        if (pin->capabilities & PIN_CAP_MAESTRO_SERVO) {
+            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
+                "%s\"maestro_servo\"", caps_len > 0 ? "," : "");
         }
 
         ret = snprintf(buffer + written, buffer_size - written,
@@ -487,6 +521,32 @@ bool pin_config_apply_json(const char* json, size_t json_len)
 
                     pin_config_set_pwm_params(gpio, freq, 0);
                 }
+
+                if (mode == PIN_MODE_MAESTRO_SERVO) {
+                    // Parse Maestro channel parameters
+                    uint16_t min_p = MAESTRO_DEFAULT_MIN_PULSE;
+                    uint16_t max_p = MAESTRO_DEFAULT_MAX_PULSE;
+                    uint16_t neut  = MAESTRO_DEFAULT_NEUTRAL;
+                    uint16_t spd   = 0;
+                    uint16_t acc   = 0;
+                    uint16_t home  = 0;
+
+                    const char* p;
+                    p = strstr(value_start, "\"min_pulse_us\"");
+                    if (p && p < value_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; min_p = (uint16_t)atoi(p); } }
+                    p = strstr(value_start, "\"max_pulse_us\"");
+                    if (p && p < value_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; max_p = (uint16_t)atoi(p); } }
+                    p = strstr(value_start, "\"neutral_us\"");
+                    if (p && p < value_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; neut = (uint16_t)atoi(p); } }
+                    p = strstr(value_start, "\"speed\"");
+                    if (p && p < value_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; spd = (uint16_t)atoi(p); } }
+                    p = strstr(value_start, "\"acceleration\"");
+                    if (p && p < value_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; acc = (uint16_t)atoi(p); } }
+                    p = strstr(value_start, "\"home_us\"");
+                    if (p && p < value_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; home = (uint16_t)atoi(p); } }
+
+                    pin_config_set_maestro_params(gpio, min_p, max_p, neut, spd, acc, home);
+                }
             }
         }
 
@@ -529,6 +589,21 @@ bool pin_config_save(void)
         if (pin_configs[i].mode == PIN_MODE_PWM || pin_configs[i].mode == PIN_MODE_SERVO) {
             storage.pin_config.pins[i].param1 = pin_configs[i].params.pwm.frequency;
             storage.pin_config.pins[i].param2 = pin_configs[i].params.pwm.duty_cycle;
+        }
+    }
+
+    // Save Maestro channel configs
+    memset(&storage.maestro_config, 0, sizeof(storage.maestro_config));
+    storage.maestro_config.channel_count = MAESTRO_MAX_CHANNELS;
+    for (uint8_t ch = 0; ch < MAESTRO_MAX_CHANNELS; ch++) {
+        const maestro_channel_config_t* mcfg = maestro_get_channel_config(ch);
+        if (mcfg) {
+            storage.maestro_config.channels[ch].min_pulse_us  = mcfg->min_pulse_us;
+            storage.maestro_config.channels[ch].max_pulse_us  = mcfg->max_pulse_us;
+            storage.maestro_config.channels[ch].neutral_us    = mcfg->neutral_us;
+            storage.maestro_config.channels[ch].speed         = mcfg->speed;
+            storage.maestro_config.channels[ch].acceleration  = mcfg->acceleration;
+            storage.maestro_config.channels[ch].home_us       = mcfg->home_us;
         }
     }
 
@@ -577,6 +652,26 @@ bool pin_config_load(void)
         }
     }
 
+    // Restore Maestro channel configs from flash
+    if (storage.maestro_config.channel_count > 0) {
+        uint8_t count_m = storage.maestro_config.channel_count;
+        if (count_m > MAESTRO_MAX_CHANNELS) count_m = MAESTRO_MAX_CHANNELS;
+        for (uint8_t ch = 0; ch < count_m; ch++) {
+            maestro_channel_config_t mcfg;
+            mcfg.min_pulse_us  = storage.maestro_config.channels[ch].min_pulse_us;
+            mcfg.max_pulse_us  = storage.maestro_config.channels[ch].max_pulse_us;
+            mcfg.neutral_us    = storage.maestro_config.channels[ch].neutral_us;
+            mcfg.speed         = storage.maestro_config.channels[ch].speed;
+            mcfg.acceleration  = storage.maestro_config.channels[ch].acceleration;
+            mcfg.home_us       = storage.maestro_config.channels[ch].home_us;
+            // Only apply if non-zero (i.e., was configured)
+            if (mcfg.min_pulse_us > 0 || mcfg.max_pulse_us > 0) {
+                maestro_set_channel_config(ch, &mcfg);
+            }
+        }
+        Serial.printf("Pin config: restored %d Maestro channel configs\n", count_m);
+    }
+
     // Apply hardware configuration
     pin_config_apply_hardware();
 
@@ -588,6 +683,8 @@ void pin_config_reset(void)
 {
     // De-initialize any configured pins (reset to input mode)
     for (uint8_t i = 0; i < pin_config_count; i++) {
+        // Skip Maestro virtual pins — they don't have physical GPIO
+        if (pin_configs[i].gpio >= MAESTRO_VIRTUAL_GPIO_BASE) continue;
         pinMode(pin_configs[i].gpio, INPUT);
     }
 
@@ -661,6 +758,14 @@ bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
         case PIN_MODE_DIGITAL_OUT:
             cfg->params.digital_out.initial_state = false;
             break;
+        case PIN_MODE_MAESTRO_SERVO:
+            cfg->params.maestro.min_pulse_us  = MAESTRO_DEFAULT_MIN_PULSE;
+            cfg->params.maestro.max_pulse_us  = MAESTRO_DEFAULT_MAX_PULSE;
+            cfg->params.maestro.neutral_us    = MAESTRO_DEFAULT_NEUTRAL;
+            cfg->params.maestro.speed         = 0;
+            cfg->params.maestro.acceleration  = 0;
+            cfg->params.maestro.home_us       = 0;
+            break;
         default:
             break;
     }
@@ -690,6 +795,25 @@ bool pin_config_set_digital_in_params(uint8_t gpio, bool pull_up, bool pull_down
 
     cfg->params.digital_in.pull_up = pull_up;
     cfg->params.digital_in.pull_down = pull_down;
+
+    return true;
+}
+
+bool pin_config_set_maestro_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t max_pulse_us,
+                                    uint16_t neutral_us, uint16_t speed, uint16_t acceleration,
+                                    uint16_t home_us)
+{
+    pin_config_t* cfg = find_or_create_config(gpio);
+    if (!cfg || cfg->mode != PIN_MODE_MAESTRO_SERVO) {
+        return false;
+    }
+
+    cfg->params.maestro.min_pulse_us  = min_pulse_us;
+    cfg->params.maestro.max_pulse_us  = max_pulse_us;
+    cfg->params.maestro.neutral_us    = neutral_us;
+    cfg->params.maestro.speed         = speed;
+    cfg->params.maestro.acceleration  = acceleration;
+    cfg->params.maestro.home_us       = home_us;
 
     return true;
 }
@@ -749,6 +873,23 @@ void pin_config_apply_hardware(void)
             case PIN_MODE_UART_RX:
                 // UART pins are configured by Serial1 library; no explicit GPIO setup needed
                 break;
+
+            case PIN_MODE_MAESTRO_SERVO:
+            {
+                // Apply channel config to the Maestro driver
+                uint8_t channel = gpio - MAESTRO_VIRTUAL_GPIO_BASE;
+                if (channel < MAESTRO_MAX_CHANNELS) {
+                    maestro_channel_config_t mcfg;
+                    mcfg.min_pulse_us  = cfg->params.maestro.min_pulse_us;
+                    mcfg.max_pulse_us  = cfg->params.maestro.max_pulse_us;
+                    mcfg.neutral_us    = cfg->params.maestro.neutral_us;
+                    mcfg.speed         = cfg->params.maestro.speed;
+                    mcfg.acceleration  = cfg->params.maestro.acceleration;
+                    mcfg.home_us       = cfg->params.maestro.home_us;
+                    maestro_set_channel_config(channel, &mcfg);
+                }
+                break;
+            }
 
             default:
                 break;

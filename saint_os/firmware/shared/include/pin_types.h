@@ -25,6 +25,7 @@
 #define PIN_CAP_UART_TX         0x40
 #define PIN_CAP_UART_RX         0x80
 #define PIN_CAP_SPI             0x100
+#define PIN_CAP_MAESTRO_SERVO   0x200
 
 // Convenience combinations
 #define PIN_CAP_GPIO            (PIN_CAP_DIGITAL_IN | PIN_CAP_DIGITAL_OUT)
@@ -46,7 +47,8 @@ typedef enum {
     PIN_MODE_I2C_SCL,
     PIN_MODE_UART_TX,
     PIN_MODE_UART_RX,
-    PIN_MODE_RESERVED
+    PIN_MODE_RESERVED,
+    PIN_MODE_MAESTRO_SERVO
 } pin_mode_t;
 
 // =============================================================================
@@ -90,6 +92,14 @@ typedef struct {
         struct {
             bool initial_state;
         } digital_out;
+        struct {
+            uint16_t min_pulse_us;
+            uint16_t max_pulse_us;
+            uint16_t neutral_us;
+            uint16_t speed;
+            uint16_t acceleration;
+            uint16_t home_us;
+        } maestro;
     } params;
 } pin_config_t;
 
@@ -139,6 +149,9 @@ bool pin_config_has_configured_pins(void);
 bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name);
 bool pin_config_set_pwm_params(uint8_t gpio, uint32_t frequency, uint16_t duty_cycle);
 bool pin_config_set_digital_in_params(uint8_t gpio, bool pull_up, bool pull_down);
+bool pin_config_set_maestro_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t max_pulse_us,
+                                    uint16_t neutral_us, uint16_t speed, uint16_t acceleration,
+                                    uint16_t home_us);
 void pin_config_apply_hardware(void);
 const char* pin_mode_to_string(pin_mode_t mode);
 pin_mode_t pin_mode_from_string(const char* str);
