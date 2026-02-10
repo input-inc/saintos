@@ -439,6 +439,54 @@ colcon test-result --verbose
 
 ---
 
+## Building Node Firmware
+
+Node firmware (RP2040, Teensy 4.1) is built separately from the server using PlatformIO.
+
+### Prerequisites
+
+Install PlatformIO Core (CLI):
+
+```bash
+pip install platformio
+```
+
+The micro-ROS PlatformIO library (used by both RP2040 and Teensy) builds its own ROS2 dependencies via colcon. You must have a working ROS2 environment available. On macOS with Conda/RoboStack, activate the ROS2 environment before building firmware:
+
+```bash
+conda activate ros2_env
+```
+
+### Teensy 4.1
+
+```bash
+cd saint_os/firmware/teensy41
+
+# Build for hardware (real Teensy)
+pio run -e hardware
+
+# Build for Renode simulation
+pio run -e simulation
+```
+
+Or use the build script:
+
+```bash
+./build.sh hw    # Hardware build
+./build.sh sim   # Simulation build
+```
+
+### RP2040
+
+```bash
+cd saint_os/firmware/rp2040
+
+./build.sh hw    # Hardware build
+./build.sh sim   # Simulation build
+```
+
+---
+
 ## Running the Server
 
 After building, you can run the SAINT.OS server:
