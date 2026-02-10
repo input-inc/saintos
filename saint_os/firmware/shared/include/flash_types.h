@@ -16,7 +16,7 @@
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   3
+#define FLASH_STORAGE_VERSION   5
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
@@ -60,6 +60,36 @@ typedef struct __attribute__((packed)) {
 } flash_maestro_config_t;
 
 // =============================================================================
+// SyRen Motor Controller Configuration
+// =============================================================================
+
+#define FLASH_SYREN_MAX_CHANNELS 8
+
+typedef struct __attribute__((packed)) {
+    uint8_t channel_count;
+    uint8_t serial_port;    // Which UART (1-8 Teensy, 0-1 RP2040)
+    uint16_t baud_rate;     // Default 9600
+    struct __attribute__((packed)) {
+        uint8_t address;       // 128-135
+        uint8_t deadband;
+        uint8_t ramping;
+        uint8_t reserved_s;
+        uint16_t timeout_ms;
+    } channels[FLASH_SYREN_MAX_CHANNELS];
+} flash_syren_config_t;
+
+// =============================================================================
+// FAS100 ADV Current/Voltage Sensor Configuration
+// =============================================================================
+
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;
+    uint8_t serial_port;       // Which UART (0-1 RP2040, 1-8 Teensy)
+    uint8_t poll_interval_ms;  // Default 50ms
+    uint8_t reserved_f;
+} flash_fas100_config_t;
+
+// =============================================================================
 // Main Storage Structure
 // =============================================================================
 
@@ -82,6 +112,10 @@ typedef struct __attribute__((packed)) {
     flash_pin_config_t pin_config;
 
     flash_maestro_config_t maestro_config;
+
+    flash_syren_config_t syren_config;
+
+    flash_fas100_config_t fas100_config;
 
     uint8_t reserved[32];
 

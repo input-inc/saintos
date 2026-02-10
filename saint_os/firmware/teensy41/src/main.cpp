@@ -13,7 +13,10 @@ extern "C" {
 #include "pin_config.h"
 #include "pin_control.h"
 #include "flash_storage.h"
+#include "peripheral_driver.h"
 #include "maestro_driver.h"
+#include "syren_driver.h"
+#include "fas100_driver.h"
 }
 
 #include <rcl/rcl.h>
@@ -337,7 +340,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
 
     float cpu_temp = hardware_get_cpu_temp();
 
-    snprintf(announcement_buffer, sizeof(announcement_buffer),
+    int ann_len = snprintf(announcement_buffer, sizeof(announcement_buffer),
         "{"
         "\"node_id\":\"%s\","
         "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
@@ -348,8 +351,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
         "\"cpu_temp\":%.1f,"
-        "\"maestro_connected\":%s"
-        "}",
+        "\"peripherals\":{",
         g_node.node_id,
         g_node.mac_address[0], g_node.mac_address[1],
         g_node.mac_address[2], g_node.mac_address[3],
@@ -361,9 +363,23 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         FIRMWARE_BUILD_TIMESTAMP,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
-        cpu_temp,
-        maestro_is_connected() ? "true" : "false"
+        cpu_temp
     );
+
+    // Add peripheral connection status
+    for (uint8_t d = 0; d < peripheral_get_count(); d++) {
+        const peripheral_driver_t* drv = peripheral_get(d);
+        if (!drv) continue;
+        bool connected = drv->is_connected ? drv->is_connected() : false;
+        ann_len += snprintf(announcement_buffer + ann_len,
+            sizeof(announcement_buffer) - ann_len,
+            "%s\"%s_connected\":%s",
+            d > 0 ? "," : "", drv->name, connected ? "true" : "false");
+    }
+
+    snprintf(announcement_buffer + ann_len,
+        sizeof(announcement_buffer) - ann_len, "}}");
+    ann_len = strlen(announcement_buffer);
 
     announcement_msg.data.data = announcement_buffer;
     announcement_msg.data.size = strlen(announcement_buffer);
@@ -575,8 +591,11 @@ void setup()
     // Initialize pin control
     pin_control_init();
 
-    // Initialize Maestro USB host driver
-    maestro_init();
+    // Register and initialize peripheral drivers
+    peripheral_register(maestro_get_peripheral_driver());
+    peripheral_register(syren_get_peripheral_driver());
+    peripheral_register(fas100_get_peripheral_driver());
+    peripheral_init_all();
 
     // Initialize hardware
     hardware_init();
@@ -695,8 +714,8 @@ void loop()
     // Update LED
     led_update();
 
-    // Poll Maestro USB host
-    maestro_update();
+    // Poll peripheral drivers (Maestro USB host, SyRen, etc.)
+    peripheral_update_all();
 
     // Error state - just blink LED
     if (g_node.state == NODE_STATE_ERROR) {

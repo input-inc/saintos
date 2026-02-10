@@ -56,6 +56,18 @@ class PinConfigManager {
             modalMaestroHome: document.getElementById('modal-maestro-home'),
             modalMaestroSpeed: document.getElementById('modal-maestro-speed'),
             modalMaestroAccel: document.getElementById('modal-maestro-accel'),
+            modalSyrenParams: document.getElementById('modal-syren-params'),
+            modalServoParams: document.getElementById('modal-servo-params'),
+            modalServoPreset: document.getElementById('modal-servo-preset'),
+            modalServoCustom: document.getElementById('modal-servo-custom'),
+            modalServoMinPulse: document.getElementById('modal-servo-min-pulse'),
+            modalServoMaxPulse: document.getElementById('modal-servo-max-pulse'),
+            modalSyrenAddress: document.getElementById('modal-syren-address'),
+            modalSyrenDeadband: document.getElementById('modal-syren-deadband'),
+            modalSyrenRamping: document.getElementById('modal-syren-ramping'),
+            modalSyrenTimeout: document.getElementById('modal-syren-timeout'),
+            modalFas100Params: document.getElementById('modal-fas100-params'),
+            modalFas100PollInterval: document.getElementById('modal-fas100-poll-interval'),
         };
     }
 
@@ -76,6 +88,22 @@ class PinConfigManager {
         // Mode selection changes parameter visibility
         this.elements.modalModeSelect?.addEventListener('change', (e) => {
             this.updateModalParams(e.target.value);
+        });
+
+        // Servo preset changes min/max values
+        this.elements.modalServoPreset?.addEventListener('change', (e) => {
+            const preset = e.target.value;
+            if (preset === 'standard') {
+                this.elements.modalServoMinPulse.value = 500;
+                this.elements.modalServoMaxPulse.value = 2500;
+                this.elements.modalServoCustom.classList.add('hidden');
+            } else if (preset === 'narrow') {
+                this.elements.modalServoMinPulse.value = 1000;
+                this.elements.modalServoMaxPulse.value = 2000;
+                this.elements.modalServoCustom.classList.add('hidden');
+            } else {
+                this.elements.modalServoCustom.classList.remove('hidden');
+            }
         });
     }
 
@@ -344,6 +372,8 @@ class PinConfigManager {
             'servo': 'pwm',
             'adc': 'adc',
             'maestro_servo': 'maestro_servo',
+            'syren_motor': 'syren_motor',
+            'fas100_sensor': 'fas100_sensor',
         };
         const required = modeMap[mode] || mode;
         return caps.includes(required);
@@ -460,6 +490,8 @@ class PinConfigManager {
             { value: 'servo', label: 'Servo', cap: 'pwm' },
             { value: 'adc', label: 'Analog Input', cap: 'adc' },
             { value: 'maestro_servo', label: 'Maestro Servo', cap: 'maestro_servo' },
+            { value: 'syren_motor', label: 'SyRen Motor', cap: 'syren_motor' },
+            { value: 'fas100_sensor', label: 'FAS100 Sensor', cap: 'fas100_sensor' },
         ];
 
         for (const opt of modeOptions) {
@@ -475,9 +507,27 @@ class PinConfigManager {
         }
 
         // Set parameter values
-        this.elements.modalPwmFreq.value = config.pwm_frequency || 50;
+        this.elements.modalPwmFreq.value = config.pwm_frequency || 1000;
         this.elements.modalPullUp.checked = config.pull_up || false;
         this.elements.modalPullDown.checked = config.pull_down || false;
+
+        // Servo pulse range
+        const servoMin = config.min_pulse_us || 500;
+        const servoMax = config.max_pulse_us || 2500;
+        this.elements.modalServoMinPulse.value = servoMin;
+        this.elements.modalServoMaxPulse.value = servoMax;
+
+        // Determine matching preset
+        if (servoMin === 500 && servoMax === 2500) {
+            this.elements.modalServoPreset.value = 'standard';
+            this.elements.modalServoCustom.classList.add('hidden');
+        } else if (servoMin === 1000 && servoMax === 2000) {
+            this.elements.modalServoPreset.value = 'narrow';
+            this.elements.modalServoCustom.classList.add('hidden');
+        } else {
+            this.elements.modalServoPreset.value = 'custom';
+            this.elements.modalServoCustom.classList.remove('hidden');
+        }
 
         // Maestro params
         this.elements.modalMaestroMinPulse.value = config.min_pulse_us || 992;
@@ -486,6 +536,15 @@ class PinConfigManager {
         this.elements.modalMaestroHome.value = config.home_us || 0;
         this.elements.modalMaestroSpeed.value = config.speed || 0;
         this.elements.modalMaestroAccel.value = config.acceleration || 0;
+
+        // SyRen params
+        this.elements.modalSyrenAddress.value = config.address || 128;
+        this.elements.modalSyrenDeadband.value = config.deadband || 3;
+        this.elements.modalSyrenRamping.value = config.ramping || 0;
+        this.elements.modalSyrenTimeout.value = config.timeout_ms || 0;
+
+        // FAS100 params
+        this.elements.modalFas100PollInterval.value = config.poll_interval_ms || 50;
 
         // Update parameter visibility
         this.updateModalParams(config.mode || '');
@@ -508,16 +567,25 @@ class PinConfigManager {
     updateModalParams(mode) {
         // Hide all param sections
         this.elements.modalPwmParams.classList.add('hidden');
+        this.elements.modalServoParams.classList.add('hidden');
         this.elements.modalDigitalInParams.classList.add('hidden');
         this.elements.modalMaestroParams.classList.add('hidden');
+        this.elements.modalSyrenParams.classList.add('hidden');
+        this.elements.modalFas100Params.classList.add('hidden');
 
         // Show relevant section
-        if (mode === 'pwm' || mode === 'servo') {
+        if (mode === 'pwm') {
             this.elements.modalPwmParams.classList.remove('hidden');
+        } else if (mode === 'servo') {
+            this.elements.modalServoParams.classList.remove('hidden');
         } else if (mode === 'digital_in') {
             this.elements.modalDigitalInParams.classList.remove('hidden');
         } else if (mode === 'maestro_servo') {
             this.elements.modalMaestroParams.classList.remove('hidden');
+        } else if (mode === 'syren_motor') {
+            this.elements.modalSyrenParams.classList.remove('hidden');
+        } else if (mode === 'fas100_sensor') {
+            this.elements.modalFas100Params.classList.remove('hidden');
         }
     }
 
@@ -542,8 +610,11 @@ class PinConfigManager {
             };
 
             // Add mode-specific params
-            if (mode === 'pwm' || mode === 'servo') {
-                config.pwm_frequency = parseInt(this.elements.modalPwmFreq.value) || 50;
+            if (mode === 'pwm') {
+                config.pwm_frequency = parseInt(this.elements.modalPwmFreq.value) || 1000;
+            } else if (mode === 'servo') {
+                config.min_pulse_us = parseInt(this.elements.modalServoMinPulse.value) || 500;
+                config.max_pulse_us = parseInt(this.elements.modalServoMaxPulse.value) || 2500;
             } else if (mode === 'digital_in') {
                 config.pull_up = this.elements.modalPullUp.checked;
                 config.pull_down = this.elements.modalPullDown.checked;
@@ -554,6 +625,13 @@ class PinConfigManager {
                 config.home_us = parseInt(this.elements.modalMaestroHome.value) || 0;
                 config.speed = parseInt(this.elements.modalMaestroSpeed.value) || 0;
                 config.acceleration = parseInt(this.elements.modalMaestroAccel.value) || 0;
+            } else if (mode === 'syren_motor') {
+                config.address = parseInt(this.elements.modalSyrenAddress.value) || 128;
+                config.deadband = parseInt(this.elements.modalSyrenDeadband.value) || 3;
+                config.ramping = parseInt(this.elements.modalSyrenRamping.value) || 0;
+                config.timeout_ms = parseInt(this.elements.modalSyrenTimeout.value) || 0;
+            } else if (mode === 'fas100_sensor') {
+                config.poll_interval_ms = parseInt(this.elements.modalFas100PollInterval.value) || 50;
             }
 
             this.pinConfig[gpio] = config;

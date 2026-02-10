@@ -31,6 +31,9 @@
 #include "pin_config.h"
 #include "pin_control.h"
 #include "flash_storage.h"
+#include "peripheral_driver.h"
+#include "syren_driver.h"
+#include "fas100_driver.h"
 
 // Transport selection based on build mode
 #ifdef SIMULATION
@@ -534,7 +537,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     float cpu_temp = hardware_get_cpu_temp();
 
     // Build announcement JSON string
-    snprintf(announcement_buffer, sizeof(announcement_buffer),
+    int ann_len = snprintf(announcement_buffer, sizeof(announcement_buffer),
         "{"
         "\"node_id\":\"%s\","
         "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
@@ -544,8 +547,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"fw_build\":\"%s\","
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
-        "\"cpu_temp\":%.1f"
-        "}",
+        "\"cpu_temp\":%.1f,"
+        "\"peripherals\":{",
         g_node.node_id,
         g_node.mac_address[0], g_node.mac_address[1],
         g_node.mac_address[2], g_node.mac_address[3],
@@ -559,6 +562,21 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         g_node.uptime_ms / 1000,
         cpu_temp
     );
+
+    // Add peripheral connection status
+    for (uint8_t d = 0; d < peripheral_get_count(); d++) {
+        const peripheral_driver_t* drv = peripheral_get(d);
+        if (!drv) continue;
+        bool connected = drv->is_connected ? drv->is_connected() : false;
+        ann_len += snprintf(announcement_buffer + ann_len,
+            sizeof(announcement_buffer) - ann_len,
+            "%s\"%s_connected\":%s",
+            d > 0 ? "," : "", drv->name, connected ? "true" : "false");
+    }
+
+    snprintf(announcement_buffer + ann_len,
+        sizeof(announcement_buffer) - ann_len, "}}");
+    ann_len = strlen(announcement_buffer);
 
     announcement_msg.data.data = announcement_buffer;
     announcement_msg.data.size = strlen(announcement_buffer);
@@ -952,6 +970,11 @@ int main(void)
     // Initialize pin control (after pin_config)
     pin_control_init();
 
+    // Register and initialize peripheral drivers
+    peripheral_register(syren_get_peripheral_driver());
+    peripheral_register(fas100_get_peripheral_driver());
+    peripheral_init_all();
+
     // Initialize hardware
     hardware_init();
 
@@ -1097,6 +1120,9 @@ int main(void)
 
         // Update LED
         led_update();
+
+        // Poll peripheral drivers
+        peripheral_update_all();
 
         // Check agent connection and reconnect if needed
         if (g_node.state != NODE_STATE_ERROR) {

@@ -119,12 +119,15 @@ set(SAINT_NODE_SOURCES
     src/main.c
     ../shared/src/node_state.c
     ../shared/src/flash_helpers.c
+    ../shared/src/peripheral_manager.c
     src/hardware.c
     src/led_status.c
     src/pico_clock.c
     src/flash_storage.c
     src/pin_config.c
     src/pin_control.c
+    src/syren_driver.c
+    src/fas100_driver.c
 )
 
 # Add transport based on build mode
