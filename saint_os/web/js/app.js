@@ -21,6 +21,9 @@ class SaintApp {
         // Load display preferences
         this.temperatureUnit = localStorage.getItem('saint_temp_unit') || 'celsius';
 
+        // Telemetry refresh interval
+        this.telemetryInterval = null;
+
         // Settings dirty tracking
         this.settingsOriginalValues = {};
         this.settingsDirty = false;
@@ -364,6 +367,11 @@ class SaintApp {
         // Stop node detail refresh when leaving that page
         if (this.currentPage === 'node-detail' && pageId !== 'node-detail') {
             this.stopNodeDetailRefresh();
+        }
+
+        // Stop telemetry refresh when leaving dashboard
+        if (this.currentPage === 'dashboard' && pageId !== 'dashboard') {
+            this.stopTelemetryRefresh();
         }
 
         // Update navigation
@@ -1036,6 +1044,7 @@ class SaintApp {
             this.nodes.unadopted = unadopted.nodes || [];
 
             this.updateNodesSummary();
+            this.initTelemetryWidgets();
         } catch (error) {
             console.error('Failed to load dashboard data:', error);
         }
@@ -2181,6 +2190,141 @@ class SaintApp {
     filterLogs(level) {
         // TODO: Implement log filtering
         console.log('Filter logs by:', level);
+    }
+
+    // ── Peripheral Telemetry ───────────────────────────────────────
+
+    /**
+     * Initialize telemetry widgets with mock data and start periodic updates.
+     */
+    initTelemetryWidgets() {
+        // Build Maestro servo grid HTML
+        const maestroGrid = document.getElementById('telem-maestro-grid');
+        if (maestroGrid && !maestroGrid.dataset.initialized) {
+            let html = '';
+            for (let i = 0; i < 6; i++) {
+                html += `
+                    <div class="servo-indicator">
+                        <div class="servo-label">Ch${i}</div>
+                        <div class="servo-value" id="telem-servo-${i}">--°</div>
+                        <div class="servo-bar-track">
+                            <div class="servo-bar-fill" id="telem-servo-bar-${i}" style="width: 50%"></div>
+                        </div>
+                    </div>`;
+            }
+            maestroGrid.innerHTML = html;
+            maestroGrid.dataset.initialized = '1';
+        }
+
+        // Initial update
+        this.updateTelemetryWidgets();
+
+        // Start periodic refresh (2 seconds)
+        this.stopTelemetryRefresh();
+        this.telemetryInterval = setInterval(() => {
+            this.updateTelemetryWidgets();
+        }, 2000);
+    }
+
+    /**
+     * Stop telemetry refresh interval.
+     */
+    stopTelemetryRefresh() {
+        if (this.telemetryInterval) {
+            clearInterval(this.telemetryInterval);
+            this.telemetryInterval = null;
+        }
+    }
+
+    /**
+     * Update all telemetry widgets with mock data + small random fluctuations.
+     */
+    updateTelemetryWidgets() {
+        const jitter = (base, range) => base + (Math.random() - 0.5) * 2 * range;
+
+        // ── FAS100 ──
+        const fasVoltage = jitter(12.4, 0.3);
+        const fasCurrent = jitter(2.3, 0.4);
+        const fasTemp = jitter(35, 3);
+
+        this.setTelemetryValue('telem-fas-voltage', `${fasVoltage.toFixed(1)}V`);
+        this.setTelemetryBar('telem-fas-voltage-bar', fasVoltage, 0, 30);
+
+        this.setTelemetryValue('telem-fas-current', `${fasCurrent.toFixed(1)}A`);
+        this.setTelemetryBar('telem-fas-current-bar', fasCurrent, 0, 50);
+
+        const fasTempEl = document.getElementById('telem-fas-temp');
+        if (fasTempEl) {
+            fasTempEl.textContent = this.formatTemperature(fasTemp);
+            fasTempEl.className = 'stat-value telemetry-temp ' + this.tempColorClass(fasTemp);
+        }
+
+        // ── RoboClaw ──
+        const rcDuty = jitter(67, 5);
+        const rcEncoder = Math.round(jitter(12456, 50));
+        const rcBattery = jitter(11.8, 0.2);
+        const rcCurrent = jitter(1.5, 0.3);
+        const rcTemp = jitter(42, 3);
+
+        const dutyEl = document.getElementById('telem-rc-duty');
+        if (dutyEl) {
+            const sign = rcDuty >= 0 ? '+' : '';
+            dutyEl.textContent = `${sign}${rcDuty.toFixed(0)}%`;
+            dutyEl.style.color = rcDuty >= 0 ? '#22d3ee' : '#fbbf24';
+        }
+
+        this.setTelemetryValue('telem-rc-encoder', rcEncoder.toLocaleString());
+
+        this.setTelemetryValue('telem-rc-battery', `${rcBattery.toFixed(1)}V`);
+        this.setTelemetryBar('telem-rc-battery-bar', rcBattery, 0, 30);
+
+        this.setTelemetryValue('telem-rc-current', `${rcCurrent.toFixed(1)}A`);
+        this.setTelemetryBar('telem-rc-current-bar', rcCurrent, 0, 10);
+
+        const rcTempEl = document.getElementById('telem-rc-temp');
+        if (rcTempEl) {
+            rcTempEl.textContent = this.formatTemperature(rcTemp);
+            rcTempEl.className = 'stat-value telemetry-temp ' + this.tempColorClass(rcTemp);
+        }
+
+        // ── Maestro Servos ──
+        const servoPositions = [90, 45, 135, 20, 160, 75];
+        for (let i = 0; i < 6; i++) {
+            const pos = Math.round(jitter(servoPositions[i], 5));
+            const clamped = Math.max(0, Math.min(180, pos));
+            const el = document.getElementById(`telem-servo-${i}`);
+            if (el) el.textContent = `${clamped}°`;
+            const bar = document.getElementById(`telem-servo-bar-${i}`);
+            if (bar) bar.style.width = `${(clamped / 180 * 100).toFixed(1)}%`;
+        }
+    }
+
+    /**
+     * Set text content of a telemetry element by ID.
+     */
+    setTelemetryValue(id, text) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = text;
+    }
+
+    /**
+     * Set width of a telemetry progress bar.
+     */
+    setTelemetryBar(id, value, min, max) {
+        const el = document.getElementById(id);
+        if (el) {
+            const pct = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+            el.style.width = `${pct.toFixed(1)}%`;
+        }
+    }
+
+    /**
+     * Return CSS class for temperature color coding.
+     */
+    tempColorClass(celsius) {
+        if (celsius >= 60) return 'telemetry-temp-red';
+        if (celsius >= 40) return 'telemetry-temp-amber';
+        return 'telemetry-temp-green';
     }
 }
 

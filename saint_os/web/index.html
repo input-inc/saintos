@@ -243,6 +243,109 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Peripheral Telemetry -->
+                <div id="telemetry-section" class="mt-6">
+                    <h3 class="text-lg font-semibold text-slate-400 mb-4">Peripheral Telemetry</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+                        <!-- FAS100 Power Monitor -->
+                        <div class="card" id="telemetry-fas100">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="flex items-center gap-2">
+                                    <span class="material-icons text-amber-400 icon-md">bolt</span>
+                                    <h4 class="text-base font-semibold text-white">FAS100 Power Monitor</h4>
+                                </div>
+                                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-700 text-slate-400">Mock Data</span>
+                            </div>
+                            <div class="telemetry-accent-bar bg-amber-500"></div>
+                            <div class="space-y-4 mt-3">
+                                <div class="stat-item">
+                                    <span class="stat-label">Battery Voltage</span>
+                                    <div class="flex items-center gap-2">
+                                        <span id="telem-fas-voltage" class="stat-value">--</span>
+                                        <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                                            <div id="telem-fas-voltage-bar" class="telemetry-bar bg-amber-500" style="width: 0%"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Current Draw</span>
+                                    <div class="flex items-center gap-2">
+                                        <span id="telem-fas-current" class="stat-value">--</span>
+                                        <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                                            <div id="telem-fas-current-bar" class="telemetry-bar bg-cyan-500" style="width: 0%"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Temperature</span>
+                                    <span id="telem-fas-temp" class="stat-value telemetry-temp">--</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- RoboClaw Motor Controller -->
+                        <div class="card" id="telemetry-roboclaw">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="flex items-center gap-2">
+                                    <span class="material-icons text-cyan-400 icon-md">settings</span>
+                                    <h4 class="text-base font-semibold text-white">RoboClaw Motor</h4>
+                                </div>
+                                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-700 text-slate-400">Mock Data</span>
+                            </div>
+                            <div class="telemetry-accent-bar bg-cyan-500"></div>
+                            <div class="space-y-3 mt-3">
+                                <div class="stat-item">
+                                    <span class="stat-label">Motor Duty</span>
+                                    <span id="telem-rc-duty" class="stat-value">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Encoder</span>
+                                    <span id="telem-rc-encoder" class="stat-value font-mono text-sm">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Battery</span>
+                                    <div class="flex items-center gap-2">
+                                        <span id="telem-rc-battery" class="stat-value">--</span>
+                                        <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                                            <div id="telem-rc-battery-bar" class="telemetry-bar bg-emerald-500" style="width: 0%"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Motor Current</span>
+                                    <div class="flex items-center gap-2">
+                                        <span id="telem-rc-current" class="stat-value">--</span>
+                                        <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                                            <div id="telem-rc-current-bar" class="telemetry-bar bg-violet-500" style="width: 0%"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Temperature</span>
+                                    <span id="telem-rc-temp" class="stat-value telemetry-temp">--</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Maestro Servo Controller -->
+                        <div class="card" id="telemetry-maestro">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="flex items-center gap-2">
+                                    <span class="material-icons text-violet-400 icon-md">precision_manufacturing</span>
+                                    <h4 class="text-base font-semibold text-white">Maestro Servos</h4>
+                                </div>
+                                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-700 text-slate-400">Mock Data</span>
+                            </div>
+                            <div class="telemetry-accent-bar bg-violet-500"></div>
+                            <div id="telem-maestro-grid" class="servo-grid mt-3">
+                                <!-- Servo channels populated by JS -->
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
             </section>
 
             <!-- Nodes Page -->
@@ -1956,6 +2059,59 @@
         .blend-shape-item:hover {
             background-color: rgba(30, 41, 59, 0.8);
             border-color: rgba(71, 85, 105, 0.8);
+        }
+
+        /* Telemetry widgets */
+        .telemetry-accent-bar {
+            height: 2px;
+            border-radius: 1px;
+            opacity: 0.6;
+        }
+        .telemetry-bar {
+            height: 100%;
+            border-radius: 9999px;
+            transition: width 0.5s ease;
+        }
+        .telemetry-temp-green { color: #34d399; }
+        .telemetry-temp-amber { color: #fbbf24; }
+        .telemetry-temp-red { color: #f87171; }
+        .servo-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.5rem;
+        }
+        .servo-indicator {
+            background-color: rgba(15, 23, 42, 0.5);
+            border: 1px solid rgba(51, 65, 85, 0.5);
+            border-radius: 0.375rem;
+            padding: 0.375rem 0.5rem;
+            text-align: center;
+        }
+        .servo-indicator .servo-label {
+            font-size: 0.625rem;
+            font-weight: 500;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .servo-indicator .servo-value {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: white;
+            margin-top: 0.125rem;
+        }
+        .servo-bar-track {
+            height: 3px;
+            background-color: #334155;
+            border-radius: 2px;
+            margin-top: 0.25rem;
+            overflow: hidden;
+        }
+        .servo-bar-fill {
+            height: 100%;
+            background-color: #a78bfa;
+            border-radius: 2px;
+            transition: width 0.5s ease;
         }
 
         /* Eye visualization */
