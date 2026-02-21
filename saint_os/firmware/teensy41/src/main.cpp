@@ -89,8 +89,9 @@ static rcl_timer_t state_timer;
 static std_msgs__msg__String announcement_msg;
 static char announcement_buffer[256];
 
+// NOTE: Current Msg is over 4K in size
 static std_msgs__msg__String capabilities_msg;
-static char capabilities_buffer[2048];
+static char capabilities_buffer[8 *1024];
 
 static std_msgs__msg__String config_msg;
 static char config_buffer[2048];
@@ -292,7 +293,11 @@ static void publish_capabilities(void)
 {
     int len = pin_config_capabilities_to_json(
         capabilities_buffer, sizeof(capabilities_buffer), g_node.node_id);
-    if (len < 0) return;
+    if (len < 0) 
+    {
+        Serial.printf("Failed to generate capabilities JSON\n");
+        return;
+    }
 
     capabilities_msg.data.data = capabilities_buffer;
     capabilities_msg.data.size = (size_t)len;

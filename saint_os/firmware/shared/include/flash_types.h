@@ -11,6 +11,10 @@
 #include <stdbool.h>
 #include "saint_types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // =============================================================================
 // Storage Configuration
 // =============================================================================
@@ -135,5 +139,9 @@ bool flash_storage_has_config(void);
 // Shared helpers (implemented in shared/src/flash_helpers.c)
 void flash_storage_from_node(flash_storage_data_t* data, const saint_node_config_t* node);
 void flash_storage_to_node(const flash_storage_data_t* data, saint_node_config_t* node);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // FLASH_TYPES_H

@@ -40,8 +40,8 @@ bool transport_native_eth_init(void)
 
     // Generate MAC from Teensy unique ID
     // Use locally administered bit
-    extern uint32_t HW_OCOTP_MAC0;
-    extern uint32_t HW_OCOTP_MAC1;
+    //extern uint32_t HW_OCOTP_MAC0;
+    //extern uint32_t HW_OCOTP_MAC1;
 
     mac_addr[0] = 0x02;  // Locally administered
     mac_addr[1] = (HW_OCOTP_MAC0 >> 24) & 0xFF;
