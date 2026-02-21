@@ -17,8 +17,8 @@ extern "C" {
 extern float tempmonGetTemp(void);
 
 // Teensy 4.1 unique ID (from OCOTP fuse bank)
-extern "C" uint32_t HW_OCOTP_MAC0;
-extern "C" uint32_t HW_OCOTP_MAC1;
+//extern "C" uint32_t HW_OCOTP_MAC0;
+//extern "C" uint32_t HW_OCOTP_MAC1;
 
 extern "C" {
 
