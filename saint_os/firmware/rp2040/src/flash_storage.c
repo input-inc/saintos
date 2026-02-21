@@ -83,10 +83,17 @@ bool flash_storage_load(flash_storage_data_t* data)
 
         // Version 1 -> 2: Added pin_config
         if (mutable_data->version == 1) {
-            // Initialize pin_config to empty
             memset(&mutable_data->pin_config, 0, sizeof(mutable_data->pin_config));
             mutable_data->pin_config.version = FLASH_PIN_CONFIG_VERSION;
             mutable_data->pin_config.pin_count = 0;
+        }
+        // Version 2 -> 3: Added maestro_config
+        if (mutable_data->version <= 2) {
+            memset(&mutable_data->maestro_config, 0, sizeof(mutable_data->maestro_config));
+        }
+        // Version 3 -> 4: Added syren_config
+        if (mutable_data->version <= 3) {
+            memset(&mutable_data->syren_config, 0, sizeof(mutable_data->syren_config));
         }
 
         mutable_data->version = FLASH_STORAGE_VERSION;

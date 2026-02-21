@@ -24,6 +24,7 @@ logical_functions:
     compatible_modes:
       - pwm
       - servo
+      - syren_motor
     default_params:
       pwm_frequency: 50
 
@@ -35,6 +36,7 @@ logical_functions:
     compatible_modes:
       - pwm
       - servo
+      - syren_motor
     default_params:
       pwm_frequency: 50
 

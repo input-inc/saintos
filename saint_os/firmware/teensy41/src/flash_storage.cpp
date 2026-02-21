@@ -80,6 +80,9 @@ bool flash_storage_load(flash_storage_data_t* data)
         if (mutable_data->version <= 2) {
             memset(&mutable_data->maestro_config, 0, sizeof(mutable_data->maestro_config));
         }
+        if (mutable_data->version <= 3) {
+            memset(&mutable_data->syren_config, 0, sizeof(mutable_data->syren_config));
+        }
         mutable_data->version = FLASH_STORAGE_VERSION;
     }
 

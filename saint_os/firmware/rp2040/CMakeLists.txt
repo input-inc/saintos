@@ -129,6 +129,7 @@ set(SAINT_NODE_SOURCES
     src/syren_driver.c
     src/fas100_driver.c
     src/roboclaw_driver.c
+    src/pathfinder_bms_driver.c
 )
 
 # Add transport based on build mode

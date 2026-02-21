@@ -16,6 +16,7 @@
 #include "pin_config.h"
 #include "flash_storage.h"
 #include "saint_node.h"
+#include "peripheral_driver.h"
 
 // =============================================================================
 // Available Pins Definition (Feather RP2040 + Ethernet FeatherWing)
@@ -94,6 +95,8 @@ static const char* mode_strings[] = {
     [PIN_MODE_UART_TX]      = "uart_tx",
     [PIN_MODE_UART_RX]      = "uart_rx",
     [PIN_MODE_RESERVED]     = "reserved",
+    [PIN_MODE_MAESTRO_SERVO] = "maestro_servo",
+    [PIN_MODE_SYREN_MOTOR]   = "syren_motor",
 };
 
 #define MODE_STRING_COUNT (sizeof(mode_strings) / sizeof(mode_strings[0]))
@@ -103,7 +106,13 @@ static const char* mode_strings[] = {
 // =============================================================================
 
 /**
+ * Scratch space for peripheral virtual pin definitions.
+ */
+static pin_definition_t virtual_pin_scratch;
+
+/**
  * Find pin definition by GPIO number.
+ * Searches physical pins first, then registered peripheral virtual pins.
  */
 static const pin_definition_t* find_pin_definition(uint8_t gpio)
 {
@@ -112,6 +121,21 @@ static const pin_definition_t* find_pin_definition(uint8_t gpio)
             return &available_pins[i];
         }
     }
+
+    // Check peripheral virtual pins
+    const peripheral_driver_t* drv = peripheral_find_by_gpio(gpio);
+    if (drv) {
+        uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
+        virtual_pin_scratch.gpio = gpio;
+        virtual_pin_scratch.capabilities = (uint16_t)drv->capability_flag;
+        snprintf(virtual_pin_scratch.name, sizeof(virtual_pin_scratch.name),
+                 "%s%d",
+                 (drv->pin_mode == PIN_MODE_MAESTRO_SERVO) ? "M" :
+                 (drv->pin_mode == PIN_MODE_SYREN_MOTOR) ? "SY" : "P",
+                 ch);
+        return &virtual_pin_scratch;
+    }
+
     return NULL;
 }
 
@@ -178,7 +202,13 @@ static bool is_mode_compatible(uint16_t capabilities, pin_mode_t mode)
         case PIN_MODE_UART_RX:
             return (capabilities & PIN_CAP_UART_RX) != 0;
         default:
+        {
+            const peripheral_driver_t* drv = peripheral_find_by_mode(mode);
+            if (drv) {
+                return (capabilities & drv->capability_flag) != 0;
+            }
             return false;
+        }
     }
 }
 
@@ -242,12 +272,50 @@ const pin_config_t* pin_config_get_all(uint8_t* count)
     return pin_configs;
 }
 
+/**
+ * Helper: Build capability string list for a pin's capabilities bitmask.
+ */
+static int build_caps_string(uint16_t capabilities, char* caps_str, size_t caps_size)
+{
+    int caps_len = 0;
+
+    struct { uint16_t flag; const char* name; } cap_map[] = {
+        { PIN_CAP_DIGITAL_IN,  "digital_in" },
+        { PIN_CAP_DIGITAL_OUT, "digital_out" },
+        { PIN_CAP_PWM,         "pwm" },
+        { PIN_CAP_ADC,         "adc" },
+        { PIN_CAP_I2C_SDA,     "i2c_sda" },
+        { PIN_CAP_I2C_SCL,     "i2c_scl" },
+        { PIN_CAP_UART_TX,     "uart_tx" },
+        { PIN_CAP_UART_RX,     "uart_rx" },
+    };
+
+    for (size_t j = 0; j < sizeof(cap_map) / sizeof(cap_map[0]); j++) {
+        if (capabilities & cap_map[j].flag) {
+            caps_len += snprintf(caps_str + caps_len, caps_size - caps_len,
+                "%s\"%s\"", caps_len > 0 ? "," : "", cap_map[j].name);
+        }
+    }
+
+    // Peripheral capability flags
+    for (uint8_t d = 0; d < peripheral_get_count(); d++) {
+        const peripheral_driver_t* drv = peripheral_get(d);
+        if (drv && (capabilities & drv->capability_flag)) {
+            caps_len += snprintf(caps_str + caps_len, caps_size - caps_len,
+                "%s\"%s\"", caps_len > 0 ? "," : "", drv->mode_string);
+        }
+    }
+
+    return caps_len;
+}
+
 int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char* node_id)
 {
     if (!buffer || buffer_size < 256) return -1;
 
     int written = 0;
     int ret;
+    bool first_pin = true;
 
     // Start JSON object
     ret = snprintf(buffer + written, buffer_size - written,
@@ -255,52 +323,50 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
     if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
     written += ret;
 
-    // Write available pins
+    // Write physical pins
     for (size_t i = 0; i < AVAILABLE_PIN_COUNT; i++) {
         const pin_definition_t* pin = &available_pins[i];
 
-        // Build capabilities array
         char caps_str[256] = "";
-        int caps_len = 0;
-
-        if (pin->capabilities & PIN_CAP_DIGITAL_IN) {
-            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
-                "%s\"digital_in\"", caps_len > 0 ? "," : "");
-        }
-        if (pin->capabilities & PIN_CAP_DIGITAL_OUT) {
-            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
-                "%s\"digital_out\"", caps_len > 0 ? "," : "");
-        }
-        if (pin->capabilities & PIN_CAP_PWM) {
-            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
-                "%s\"pwm\"", caps_len > 0 ? "," : "");
-        }
-        if (pin->capabilities & PIN_CAP_ADC) {
-            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
-                "%s\"adc\"", caps_len > 0 ? "," : "");
-        }
-        if (pin->capabilities & PIN_CAP_I2C_SDA) {
-            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
-                "%s\"i2c_sda\"", caps_len > 0 ? "," : "");
-        }
-        if (pin->capabilities & PIN_CAP_I2C_SCL) {
-            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
-                "%s\"i2c_scl\"", caps_len > 0 ? "," : "");
-        }
-        if (pin->capabilities & PIN_CAP_UART_TX) {
-            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
-                "%s\"uart_tx\"", caps_len > 0 ? "," : "");
-        }
-        if (pin->capabilities & PIN_CAP_UART_RX) {
-            caps_len += snprintf(caps_str + caps_len, sizeof(caps_str) - caps_len,
-                "%s\"uart_rx\"", caps_len > 0 ? "," : "");
-        }
+        build_caps_string(pin->capabilities, caps_str, sizeof(caps_str));
 
         ret = snprintf(buffer + written, buffer_size - written,
             "%s{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[%s]}",
-            i > 0 ? "," : "", pin->gpio, pin->name, caps_str);
+            first_pin ? "" : ",", pin->gpio, pin->name, caps_str);
         if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
         written += ret;
+        first_pin = false;
+    }
+
+    // Write virtual pins from registered peripheral drivers
+    for (uint8_t d = 0; d < peripheral_get_count(); d++) {
+        const peripheral_driver_t* drv = peripheral_get(d);
+        if (!drv) continue;
+
+        for (uint8_t ch = 0; ch < drv->channel_count; ch++) {
+            if (drv->capabilities_to_json) {
+                ret = snprintf(buffer + written, buffer_size - written,
+                    "%s", first_pin ? "" : ",");
+                if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+                written += ret;
+
+                int frag = drv->capabilities_to_json(ch, buffer + written,
+                                                      buffer_size - written);
+                if (frag < 0) return -1;
+                written += frag;
+            } else {
+                uint16_t gpio = drv->virtual_gpio_base + ch;
+                char pin_name[8];
+                snprintf(pin_name, sizeof(pin_name), "P%d", ch);
+
+                ret = snprintf(buffer + written, buffer_size - written,
+                    "%s{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[\"%s\"]}",
+                    first_pin ? "" : ",", gpio, pin_name, drv->mode_string);
+                if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+                written += ret;
+            }
+            first_pin = false;
+        }
     }
 
     // Write reserved pins array
@@ -450,10 +516,9 @@ bool pin_config_apply_json(const char* json, size_t json_len)
                        gpio, pin_mode_to_string(mode), logical_name);
 
                 // Parse mode-specific parameters
-                if (mode == PIN_MODE_PWM || mode == PIN_MODE_SERVO) {
+                if (mode == PIN_MODE_PWM) {
                     // Parse pwm_frequency
-                    uint32_t freq = (mode == PIN_MODE_SERVO) ?
-                        PIN_CONFIG_SERVO_PWM_FREQ : PIN_CONFIG_DEFAULT_PWM_FREQ;
+                    uint32_t freq = PIN_CONFIG_DEFAULT_PWM_FREQ;
 
                     const char* freq_str = strstr(value_start, "\"pwm_frequency\"");
                     if (freq_str && freq_str < value_end) {
@@ -466,6 +531,41 @@ bool pin_config_apply_json(const char* json, size_t json_len)
                     }
 
                     pin_config_set_pwm_params(gpio, freq, 0);
+                } else if (mode == PIN_MODE_SERVO) {
+                    // Parse servo pulse range
+                    uint16_t min_us = PIN_CONFIG_SERVO_MIN_PULSE_US;
+                    uint16_t max_us = PIN_CONFIG_SERVO_MAX_PULSE_US;
+
+                    const char* min_str = strstr(value_start, "\"min_pulse_us\"");
+                    if (min_str && min_str < value_end) {
+                        min_str = strchr(min_str, ':');
+                        if (min_str) {
+                            min_str++;
+                            while (*min_str == ' ') min_str++;
+                            min_us = (uint16_t)atoi(min_str);
+                        }
+                    }
+
+                    const char* max_str = strstr(value_start, "\"max_pulse_us\"");
+                    if (max_str && max_str < value_end) {
+                        max_str = strchr(max_str, ':');
+                        if (max_str) {
+                            max_str++;
+                            while (*max_str == ' ') max_str++;
+                            max_us = (uint16_t)atoi(max_str);
+                        }
+                    }
+
+                    pin_config_set_servo_params(gpio, min_us, max_us);
+                } else {
+                    // Delegate to peripheral driver for mode-specific params
+                    const peripheral_driver_t* drv = peripheral_find_by_mode(mode);
+                    if (drv && drv->parse_json_params) {
+                        pin_config_t* pcfg = find_or_create_config(gpio);
+                        if (pcfg) {
+                            drv->parse_json_params(value_start, value_end, pcfg);
+                        }
+                    }
                 }
             }
         }
@@ -506,9 +606,23 @@ bool pin_config_save(void)
                 PIN_CONFIG_MAX_NAME_LEN - 1);
 
         // Store mode-specific params
-        if (pin_configs[i].mode == PIN_MODE_PWM || pin_configs[i].mode == PIN_MODE_SERVO) {
+        if (pin_configs[i].mode == PIN_MODE_PWM) {
             storage.pin_config.pins[i].param1 = pin_configs[i].params.pwm.frequency;
             storage.pin_config.pins[i].param2 = pin_configs[i].params.pwm.duty_cycle;
+        } else if (pin_configs[i].mode == PIN_MODE_SERVO) {
+            storage.pin_config.pins[i].param1 = pin_configs[i].params.servo.frequency;
+            storage.pin_config.pins[i].param2 = pin_configs[i].params.servo.min_pulse_us;
+            // Pack max_pulse_us into reserved bytes (little-endian)
+            storage.pin_config.pins[i].reserved_pin[0] = (uint8_t)(pin_configs[i].params.servo.max_pulse_us & 0xFF);
+            storage.pin_config.pins[i].reserved_pin[1] = (uint8_t)((pin_configs[i].params.servo.max_pulse_us >> 8) & 0xFF);
+        }
+    }
+
+    // Save peripheral driver configs (SyRen, etc.)
+    for (uint8_t d = 0; d < peripheral_get_count(); d++) {
+        const peripheral_driver_t* drv = peripheral_get(d);
+        if (drv && drv->save_config) {
+            drv->save_config(&storage);
         }
     }
 
@@ -549,11 +663,32 @@ bool pin_config_load(void)
 
         if (pin_config_set(gpio, mode, name)) {
             // Restore mode-specific params
-            if (mode == PIN_MODE_PWM || mode == PIN_MODE_SERVO) {
+            if (mode == PIN_MODE_PWM) {
                 pin_config_set_pwm_params(gpio,
                     storage.pin_config.pins[i].param1,
                     storage.pin_config.pins[i].param2);
+            } else if (mode == PIN_MODE_SERVO) {
+                uint16_t min_us = storage.pin_config.pins[i].param2;
+                if (min_us == 0) {
+                    // Old format: param2 was duty_cycle (always 0 for servo)
+                    // Use defaults for backward compatibility
+                    min_us = PIN_CONFIG_SERVO_MIN_PULSE_US;
+                }
+                uint16_t max_us = (uint16_t)storage.pin_config.pins[i].reserved_pin[0] |
+                                  ((uint16_t)storage.pin_config.pins[i].reserved_pin[1] << 8);
+                if (max_us == 0) {
+                    max_us = PIN_CONFIG_SERVO_MAX_PULSE_US;
+                }
+                pin_config_set_servo_params(gpio, min_us, max_us);
             }
+        }
+    }
+
+    // Restore peripheral driver configs from flash
+    for (uint8_t d = 0; d < peripheral_get_count(); d++) {
+        const peripheral_driver_t* drv = peripheral_get(d);
+        if (drv && drv->load_config) {
+            drv->load_config(&storage);
         }
     }
 
@@ -566,8 +701,9 @@ bool pin_config_load(void)
 
 void pin_config_reset(void)
 {
-    // De-initialize any configured pins
+    // De-initialize any configured pins (skip peripheral virtual pins)
     for (uint8_t i = 0; i < pin_config_count; i++) {
+        if (peripheral_is_virtual_gpio(pin_configs[i].gpio)) continue;
         gpio_deinit(pin_configs[i].gpio);
     }
 
@@ -631,8 +767,9 @@ bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
             cfg->params.pwm.duty_cycle = 0;
             break;
         case PIN_MODE_SERVO:
-            cfg->params.pwm.frequency = PIN_CONFIG_SERVO_PWM_FREQ;
-            cfg->params.pwm.duty_cycle = 0;
+            cfg->params.servo.frequency = PIN_CONFIG_SERVO_PWM_FREQ;
+            cfg->params.servo.min_pulse_us = PIN_CONFIG_SERVO_MIN_PULSE_US;
+            cfg->params.servo.max_pulse_us = PIN_CONFIG_SERVO_MAX_PULSE_US;
             break;
         case PIN_MODE_DIGITAL_IN:
             cfg->params.digital_in.pull_up = false;
@@ -642,7 +779,14 @@ bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
             cfg->params.digital_out.initial_state = false;
             break;
         default:
+        {
+            const peripheral_driver_t* drv = peripheral_find_by_mode(mode);
+            if (drv && drv->set_defaults) {
+                uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
+                drv->set_defaults(ch, cfg);
+            }
             break;
+        }
     }
 
     return true;
@@ -651,12 +795,25 @@ bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
 bool pin_config_set_pwm_params(uint8_t gpio, uint32_t frequency, uint16_t duty_cycle)
 {
     pin_config_t* cfg = find_or_create_config(gpio);
-    if (!cfg || (cfg->mode != PIN_MODE_PWM && cfg->mode != PIN_MODE_SERVO)) {
+    if (!cfg || cfg->mode != PIN_MODE_PWM) {
         return false;
     }
 
     cfg->params.pwm.frequency = frequency;
     cfg->params.pwm.duty_cycle = duty_cycle;
+
+    return true;
+}
+
+bool pin_config_set_servo_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t max_pulse_us)
+{
+    pin_config_t* cfg = find_or_create_config(gpio);
+    if (!cfg || cfg->mode != PIN_MODE_SERVO) {
+        return false;
+    }
+
+    cfg->params.servo.min_pulse_us = min_pulse_us;
+    cfg->params.servo.max_pulse_us = max_pulse_us;
 
     return true;
 }
@@ -706,7 +863,9 @@ void pin_config_apply_hardware(void)
 
                     // Calculate wrap and divider for desired frequency
                     // PWM frequency = 125MHz / (divider * wrap)
-                    uint32_t freq = cfg->params.pwm.frequency;
+                    uint32_t freq = (cfg->mode == PIN_MODE_SERVO)
+                        ? cfg->params.servo.frequency
+                        : cfg->params.pwm.frequency;
                     if (freq == 0) freq = 1000; // Default 1kHz
 
                     uint32_t clock = 125000000; // 125 MHz
@@ -741,7 +900,14 @@ void pin_config_apply_hardware(void)
                 break;
 
             default:
+            {
+                const peripheral_driver_t* drv = peripheral_find_by_mode(cfg->mode);
+                if (drv && drv->apply_config) {
+                    uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
+                    drv->apply_config(ch, cfg);
+                }
                 break;
+            }
         }
 
         printf("Pin config: applied hardware config for GPIO %d (%s)\n",
@@ -751,9 +917,11 @@ void pin_config_apply_hardware(void)
 
 const char* pin_mode_to_string(pin_mode_t mode)
 {
-    if (mode < MODE_STRING_COUNT) {
+    if (mode < MODE_STRING_COUNT && mode_strings[mode]) {
         return mode_strings[mode];
     }
+    const peripheral_driver_t* drv = peripheral_find_by_mode(mode);
+    if (drv) return drv->mode_string;
     return "unknown";
 }
 
@@ -766,6 +934,9 @@ pin_mode_t pin_mode_from_string(const char* str)
             return (pin_mode_t)i;
         }
     }
+
+    const peripheral_driver_t* drv = peripheral_find_by_mode_string(str);
+    if (drv) return drv->pin_mode;
 
     return PIN_MODE_UNCONFIGURED;
 }

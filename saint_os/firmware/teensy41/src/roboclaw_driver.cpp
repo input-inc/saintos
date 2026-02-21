@@ -424,7 +424,7 @@ static void roboclaw_drv_estop(void)
 
 static int roboclaw_drv_caps_json(uint8_t channel, char* buf, size_t remaining)
 {
-    uint8_t gpio = ROBOCLAW_VIRTUAL_GPIO_BASE + channel;
+    uint16_t gpio = ROBOCLAW_VIRTUAL_GPIO_BASE + channel;
     uint8_t unit = channel / ROBOCLAW_CHANNELS_PER_UNIT;
     uint8_t sub = channel % ROBOCLAW_CHANNELS_PER_UNIT;
 

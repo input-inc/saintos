@@ -29,6 +29,7 @@
 #define PIN_CAP_SYREN_MOTOR     0x400
 #define PIN_CAP_FAS100_SENSOR   0x800
 #define PIN_CAP_ROBOCLAW_MOTOR  0x1000
+#define PIN_CAP_PATHFINDER_BMS  0x2000
 
 // Convenience combinations
 #define PIN_CAP_GPIO            (PIN_CAP_DIGITAL_IN | PIN_CAP_DIGITAL_OUT)
@@ -54,7 +55,8 @@ typedef enum {
     PIN_MODE_MAESTRO_SERVO,
     PIN_MODE_SYREN_MOTOR,
     PIN_MODE_FAS100_SENSOR,
-    PIN_MODE_ROBOCLAW_MOTOR
+    PIN_MODE_ROBOCLAW_MOTOR,
+    PIN_MODE_PATHFINDER_BMS
 } pin_mode_t;
 
 // =============================================================================
@@ -130,6 +132,9 @@ typedef struct {
             uint8_t deadband;
             uint16_t max_current_ma;
         } roboclaw;
+        struct {
+            uint16_t poll_interval_ms;
+        } pathfinder_bms;
     } params;
 } pin_config_t;
 

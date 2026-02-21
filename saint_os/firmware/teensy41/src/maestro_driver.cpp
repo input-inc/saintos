@@ -13,6 +13,7 @@
 
 extern "C" {
 #include "maestro_driver.h"
+#include "peripheral_driver.h"
 }
 
 // =============================================================================
@@ -256,6 +257,207 @@ uint16_t maestro_angle_to_target(float angle, const maestro_channel_config_t* co
 
     // Convert microseconds to quarter-microseconds
     return (uint16_t)(pulse_us * 4.0f);
+}
+
+// =============================================================================
+// Peripheral Driver Interface
+// =============================================================================
+
+static bool maestro_drv_init(void)
+{
+    maestro_init();
+    return true;
+}
+
+static bool maestro_drv_set_value(uint8_t channel, float value)
+{
+    if (channel >= MAESTRO_MAX_CHANNELS) return false;
+
+    // value is angle 0-180
+    float angle = value;
+    if (angle < 0.0f) angle = 0.0f;
+    if (angle > 180.0f) angle = 180.0f;
+
+    const maestro_channel_config_t* mcfg = maestro_get_channel_config(channel);
+    if (!mcfg) return false;
+
+    uint16_t target = maestro_angle_to_target(angle, mcfg);
+    return maestro_set_target(channel, target);
+}
+
+static bool maestro_drv_get_value(uint8_t channel, float* value)
+{
+    if (channel >= MAESTRO_MAX_CHANNELS || !value) return false;
+
+    if (!maestro_is_connected()) return false;
+
+    uint16_t pos_qus = maestro_get_position(channel);
+    if (pos_qus == 0) return false;
+
+    const maestro_channel_config_t* mcfg = maestro_get_channel_config(channel);
+    if (!mcfg || mcfg->max_pulse_us <= mcfg->min_pulse_us) return false;
+
+    float pulse_us = pos_qus / 4.0f;
+    float angle = (pulse_us - mcfg->min_pulse_us) /
+                  (float)(mcfg->max_pulse_us - mcfg->min_pulse_us) * 180.0f;
+    if (angle < 0.0f) angle = 0.0f;
+    if (angle > 180.0f) angle = 180.0f;
+    *value = angle;
+    return true;
+}
+
+static void maestro_drv_set_defaults(uint8_t channel, pin_config_t* config)
+{
+    (void)channel;
+    if (!config) return;
+    config->params.maestro.min_pulse_us  = MAESTRO_DEFAULT_MIN_PULSE;
+    config->params.maestro.max_pulse_us  = MAESTRO_DEFAULT_MAX_PULSE;
+    config->params.maestro.neutral_us    = MAESTRO_DEFAULT_NEUTRAL;
+    config->params.maestro.speed         = 0;
+    config->params.maestro.acceleration  = 0;
+    config->params.maestro.home_us       = 0;
+}
+
+static bool maestro_drv_apply_config(uint8_t channel, const pin_config_t* config)
+{
+    if (channel >= MAESTRO_MAX_CHANNELS || !config) return false;
+
+    maestro_channel_config_t mcfg;
+    mcfg.min_pulse_us  = config->params.maestro.min_pulse_us;
+    mcfg.max_pulse_us  = config->params.maestro.max_pulse_us;
+    mcfg.neutral_us    = config->params.maestro.neutral_us;
+    mcfg.speed         = config->params.maestro.speed;
+    mcfg.acceleration  = config->params.maestro.acceleration;
+    mcfg.home_us       = config->params.maestro.home_us;
+    maestro_set_channel_config(channel, &mcfg);
+    return true;
+}
+
+static bool maestro_drv_parse_json(const char* json_start, const char* json_end,
+                                    pin_config_t* config)
+{
+    if (!json_start || !json_end || !config) return false;
+
+    uint16_t min_p = MAESTRO_DEFAULT_MIN_PULSE;
+    uint16_t max_p = MAESTRO_DEFAULT_MAX_PULSE;
+    uint16_t neut  = MAESTRO_DEFAULT_NEUTRAL;
+    uint16_t spd   = 0;
+    uint16_t acc   = 0;
+    uint16_t home  = 0;
+
+    const char* p;
+    p = strstr(json_start, "\"min_pulse_us\"");
+    if (p && p < json_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; min_p = (uint16_t)atoi(p); } }
+    p = strstr(json_start, "\"max_pulse_us\"");
+    if (p && p < json_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; max_p = (uint16_t)atoi(p); } }
+    p = strstr(json_start, "\"neutral_us\"");
+    if (p && p < json_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; neut = (uint16_t)atoi(p); } }
+    p = strstr(json_start, "\"speed\"");
+    if (p && p < json_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; spd = (uint16_t)atoi(p); } }
+    p = strstr(json_start, "\"acceleration\"");
+    if (p && p < json_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; acc = (uint16_t)atoi(p); } }
+    p = strstr(json_start, "\"home_us\"");
+    if (p && p < json_end) { p = strchr(p, ':'); if (p) { p++; while (*p == ' ') p++; home = (uint16_t)atoi(p); } }
+
+    config->params.maestro.min_pulse_us  = min_p;
+    config->params.maestro.max_pulse_us  = max_p;
+    config->params.maestro.neutral_us    = neut;
+    config->params.maestro.speed         = spd;
+    config->params.maestro.acceleration  = acc;
+    config->params.maestro.home_us       = home;
+    return true;
+}
+
+static void maestro_drv_estop(void)
+{
+    if (maestro_is_connected()) {
+        maestro_go_home();
+    }
+}
+
+static int maestro_drv_caps_json(uint8_t channel, char* buf, size_t remaining)
+{
+    if (channel >= MAESTRO_MAX_CHANNELS || !buf) return -1;
+
+    char name[8];
+    int gpio = MAESTRO_VIRTUAL_GPIO_BASE + channel;
+    snprintf(name, sizeof(name), "M%d", channel);
+
+    return snprintf(buf, remaining,
+        "{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[\"maestro_servo\"]}",
+        gpio, name);
+}
+
+static bool maestro_drv_save(void* storage)
+{
+    flash_storage_data_t* s = (flash_storage_data_t*)storage;
+    if (!s) return false;
+
+    memset(&s->maestro_config, 0, sizeof(s->maestro_config));
+    s->maestro_config.channel_count = MAESTRO_MAX_CHANNELS;
+    for (uint8_t ch = 0; ch < MAESTRO_MAX_CHANNELS; ch++) {
+        const maestro_channel_config_t* mcfg = maestro_get_channel_config(ch);
+        if (mcfg) {
+            s->maestro_config.channels[ch].min_pulse_us  = mcfg->min_pulse_us;
+            s->maestro_config.channels[ch].max_pulse_us  = mcfg->max_pulse_us;
+            s->maestro_config.channels[ch].neutral_us    = mcfg->neutral_us;
+            s->maestro_config.channels[ch].speed         = mcfg->speed;
+            s->maestro_config.channels[ch].acceleration  = mcfg->acceleration;
+            s->maestro_config.channels[ch].home_us       = mcfg->home_us;
+        }
+    }
+    return true;
+}
+
+static bool maestro_drv_load(const void* storage)
+{
+    const flash_storage_data_t* s = (const flash_storage_data_t*)storage;
+    if (!s) return false;
+
+    if (s->maestro_config.channel_count > 0) {
+        uint8_t count_m = s->maestro_config.channel_count;
+        if (count_m > MAESTRO_MAX_CHANNELS) count_m = MAESTRO_MAX_CHANNELS;
+        for (uint8_t ch = 0; ch < count_m; ch++) {
+            maestro_channel_config_t mcfg;
+            mcfg.min_pulse_us  = s->maestro_config.channels[ch].min_pulse_us;
+            mcfg.max_pulse_us  = s->maestro_config.channels[ch].max_pulse_us;
+            mcfg.neutral_us    = s->maestro_config.channels[ch].neutral_us;
+            mcfg.speed         = s->maestro_config.channels[ch].speed;
+            mcfg.acceleration  = s->maestro_config.channels[ch].acceleration;
+            mcfg.home_us       = s->maestro_config.channels[ch].home_us;
+            if (mcfg.min_pulse_us > 0 || mcfg.max_pulse_us > 0) {
+                maestro_set_channel_config(ch, &mcfg);
+            }
+        }
+        Serial.printf("Maestro: restored %d channel configs from flash\n", count_m);
+    }
+    return true;
+}
+
+static const peripheral_driver_t maestro_peripheral = {
+    .name             = "maestro",
+    .mode_string      = "maestro_servo",
+    .pin_mode         = PIN_MODE_MAESTRO_SERVO,
+    .capability_flag  = PIN_CAP_MAESTRO_SERVO,
+    .virtual_gpio_base = MAESTRO_VIRTUAL_GPIO_BASE,
+    .channel_count    = MAESTRO_MAX_CHANNELS,
+    .init             = maestro_drv_init,
+    .update           = maestro_update,
+    .is_connected     = maestro_is_connected,
+    .set_value        = maestro_drv_set_value,
+    .get_value        = maestro_drv_get_value,
+    .set_defaults     = maestro_drv_set_defaults,
+    .apply_config     = maestro_drv_apply_config,
+    .parse_json_params = maestro_drv_parse_json,
+    .estop            = maestro_drv_estop,
+    .capabilities_to_json = maestro_drv_caps_json,
+    .save_config      = maestro_drv_save,
+    .load_config      = maestro_drv_load,
+};
+
+const peripheral_driver_t* maestro_get_peripheral_driver(void)
+{
+    return &maestro_peripheral;
 }
 
 } // extern "C"

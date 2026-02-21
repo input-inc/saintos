@@ -15,6 +15,7 @@
 
 #include "pin_control.h"
 #include "pin_config.h"
+#include "peripheral_driver.h"
 
 // =============================================================================
 // Constants
@@ -22,9 +23,7 @@
 
 #define MAX_RUNTIME_VALUES 16
 
-// Servo timing constants (standard servo)
-#define SERVO_MIN_PULSE_US  500     // 0.5ms for 0 degrees
-#define SERVO_MAX_PULSE_US  2500    // 2.5ms for 180 degrees
+// Servo timing constant
 #define SERVO_PERIOD_US     20000   // 20ms (50Hz)
 
 // ADC constants
@@ -88,7 +87,9 @@ static uint32_t get_pwm_wrap(uint8_t gpio)
     const pin_config_t* cfg = pin_config_get(gpio);
     if (!cfg) return 65535;
 
-    uint32_t freq = cfg->params.pwm.frequency;
+    uint32_t freq = (cfg->mode == PIN_MODE_SERVO)
+        ? cfg->params.servo.frequency
+        : cfg->params.pwm.frequency;
     if (freq == 0) freq = 1000;
 
     uint32_t clock = 125000000; // 125 MHz
@@ -152,9 +153,24 @@ bool pin_control_set_value(uint8_t gpio, float value)
             return pin_control_set_digital(gpio, value >= 0.5f);
 
         default:
+        {
+            const peripheral_driver_t* drv = peripheral_find_by_mode(cfg->mode);
+            if (drv && drv->set_value) {
+                uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
+                bool ok = drv->set_value(ch, value);
+
+                pin_runtime_value_t* rv = find_or_create_runtime(gpio);
+                if (rv) {
+                    rv->value = value;
+                    rv->last_updated = to_ms_since_boot(get_absolute_time());
+                }
+                return ok;
+            }
+
             printf("Pin control: GPIO %d mode %s not controllable\n",
                    gpio, pin_mode_to_string(cfg->mode));
             return false;
+        }
     }
 }
 
@@ -200,10 +216,10 @@ bool pin_control_set_servo(uint8_t gpio, float angle)
     if (angle < 0.0f) angle = 0.0f;
     if (angle > 180.0f) angle = 180.0f;
 
-    // Calculate pulse width
-    // Servo expects 50Hz PWM with 0.5ms-2.5ms pulse
-    float pulse_us = SERVO_MIN_PULSE_US +
-                     (angle / 180.0f) * (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US);
+    // Calculate pulse width using per-pin configurable range
+    uint16_t min_us = cfg->params.servo.min_pulse_us;
+    uint16_t max_us = cfg->params.servo.max_pulse_us;
+    float pulse_us = min_us + (angle / 180.0f) * (max_us - min_us);
     float duty_percent = (pulse_us / SERVO_PERIOD_US) * 100.0f;
 
     // Calculate PWM level
@@ -328,7 +344,21 @@ void pin_control_update_state(void)
                 break;
 
             default:
+            {
+                const peripheral_driver_t* drv = peripheral_find_by_mode(cfg->mode);
+                if (drv && drv->get_value && drv->is_connected && drv->is_connected()) {
+                    uint8_t ch = peripheral_gpio_to_channel(drv, cfg->gpio);
+                    float val;
+                    if (drv->get_value(ch, &val)) {
+                        pin_runtime_value_t* rv = find_or_create_runtime(cfg->gpio);
+                        if (rv) {
+                            rv->value = val;
+                            rv->last_updated = to_ms_since_boot(get_absolute_time());
+                        }
+                    }
+                }
                 break;
+            }
         }
     }
 }
@@ -369,6 +399,10 @@ void pin_control_estop(void)
                 break;
         }
     }
+
+    // Emergency stop all peripheral drivers
+    peripheral_estop_all();
+    printf("ESTOP: peripherals stopped\n");
 
     printf("ESTOP: Complete\n");
 }

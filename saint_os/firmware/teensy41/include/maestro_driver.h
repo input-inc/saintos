@@ -124,6 +124,13 @@ const maestro_channel_config_t* maestro_get_channel_config(uint8_t channel);
  */
 uint16_t maestro_angle_to_target(float angle, const maestro_channel_config_t* config);
 
+/**
+ * Get the peripheral driver interface for the Maestro.
+ * Used for registration with the peripheral manager.
+ */
+struct peripheral_driver;
+const struct peripheral_driver* maestro_get_peripheral_driver(void);
+
 #ifdef __cplusplus
 }
 #endif

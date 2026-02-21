@@ -13,7 +13,7 @@
 extern "C" {
 #include "pin_control.h"
 #include "pin_config.h"
-#include "maestro_driver.h"
+#include "peripheral_driver.h"
 }
 
 // =============================================================================
@@ -22,9 +22,7 @@ extern "C" {
 
 #define MAX_RUNTIME_VALUES 48
 
-// Servo timing constants (standard servo)
-#define SERVO_MIN_PULSE_US  500     // 0.5ms for 0 degrees
-#define SERVO_MAX_PULSE_US  2500    // 2.5ms for 180 degrees
+// Servo timing constant
 #define SERVO_PERIOD_US     20000   // 20ms (50Hz)
 
 // ADC constants
@@ -139,36 +137,27 @@ bool pin_control_set_value(uint8_t gpio, float value)
         case PIN_MODE_DIGITAL_OUT:
             return pin_control_set_digital(gpio, value >= 0.5f);
 
-        case PIN_MODE_MAESTRO_SERVO:
+        default:
         {
-            // value is angle in degrees (0-180)
-            uint8_t channel = gpio - MAESTRO_VIRTUAL_GPIO_BASE;
-            if (channel >= MAESTRO_MAX_CHANNELS) return false;
+            // Dispatch to peripheral driver
+            const peripheral_driver_t* drv = peripheral_find_by_mode(cfg->mode);
+            if (drv && drv->set_value) {
+                uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
+                bool ok = drv->set_value(ch, value);
 
-            float angle = value;
-            if (angle < 0.0f) angle = 0.0f;
-            if (angle > 180.0f) angle = 180.0f;
-
-            const maestro_channel_config_t* mcfg = maestro_get_channel_config(channel);
-            if (!mcfg) return false;
-
-            uint16_t target = maestro_angle_to_target(angle, mcfg);
-            bool ok = maestro_set_target(channel, target);
-
-            // Store runtime value (angle)
-            pin_runtime_value_t* rv = find_or_create_runtime(gpio);
-            if (rv) {
-                rv->value = angle;
-                rv->last_updated = millis();
+                // Store runtime value
+                pin_runtime_value_t* rv = find_or_create_runtime(gpio);
+                if (rv) {
+                    rv->value = value;
+                    rv->last_updated = millis();
+                }
+                return ok;
             }
 
-            return ok;
-        }
-
-        default:
             Serial.printf("Pin control: GPIO %d mode %s not controllable\n",
                    gpio, pin_mode_to_string(cfg->mode));
             return false;
+        }
     }
 }
 
@@ -210,10 +199,10 @@ bool pin_control_set_servo(uint8_t gpio, float angle)
     if (angle < 0.0f) angle = 0.0f;
     if (angle > 180.0f) angle = 180.0f;
 
-    // Calculate pulse width
-    // Servo expects 50Hz PWM with 0.5ms-2.5ms pulse in 20ms period
-    float pulse_us = SERVO_MIN_PULSE_US +
-                     (angle / 180.0f) * (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US);
+    // Calculate pulse width using per-pin configurable range
+    uint16_t min_us = cfg->params.servo.min_pulse_us;
+    uint16_t max_us = cfg->params.servo.max_pulse_us;
+    float pulse_us = min_us + (angle / 180.0f) * (max_us - min_us);
     float duty_fraction = pulse_us / (float)SERVO_PERIOD_US;
 
     // Teensy analogWrite with 12-bit resolution at 50Hz
@@ -329,33 +318,23 @@ void pin_control_update_state(void)
                 pin_control_read_digital(cfg->gpio);
                 break;
 
-            case PIN_MODE_MAESTRO_SERVO:
+            default:
             {
-                // Read actual position from Maestro
-                if (maestro_is_connected()) {
-                    uint8_t channel = cfg->gpio - MAESTRO_VIRTUAL_GPIO_BASE;
-                    uint16_t pos_qus = maestro_get_position(channel);
-                    if (pos_qus > 0) {
-                        const maestro_channel_config_t* mcfg = maestro_get_channel_config(channel);
-                        if (mcfg && mcfg->max_pulse_us > mcfg->min_pulse_us) {
-                            float pulse_us = pos_qus / 4.0f;
-                            float angle = (pulse_us - mcfg->min_pulse_us) /
-                                          (float)(mcfg->max_pulse_us - mcfg->min_pulse_us) * 180.0f;
-                            if (angle < 0.0f) angle = 0.0f;
-                            if (angle > 180.0f) angle = 180.0f;
-                            pin_runtime_value_t* rv = find_or_create_runtime(cfg->gpio);
-                            if (rv) {
-                                rv->value = angle;
-                                rv->last_updated = millis();
-                            }
+                // Dispatch to peripheral driver for value readback
+                const peripheral_driver_t* drv = peripheral_find_by_mode(cfg->mode);
+                if (drv && drv->get_value && drv->is_connected && drv->is_connected()) {
+                    uint8_t ch = peripheral_gpio_to_channel(drv, cfg->gpio);
+                    float val;
+                    if (drv->get_value(ch, &val)) {
+                        pin_runtime_value_t* rv = find_or_create_runtime(cfg->gpio);
+                        if (rv) {
+                            rv->value = val;
+                            rv->last_updated = millis();
                         }
                     }
                 }
                 break;
             }
-
-            default:
-                break;
         }
     }
 }
@@ -384,10 +363,6 @@ void pin_control_estop(void)
                 Serial.printf("ESTOP: GPIO %d (Servo) -> 90 deg (center)\n", cfg->gpio);
                 break;
 
-            case PIN_MODE_MAESTRO_SERVO:
-                // Maestro channels handled below via go_home
-                break;
-
             case PIN_MODE_DIGITAL_OUT:
                 // Set digital outputs low
                 pin_control_set_digital(cfg->gpio, false);
@@ -400,11 +375,9 @@ void pin_control_estop(void)
         }
     }
 
-    // Send all Maestro channels to home positions
-    if (maestro_is_connected()) {
-        maestro_go_home();
-        Serial.printf("ESTOP: Maestro -> go home\n");
-    }
+    // Emergency stop all peripheral drivers (Maestro, SyRen, etc.)
+    peripheral_estop_all();
+    Serial.printf("ESTOP: peripherals stopped\n");
 
     Serial.printf("ESTOP: Complete\n");
 }

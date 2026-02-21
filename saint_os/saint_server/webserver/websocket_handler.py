@@ -95,6 +95,17 @@ def translate_normalized_value(value: float, mode: str, input_range: str = 'bipo
             # Unipolar/trigger: 0→0, 1→180
             return value * 180.0
 
+    elif mode_lower == 'syren_motor':
+        if use_bipolar:
+            # Bipolar/joystick: -1→-100, 0→0, 1→100
+            return value * 100.0
+        else:
+            # Unipolar/trigger: 0→-100, 0.5→0, 1→100
+            return value * 200.0 - 100.0
+
+    elif mode_lower == 'pathfinder_bms_sensor':
+        return value
+
     elif mode_lower == 'digital_out':
         # Threshold at 0.5
         return 1.0 if value >= 0.5 else 0.0

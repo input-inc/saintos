@@ -47,6 +47,10 @@ class PinCapability:
             'uart_tx': 'uart_tx',
             'uart_rx': 'uart_rx',
             'maestro_servo': 'maestro_servo',
+            'syren_motor': 'syren_motor',
+            'fas100_sensor': 'fas100_sensor',
+            'roboclaw_motor': 'roboclaw_motor',
+            'pathfinder_bms_sensor': 'pathfinder_bms_sensor',
         }
         required_cap = mode_map.get(mode, mode)
         return required_cap in self.capabilities
@@ -1138,7 +1142,7 @@ class StateManager:
         if not node or not node.pin_config:
             return []
 
-        controllable_modes = {'pwm', 'servo', 'digital_out', 'maestro_servo'}
+        controllable_modes = {'pwm', 'servo', 'digital_out', 'maestro_servo', 'syren_motor'}
         result = []
 
         for gpio, config in node.pin_config.pins.items():

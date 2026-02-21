@@ -35,6 +35,7 @@
 #include "syren_driver.h"
 #include "fas100_driver.h"
 #include "roboclaw_driver.h"
+#include "pathfinder_bms_driver.h"
 
 // Transport selection based on build mode
 #ifdef SIMULATION
@@ -975,6 +976,7 @@ int main(void)
     peripheral_register(syren_get_peripheral_driver());
     peripheral_register(fas100_get_peripheral_driver());
     peripheral_register(roboclaw_get_peripheral_driver());
+    peripheral_register(pathfinder_bms_get_peripheral_driver());
     peripheral_init_all();
 
     // Initialize hardware

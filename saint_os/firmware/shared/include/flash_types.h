@@ -16,7 +16,7 @@
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   6
+#define FLASH_STORAGE_VERSION   7
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
@@ -107,6 +107,16 @@ typedef struct __attribute__((packed)) {
 } flash_roboclaw_config_t;
 
 // =============================================================================
+// Pathfinder BMS Configuration
+// =============================================================================
+
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;
+    uint8_t serial_port;       // Which UART (0-1 RP2040, 1-8 Teensy)
+    uint16_t poll_interval_ms; // Default 1000ms
+} flash_pathfinder_bms_config_t;
+
+// =============================================================================
 // Main Storage Structure
 // =============================================================================
 
@@ -135,6 +145,8 @@ typedef struct __attribute__((packed)) {
     flash_fas100_config_t fas100_config;
 
     flash_roboclaw_config_t roboclaw_config;
+
+    flash_pathfinder_bms_config_t pathfinder_bms_config;
 
     uint8_t reserved[32];
 
