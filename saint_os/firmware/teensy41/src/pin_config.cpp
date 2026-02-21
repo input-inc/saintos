@@ -295,7 +295,11 @@ const pin_config_t* pin_config_get_all(uint8_t* count)
 
 int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char* node_id)
 {
-    if (!buffer || buffer_size < 256) return -1;
+    if (!buffer || buffer_size < 256) 
+    {
+        Serial.printf("Pin config: buffer too small for capabilities JSON\n");
+        return -1;
+    }
 
     int written = 0;
     int ret;
@@ -303,7 +307,11 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
     // Start JSON object
     ret = snprintf(buffer + written, buffer_size - written,
         "{\"node_id\":\"%s\",\"pins\":[", node_id);
-    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+    if ((ret < 0) || ((size_t)ret >= (buffer_size - written)))
+    {
+        Serial.printf("Pin config: snprintf failed for node_id JSON, ret=%d\n", ret);
+        return -1;
+    }
     written += ret;
 
     // Write available pins
@@ -354,25 +362,42 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
         ret = snprintf(buffer + written, buffer_size - written,
             "%s{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[%s]}",
             i > 0 ? "," : "", pin->gpio, pin->name, caps_str);
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+        if ((ret < 0) || ((size_t)ret >= (buffer_size - written)))
+        {
+            Serial.printf("Pin config: buffer_size=%d, written=%d, ret=%d\n", (int)buffer_size, written, ret);    
+            Serial.printf("Pin config: snprintf(2) failed for pin JSON, ret=%d\n", ret);
+            return -1;
+        }
         written += ret;
     }
 
     // Write reserved pins array
     ret = snprintf(buffer + written, buffer_size - written, "],\"reserved_pins\":[");
-    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+    if ((ret < 0) || ((size_t)ret >= (buffer_size - written))) 
+    {
+        Serial.printf("Pin config: snprintf failed for reserved pins array start, ret=%d\n", ret);
+        return -1;
+    }
     written += ret;
 
     for (size_t i = 0; i < RESERVED_PIN_COUNT; i++) {
         ret = snprintf(buffer + written, buffer_size - written,
             "%s%d", i > 0 ? "," : "", reserved_pins[i]);
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+        if ((ret < 0) || ((size_t)ret >= (buffer_size - written))) 
+        {
+            Serial.printf("Pin config: snprintf failed for reserved pin %d, ret=%d\n", i, ret);
+            return -1;
+        }
         written += ret;
     }
 
     // Close JSON
     ret = snprintf(buffer + written, buffer_size - written, "]}");
-    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+    if ((ret < 0) || ((size_t)ret >= (buffer_size - written))) 
+    {
+        Serial.printf("Pin config: snprintf failed to close JSON, ret=%d\n", ret);
+        return -1;
+    }
     written += ret;
 
     return written;
