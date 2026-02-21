@@ -12,6 +12,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // =============================================================================
 // Node States
 // =============================================================================
@@ -105,5 +109,9 @@ void led_init(void);
 void led_set_state(node_state_t state);
 void led_update(void);
 void led_identify(uint8_t flash_count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // SAINT_TYPES_H

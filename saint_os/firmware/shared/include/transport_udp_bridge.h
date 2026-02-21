@@ -14,6 +14,10 @@
 
 #include <uxr/client/transport.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 bool transport_udp_bridge_init(void);
 bool transport_udp_bridge_connect(void);
 void transport_udp_bridge_get_ip(uint8_t* ip);
@@ -34,5 +38,9 @@ size_t transport_udp_bridge_read(
     size_t len,
     int timeout_ms,
     uint8_t* err);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // TRANSPORT_UDP_BRIDGE_H
