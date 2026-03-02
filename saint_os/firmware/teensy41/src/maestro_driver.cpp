@@ -11,10 +11,9 @@
 #include <USBHost_t36.h>
 #endif
 
-extern "C" {
+#include "flash_types.h"
 #include "maestro_driver.h"
 #include "peripheral_driver.h"
-}
 
 // =============================================================================
 // USB Host Objects (hardware only)
@@ -23,7 +22,7 @@ extern "C" {
 #ifndef SIMULATION
 static USBHost myusb;
 static USBHub hub1(myusb);
-static USBSerial_BigBuffer maestroSerial(myusb);
+static USBSerial_BigBuffer maestroSerial(myusb, 1);
 #endif
 
 // =============================================================================
@@ -112,6 +111,17 @@ void maestro_init(void)
     maestro_initialized = true;
 }
 
+void PrintDeviceListChanges() {
+    Serial.printf("*** Device %s %x:%x - connected ***\n", "Maestro", maestroSerial.idVendor(), maestroSerial.idProduct());
+
+    const uint8_t *psz = maestroSerial.manufacturer();
+    if (psz && *psz) Serial.printf("  manufacturer: %s\n", psz);
+    psz = maestroSerial.product();
+    if (psz && *psz) Serial.printf("  product: %s\n", psz);
+    psz = maestroSerial.serialNumber();
+    if (psz && *psz) Serial.printf("  Serial: %s\n", psz);
+}
+
 void maestro_update(void)
 {
     if (!maestro_initialized) return;
@@ -125,10 +135,11 @@ void maestro_update(void)
         last_connect_check = now;
 
         bool was_connected = maestro_connected;
-        maestro_connected = (bool)maestroSerial;
-
+        maestro_connected = maestroSerial;
+ 
         if (maestro_connected && !was_connected) {
             Serial.printf("Maestro: device connected\n");
+            PrintDeviceListChanges();
             // Clear any pending errors
             maestro_get_errors();
         } else if (!maestro_connected && was_connected) {

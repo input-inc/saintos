@@ -8,11 +8,9 @@
 
 #include <Arduino.h>
 
-extern "C" {
 #include "fas100_driver.h"
 #include "peripheral_driver.h"
 #include "flash_types.h"
-}
 
 // =============================================================================
 // Configuration
@@ -51,11 +49,11 @@ static uint8_t rx_pos = 0;
 static void send_poll(void)
 {
 #ifndef SIMULATION
-    uint8_t frame[SPORT_POLL_FRAME_SIZE] = {
+    uint8_t frame[FAS100_POLL_FRAME_SIZE] = {
         SPORT_POLL_HEADER,
         SPORT_FAS100_PHYSICAL_ID
     };
-    FAS100_SERIAL.write(frame, SPORT_POLL_FRAME_SIZE);
+    FAS100_SERIAL.write(frame, FAS100_POLL_FRAME_SIZE);
 #endif
 }
 

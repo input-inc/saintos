@@ -89,11 +89,11 @@ static rcl_timer_t state_timer;
 
 // Message buffers
 static std_msgs__msg__String announcement_msg;
-static char announcement_buffer[256];
+static char announcement_buffer[512];
 
 // NOTE: Current Msg is over 4K in size
 static std_msgs__msg__String capabilities_msg;
-static char capabilities_buffer[8 *1024];
+static char capabilities_buffer[10 *1024];
 
 static std_msgs__msg__String config_msg;
 static char config_buffer[2048];
@@ -387,6 +387,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     snprintf(announcement_buffer + ann_len,
         sizeof(announcement_buffer) - ann_len, "}}");
     ann_len = strlen(announcement_buffer);
+    //Serial.printf("Announcement: %s, len=%d\n", announcement_buffer, ann_len);
 
     announcement_msg.data.data = announcement_buffer;
     announcement_msg.data.size = strlen(announcement_buffer);
