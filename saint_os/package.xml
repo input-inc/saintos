@@ -28,6 +28,8 @@
   <build_depend>sensor_msgs</build_depend>
   <build_depend>nav_msgs</build_depend>
   <build_depend>builtin_interfaces</build_depend>
+  <!-- Python headers required by rosidl_generator_py to build typesupport extensions -->
+  <build_depend>python3-dev</build_depend>
 
   <!-- Execution dependencies -->
   <exec_depend>rclpy</exec_depend>
