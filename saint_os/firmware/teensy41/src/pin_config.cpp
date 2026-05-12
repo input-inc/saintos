@@ -389,12 +389,20 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
                 // Write comma separator
                 ret = snprintf(buffer + written, buffer_size - written,
                     "%s", first_pin ? "" : ",");
-                if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+                if (ret < 0 || (size_t)ret >= buffer_size - written) 
+                {
+                    Serial.printf("Pin config: snprintf failed for comma separator, ret=%d\n", ret);
+                    return -1;
+                }
                 written += ret;
 
                 int frag = drv->capabilities_to_json(ch, buffer + written,
                                                       buffer_size - written);
-                if (frag < 0) return -1;
+                if (frag < 0) 
+                {
+                    Serial.printf("Pin config: driver capabilities_to_json failed for channel %d\n", ch);
+                    return -1;
+                }
                 written += frag;
             } else {
                 // Generic virtual pin entry
@@ -405,7 +413,11 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
                 ret = snprintf(buffer + written, buffer_size - written,
                     "%s{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[\"%s\"]}",
                     first_pin ? "" : ",", gpio, pin_name, drv->mode_string);
-                if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+                if (ret < 0 || (size_t)ret >= buffer_size - written) 
+                {
+                    Serial.printf("Pin config: snprintf failed for virtual pin JSON, ret=%d\n", ret);
+                    return -1;
+                }
                 written += ret;
             }
             first_pin = false;
