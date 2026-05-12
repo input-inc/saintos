@@ -18,6 +18,10 @@ concurrency:
 permissions:
   contents: write
 
+env:
+  # Opt JS actions into Node.js 24 ahead of the 2026-06-02 forced cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   # ---------------------------------------------------------------------------
   meta:
