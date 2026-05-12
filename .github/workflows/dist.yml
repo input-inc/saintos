@@ -95,10 +95,6 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
@@ -106,11 +102,21 @@ jobs:
             ~/.platformio/.cache
             ~/.platformio/packages
             ~/.platformio/platforms
+            ~/.platformio/penv
           key: pio-${{ hashFiles('saint_os/firmware/teensy41/platformio.ini') }}
           restore-keys: pio-
 
-      - name: Install PlatformIO
-        run: pip install --upgrade platformio
+      # micro_ros_platformio's build script sources ~/.platformio/penv/bin/activate,
+      # which PlatformIO normally creates lazily — but not when PIO is installed
+      # into a non-system Python. Bootstrap the penv ourselves so the library finds it.
+      - name: Install PlatformIO into ~/.platformio/penv
+        run: |
+          if [[ ! -x "$HOME/.platformio/penv/bin/pio" ]]; then
+            mkdir -p "$HOME/.platformio"
+            python3 -m venv "$HOME/.platformio/penv"
+            "$HOME/.platformio/penv/bin/pip" install --upgrade pip platformio
+          fi
+          echo "$HOME/.platformio/penv/bin" >> "$GITHUB_PATH"
 
       - name: Build firmware (hardware)
         run: |
