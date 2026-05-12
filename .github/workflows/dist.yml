@@ -1,0 +1,258 @@
+name: dist
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override version (default: <VERSION>-<sha7>)'
+        required: false
+
+concurrency:
+  group: dist-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          set -euo pipefail
+          BASE=$(tr -d '[:space:]' < VERSION)
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${BASE}-${GITHUB_SHA::7}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+  # ---------------------------------------------------------------------------
+  firmware-rp2040:
+    needs: meta
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build build-essential \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+            python3 git
+
+      - name: Cache Pico SDK
+        id: pico-sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/pico-sdk
+          key: pico-sdk-2.1.0
+
+      - name: Clone Pico SDK
+        if: steps.pico-sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 2.1.0 https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
+          git -C ~/pico-sdk submodule update --init --recursive --depth 1
+
+      - name: Build firmware (hardware)
+        env:
+          PICO_SDK_PATH: /home/runner/pico-sdk
+        run: |
+          cd saint_os/firmware/rp2040
+          ./build.sh hw
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-rp2040
+          path: |
+            saint_os/firmware/rp2040/build/*.uf2
+            saint_os/firmware/rp2040/build/*.elf
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  firmware-teensy41:
+    needs: meta
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ hashFiles('saint_os/firmware/teensy41/platformio.ini') }}
+          restore-keys: pio-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware (hardware)
+        run: |
+          cd saint_os/firmware/teensy41
+          pio run -e hardware
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-teensy41
+          path: saint_os/firmware/teensy41/.pio/build/hardware/firmware.hex
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  firmware-rpi5:
+    needs: meta
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package Pi 5 node firmware
+        run: |
+          cd saint_os/firmware/rpi5/scripts
+          ./package.sh "${{ needs.meta.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-rpi5
+          path: saint_os/firmware/rpi5/dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  package-server:
+    needs: [meta, firmware-rp2040, firmware-teensy41, firmware-rpi5]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-22.04-arm
+            arch: arm64
+            ros: humble
+            codename: jammy
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ROS2 ${{ matrix.ros }}
+        env:
+          ROS_DISTRO: ${{ matrix.ros }}
+          CODENAME: ${{ matrix.codename }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y locales curl gnupg lsb-release software-properties-common
+          sudo locale-gen en_US en_US.UTF-8
+          sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+          sudo add-apt-repository -y universe
+          sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+            -o /usr/share/keyrings/ros-archive-keyring.gpg
+          echo "deb [arch=${ARCH} signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu ${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            "ros-${ROS_DISTRO}-ros-base" \
+            "ros-${ROS_DISTRO}-rosidl-default-generators" \
+            "ros-${ROS_DISTRO}-rosidl-default-runtime" \
+            python3-colcon-common-extensions \
+            python3-rosdep
+
+      - name: rosdep
+        run: |
+          sudo rosdep init || true
+          rosdep update
+          source /opt/ros/${{ matrix.ros }}/setup.bash
+          rosdep install --from-paths saint_os --ignore-src -y \
+            --rosdistro ${{ matrix.ros }} || true
+
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: _fw
+
+      - name: Stage firmware into resources
+        run: |
+          set -euo pipefail
+          mkdir -p saint_os/resources/firmware/{rp2040,teensy41,rpi5}
+          # rp2040: .uf2 + .elf
+          if [[ -d _fw/firmware-rp2040 ]]; then
+            find _fw/firmware-rp2040 -type f \( -name '*.uf2' -o -name '*.elf' \) \
+              -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+          fi
+          # teensy41: .hex
+          if [[ -d _fw/firmware-teensy41 ]]; then
+            find _fw/firmware-teensy41 -type f -name '*.hex' \
+              -exec cp -v {} saint_os/resources/firmware/teensy41/ \;
+          fi
+          # rpi5: zip + info.json (package.sh output)
+          if [[ -d _fw/firmware-rpi5 ]]; then
+            cp -rv _fw/firmware-rpi5/. saint_os/resources/firmware/rpi5/
+          fi
+          ls -la saint_os/resources/firmware/*/
+
+      - name: colcon build
+        run: |
+          set -euo pipefail
+          source /opt/ros/${{ matrix.ros }}/setup.bash
+          colcon build \
+            --merge-install \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+      - name: Assemble distribution tarball
+        run: |
+          .github/scripts/make-dist.sh \
+            "${{ needs.meta.outputs.version }}" \
+            "${{ matrix.arch }}" \
+            "${{ matrix.ros }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: saint-os_${{ needs.meta.outputs.version }}_${{ matrix.arch }}_${{ matrix.ros }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  release:
+    needs: package-server
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: saint-os_*
+          merge-multiple: true
+
+      - name: Inspect downloaded artifacts
+        run: ls -lah dist/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true
