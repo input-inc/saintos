@@ -1,0 +1,36 @@
+[Unit]
+Description=SAINT.OS Server
+Documentation=https://github.com/input-inc/saintos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+
+Environment=ROS_DOMAIN_ID=0
+Environment=PYTHONUNBUFFERED=1
+Environment=SAINT_CONFIG_DIR=@CONFIG_DIR@
+Environment=SAINT_STATE_DIR=@STATE_DIR@
+Environment=SAINT_LOG_DIR=@LOG_DIR@
+
+ExecStart=/bin/bash -lc 'source /opt/ros/@ROS_DISTRO@/setup.bash && source @PREFIX@/install/setup.bash && exec ros2 launch saint_os server.launch.py'
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+# Capabilities so the server can bind port 80 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+ReadWritePaths=@STATE_DIR@ @LOG_DIR@ @CONFIG_DIR@
+
+[Install]
+WantedBy=multi-user.target
