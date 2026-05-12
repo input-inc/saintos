@@ -1,3 +1,7 @@
 [submodule "saint_os/firmware/rp2040/lib/ioLibrary_Driver"]
 	path = saint_os/firmware/rp2040/lib/ioLibrary_Driver
 	url = https://github.com/Wiznet/ioLibrary_Driver.git
+[submodule "saint_os/firmware/rp2040/lib/micro_ros_raspberrypi_pico_sdk"]
+	path = saint_os/firmware/rp2040/lib/micro_ros_raspberrypi_pico_sdk
+	url = https://github.com/micro-ROS/micro_ros_raspberrypi_pico_sdk.git
+	branch = humble

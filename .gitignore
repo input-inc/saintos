@@ -22,6 +22,9 @@ eggs/
 .eggs/
 lib/
 lib64/
+# Firmware vendor libraries (submodules) are real source, not Python build dirs
+!saint_os/firmware/*/lib/
+!saint_os/firmware/*/lib/**
 parts/
 sdist/
 var/
