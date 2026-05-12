@@ -226,7 +226,8 @@ jobs:
 
       - name: colcon build
         run: |
-          set -euo pipefail
+          # No `-u`: ROS2's setup.bash references unbound vars (AMENT_TRACE_SETUP_FILES etc.)
+          set -eo pipefail
           source /opt/ros/${{ matrix.ros }}/setup.bash
           colcon build \
             --merge-install \
