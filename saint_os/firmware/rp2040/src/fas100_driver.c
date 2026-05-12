@@ -61,11 +61,11 @@ static uint8_t rx_pos = 0;
 static void send_poll(void)
 {
 #ifndef SIMULATION
-    uint8_t frame[SPORT_POLL_FRAME_SIZE] = {
+    uint8_t frame[FAS100_POLL_FRAME_SIZE] = {
         SPORT_POLL_HEADER,
         SPORT_FAS100_PHYSICAL_ID
     };
-    uart_write_blocking(FAS100_UART, frame, SPORT_POLL_FRAME_SIZE);
+    uart_write_blocking(FAS100_UART, frame, FAS100_POLL_FRAME_SIZE);
 #endif
 }
 
