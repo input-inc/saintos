@@ -5,8 +5,11 @@ project(saint_os)
 # Python Compatibility Fix for CMake 3.27+
 # ==============================================================================
 # CMake 3.27+ removed FindPythonInterp/FindPythonLibs which ROS2 still uses.
-# Add our shim modules to CMAKE_MODULE_PATH to provide backwards compatibility.
-list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules")
+# Only inject our shims when needed — on older CMake (e.g. 3.22 on Ubuntu 22.04)
+# the built-in modules work fine and the shims fail on linux/arm64.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules")
+endif()
 
 # Default to C++17
 if(NOT CMAKE_CXX_STANDARD)
