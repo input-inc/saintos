@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.14...3.30)
 project(saint_os)
 
+# ==============================================================================
+# Python Compatibility Fix for CMake 3.27+
+# ==============================================================================
+# CMake 3.27 removed FindPythonInterp/FindPythonLibs but ROS2 Humble's
+# python_cmake_module still calls them. Inject compatibility shims that
+# delegate to FindPython3. Only active on CMake versions that need it.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules")
+endif()
+
 # Default to C++17
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
