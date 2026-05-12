@@ -6,6 +6,7 @@
 
 #include "peripheral_driver.h"
 #include "platform.h"
+#include <stdio.h>
 #include <string.h>
 
 // =============================================================================
