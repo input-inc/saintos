@@ -25,6 +25,9 @@ lib64/
 # Firmware vendor libraries (submodules) are real source, not Python build dirs
 !saint_os/firmware/*/lib/
 !saint_os/firmware/*/lib/**
+# CI installer payload is source, not a Python build dir
+!.github/dist/
+!.github/dist/**
 parts/
 sdist/
 var/
