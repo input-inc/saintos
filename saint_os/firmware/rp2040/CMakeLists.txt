@@ -117,9 +117,9 @@ target_link_libraries(wiznet_iolibrary
 # Common source files
 set(SAINT_NODE_SOURCES
     src/main.c
-    ../shared/src/node_state.c
+    ../shared/src/node_state.cpp
     ../shared/src/flash_helpers.c
-    ../shared/src/peripheral_manager.c
+    ../shared/src/peripheral_manager.cpp
     src/hardware.c
     src/led_status.c
     src/pico_clock.c
@@ -134,7 +134,7 @@ set(SAINT_NODE_SOURCES
 
 # Add transport based on build mode
 if(SIMULATION)
-    list(APPEND SAINT_NODE_SOURCES ../shared/src/transport_udp_bridge.c)
+    list(APPEND SAINT_NODE_SOURCES ../shared/src/transport_udp_bridge.cpp)
 else()
     list(APPEND SAINT_NODE_SOURCES transport/transport_w5500.c)
     list(APPEND SAINT_NODE_SOURCES src/discovery.c)
