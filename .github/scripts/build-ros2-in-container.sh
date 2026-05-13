@@ -86,6 +86,14 @@ cd "${ROS_ROOT}"
 echo ">>> Importing ros2.repos..."
 vcs import --input /work/_ros2_src/ros2.repos src
 
+# ros2/variants holds the ros_base / ros_core / desktop meta-packages.
+# It's NOT included in Jazzy's ros2.repos (was in Humble), but it still
+# exists upstream — we need it for `colcon build --packages-up-to ros_base`.
+echo ">>> Cloning ros2/variants (provides ros_base meta-package)..."
+git clone --depth 1 -b "${ROS_DISTRO}" \
+    https://github.com/ros2/variants.git \
+    src/ros2/variants
+
 echo ">>> Cloning micro_ros_setup..."
 git clone --depth 1 -b "${MICRO_ROS_REF}" \
     https://github.com/micro-ROS/micro_ros_setup.git \
