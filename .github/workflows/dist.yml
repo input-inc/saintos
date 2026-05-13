@@ -242,7 +242,9 @@ jobs:
       - name: Build saint_os against bundled ROS2 (in bookworm container)
         run: |
           set -eo pipefail
-          docker run --rm --platform linux/arm64 \
+          # -i forwards the heredoc as stdin; without it bash inside the
+          # container gets no input and exits silently.
+          docker run --rm -i --platform linux/arm64 \
             -v "${PWD}:/work" \
             -w /work \
             -e ROS_DISTRO \

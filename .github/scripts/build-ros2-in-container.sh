@@ -26,7 +26,10 @@ echo "Building ROS2 ${ROS_DISTRO} for arm64 against Debian ${DEBIAN_RELEASE}"
 
 # The actual build runs as root inside the container. We mount the workspace
 # in so the resulting tarball lands back on the runner FS.
-docker run --rm --platform linux/arm64 \
+# -i forwards our heredoc as stdin to bash inside the container. Without it,
+# docker run discards stdin and the container's bash exits immediately with
+# nothing to do — producing a "success" run with no actual work performed.
+docker run --rm -i --platform linux/arm64 \
     -v "${WS}:/work" \
     -w /work \
     -e ROS_DISTRO \
