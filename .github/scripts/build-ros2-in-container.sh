@@ -208,8 +208,17 @@ find "${ROS_ROOT}/install" -name '*.sh' -type f \
 # no Debian apt mapping, and we don't use them anyway.
 BUILT_PKGS=$(ls "${ROS_ROOT}/install/share/" 2>/dev/null | tr '\n' ' ')
 PROPRIETARY_SKIPS="rti_connext_dds_cmake_module rti-connext-dds-6.0.1 rmw_connextdds"
-export EXTERNAL_SKIP="${BUILT_PKGS} ${PROPRIETARY_SKIPS}"
+# Ubuntu-only rosdep keys whose mapping doesn't translate cleanly to Debian.
+# We pre-install the Debian equivalents below, then skip these so rosdep
+# doesn't try its (broken on Debian) apt-install command.
+UBUNTU_ONLY_KEYS="python3-catkin-pkg-modules"
+export EXTERNAL_SKIP="${BUILT_PKGS} ${PROPRIETARY_SKIPS} ${UBUNTU_ONLY_KEYS}"
 echo ">>> Configured EXTERNAL_SKIP with $(echo "${EXTERNAL_SKIP}" | wc -w) entries"
+
+# Pre-install Debian equivalents for the Ubuntu-only rosdep keys we skip
+# above, so anything that genuinely needs catkin_pkg still resolves at
+# Python import time.
+apt-get install -y --no-install-recommends python3-catkin-pkg
 
 echo ">>> Creating micro-ROS agent workspace..."
 ros2 run micro_ros_setup create_agent_ws.sh
