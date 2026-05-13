@@ -180,12 +180,19 @@ print(f"Stripped from agent_uros_packages.repos: {removed}")
 PY
 fi
 
-# micro_ros_setup's create_agent_ws.sh hardcodes `--os=ubuntu:noble` when
-# calling rosdep, so it generates Ubuntu-style package names (e.g.
-# ros-jazzy-urdfdom-headers) that don't exist on Debian's apt. To work
-# around this, we use the EXTERNAL_SKIP env var the script accepts and
-# feed it the full list of packages we've already source-built in Phase 1.
-# Anything in /opt/ros/jazzy/install/share/ is satisfied — skip rosdep for it.
+# micro_ros_setup's scripts hardcode `--os=ubuntu:noble` when calling rosdep.
+# On Debian Bookworm that produces Ubuntu-only package names — including
+# noble-specific t64-suffixed names (libopencv-core406t64 etc.) from
+# Ubuntu's time64 transition that Debian Bookworm hasn't applied. Patch
+# the installed scripts to target Debian Bookworm instead so rosdep
+# generates Debian-native package names.
+echo ">>> Patching micro_ros_setup scripts: --os=ubuntu:noble → --os=debian:bookworm"
+find "${ROS_ROOT}/install" -name '*.sh' -type f \
+    -exec sed -i 's|--os=ubuntu:noble|--os=debian:bookworm|g' {} +
+
+# Build a skip list from packages already source-built in Phase 1. rosdep
+# (even pointed at Debian Bookworm) doesn't know what's in /opt/ros/jazzy/
+# install/, so we list every ament package name as already-satisfied.
 BUILT_PKGS=$(ls "${ROS_ROOT}/install/share/" 2>/dev/null | tr '\n' ' ')
 export EXTERNAL_SKIP="${BUILT_PKGS}"
 echo ">>> Configured EXTERNAL_SKIP with $(echo "${BUILT_PKGS}" | wc -w) packages"
