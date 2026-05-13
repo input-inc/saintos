@@ -218,8 +218,13 @@ done
 # the colcon build below will fail with a useful CMake-level error — much
 # clearer than rosdep's "no Debian mapping" cryptic failures.
 
+# Pass `--merge-install` through to colcon — Phase 1 used merged layout, so
+# this is required to keep using the same install/ tree (otherwise colcon
+# refuses to mix layouts). With `--packages-up-to micro_ros_agent` and a
+# merged install, colcon reuses already-built ros_base packages from Phase
+# 1 and only compiles what's new (micro_ros_agent + its non-ros_base deps).
 echo ">>> Building micro-ROS agent..."
-ros2 run micro_ros_setup build_agent.sh
+ros2 run micro_ros_setup build_agent.sh --merge-install
 
 # --- Tar up the result for the runner --------------------------------------
 
