@@ -46,7 +46,6 @@ apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg wget locales \
     build-essential cmake git pkg-config \
     python3 python3-dev python3-pip python3-venv \
-    python3-rosdep python3-vcstool python3-colcon-common-extensions \
     python3-flake8 python3-numpy python3-yaml python3-pytest \
     libacl1-dev liblog4cxx-dev libcurl4-openssl-dev libssl-dev \
     libtinyxml2-dev libxml2-dev libyaml-dev libeigen3-dev \
@@ -57,6 +56,22 @@ apt-get install -y --no-install-recommends \
 locale-gen en_US en_US.UTF-8
 update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+# ROS2 build tooling — these aren't in Debian's apt repos (only Ubuntu's
+# via packages.ros.org), so we follow the ROS2 source-install procedure for
+# unsupported distros and install them from PyPI. --break-system-packages
+# is fine in a throwaway build container; never use it on the target.
+# EmPy is pinned to 3.x — Jazzy is incompatible with EmPy 4.
+python3 -m pip install --break-system-packages -U \
+    colcon-common-extensions \
+    rosdep \
+    vcstool \
+    catkin_pkg \
+    "empy==3.3.4" \
+    lark \
+    netifaces \
+    pyparsing \
+    setuptools
 
 # rosdep needs to be initialized to map keys to apt packages on bookworm.
 # bookworm is "Tier 3" so we'll see warnings about unsupported deps — they
