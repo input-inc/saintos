@@ -43,7 +43,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
 apt-get install -y --no-install-recommends \
-    ca-certificates curl gnupg wget locales \
+    ca-certificates curl gnupg wget \
     build-essential cmake git pkg-config \
     python3 python3-dev python3-pip python3-venv \
     python3-flake8 python3-numpy python3-yaml python3-pytest \
@@ -52,10 +52,8 @@ apt-get install -y --no-install-recommends \
     libasio-dev libtinyxml-dev libcunit1-dev libbenchmark-dev \
     uncrustify cppcheck
 
-# Locale matters for some build steps.
-locale-gen en_US en_US.UTF-8
-update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+# Use C.UTF-8 — built into glibc, no locale generation needed.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 # ROS2 build tooling — these aren't in Debian's apt repos (only Ubuntu's
 # via packages.ros.org), so we follow the ROS2 source-install procedure for
