@@ -158,6 +158,16 @@ source install/setup.bash
 
 # --- Phase 3: create + build the micro-ROS agent ----------------------------
 
+# micro_ros_setup's create_agent_ws.sh hardcodes `--os=ubuntu:noble` when
+# calling rosdep, so it generates Ubuntu-style package names (e.g.
+# ros-jazzy-urdfdom-headers) that don't exist on Debian's apt. To work
+# around this, we use the EXTERNAL_SKIP env var the script accepts and
+# feed it the full list of packages we've already source-built in Phase 1.
+# Anything in /opt/ros/jazzy/install/share/ is satisfied — skip rosdep for it.
+BUILT_PKGS=$(ls "${ROS_ROOT}/install/share/" 2>/dev/null | tr '\n' ' ')
+export EXTERNAL_SKIP="${BUILT_PKGS}"
+echo ">>> Configured EXTERNAL_SKIP with $(echo "${BUILT_PKGS}" | wc -w) packages"
+
 echo ">>> Creating micro-ROS agent workspace..."
 ros2 run micro_ros_setup create_agent_ws.sh
 
