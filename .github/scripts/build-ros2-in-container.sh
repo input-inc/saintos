@@ -158,27 +158,38 @@ source install/setup.bash
 
 # --- Phase 3: create + build the micro-ROS agent ----------------------------
 
-# Strip `drive_base` out of the agent repos file. It's a micro-ROS demo
-# (Arduino-controlled mobile base) that depends on image_pipeline + a
-# chain of vision/camera packages — none of which we want for just
-# running the agent, and none of which have Debian apt mappings.
-AGENT_REPOS="${ROS_ROOT}/install/share/micro_ros_setup/config/agent_uros_packages.repos"
-if [[ -f "${AGENT_REPOS}" ]]; then
+# Strip `drive_base` (and rti_connext_dds_cmake_module) out of the agent
+# repos file. drive_base is a micro-ROS demo that depends on image_pipeline
+# and a chain of vision packages. rti_connext_dds_cmake_module pulls in
+# proprietary Connext DDS that's only available via Ubuntu apt.
+#
+# The script's actual path depends on where ament installs config files,
+# which differs between ament_cmake and ament_python packages. Use `find`
+# to discover the path reliably.
+echo ">>> Locating agent_uros_packages.repos under ${ROS_ROOT}/install"
+mapfile -t AGENT_REPOS_FILES < <(find "${ROS_ROOT}/install" -name 'agent_uros_packages.repos' -type f)
+if (( ${#AGENT_REPOS_FILES[@]} == 0 )); then
+    echo "    WARNING: no agent_uros_packages.repos found — drive_base will be cloned"
+fi
+for AGENT_REPOS in "${AGENT_REPOS_FILES[@]}"; do
+    echo "    patching: ${AGENT_REPOS}"
     python3 - "${AGENT_REPOS}" <<'PY'
 import sys, yaml
 path = sys.argv[1]
 with open(path) as f:
     data = yaml.safe_load(f) or {}
 repos = data.get('repositories', {}) or {}
-removed = [k for k in list(repos) if 'drive_base' in k]
+# Drop demos and proprietary-DDS deps we don't want.
+DROP = ('drive_base', 'rti_connext')
+removed = [k for k in list(repos) if any(p in k.lower() for p in DROP)]
 for k in removed:
     repos.pop(k, None)
 data['repositories'] = repos
 with open(path, 'w') as f:
     yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-print(f"Stripped from agent_uros_packages.repos: {removed}")
+print(f"    stripped: {removed if removed else '(nothing to strip)'}")
 PY
-fi
+done
 
 # micro_ros_setup's scripts hardcode `--os=ubuntu:noble` when calling rosdep.
 # On Debian Bookworm that produces Ubuntu-only package names — including
@@ -193,12 +204,34 @@ find "${ROS_ROOT}/install" -name '*.sh' -type f \
 # Build a skip list from packages already source-built in Phase 1. rosdep
 # (even pointed at Debian Bookworm) doesn't know what's in /opt/ros/jazzy/
 # install/, so we list every ament package name as already-satisfied.
+# Also explicitly skip proprietary middleware deps (Connext) — they have
+# no Debian apt mapping, and we don't use them anyway.
 BUILT_PKGS=$(ls "${ROS_ROOT}/install/share/" 2>/dev/null | tr '\n' ' ')
-export EXTERNAL_SKIP="${BUILT_PKGS}"
-echo ">>> Configured EXTERNAL_SKIP with $(echo "${BUILT_PKGS}" | wc -w) packages"
+PROPRIETARY_SKIPS="rti_connext_dds_cmake_module rti-connext-dds-6.0.1 rmw_connextdds"
+export EXTERNAL_SKIP="${BUILT_PKGS} ${PROPRIETARY_SKIPS}"
+echo ">>> Configured EXTERNAL_SKIP with $(echo "${EXTERNAL_SKIP}" | wc -w) entries"
 
 echo ">>> Creating micro-ROS agent workspace..."
 ros2 run micro_ros_setup create_agent_ws.sh
+
+# After the agent workspace is created (sources cloned, rosdep applied),
+# remove any package source directories we don't want colcon to build.
+# Without this, build_agent.sh would try to compile rti_connext_dds_cmake_module
+# which requires proprietary RTI Connext DDS to be installed.
+AGENT_WS_SRC=$(find . -maxdepth 4 -type d -name 'uros' -print -quit 2>/dev/null)
+if [[ -n "${AGENT_WS_SRC}" ]]; then
+    echo ">>> Pruning unwanted packages from agent workspace at ${AGENT_WS_SRC}"
+    for pkg in rti_connext_dds_cmake_module drive_base; do
+        find "${AGENT_WS_SRC}" -type d -name "${pkg}" -prune -exec rm -rf {} + 2>/dev/null || true
+        # Also handle packages whose containing repo dir was checked out
+        # under a different name (e.g. a monorepo with sub-packages).
+        find "${AGENT_WS_SRC}" -type d -path "*/${pkg}" -prune -exec rm -rf {} + 2>/dev/null || true
+    done
+    echo "    remaining agent workspace packages:"
+    find "${AGENT_WS_SRC}" -name package.xml -type f -exec dirname {} \; | sed 's|^|        |'
+else
+    echo "    WARNING: could not locate 'uros' workspace dir to prune"
+fi
 
 echo ">>> Building micro-ROS agent..."
 ros2 run micro_ros_setup build_agent.sh
