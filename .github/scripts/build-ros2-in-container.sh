@@ -47,10 +47,30 @@ apt-get install -y --no-install-recommends \
     build-essential cmake git pkg-config \
     python3 python3-dev python3-pip python3-venv \
     python3-flake8 python3-numpy python3-yaml python3-pytest \
-    libacl1-dev liblog4cxx-dev libcurl4-openssl-dev libssl-dev \
-    libtinyxml2-dev libxml2-dev libyaml-dev libeigen3-dev \
-    libasio-dev libtinyxml-dev libcunit1-dev libbenchmark-dev \
-    uncrustify cppcheck
+    python3-pytest-cov python3-pytest-mock python3-pytest-repeat \
+    python3-pytest-rerunfailures python3-pytest-runner python3-pytest-timeout \
+    python3-mypy \
+    uncrustify cppcheck \
+    libacl1-dev \
+    libasio-dev \
+    libbenchmark-dev \
+    libcunit1-dev \
+    libcurl4-openssl-dev \
+    libeigen3-dev \
+    libffi-dev \
+    liblog4cxx-dev \
+    liblttng-ust-dev \
+    liblz4-dev \
+    libpcre3-dev \
+    libsqlite3-dev \
+    libssl-dev \
+    libtinyxml-dev \
+    libtinyxml2-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    libyaml-dev \
+    libzstd-dev \
+    uuid-dev
 
 # Use C.UTF-8 — built into glibc, no locale generation needed.
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
