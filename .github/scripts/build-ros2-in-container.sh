@@ -156,30 +156,34 @@ colcon build \
 
 source install/setup.bash
 
-# --- Phase 3: create + build the micro-ROS agent ----------------------------
-
-# Strip `drive_base` (and rti_connext_dds_cmake_module) out of the agent
-# repos file. drive_base is a micro-ROS demo that depends on image_pipeline
-# and a chain of vision packages. rti_connext_dds_cmake_module pulls in
-# proprietary Connext DDS that's only available via Ubuntu apt.
+# --- Phase 3: micro-ROS agent -----------------------------------------------
 #
-# The script's actual path depends on where ament installs config files,
-# which differs between ament_cmake and ament_python packages. Use `find`
-# to discover the path reliably.
-echo ">>> Locating agent_uros_packages.repos under ${ROS_ROOT}/install"
-mapfile -t AGENT_REPOS_FILES < <(find "${ROS_ROOT}/install" -name 'agent_uros_packages.repos' -type f)
-if (( ${#AGENT_REPOS_FILES[@]} == 0 )); then
-    echo "    WARNING: no agent_uros_packages.repos found — drive_base will be cloned"
+# We replicate the work create_agent_ws.sh would do — vcs-import the agent
+# repos, then build — but bypass its built-in rosdep call. Its rosdep call
+# hardcodes --os=ubuntu:noble (we patched that earlier, but rosdep on Debian
+# still can't resolve every Ubuntu-only key in rosdistro), and we don't
+# actually need it: every transitive dep of micro_ros_agent is either a
+# ROS package we source-built in Phase 1 (already in /opt/ros/jazzy/install/)
+# or a system lib we apt-installed at container setup.
+
+PREFIX=$(ros2 pkg prefix micro_ros_setup)
+TARGETDIR=src
+mkdir -p "${TARGETDIR}"
+
+AGENT_REPOS="${PREFIX}/config/agent_uros_packages.repos"
+if [[ ! -f "${AGENT_REPOS}" ]]; then
+    AGENT_REPOS=$(find "${ROS_ROOT}/install" -name 'agent_uros_packages.repos' -type f -print -quit)
 fi
-for AGENT_REPOS in "${AGENT_REPOS_FILES[@]}"; do
-    echo "    patching: ${AGENT_REPOS}"
-    python3 - "${AGENT_REPOS}" <<'PY'
+
+# Strip drive_base (vision demo, brings in image_pipeline) and any
+# Connext-specific repos (Ubuntu-only, proprietary) from the imports.
+echo ">>> Pruning unwanted repos from ${AGENT_REPOS}"
+python3 - "${AGENT_REPOS}" <<'PY'
 import sys, yaml
 path = sys.argv[1]
 with open(path) as f:
     data = yaml.safe_load(f) or {}
 repos = data.get('repositories', {}) or {}
-# Drop demos and proprietary-DDS deps we don't want.
 DROP = ('drive_base', 'rti_connext')
 removed = [k for k in list(repos) if any(p in k.lower() for p in DROP)]
 for k in removed:
@@ -187,60 +191,32 @@ for k in removed:
 data['repositories'] = repos
 with open(path, 'w') as f:
     yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-print(f"    stripped: {removed if removed else '(nothing to strip)'}")
+print(f"    stripped: {removed if removed else '(nothing)'}")
 PY
+
+# create_ws.sh handles only the vcs imports (filtered ros2.repos + the user
+# repos). It doesn't run rosdep — that's create_agent_ws.sh's later step
+# which we're skipping.
+echo ">>> Importing agent workspace repos..."
+ros2 run micro_ros_setup create_ws.sh \
+    "${TARGETDIR}" \
+    "${PREFIX}/config/agent_ros2_packages.txt" \
+    "${AGENT_REPOS}"
+
+# Workspace inventory — useful when debugging unexpected deps.
+echo ">>> Agent workspace package.xml inventory:"
+find "${TARGETDIR}" -name package.xml -type f | sort | sed 's|^|    |'
+
+# Belt-and-suspenders: drop any source dirs for packages we don't want
+# colcon to compile, even if they snuck past the repos-file filter.
+for pkg in rti_connext_dds_cmake_module drive_base; do
+    find "${TARGETDIR}" -type d \( -name "${pkg}" -o -path "*/${pkg}" \) -prune \
+        -exec rm -rf {} + 2>/dev/null || true
 done
 
-# micro_ros_setup's scripts hardcode `--os=ubuntu:noble` when calling rosdep.
-# On Debian Bookworm that produces Ubuntu-only package names — including
-# noble-specific t64-suffixed names (libopencv-core406t64 etc.) from
-# Ubuntu's time64 transition that Debian Bookworm hasn't applied. Patch
-# the installed scripts to target Debian Bookworm instead so rosdep
-# generates Debian-native package names.
-echo ">>> Patching micro_ros_setup scripts: --os=ubuntu:noble → --os=debian:bookworm"
-find "${ROS_ROOT}/install" -name '*.sh' -type f \
-    -exec sed -i 's|--os=ubuntu:noble|--os=debian:bookworm|g' {} +
-
-# Build a skip list from packages already source-built in Phase 1. rosdep
-# (even pointed at Debian Bookworm) doesn't know what's in /opt/ros/jazzy/
-# install/, so we list every ament package name as already-satisfied.
-# Also explicitly skip proprietary middleware deps (Connext) — they have
-# no Debian apt mapping, and we don't use them anyway.
-BUILT_PKGS=$(ls "${ROS_ROOT}/install/share/" 2>/dev/null | tr '\n' ' ')
-PROPRIETARY_SKIPS="rti_connext_dds_cmake_module rti-connext-dds-6.0.1 rmw_connextdds"
-# Ubuntu-only rosdep keys whose mapping doesn't translate cleanly to Debian.
-# We pre-install the Debian equivalents below, then skip these so rosdep
-# doesn't try its (broken on Debian) apt-install command.
-UBUNTU_ONLY_KEYS="python3-catkin-pkg-modules"
-export EXTERNAL_SKIP="${BUILT_PKGS} ${PROPRIETARY_SKIPS} ${UBUNTU_ONLY_KEYS}"
-echo ">>> Configured EXTERNAL_SKIP with $(echo "${EXTERNAL_SKIP}" | wc -w) entries"
-
-# Pre-install Debian equivalents for the Ubuntu-only rosdep keys we skip
-# above, so anything that genuinely needs catkin_pkg still resolves at
-# Python import time.
-apt-get install -y --no-install-recommends python3-catkin-pkg
-
-echo ">>> Creating micro-ROS agent workspace..."
-ros2 run micro_ros_setup create_agent_ws.sh
-
-# After the agent workspace is created (sources cloned, rosdep applied),
-# remove any package source directories we don't want colcon to build.
-# Without this, build_agent.sh would try to compile rti_connext_dds_cmake_module
-# which requires proprietary RTI Connext DDS to be installed.
-AGENT_WS_SRC=$(find . -maxdepth 4 -type d -name 'uros' -print -quit 2>/dev/null)
-if [[ -n "${AGENT_WS_SRC}" ]]; then
-    echo ">>> Pruning unwanted packages from agent workspace at ${AGENT_WS_SRC}"
-    for pkg in rti_connext_dds_cmake_module drive_base; do
-        find "${AGENT_WS_SRC}" -type d -name "${pkg}" -prune -exec rm -rf {} + 2>/dev/null || true
-        # Also handle packages whose containing repo dir was checked out
-        # under a different name (e.g. a monorepo with sub-packages).
-        find "${AGENT_WS_SRC}" -type d -path "*/${pkg}" -prune -exec rm -rf {} + 2>/dev/null || true
-    done
-    echo "    remaining agent workspace packages:"
-    find "${AGENT_WS_SRC}" -name package.xml -type f -exec dirname {} \; | sed 's|^|        |'
-else
-    echo "    WARNING: could not locate 'uros' workspace dir to prune"
-fi
+# Skip rosdep entirely. Reasoning above. If a transitive dep IS missing,
+# the colcon build below will fail with a useful CMake-level error — much
+# clearer than rosdep's "no Debian mapping" cryptic failures.
 
 echo ">>> Building micro-ROS agent..."
 ros2 run micro_ros_setup build_agent.sh
