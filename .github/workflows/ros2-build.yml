@@ -1,0 +1,143 @@
+name: ros2-build
+
+# Source-builds ROS2 (ros_base subset) plus the micro-ROS agent inside a
+# Debian Bookworm container on an arm64 runner. The resulting install/ tree
+# is published as a GitHub Release tagged with a content hash, so the dist
+# workflow can pull a pre-built copy in seconds instead of re-building it
+# (45-90 minutes cold).
+#
+# Re-runs are idempotent: if a release with the computed tag already exists,
+# the build is skipped entirely.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ros_distro:
+        description: 'ROS2 distro to build'
+        default: jazzy
+        required: false
+      force_rebuild:
+        description: 'Rebuild even if a release with the computed tag exists'
+        type: boolean
+        default: false
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ros2-build.yml'
+      - '.github/scripts/build-ros2-in-container.sh'
+
+concurrency:
+  group: ros2-build-${{ github.event.inputs.ros_distro || 'jazzy' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 180
+    env:
+      ROS_DISTRO: ${{ github.event.inputs.ros_distro || 'jazzy' }}
+      MICRO_ROS_REF: jazzy
+      ARCH: arm64
+      DEBIAN_RELEASE: bookworm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------------
+      # Compute a content hash over the inputs that determine binary output.
+      # If upstream pins move (new ros2.repos commits) we rebuild; otherwise
+      # we re-use an existing release tarball.
+      - name: Resolve upstream refs and compute hash
+        id: hash
+        run: |
+          set -eo pipefail
+          mkdir -p _ros2_src
+          cd _ros2_src
+
+          # ros2.repos — the canonical pinned-SHA file maintained by the
+          # ROS2 team for the given distro.
+          curl -fsSL \
+            "https://raw.githubusercontent.com/ros2/ros2/${ROS_DISTRO}/ros2.repos" \
+            -o ros2.repos
+
+          # micro_ros_setup is a single repo whose HEAD on the jazzy branch
+          # we need to capture. We hash the latest commit SHA on that branch.
+          MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git "refs/heads/${MICRO_ROS_REF}" | awk '{print $1}')
+          echo "micro_ros_setup_sha=${MICRO_SHA}" > micro_ros.txt
+          echo "$MICRO_SHA" > micro_ros_setup.sha
+
+          HASH=$(cat ros2.repos micro_ros.txt | sha256sum | cut -c1-12)
+          TAG="ros2-${ROS_DISTRO}-${ARCH}-${HASH}"
+
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"   >> "$GITHUB_OUTPUT"
+          echo "micro_sha=${MICRO_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: ${TAG}"
+          echo "  upstream ros2.repos lines: $(wc -l < ros2.repos)"
+          echo "  micro_ros_setup HEAD:      ${MICRO_SHA}"
+
+      # ----------------------------------------------------------------------
+      - name: Check whether release already exists
+        id: release_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force_rebuild }}
+        run: |
+          if [[ "$FORCE" == "true" ]]; then
+            echo "Force rebuild requested — proceeding."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view "${{ steps.hash.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release ${{ steps.hash.outputs.tag }} already exists — nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No existing release for ${{ steps.hash.outputs.tag }} — will build."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ----------------------------------------------------------------------
+      # Fast-path: try to restore a previous build from GHA cache (7-day TTL
+      # since last hit). Only useful if we're re-running for the same hash
+      # within the eviction window.
+      - name: Restore from GHA cache (fast path)
+        if: steps.release_check.outputs.exists != 'true'
+        id: ros2_cache
+        uses: actions/cache@v4
+        with:
+          path: ros2-install.tar.gz
+          key: ${{ steps.hash.outputs.tag }}
+
+      # ----------------------------------------------------------------------
+      - name: Source-build ROS2 + micro-ROS agent
+        if: steps.release_check.outputs.exists != 'true' && steps.ros2_cache.outputs.cache-hit != 'true'
+        env:
+          ROS_DISTRO: ${{ env.ROS_DISTRO }}
+          MICRO_ROS_REF: ${{ env.MICRO_ROS_REF }}
+          DEBIAN_RELEASE: ${{ env.DEBIAN_RELEASE }}
+        run: |
+          set -eo pipefail
+          chmod +x .github/scripts/build-ros2-in-container.sh
+          .github/scripts/build-ros2-in-container.sh
+
+      # ----------------------------------------------------------------------
+      - name: Publish GitHub Release
+        if: steps.release_check.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.hash.outputs.tag }}" \
+            --title "ROS2 ${{ env.ROS_DISTRO }} (${{ env.ARCH }}, ${{ env.DEBIAN_RELEASE }})" \
+            --notes "Source-built ROS2 ${{ env.ROS_DISTRO }} ros_base + micro_ros_agent. \
+            Built against Debian ${{ env.DEBIAN_RELEASE }} (glibc 2.36, libpython3.11). \
+            Compatible with Raspberry Pi OS Bookworm natively, and Ubuntu 24.04 with libpython3.11 installed. \
+            \
+            micro_ros_setup branch: ${{ env.MICRO_ROS_REF }} @ ${{ steps.hash.outputs.micro_sha }}" \
+            ros2-install.tar.gz

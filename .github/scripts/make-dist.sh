@@ -2,9 +2,10 @@
 #
 # Assemble a SAINT.OS server distribution tarball.
 #
-# Expects (relative to repo root) that `colcon build --merge-install` has
-# already produced ./install/, and that node firmware artifacts have been
-# staged under saint_os/resources/firmware/{rp2040,teensy41,rpi5}/.
+# Expects (relative to repo root):
+#   - ./install/       saint_os colcon install tree (--merge-install output)
+#   - ./_ros2/opt/ros/<distro>/install/   bundled ROS2 install tree
+#   - saint_os/resources/firmware/{rp2040,teensy41,rpi5}/   staged firmware
 #
 # Usage: make-dist.sh <version> <arch> <ros_distro>
 # Output: dist/saint-os_<version>_<arch>_<ros_distro>.tar.gz
@@ -24,6 +25,12 @@ if [[ ! -d install ]]; then
     exit 1
 fi
 
+ROS2_BUNDLED_DIR="_ros2/opt/ros/${ROS_DISTRO}/install"
+if [[ ! -d "${ROS2_BUNDLED_DIR}" ]]; then
+    echo "ERROR: ${ROS2_BUNDLED_DIR} not found — download the matching ros2-${ROS_DISTRO}-${ARCH}-* release first" >&2
+    exit 1
+fi
+
 PKG_NAME="saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}"
 STAGING="$(mktemp -d)"
 PKG_DIR="${STAGING}/${PKG_NAME}"
@@ -33,9 +40,13 @@ trap 'rm -rf "${STAGING}"' EXIT
 
 echo "Staging payload to ${PKG_DIR}..."
 
-# Colcon install tree — this carries Python code, message bindings, configs,
-# launch files, web/, and the ROS2 setup.bash for the package.
-cp -a install "${PKG_DIR}/ros_install"
+# saint_os colcon install tree — Python code, message bindings, configs,
+# launch files, web/.
+cp -a install "${PKG_DIR}/saint_install"
+
+# Bundled ROS2 install tree (ros_base + micro_ros_agent). Extracted to
+# /opt/ros/<distro>/ on the target by install.sh.
+cp -a "${ROS2_BUNDLED_DIR}" "${PKG_DIR}/ros2_install"
 
 # Bundled node firmware for the OTA endpoint.
 if [[ -d saint_os/resources/firmware ]]; then
