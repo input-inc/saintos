@@ -158,6 +158,28 @@ source install/setup.bash
 
 # --- Phase 3: create + build the micro-ROS agent ----------------------------
 
+# Strip `drive_base` out of the agent repos file. It's a micro-ROS demo
+# (Arduino-controlled mobile base) that depends on image_pipeline + a
+# chain of vision/camera packages — none of which we want for just
+# running the agent, and none of which have Debian apt mappings.
+AGENT_REPOS="${ROS_ROOT}/install/share/micro_ros_setup/config/agent_uros_packages.repos"
+if [[ -f "${AGENT_REPOS}" ]]; then
+    python3 - "${AGENT_REPOS}" <<'PY'
+import sys, yaml
+path = sys.argv[1]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+repos = data.get('repositories', {}) or {}
+removed = [k for k in list(repos) if 'drive_base' in k]
+for k in removed:
+    repos.pop(k, None)
+data['repositories'] = repos
+with open(path, 'w') as f:
+    yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+print(f"Stripped from agent_uros_packages.repos: {removed}")
+PY
+fi
+
 # micro_ros_setup's create_agent_ws.sh hardcodes `--os=ubuntu:noble` when
 # calling rosdep, so it generates Ubuntu-style package names (e.g.
 # ros-jazzy-urdfdom-headers) that don't exist on Debian's apt. To work
