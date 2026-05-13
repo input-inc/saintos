@@ -54,6 +54,7 @@ apt-get install -y --no-install-recommends \
     libacl1-dev \
     libasio-dev \
     libbenchmark-dev \
+    libbullet-dev \
     libcunit1-dev \
     libcurl4-openssl-dev \
     libeigen3-dev \
