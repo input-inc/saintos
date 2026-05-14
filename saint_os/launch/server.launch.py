@@ -53,14 +53,17 @@ def generate_launch_description():
         description='Enable RC receiver'
     )
 
-    # Create the server node
+    # Create the server node.
+    # NOTE: `config/server.yaml` is a generic application config (nested
+    # keys), NOT a ROS2 parameters file — the saint_server code reads it
+    # directly via saint_server/config/__init__.py. We pass only the
+    # explicit per-launch overrides through ROS2 parameters.
     server_node = Node(
         package='saint_os',
         executable='saint_server',
         name='saint_server',
         output='screen',
         parameters=[
-            LaunchConfiguration('config'),
             {
                 'server_name': LaunchConfiguration('server_name'),
                 'web_port': LaunchConfiguration('web_port'),
