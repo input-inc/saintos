@@ -287,21 +287,29 @@ setup_wifi_ap() {
     # Ubuntu Server, systemd-networkd will otherwise hold wlan0 and NM won't
     # touch it. The 99-* prefix ensures we override anything cloud-init
     # generated.
-    local netplan_file=/etc/netplan/99-saint-wifi.yaml
-    if [[ ! -f "$netplan_file" ]]; then
-        if (( DRY_RUN )); then
-            echo "+ write ${netplan_file} (renderer=NetworkManager for ${wlan})"
-        else
-            cat > "$netplan_file" <<NETPLAN
+    #
+    # On Raspberry Pi OS (Bookworm+) netplan isn't installed — NetworkManager
+    # manages interfaces directly — so /etc/netplan doesn't exist and we
+    # skip this step entirely.
+    if [[ -d /etc/netplan ]]; then
+        local netplan_file=/etc/netplan/99-saint-wifi.yaml
+        if [[ ! -f "$netplan_file" ]]; then
+            if (( DRY_RUN )); then
+                echo "+ write ${netplan_file} (renderer=NetworkManager for ${wlan})"
+            else
+                cat > "$netplan_file" <<NETPLAN
 network:
   version: 2
   renderer: NetworkManager
   wifis:
     ${wlan}: {}
 NETPLAN
-            chmod 0600 "$netplan_file"
-            netplan apply || warn "netplan apply reported an issue (continuing)"
+                chmod 0600 "$netplan_file"
+                netplan apply || warn "netplan apply reported an issue (continuing)"
+            fi
         fi
+    else
+        log "No /etc/netplan — assuming NetworkManager manages ${wlan} directly"
     fi
 
     # Set regulatory domain — required by most adapters before AP mode works.
