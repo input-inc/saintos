@@ -266,7 +266,14 @@ jobs:
               lark
           export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-          source /work/_ros2/opt/ros/${ROS_DISTRO}/install/setup.bash
+          # Place ROS2 INSIDE the container at the exact path it'll be
+          # deployed to on the target (/opt/ros/<distro>/install/). colcon
+          # records absolute paths to ROS2's local_setup.bash etc. in the
+          # saint_os install tree — if those paths don't match the deploy
+          # location, the systemd unit fails to source on the target.
+          mkdir -p /opt/ros/${ROS_DISTRO}
+          cp -a /work/_ros2/opt/ros/${ROS_DISTRO}/install /opt/ros/${ROS_DISTRO}/install
+          source /opt/ros/${ROS_DISTRO}/install/setup.bash
 
           colcon build \
               --merge-install \

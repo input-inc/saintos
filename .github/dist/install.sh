@@ -119,6 +119,8 @@ COMMON_DEPS=(
     python3-aiohttp
     python3-websockets
     python3-psutil
+    # ros2cli imports `from packaging.version import Version` on startup
+    python3-packaging
 )
 
 # Python 3.11 specifically: the bundled ROS2 was built against libpython3.11.
@@ -137,14 +139,20 @@ run apt-get install -y "${COMMON_DEPS[@]}" "${PY311_DEPS[@]}"
 
 # --- Extract bundled ROS2 ---------------------------------------------------
 
-ROS_PREFIX="/opt/ros/${ROS_DISTRO}"
+# We deploy to /opt/ros/<distro>/install/ — same path the saint_os build
+# container saw at compile time. colcon embeds absolute paths to ROS2's
+# local_setup.bash inside saint_os's setup tree; if the deploy path
+# doesn't match the build path, the systemd unit fails to source.
+ROS_PARENT="/opt/ros/${ROS_DISTRO}"
+ROS_PREFIX="${ROS_PARENT}/install"
 if [[ ! -d "${PAYLOAD_DIR}/ros2_install" ]]; then
     die "Bundled ROS2 not found at ${PAYLOAD_DIR}/ros2_install"
 fi
 log "Extracting bundled ROS2 to ${ROS_PREFIX}"
+# Wipe any prior install (including older layouts that put ROS2 directly
+# under /opt/ros/<distro> without the install/ subdir).
+run rm -rf "${ROS_PARENT:?}"
 run install -d "${ROS_PREFIX}"
-# Wipe any prior install to avoid stale files mixing with the new tree.
-run rm -rf "${ROS_PREFIX:?}"/*
 run cp -a "${PAYLOAD_DIR}/ros2_install/." "${ROS_PREFIX}/"
 
 if [[ ! -f "${ROS_PREFIX}/setup.bash" ]]; then
