@@ -169,6 +169,15 @@ done
 run install -d -m 0755 -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
     "${PREFIX}" "${CONFIG_DIR}" "${STATE_DIR}" "${LOG_DIR}"
 
+# Stop the existing service (if running) so we can replace files cleanly.
+# Idempotent: systemctl stop on a non-running unit is a no-op.
+if systemctl list-unit-files --quiet --type=service "${SERVICE_NAME}.service" >/dev/null 2>&1; then
+    if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+        log "Stopping running ${SERVICE_NAME} for update"
+        run systemctl stop "${SERVICE_NAME}.service" || true
+    fi
+fi
+
 # --- Copy payload ------------------------------------------------------------
 
 log "Copying saint_os payload to ${PREFIX}"
@@ -230,6 +239,10 @@ fi
 
 run systemctl daemon-reload
 run systemctl enable "${SERVICE_NAME}.service"
+
+# Clear any failed-state flag so a previously-crashed install doesn't
+# block restart. Idempotent — no-op if the unit isn't in failed state.
+run systemctl reset-failed "${SERVICE_NAME}.service" 2>/dev/null || true
 
 if (( NO_START )); then
     log "Skipping start (--no-start). Start manually with: systemctl start ${SERVICE_NAME}"
@@ -293,20 +306,20 @@ setup_wifi_ap() {
     # skip this step entirely.
     if [[ -d /etc/netplan ]]; then
         local netplan_file=/etc/netplan/99-saint-wifi.yaml
-        if [[ ! -f "$netplan_file" ]]; then
-            if (( DRY_RUN )); then
-                echo "+ write ${netplan_file} (renderer=NetworkManager for ${wlan})"
-            else
-                cat > "$netplan_file" <<NETPLAN
+        # Always rewrite so config changes (different interface name across
+        # re-runs, etc.) actually take effect.
+        if (( DRY_RUN )); then
+            echo "+ write ${netplan_file} (renderer=NetworkManager for ${wlan})"
+        else
+            cat > "$netplan_file" <<NETPLAN
 network:
   version: 2
   renderer: NetworkManager
   wifis:
     ${wlan}: {}
 NETPLAN
-                chmod 0600 "$netplan_file"
-                netplan apply || warn "netplan apply reported an issue (continuing)"
-            fi
+            chmod 0600 "$netplan_file"
+            netplan apply || warn "netplan apply reported an issue (continuing)"
         fi
     else
         log "No /etc/netplan — assuming NetworkManager manages ${wlan} directly"
