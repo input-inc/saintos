@@ -15,7 +15,7 @@ Environment=SAINT_CONFIG_DIR=@CONFIG_DIR@
 Environment=SAINT_STATE_DIR=@STATE_DIR@
 Environment=SAINT_LOG_DIR=@LOG_DIR@
 
-ExecStart=/bin/bash -lc 'source /opt/ros/@ROS_DISTRO@/setup.bash && source @PREFIX@/install/setup.bash && exec ros2 launch saint_os server.launch.py'
+ExecStart=/bin/bash -lc 'source /opt/ros/@ROS_DISTRO@/install/setup.bash && source @PREFIX@/install/setup.bash && exec ros2 launch saint_os server.launch.py'
 
 Restart=on-failure
 RestartSec=5
