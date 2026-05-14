@@ -119,8 +119,13 @@ COMMON_DEPS=(
     python3-aiohttp
     python3-websockets
     python3-psutil
-    # ros2cli imports `from packaging.version import Version` on startup
+    # ROS2 Python runtime deps that ros2cli / ros2launch / rclpy import
+    # eagerly. Names match on both Debian Bookworm and Ubuntu noble.
     python3-packaging
+    python3-lark
+    python3-empy
+    python3-catkin-pkg
+    python3-importlib-metadata
 )
 
 # Python 3.11 specifically: the bundled ROS2 was built against libpython3.11.
