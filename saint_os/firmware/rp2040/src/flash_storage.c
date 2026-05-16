@@ -95,6 +95,10 @@ bool flash_storage_load(flash_storage_data_t* data)
         if (mutable_data->version <= 3) {
             memset(&mutable_data->syren_config, 0, sizeof(mutable_data->syren_config));
         }
+        // Version 7 -> 8: Added uart_pins block (zero -> use driver defaults)
+        if (mutable_data->version <= 7) {
+            memset(&mutable_data->uart_pins, 0, sizeof(mutable_data->uart_pins));
+        }
 
         mutable_data->version = FLASH_STORAGE_VERSION;
     }

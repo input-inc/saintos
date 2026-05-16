@@ -10,6 +10,7 @@
 #include "peripheral_driver.h"
 #include "flash_types.h"
 #include "platform.h"
+#include "uart_pin_pairs.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -24,11 +25,15 @@
 // Configuration
 // =============================================================================
 
-// Default UART instance and pins for RP2040
-#define BMS_UART            uart0
-#define BMS_UART_TX_PIN     0
-#define BMS_UART_RX_PIN     1
-#define BMS_SERIAL_PORT     0
+#define BMS_DEFAULT_TX_PIN     0
+#define BMS_DEFAULT_RX_PIN     1
+
+#ifndef SIMULATION
+static uart_inst_t* bms_uart = NULL;
+#endif
+static uint8_t bms_tx_pin = BMS_DEFAULT_TX_PIN;
+static uint8_t bms_rx_pin = BMS_DEFAULT_RX_PIN;
+static uint8_t bms_uart_instance = 0;
 
 // =============================================================================
 // RX State Machine
@@ -84,9 +89,10 @@ static float cell_voltages[JBD_MAX_CELLS];
 static void send_read_request(uint8_t reg)
 {
 #ifndef SIMULATION
+    if (!bms_uart) return;
     uint8_t frame[JBD_READ_REQUEST_SIZE];
     jbd_build_read_request(reg, frame);
-    uart_write_blocking(BMS_UART, frame, JBD_READ_REQUEST_SIZE);
+    uart_write_blocking(bms_uart, frame, JBD_READ_REQUEST_SIZE);
 #else
     (void)reg;
 #endif
@@ -223,9 +229,16 @@ static void process_rx_byte(uint8_t byte)
 void pathfinder_bms_init(void)
 {
 #ifndef SIMULATION
-    uart_init(BMS_UART, JBD_BAUD_RATE);
-    gpio_set_function(BMS_UART_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(BMS_UART_RX_PIN, GPIO_FUNC_UART);
+    if (!uart_pin_pair_lookup(bms_tx_pin, bms_rx_pin, &bms_uart_instance)) {
+        bms_tx_pin = BMS_DEFAULT_TX_PIN;
+        bms_rx_pin = BMS_DEFAULT_RX_PIN;
+        bms_uart_instance = 0;
+    }
+    bms_uart = (bms_uart_instance == 0) ? uart0 : uart1;
+
+    uart_init(bms_uart, JBD_BAUD_RATE);
+    gpio_set_function(bms_tx_pin, GPIO_FUNC_UART);
+    gpio_set_function(bms_rx_pin, GPIO_FUNC_UART);
 #endif
 
     memset(cell_voltages, 0, sizeof(cell_voltages));
@@ -234,8 +247,9 @@ void pathfinder_bms_init(void)
     next_register = JBD_REG_BASIC_INFO;
     port_initialized = true;
 
-    PLATFORM_PRINTF("Pathfinder BMS: initialized on UART%d at %d baud (poll %dms)\n",
-                    BMS_SERIAL_PORT, JBD_BAUD_RATE, poll_interval_ms);
+    PLATFORM_PRINTF("Pathfinder BMS: initialized on UART%d TX=%d RX=%d at %d baud (poll %dms)\n",
+                    bms_uart_instance, bms_tx_pin, bms_rx_pin,
+                    JBD_BAUD_RATE, poll_interval_ms);
 }
 
 void pathfinder_bms_update(void)
@@ -246,8 +260,8 @@ void pathfinder_bms_update(void)
 
     // Non-blocking read of available bytes
 #ifndef SIMULATION
-    while (uart_is_readable(BMS_UART)) {
-        uint8_t byte = uart_getc(BMS_UART);
+    while (bms_uart && uart_is_readable(bms_uart)) {
+        uint8_t byte = uart_getc(bms_uart);
         process_rx_byte(byte);
     }
 #endif
@@ -353,6 +367,14 @@ static bool bms_drv_parse_json(const char* json_start, const char* json_end,
             config->params.pathfinder_bms.poll_interval_ms = (uint16_t)atoi(p);
         }
     }
+
+    uint8_t tx, rx, inst;
+    if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
+        bms_tx_pin = tx;
+        bms_rx_pin = rx;
+        bms_uart_instance = inst;
+    }
+
     return true;
 }
 
@@ -383,8 +405,11 @@ static bool bms_drv_save(void* storage_ptr)
 
     memset(&storage->pathfinder_bms_config, 0, sizeof(storage->pathfinder_bms_config));
     storage->pathfinder_bms_config.enabled = port_initialized ? 1 : 0;
-    storage->pathfinder_bms_config.serial_port = BMS_SERIAL_PORT;
+    storage->pathfinder_bms_config.serial_port = bms_uart_instance;
     storage->pathfinder_bms_config.poll_interval_ms = poll_interval_ms;
+
+    storage->uart_pins.pathfinder_bms_tx_pin = bms_tx_pin;
+    storage->uart_pins.pathfinder_bms_rx_pin = bms_rx_pin;
 
     return true;
 }
@@ -392,6 +417,20 @@ static bool bms_drv_save(void* storage_ptr)
 static bool bms_drv_load(const void* storage_ptr)
 {
     const flash_storage_data_t* storage = (const flash_storage_data_t*)storage_ptr;
+
+    uint8_t stored_tx = storage->uart_pins.pathfinder_bms_tx_pin;
+    uint8_t stored_rx = storage->uart_pins.pathfinder_bms_rx_pin;
+    if (stored_tx != 0 || stored_rx != 0) {
+        uint8_t inst;
+        if (uart_pin_pair_lookup(stored_tx, stored_rx, &inst)) {
+            bms_tx_pin = stored_tx;
+            bms_rx_pin = stored_rx;
+            bms_uart_instance = inst;
+        } else {
+            PLATFORM_PRINTF("Pathfinder BMS: invalid stored pin pair tx=%d rx=%d, using defaults\n",
+                            stored_tx, stored_rx);
+        }
+    }
 
     if (!storage->pathfinder_bms_config.enabled) return true;
 

@@ -20,7 +20,7 @@ extern "C" {
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   7
+#define FLASH_STORAGE_VERSION   8
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
@@ -121,6 +121,27 @@ typedef struct __attribute__((packed)) {
 } flash_pathfinder_bms_config_t;
 
 // =============================================================================
+// UART Pin Assignments (added v8)
+// =============================================================================
+//
+// Per-peripheral TX/RX pin selection. A value of 0 for tx_pin means
+// "use platform default" — drivers fall back to their hardcoded pair.
+// On v7 -> v8 migration this whole block is zero-initialized, so existing
+// nodes silently keep their old behavior.
+
+typedef struct __attribute__((packed)) {
+    uint8_t fas100_tx_pin;
+    uint8_t fas100_rx_pin;
+    uint8_t syren_tx_pin;
+    uint8_t syren_rx_pin;
+    uint8_t roboclaw_tx_pin;
+    uint8_t roboclaw_rx_pin;
+    uint8_t pathfinder_bms_tx_pin;
+    uint8_t pathfinder_bms_rx_pin;
+    uint8_t reserved_u[8];
+} flash_uart_pins_t;
+
+// =============================================================================
 // Main Storage Structure
 // =============================================================================
 
@@ -152,7 +173,9 @@ typedef struct __attribute__((packed)) {
 
     flash_pathfinder_bms_config_t pathfinder_bms_config;
 
-    uint8_t reserved[32];
+    flash_uart_pins_t uart_pins;
+
+    uint8_t reserved[16];
 
 } flash_storage_data_t;
 

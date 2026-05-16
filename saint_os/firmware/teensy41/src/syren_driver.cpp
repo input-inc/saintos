@@ -7,19 +7,28 @@
 
 #include <Arduino.h>
 
+#include "uart_serial_lookup.h"
+
 extern "C" {
 #include "syren_driver.h"
 #include "peripheral_driver.h"
 #include "flash_types.h"
+#include "uart_pin_pairs.h"
 }
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
-// Which HardwareSerial to use (Serial2 = pins 7/8 on Teensy 4.1)
-#define SYREN_SERIAL        Serial2
-#define SYREN_SERIAL_PORT   2
+// Defaults: Serial2 = pins 8(TX) / 7(RX) on Teensy 4.1
+#define SYREN_DEFAULT_TX_PIN   8
+#define SYREN_DEFAULT_RX_PIN   7
+#define SYREN_DEFAULT_INST     2
+
+static HardwareSerial* syren_serial = &Serial2;
+static uint8_t syren_tx_pin = SYREN_DEFAULT_TX_PIN;
+static uint8_t syren_rx_pin = SYREN_DEFAULT_RX_PIN;
+static uint8_t syren_uart_instance = SYREN_DEFAULT_INST;
 
 // =============================================================================
 // State
@@ -37,7 +46,7 @@ static void send_packet(uint8_t address, uint8_t command, uint8_t value)
 {
     uint8_t packet[4];
     syren_build_packet(address, command, value, packet);
-    SYREN_SERIAL.write(packet, 4);
+    syren_serial->write(packet, 4);
 }
 
 // =============================================================================
@@ -57,17 +66,25 @@ void syren_init(void)
     }
 
 #ifndef SIMULATION
-    SYREN_SERIAL.begin(configured_baud);
+    if (!uart_pin_pair_lookup(syren_tx_pin, syren_rx_pin, &syren_uart_instance)) {
+        syren_tx_pin = SYREN_DEFAULT_TX_PIN;
+        syren_rx_pin = SYREN_DEFAULT_RX_PIN;
+        syren_uart_instance = SYREN_DEFAULT_INST;
+    }
+    HardwareSerial* s = teensy_serial_from_instance(syren_uart_instance);
+    if (s) syren_serial = s;
+
+    syren_serial->begin(configured_baud);
     delay(100);
 
     // Send autobaud byte
-    SYREN_SERIAL.write(SYREN_AUTOBAUD_BYTE);
+    syren_serial->write(SYREN_AUTOBAUD_BYTE);
     delay(50);
 #endif
 
     port_initialized = true;
-    Serial.printf("SyRen: initialized on Serial%d at %d baud\n",
-                  SYREN_SERIAL_PORT, configured_baud);
+    Serial.printf("SyRen: initialized on Serial%d TX=%d at %d baud\n",
+                  syren_uart_instance, syren_tx_pin, configured_baud);
 }
 
 void syren_update(void)
@@ -232,6 +249,13 @@ static bool syren_drv_parse_json(const char* json_start, const char* json_end,
         if (p) { p++; while (*p == ' ') p++; config->params.syren.timeout_ms = (uint16_t)atoi(p); }
     }
 
+    uint8_t tx, rx, inst;
+    if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
+        syren_tx_pin = tx;
+        syren_rx_pin = rx;
+        syren_uart_instance = inst;
+    }
+
     return true;
 }
 
@@ -255,8 +279,11 @@ static bool syren_drv_save(void* storage_ptr)
 
     memset(&storage->syren_config, 0, sizeof(storage->syren_config));
     storage->syren_config.channel_count = SYREN_MAX_CHANNELS;
-    storage->syren_config.serial_port = SYREN_SERIAL_PORT;
+    storage->syren_config.serial_port = syren_uart_instance;
     storage->syren_config.baud_rate = configured_baud;
+
+    storage->uart_pins.syren_tx_pin = syren_tx_pin;
+    storage->uart_pins.syren_rx_pin = syren_rx_pin;
 
     for (uint8_t ch = 0; ch < SYREN_MAX_CHANNELS; ch++) {
         storage->syren_config.channels[ch].address    = channel_configs[ch].address;
@@ -272,6 +299,20 @@ static bool syren_drv_save(void* storage_ptr)
 static bool syren_drv_load(const void* storage_ptr)
 {
     const flash_storage_data_t* storage = (const flash_storage_data_t*)storage_ptr;
+
+    uint8_t stored_tx = storage->uart_pins.syren_tx_pin;
+    uint8_t stored_rx = storage->uart_pins.syren_rx_pin;
+    if (stored_tx != 0 || stored_rx != 0) {
+        uint8_t inst;
+        if (uart_pin_pair_lookup(stored_tx, stored_rx, &inst)) {
+            syren_tx_pin = stored_tx;
+            syren_rx_pin = stored_rx;
+            syren_uart_instance = inst;
+        } else {
+            Serial.printf("SyRen: invalid stored pin pair tx=%d rx=%d, using defaults\n",
+                          stored_tx, stored_rx);
+        }
+    }
 
     if (storage->syren_config.channel_count == 0) return true;
 

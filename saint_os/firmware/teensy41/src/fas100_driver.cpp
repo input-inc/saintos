@@ -11,14 +11,25 @@
 #include "fas100_driver.h"
 #include "peripheral_driver.h"
 #include "flash_types.h"
+#include "uart_serial_lookup.h"
+
+extern "C" {
+#include "uart_pin_pairs.h"
+}
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
-// Serial3 = pins 14(TX) / 15(RX) on Teensy 4.1
-#define FAS100_SERIAL        Serial3
-#define FAS100_SERIAL_PORT   3
+// Defaults: Serial3 = pins 14(TX) / 15(RX) on Teensy 4.1
+#define FAS100_DEFAULT_TX_PIN  14
+#define FAS100_DEFAULT_RX_PIN  15
+#define FAS100_DEFAULT_INST     3
+
+static HardwareSerial* fas100_serial = &Serial3;
+static uint8_t fas100_tx_pin = FAS100_DEFAULT_TX_PIN;
+static uint8_t fas100_rx_pin = FAS100_DEFAULT_RX_PIN;
+static uint8_t fas100_uart_instance = FAS100_DEFAULT_INST;
 
 // Response buffer
 #define FAS100_RX_BUF_SIZE   16
@@ -53,7 +64,7 @@ static void send_poll(void)
         SPORT_POLL_HEADER,
         SPORT_FAS100_PHYSICAL_ID
     };
-    FAS100_SERIAL.write(frame, FAS100_POLL_FRAME_SIZE);
+    (*fas100_serial).write(frame, FAS100_POLL_FRAME_SIZE);
 #endif
 }
 
@@ -115,16 +126,25 @@ extern "C" {
 void fas100_init(void)
 {
 #ifndef SIMULATION
+    if (!uart_pin_pair_lookup(fas100_tx_pin, fas100_rx_pin, &fas100_uart_instance)) {
+        fas100_tx_pin = FAS100_DEFAULT_TX_PIN;
+        fas100_rx_pin = FAS100_DEFAULT_RX_PIN;
+        fas100_uart_instance = FAS100_DEFAULT_INST;
+    }
+    HardwareSerial* s = teensy_serial_from_instance(fas100_uart_instance);
+    if (s) fas100_serial = s;
+
     // SERIAL_8N1_RXINV_TXINV enables inverted signaling for S.Port
-    FAS100_SERIAL.begin(SPORT_BAUD_RATE, SERIAL_8N1_RXINV_TXINV);
+    fas100_serial->begin(SPORT_BAUD_RATE, SERIAL_8N1_RXINV_TXINV);
 #endif
 
     rx_pos = 0;
     sensor_responded = false;
     port_initialized = true;
 
-    Serial.printf("FAS100: initialized on Serial%d at %d baud (poll %dms)\n",
-                  FAS100_SERIAL_PORT, SPORT_BAUD_RATE, poll_interval_ms);
+    Serial.printf("FAS100: initialized on Serial%d TX=%d RX=%d at %d baud (poll %dms)\n",
+                  fas100_uart_instance, fas100_tx_pin, fas100_rx_pin,
+                  SPORT_BAUD_RATE, poll_interval_ms);
 }
 
 void fas100_update(void)
@@ -137,8 +157,8 @@ void fas100_update(void)
 #ifndef SIMULATION
     static bool in_stuff = false;
 
-    while (FAS100_SERIAL.available()) {
-        uint8_t raw = FAS100_SERIAL.read();
+    while ((*fas100_serial).available()) {
+        uint8_t raw = (*fas100_serial).read();
         uint8_t byte;
 
         if (destuff_byte(raw, &byte, &in_stuff)) {
@@ -231,6 +251,13 @@ static bool fas100_drv_parse_json(const char* json_start, const char* json_end,
             config->params.fas100.poll_interval_ms = (uint8_t)atoi(p);
         }
     }
+
+    uint8_t tx, rx, inst;
+    if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
+        fas100_tx_pin = tx;
+        fas100_rx_pin = rx;
+        fas100_uart_instance = inst;
+    }
     return true;
 }
 
@@ -256,8 +283,11 @@ static bool fas100_drv_save(void* storage_ptr)
 
     memset(&storage->fas100_config, 0, sizeof(storage->fas100_config));
     storage->fas100_config.enabled = port_initialized ? 1 : 0;
-    storage->fas100_config.serial_port = FAS100_SERIAL_PORT;
+    storage->fas100_config.serial_port = fas100_uart_instance;
     storage->fas100_config.poll_interval_ms = poll_interval_ms;
+
+    storage->uart_pins.fas100_tx_pin = fas100_tx_pin;
+    storage->uart_pins.fas100_rx_pin = fas100_rx_pin;
 
     return true;
 }
@@ -266,14 +296,28 @@ static bool fas100_drv_load(const void* storage_ptr)
 {
     const flash_storage_data_t* storage = (const flash_storage_data_t*)storage_ptr;
 
+    uint8_t stored_tx = storage->uart_pins.fas100_tx_pin;
+    uint8_t stored_rx = storage->uart_pins.fas100_rx_pin;
+    if (stored_tx != 0 || stored_rx != 0) {
+        uint8_t inst;
+        if (uart_pin_pair_lookup(stored_tx, stored_rx, &inst)) {
+            fas100_tx_pin = stored_tx;
+            fas100_rx_pin = stored_rx;
+            fas100_uart_instance = inst;
+        } else {
+            Serial.printf("FAS100: invalid stored pin pair tx=%d rx=%d, using defaults\n",
+                          stored_tx, stored_rx);
+        }
+    }
+
     if (!storage->fas100_config.enabled) return true;
 
     if (storage->fas100_config.poll_interval_ms >= 20) {
         poll_interval_ms = storage->fas100_config.poll_interval_ms;
     }
 
-    Serial.printf("FAS100: restored config from flash (poll %dms)\n",
-                  poll_interval_ms);
+    Serial.printf("FAS100: restored config from flash (Serial%d TX=%d RX=%d, poll %dms)\n",
+                  fas100_uart_instance, fas100_tx_pin, fas100_rx_pin, poll_interval_ms);
     return true;
 }
 

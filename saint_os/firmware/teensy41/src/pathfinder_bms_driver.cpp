@@ -8,19 +8,28 @@
 
 #include <Arduino.h>
 
+#include "uart_serial_lookup.h"
+
 extern "C" {
 #include "pathfinder_bms_driver.h"
 #include "peripheral_driver.h"
 #include "flash_types.h"
+#include "uart_pin_pairs.h"
 }
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
-// Serial4 = pins 16(TX) / 17(RX) on Teensy 4.1
-#define BMS_SERIAL          Serial4
-#define BMS_SERIAL_PORT     4
+// Defaults: Serial4 = pins 17(TX) / 16(RX) on Teensy 4.1
+#define BMS_DEFAULT_TX_PIN  17
+#define BMS_DEFAULT_RX_PIN  16
+#define BMS_DEFAULT_INST    4
+
+static HardwareSerial* bms_serial = &Serial4;
+static uint8_t bms_tx_pin = BMS_DEFAULT_TX_PIN;
+static uint8_t bms_rx_pin = BMS_DEFAULT_RX_PIN;
+static uint8_t bms_uart_instance = BMS_DEFAULT_INST;
 
 // =============================================================================
 // RX State Machine
@@ -78,7 +87,7 @@ static void send_read_request(uint8_t reg)
 #ifndef SIMULATION
     uint8_t frame[JBD_READ_REQUEST_SIZE];
     jbd_build_read_request(reg, frame);
-    BMS_SERIAL.write(frame, JBD_READ_REQUEST_SIZE);
+    bms_serial->write(frame, JBD_READ_REQUEST_SIZE);
 #else
     (void)reg;
 #endif
@@ -217,7 +226,15 @@ extern "C" {
 void pathfinder_bms_init(void)
 {
 #ifndef SIMULATION
-    BMS_SERIAL.begin(JBD_BAUD_RATE);
+    if (!uart_pin_pair_lookup(bms_tx_pin, bms_rx_pin, &bms_uart_instance)) {
+        bms_tx_pin = BMS_DEFAULT_TX_PIN;
+        bms_rx_pin = BMS_DEFAULT_RX_PIN;
+        bms_uart_instance = BMS_DEFAULT_INST;
+    }
+    HardwareSerial* s = teensy_serial_from_instance(bms_uart_instance);
+    if (s) bms_serial = s;
+
+    bms_serial->begin(JBD_BAUD_RATE);
 #endif
 
     memset(cell_voltages, 0, sizeof(cell_voltages));
@@ -226,8 +243,9 @@ void pathfinder_bms_init(void)
     next_register = JBD_REG_BASIC_INFO;
     port_initialized = true;
 
-    Serial.printf("Pathfinder BMS: initialized on Serial%d at %d baud (poll %dms)\n",
-                  BMS_SERIAL_PORT, JBD_BAUD_RATE, poll_interval_ms);
+    Serial.printf("Pathfinder BMS: initialized on Serial%d TX=%d RX=%d at %d baud (poll %dms)\n",
+                  bms_uart_instance, bms_tx_pin, bms_rx_pin,
+                  JBD_BAUD_RATE, poll_interval_ms);
 }
 
 void pathfinder_bms_update(void)
@@ -238,8 +256,8 @@ void pathfinder_bms_update(void)
 
     // Non-blocking read of available bytes
 #ifndef SIMULATION
-    while (BMS_SERIAL.available()) {
-        uint8_t byte = BMS_SERIAL.read();
+    while (bms_serial->available()) {
+        uint8_t byte = bms_serial->read();
         process_rx_byte(byte);
     }
 #endif
@@ -346,6 +364,14 @@ static bool bms_drv_parse_json(const char* json_start, const char* json_end,
             config->params.pathfinder_bms.poll_interval_ms = (uint16_t)atoi(p);
         }
     }
+
+    uint8_t tx, rx, inst;
+    if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
+        bms_tx_pin = tx;
+        bms_rx_pin = rx;
+        bms_uart_instance = inst;
+    }
+
     return true;
 }
 
@@ -376,8 +402,11 @@ static bool bms_drv_save(void* storage_ptr)
 
     memset(&storage->pathfinder_bms_config, 0, sizeof(storage->pathfinder_bms_config));
     storage->pathfinder_bms_config.enabled = port_initialized ? 1 : 0;
-    storage->pathfinder_bms_config.serial_port = BMS_SERIAL_PORT;
+    storage->pathfinder_bms_config.serial_port = bms_uart_instance;
     storage->pathfinder_bms_config.poll_interval_ms = poll_interval_ms;
+
+    storage->uart_pins.pathfinder_bms_tx_pin = bms_tx_pin;
+    storage->uart_pins.pathfinder_bms_rx_pin = bms_rx_pin;
 
     return true;
 }
@@ -386,14 +415,28 @@ static bool bms_drv_load(const void* storage_ptr)
 {
     const flash_storage_data_t* storage = (const flash_storage_data_t*)storage_ptr;
 
+    uint8_t stored_tx = storage->uart_pins.pathfinder_bms_tx_pin;
+    uint8_t stored_rx = storage->uart_pins.pathfinder_bms_rx_pin;
+    if (stored_tx != 0 || stored_rx != 0) {
+        uint8_t inst;
+        if (uart_pin_pair_lookup(stored_tx, stored_rx, &inst)) {
+            bms_tx_pin = stored_tx;
+            bms_rx_pin = stored_rx;
+            bms_uart_instance = inst;
+        } else {
+            Serial.printf("Pathfinder BMS: invalid stored pin pair tx=%d rx=%d, using defaults\n",
+                          stored_tx, stored_rx);
+        }
+    }
+
     if (!storage->pathfinder_bms_config.enabled) return true;
 
     if (storage->pathfinder_bms_config.poll_interval_ms >= 100) {
         poll_interval_ms = storage->pathfinder_bms_config.poll_interval_ms;
     }
 
-    Serial.printf("Pathfinder BMS: restored config from flash (poll %dms)\n",
-                  poll_interval_ms);
+    Serial.printf("Pathfinder BMS: restored config from flash (Serial%d TX=%d RX=%d, poll %dms)\n",
+                  bms_uart_instance, bms_tx_pin, bms_rx_pin, poll_interval_ms);
     return true;
 }
 

@@ -12,6 +12,7 @@
 #include "peripheral_driver.h"
 #include "flash_types.h"
 #include "platform.h"
+#include "uart_pin_pairs.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -26,11 +27,12 @@
 // Configuration
 // =============================================================================
 
-// Default UART instance and pins for RP2040
-#define ROBOCLAW_DEFAULT_UART       uart0
 #define ROBOCLAW_DEFAULT_TX_PIN     0
 #define ROBOCLAW_DEFAULT_RX_PIN     1
 #define ROBOCLAW_DEFAULT_SERIAL_PORT 0
+
+static uint8_t roboclaw_tx_pin = ROBOCLAW_DEFAULT_TX_PIN;
+static uint8_t roboclaw_rx_pin = ROBOCLAW_DEFAULT_RX_PIN;
 
 // =============================================================================
 // Per-Unit State
@@ -158,26 +160,20 @@ void roboclaw_init(void)
     }
 
 #ifndef SIMULATION
-    // Select UART based on configured serial port
-    if (configured_serial_port == 0) {
-        hw_uart = uart0;
+    // Resolve UART instance from configured pin pair (falls back to defaults).
+    uint8_t resolved_inst;
+    if (uart_pin_pair_lookup(roboclaw_tx_pin, roboclaw_rx_pin, &resolved_inst)) {
+        configured_serial_port = resolved_inst;
     } else {
-        hw_uart = uart1;
+        roboclaw_tx_pin = ROBOCLAW_DEFAULT_TX_PIN;
+        roboclaw_rx_pin = ROBOCLAW_DEFAULT_RX_PIN;
+        configured_serial_port = ROBOCLAW_DEFAULT_SERIAL_PORT;
     }
+    hw_uart = (configured_serial_port == 0) ? uart0 : uart1;
 
     uart_init(hw_uart, configured_baud);
-
-    // Set TX and RX pins
-    uint tx_pin, rx_pin;
-    if (hw_uart == uart0) {
-        tx_pin = ROBOCLAW_DEFAULT_TX_PIN;
-        rx_pin = ROBOCLAW_DEFAULT_RX_PIN;
-    } else {
-        tx_pin = 4;
-        rx_pin = 5;
-    }
-    gpio_set_function(tx_pin, GPIO_FUNC_UART);
-    gpio_set_function(rx_pin, GPIO_FUNC_UART);
+    gpio_set_function(roboclaw_tx_pin, GPIO_FUNC_UART);
+    gpio_set_function(roboclaw_rx_pin, GPIO_FUNC_UART);
 
     PLATFORM_SLEEP_MS(100);
 
@@ -229,8 +225,9 @@ version_done:
 #endif
 
     port_initialized = true;
-    PLATFORM_PRINTF("RoboClaw: initialized on UART%d at %d baud, %d units\n",
-                    configured_serial_port, configured_baud, unit_count);
+    PLATFORM_PRINTF("RoboClaw: initialized on UART%d TX=%d RX=%d at %d baud, %d units\n",
+                    configured_serial_port, roboclaw_tx_pin, roboclaw_rx_pin,
+                    configured_baud, unit_count);
 }
 
 void roboclaw_update(void)
@@ -434,6 +431,13 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
         if (p) { p++; while (*p == ' ') p++; config->params.roboclaw.max_current_ma = (uint16_t)atoi(p); }
     }
 
+    uint8_t tx, rx, inst;
+    if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
+        roboclaw_tx_pin = tx;
+        roboclaw_rx_pin = rx;
+        configured_serial_port = inst;
+    }
+
     return true;
 }
 
@@ -466,6 +470,9 @@ static bool roboclaw_drv_save(void* storage_ptr)
     storage->roboclaw_config.serial_port = configured_serial_port;
     storage->roboclaw_config.baud_rate = configured_baud;
 
+    storage->uart_pins.roboclaw_tx_pin = roboclaw_tx_pin;
+    storage->uart_pins.roboclaw_rx_pin = roboclaw_rx_pin;
+
     for (uint8_t i = 0; i < ROBOCLAW_MAX_UNITS; i++) {
         storage->roboclaw_config.units[i].address = units[i].address;
         storage->roboclaw_config.units[i].deadband = units[i].deadband;
@@ -478,6 +485,20 @@ static bool roboclaw_drv_save(void* storage_ptr)
 static bool roboclaw_drv_load(const void* storage_ptr)
 {
     const flash_storage_data_t* storage = (const flash_storage_data_t*)storage_ptr;
+
+    uint8_t stored_tx = storage->uart_pins.roboclaw_tx_pin;
+    uint8_t stored_rx = storage->uart_pins.roboclaw_rx_pin;
+    if (stored_tx != 0 || stored_rx != 0) {
+        uint8_t inst;
+        if (uart_pin_pair_lookup(stored_tx, stored_rx, &inst)) {
+            roboclaw_tx_pin = stored_tx;
+            roboclaw_rx_pin = stored_rx;
+            configured_serial_port = inst;
+        } else {
+            PLATFORM_PRINTF("RoboClaw: invalid stored pin pair tx=%d rx=%d, using defaults\n",
+                            stored_tx, stored_rx);
+        }
+    }
 
     if (storage->roboclaw_config.unit_count == 0) return true;
 

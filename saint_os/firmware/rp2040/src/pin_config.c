@@ -16,6 +16,7 @@
 #include "pin_config.h"
 #include "flash_storage.h"
 #include "saint_node.h"
+#include "uart_pin_pairs.h"
 #include "peripheral_driver.h"
 
 // =============================================================================
@@ -377,6 +378,22 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
     for (size_t i = 0; i < RESERVED_PIN_COUNT; i++) {
         ret = snprintf(buffer + written, buffer_size - written,
             "%s%d", i > 0 ? "," : "", reserved_pins[i]);
+        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+        written += ret;
+    }
+
+    // Write UART pin pairs the platform supports
+    ret = snprintf(buffer + written, buffer_size - written, "],\"uart_pairs\":[");
+    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+    written += ret;
+
+    size_t pair_count = 0;
+    const uart_pin_pair_t* pairs = uart_pin_pairs_table(&pair_count);
+    for (size_t i = 0; i < pair_count; i++) {
+        ret = snprintf(buffer + written, buffer_size - written,
+            "%s{\"uart\":%d,\"tx\":%d,\"rx\":%d}",
+            i > 0 ? "," : "",
+            pairs[i].uart_instance, pairs[i].tx_pin, pairs[i].rx_pin);
         if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
         written += ret;
     }

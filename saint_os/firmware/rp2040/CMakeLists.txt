@@ -120,12 +120,14 @@ set(SAINT_NODE_SOURCES
     ../shared/src/node_state.cpp
     ../shared/src/flash_helpers.c
     ../shared/src/peripheral_manager.cpp
+    ../shared/src/uart_pin_pairs_parse.c
     src/hardware.c
     src/led_status.c
     src/pico_clock.c
     src/flash_storage.c
     src/pin_config.c
     src/pin_control.c
+    src/uart_pin_pairs.c
     src/syren_driver.c
     src/fas100_driver.c
     src/roboclaw_driver.c

@@ -72,7 +72,66 @@ class PinConfigManager {
             modalRoboclawAddress: document.getElementById('modal-roboclaw-address'),
             modalRoboclawDeadband: document.getElementById('modal-roboclaw-deadband'),
             modalRoboclawMaxCurrent: document.getElementById('modal-roboclaw-max-current'),
+            modalUartPairParams: document.getElementById('modal-uart-pair-params'),
+            modalUartPair: document.getElementById('modal-uart-pair'),
         };
+    }
+
+    /**
+     * Modes that consume a hardware UART and need a TX/RX pin pair selector.
+     */
+    isUartMode(mode) {
+        return mode === 'fas100_sensor'
+            || mode === 'syren_motor'
+            || mode === 'roboclaw_motor';
+    }
+
+    /**
+     * Encode a (tx, rx) pair as a single string for the <option value>.
+     */
+    encodeUartPair(tx, rx) {
+        return `${tx}:${rx}`;
+    }
+
+    decodeUartPair(value) {
+        if (!value) return null;
+        const [tx, rx] = value.split(':').map(n => parseInt(n, 10));
+        if (isNaN(tx) || isNaN(rx)) return null;
+        return { tx, rx };
+    }
+
+    /**
+     * Populate the UART pair dropdown from capabilities.uart_pairs.
+     * Selects the saved pair if any, otherwise the first available.
+     */
+    populateUartPairSelect(currentTx, currentRx) {
+        const select = this.elements.modalUartPair;
+        select.innerHTML = '';
+
+        const pairs = (this.capabilities && this.capabilities.uart_pairs) || [];
+        if (pairs.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'No UART pairs advertised by this node';
+            select.appendChild(opt);
+            return;
+        }
+
+        let matchedSaved = false;
+        for (const p of pairs) {
+            const opt = document.createElement('option');
+            opt.value = this.encodeUartPair(p.tx, p.rx);
+            opt.textContent = `UART${p.uart}  (TX=${p.tx}, RX=${p.rx})`;
+            if (currentTx === p.tx && currentRx === p.rx) {
+                opt.selected = true;
+                matchedSaved = true;
+            }
+            select.appendChild(opt);
+        }
+
+        if (!matchedSaved && select.options.length > 0) {
+            select.selectedIndex = 0;
+        }
     }
 
     /**
@@ -557,6 +616,9 @@ class PinConfigManager {
         this.elements.modalRoboclawDeadband.value = config.deadband || 0;
         this.elements.modalRoboclawMaxCurrent.value = config.max_current_ma || 0;
 
+        // UART pin pair (shared across UART peripherals)
+        this.populateUartPairSelect(config.tx_pin, config.rx_pin);
+
         // Update parameter visibility
         this.updateModalParams(config.mode || '');
 
@@ -584,6 +646,7 @@ class PinConfigManager {
         this.elements.modalSyrenParams.classList.add('hidden');
         this.elements.modalFas100Params.classList.add('hidden');
         this.elements.modalRoboclawParams.classList.add('hidden');
+        this.elements.modalUartPairParams.classList.add('hidden');
 
         // Show relevant section
         if (mode === 'pwm') {
@@ -600,6 +663,11 @@ class PinConfigManager {
             this.elements.modalFas100Params.classList.remove('hidden');
         } else if (mode === 'roboclaw_motor') {
             this.elements.modalRoboclawParams.classList.remove('hidden');
+        }
+
+        // Show UART pair selector for any UART peripheral mode
+        if (this.isUartMode(mode)) {
+            this.elements.modalUartPairParams.classList.remove('hidden');
         }
     }
 
@@ -652,6 +720,15 @@ class PinConfigManager {
                 config.max_current_ma = parseInt(this.elements.modalRoboclawMaxCurrent.value) || 0;
             }
 
+            // UART peripheral pin pair (shared selector across all UART modes)
+            if (this.isUartMode(mode)) {
+                const pair = this.decodeUartPair(this.elements.modalUartPair.value);
+                if (pair) {
+                    config.tx_pin = pair.tx;
+                    config.rx_pin = pair.rx;
+                }
+            }
+
             this.pinConfig[gpio] = config;
         }
 
@@ -692,9 +769,56 @@ class PinConfigManager {
             } else {
                 console.error('Failed to save config:', result.message);
             }
+
+            // Proactively check for conflicts (UART overlap, missing required functions)
+            // and surface them in a banner so the user sees them before hitting Sync.
+            this.refreshConflictBanner();
         } catch (error) {
             console.error('Failed to save configuration:', error);
         }
+    }
+
+    /**
+     * Re-validate the current config against the server and render any errors
+     * into the conflict banner above the configuration summary.
+     */
+    async refreshConflictBanner() {
+        if (!this.selectedNode) return;
+        const banner = document.getElementById('pinconfig-conflicts');
+        if (!banner) return;
+
+        try {
+            const ws = window.saintWS;
+            const pins = Object.fromEntries(
+                Object.entries(this.pinConfig).map(([k, v]) => [k.toString(), v])
+            );
+            const result = await ws.management('validate_pin_config', {
+                node_id: this.selectedNode,
+                pins,
+                role: this.nodeInfo?.role,
+            });
+
+            const errors = (result && result.errors) || [];
+            if (errors.length === 0) {
+                banner.classList.add('hidden');
+                banner.innerHTML = '';
+                return;
+            }
+            banner.innerHTML = errors
+                .map(e => `<div>⚠ ${this.escapeHtml(e)}</div>`)
+                .join('');
+            banner.classList.remove('hidden');
+        } catch (err) {
+            console.warn('Conflict check failed:', err);
+        }
+    }
+
+    escapeHtml(s) {
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
 
     /**
