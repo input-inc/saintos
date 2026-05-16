@@ -511,6 +511,7 @@
                             <!-- Configuration Summary -->
                             <div class="card mt-4">
                                 <h3 class="text-lg font-semibold text-white mb-4">Configuration Summary</h3>
+                                <div id="pinconfig-conflicts" class="hidden mb-3 p-3 rounded bg-red-900/40 border border-red-700 text-red-200 text-sm space-y-1"></div>
                                 <div id="pinconfig-summary" class="space-y-2">
                                     <p class="text-slate-400 text-sm">No pins configured.</p>
                                 </div>
@@ -895,6 +896,15 @@
                                     </div>
                                 </div>
                                 <p class="text-xs text-slate-500">Address: 128-135 (0x80-0x87). Max Current: 0 = unlimited. 5 channels per unit (motor, encoder, voltage, current, temp).</p>
+                            </div>
+
+                            <!-- UART Pin Selection (appears for any UART peripheral) -->
+                            <div id="modal-uart-pair-params" class="hidden space-y-3 pt-3 border-t border-slate-700">
+                                <div>
+                                    <label class="block text-xs text-slate-400 mb-1">UART Pins</label>
+                                    <select id="modal-uart-pair" class="input-field w-full"></select>
+                                </div>
+                                <p class="text-xs text-slate-500">Selects which hardware UART and pin pair this peripheral uses. Shared across all channels of this peripheral. Cannot overlap with another active UART peripheral.</p>
                             </div>
                         </div>
 

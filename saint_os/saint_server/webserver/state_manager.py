@@ -80,6 +80,9 @@ class NodeCapabilities:
     node_id: str
     pins: List[PinCapability] = field(default_factory=list)
     reserved_pins: List[int] = field(default_factory=list)
+    # Legal (uart_instance, tx_pin, rx_pin) tuples for UART peripherals.
+    # Each entry is a dict like {"uart": 0, "tx": 0, "rx": 1}.
+    uart_pairs: List[Dict[str, int]] = field(default_factory=list)
     last_updated: float = field(default_factory=time.time)
 
     def get_pin(self, gpio: int) -> Optional[PinCapability]:
@@ -106,6 +109,7 @@ class NodeCapabilities:
                 for p in self.pins
             ],
             "reserved_pins": self.reserved_pins,
+            "uart_pairs": self.uart_pairs,
         }
 
 
@@ -710,6 +714,7 @@ class StateManager:
             node_id=node_id,
             pins=pins,
             reserved_pins=data.get('reserved_pins', []),
+            uart_pairs=data.get('uart_pairs', []),
             last_updated=time.time(),
         )
 
@@ -887,6 +892,49 @@ class StateManager:
                     errors.append(
                         f"GPIO {gpio} ({pin_cap.name}) does not support mode '{mode}'"
                     )
+
+        # Detect UART conflicts: two UART-using peripherals on the same UART instance.
+        # Each UART peripheral config carries tx_pin/rx_pin; resolve to a UART instance
+        # via the node's advertised uart_pairs table and flag overlaps.
+        uart_modes = {
+            'fas100_sensor', 'syren_motor', 'roboclaw_motor', 'pathfinder_bms_sensor'
+        }
+        if capabilities and capabilities.uart_pairs:
+            pair_to_uart = {
+                (p.get('tx'), p.get('rx')): p.get('uart')
+                for p in capabilities.uart_pairs
+            }
+            # Map: peripheral_kind -> (tx, rx, uart_instance). One entry per kind because
+            # all virtual pins of a peripheral share its UART; pick the first one seen.
+            assignments: Dict[str, tuple] = {}
+            for config in pin_configs.values():
+                mode = config.get('mode', '')
+                if mode not in uart_modes:
+                    continue
+                tx = config.get('tx_pin')
+                rx = config.get('rx_pin')
+                if tx is None or rx is None:
+                    continue
+                key = (int(tx), int(rx))
+                uart_inst = pair_to_uart.get(key)
+                if uart_inst is None:
+                    errors.append(
+                        f"{mode}: TX={tx}/RX={rx} is not a legal UART pair on this node"
+                    )
+                    continue
+                if mode not in assignments:
+                    assignments[mode] = (int(tx), int(rx), uart_inst)
+
+            # Same-UART conflicts (two peripherals on overlapping pins).
+            for mode_a, (tx_a, rx_a, uart_a) in assignments.items():
+                for mode_b, (tx_b, rx_b, uart_b) in assignments.items():
+                    if mode_a >= mode_b:  # only one direction
+                        continue
+                    if uart_a == uart_b:
+                        errors.append(
+                            f"UART conflict: {mode_a} (TX={tx_a}/RX={rx_a}) and "
+                            f"{mode_b} (TX={tx_b}/RX={rx_b}) both claim UART{uart_a}"
+                        )
 
         return {
             "valid": len(errors) == 0,

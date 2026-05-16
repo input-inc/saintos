@@ -10,6 +10,7 @@
 #include "peripheral_driver.h"
 #include "flash_types.h"
 #include "platform.h"
+#include "uart_pin_pairs.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -24,10 +25,15 @@
 // Configuration
 // =============================================================================
 
-#define FAS100_UART          uart0
-#define FAS100_UART_TX_PIN   0
-#define FAS100_UART_RX_PIN   1
-#define FAS100_SERIAL_PORT   0
+#define FAS100_DEFAULT_TX_PIN   0
+#define FAS100_DEFAULT_RX_PIN   1
+
+#ifndef SIMULATION
+static uart_inst_t* fas100_uart = NULL;
+#endif
+static uint8_t fas100_tx_pin = FAS100_DEFAULT_TX_PIN;
+static uint8_t fas100_rx_pin = FAS100_DEFAULT_RX_PIN;
+static uint8_t fas100_uart_instance = 0;
 
 // Response buffer (enough for one de-stuffed frame)
 #define FAS100_RX_BUF_SIZE   16
@@ -61,11 +67,12 @@ static uint8_t rx_pos = 0;
 static void send_poll(void)
 {
 #ifndef SIMULATION
+    if (!fas100_uart) return;
     uint8_t frame[FAS100_POLL_FRAME_SIZE] = {
         SPORT_POLL_HEADER,
         SPORT_FAS100_PHYSICAL_ID
     };
-    uart_write_blocking(FAS100_UART, frame, FAS100_POLL_FRAME_SIZE);
+    uart_write_blocking(fas100_uart, frame, FAS100_POLL_FRAME_SIZE);
 #endif
 }
 
@@ -139,22 +146,31 @@ static void parse_response(const uint8_t* frame, uint8_t len)
 void fas100_init(void)
 {
 #ifndef SIMULATION
-    uart_init(FAS100_UART, SPORT_BAUD_RATE);
+    // Resolve UART instance from configured pin pair, with fallback to defaults.
+    if (!uart_pin_pair_lookup(fas100_tx_pin, fas100_rx_pin, &fas100_uart_instance)) {
+        fas100_tx_pin = FAS100_DEFAULT_TX_PIN;
+        fas100_rx_pin = FAS100_DEFAULT_RX_PIN;
+        fas100_uart_instance = 0;
+    }
+    fas100_uart = (fas100_uart_instance == 0) ? uart0 : uart1;
 
-    gpio_set_function(FAS100_UART_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(FAS100_UART_RX_PIN, GPIO_FUNC_UART);
+    uart_init(fas100_uart, SPORT_BAUD_RATE);
+
+    gpio_set_function(fas100_tx_pin, GPIO_FUNC_UART);
+    gpio_set_function(fas100_rx_pin, GPIO_FUNC_UART);
 
     // S.Port uses inverted signaling
-    gpio_set_outover(FAS100_UART_TX_PIN, GPIO_OVERRIDE_INVERT);
-    gpio_set_inover(FAS100_UART_RX_PIN, GPIO_OVERRIDE_INVERT);
+    gpio_set_outover(fas100_tx_pin, GPIO_OVERRIDE_INVERT);
+    gpio_set_inover(fas100_rx_pin, GPIO_OVERRIDE_INVERT);
 #endif
 
     rx_pos = 0;
     sensor_responded = false;
     port_initialized = true;
 
-    PLATFORM_PRINTF("FAS100: initialized on UART%d at %d baud (poll %dms)\n",
-                    FAS100_SERIAL_PORT, SPORT_BAUD_RATE, poll_interval_ms);
+    PLATFORM_PRINTF("FAS100: initialized on UART%d TX=%d RX=%d at %d baud (poll %dms)\n",
+                    fas100_uart_instance, fas100_tx_pin, fas100_rx_pin,
+                    SPORT_BAUD_RATE, poll_interval_ms);
 }
 
 void fas100_update(void)
@@ -165,8 +181,8 @@ void fas100_update(void)
 
     // Non-blocking read of any available bytes
 #ifndef SIMULATION
-    while (uart_is_readable(FAS100_UART)) {
-        uint8_t raw = uart_getc(FAS100_UART);
+    while (fas100_uart && uart_is_readable(fas100_uart)) {
+        uint8_t raw = uart_getc(fas100_uart);
         static bool in_stuff = false;
         uint8_t byte;
 
@@ -262,6 +278,13 @@ static bool fas100_drv_parse_json(const char* json_start, const char* json_end,
             config->params.fas100.poll_interval_ms = (uint8_t)atoi(p);
         }
     }
+
+    uint8_t tx, rx, inst;
+    if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
+        fas100_tx_pin = tx;
+        fas100_rx_pin = rx;
+        fas100_uart_instance = inst;
+    }
     return true;
 }
 
@@ -288,8 +311,11 @@ static bool fas100_drv_save(void* storage_ptr)
 
     memset(&storage->fas100_config, 0, sizeof(storage->fas100_config));
     storage->fas100_config.enabled = port_initialized ? 1 : 0;
-    storage->fas100_config.serial_port = FAS100_SERIAL_PORT;
+    storage->fas100_config.serial_port = fas100_uart_instance;
     storage->fas100_config.poll_interval_ms = poll_interval_ms;
+
+    storage->uart_pins.fas100_tx_pin = fas100_tx_pin;
+    storage->uart_pins.fas100_rx_pin = fas100_rx_pin;
 
     return true;
 }
@@ -298,14 +324,29 @@ static bool fas100_drv_load(const void* storage_ptr)
 {
     const flash_storage_data_t* storage = (const flash_storage_data_t*)storage_ptr;
 
+    // Pin assignment applies before init even if disabled, so init reads it.
+    uint8_t stored_tx = storage->uart_pins.fas100_tx_pin;
+    uint8_t stored_rx = storage->uart_pins.fas100_rx_pin;
+    if (stored_tx != 0 || stored_rx != 0) {
+        uint8_t inst;
+        if (uart_pin_pair_lookup(stored_tx, stored_rx, &inst)) {
+            fas100_tx_pin = stored_tx;
+            fas100_rx_pin = stored_rx;
+            fas100_uart_instance = inst;
+        } else {
+            PLATFORM_PRINTF("FAS100: invalid stored pin pair tx=%d rx=%d, using defaults\n",
+                            stored_tx, stored_rx);
+        }
+    }
+
     if (!storage->fas100_config.enabled) return true;
 
     if (storage->fas100_config.poll_interval_ms >= 20) {
         poll_interval_ms = storage->fas100_config.poll_interval_ms;
     }
 
-    PLATFORM_PRINTF("FAS100: restored config from flash (poll %dms)\n",
-                    poll_interval_ms);
+    PLATFORM_PRINTF("FAS100: restored config from flash (UART%d TX=%d RX=%d, poll %dms)\n",
+                    fas100_uart_instance, fas100_tx_pin, fas100_rx_pin, poll_interval_ms);
     return true;
 }
 

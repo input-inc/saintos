@@ -10,18 +10,26 @@
 
 #include <Arduino.h>
 
+#include "uart_serial_lookup.h"
+
 extern "C" {
 #include "roboclaw_driver.h"
 #include "peripheral_driver.h"
 #include "flash_types.h"
+#include "uart_pin_pairs.h"
 }
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
-// Default to Serial3 (pins 14/15 on Teensy 4.1)
+// Defaults: Serial3 = pins 14(TX) / 15(RX) on Teensy 4.1
 #define ROBOCLAW_DEFAULT_SERIAL_PORT 3
+#define ROBOCLAW_DEFAULT_TX_PIN      14
+#define ROBOCLAW_DEFAULT_RX_PIN      15
+
+static uint8_t roboclaw_tx_pin = ROBOCLAW_DEFAULT_TX_PIN;
+static uint8_t roboclaw_rx_pin = ROBOCLAW_DEFAULT_RX_PIN;
 
 // =============================================================================
 // Per-Unit State
@@ -161,7 +169,16 @@ void roboclaw_init(void)
     }
 
 #ifndef SIMULATION
-    hw_serial = get_serial_port(configured_serial_port);
+    uint8_t resolved_inst;
+    if (uart_pin_pair_lookup(roboclaw_tx_pin, roboclaw_rx_pin, &resolved_inst)) {
+        configured_serial_port = resolved_inst;
+    } else {
+        roboclaw_tx_pin = ROBOCLAW_DEFAULT_TX_PIN;
+        roboclaw_rx_pin = ROBOCLAW_DEFAULT_RX_PIN;
+        configured_serial_port = ROBOCLAW_DEFAULT_SERIAL_PORT;
+    }
+    HardwareSerial* s = teensy_serial_from_instance(configured_serial_port);
+    hw_serial = s ? s : get_serial_port(configured_serial_port);
     hw_serial->begin(configured_baud);
     delay(100);
 
@@ -210,8 +227,9 @@ version_done:
 #endif
 
     port_initialized = true;
-    Serial.printf("RoboClaw: initialized on Serial%d at %d baud, %d units\n",
-                  configured_serial_port, configured_baud, unit_count);
+    Serial.printf("RoboClaw: initialized on Serial%d TX=%d RX=%d at %d baud, %d units\n",
+                  configured_serial_port, roboclaw_tx_pin, roboclaw_rx_pin,
+                  configured_baud, unit_count);
 }
 
 void roboclaw_update(void)
@@ -413,6 +431,13 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
         if (p) { p++; while (*p == ' ') p++; config->params.roboclaw.max_current_ma = (uint16_t)atoi(p); }
     }
 
+    uint8_t tx, rx, inst;
+    if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
+        roboclaw_tx_pin = tx;
+        roboclaw_rx_pin = rx;
+        configured_serial_port = inst;
+    }
+
     return true;
 }
 
@@ -445,6 +470,9 @@ static bool roboclaw_drv_save(void* storage_ptr)
     storage->roboclaw_config.serial_port = configured_serial_port;
     storage->roboclaw_config.baud_rate = configured_baud;
 
+    storage->uart_pins.roboclaw_tx_pin = roboclaw_tx_pin;
+    storage->uart_pins.roboclaw_rx_pin = roboclaw_rx_pin;
+
     for (uint8_t i = 0; i < ROBOCLAW_MAX_UNITS; i++) {
         storage->roboclaw_config.units[i].address = units[i].address;
         storage->roboclaw_config.units[i].deadband = units[i].deadband;
@@ -457,6 +485,20 @@ static bool roboclaw_drv_save(void* storage_ptr)
 static bool roboclaw_drv_load(const void* storage_ptr)
 {
     const flash_storage_data_t* storage = (const flash_storage_data_t*)storage_ptr;
+
+    uint8_t stored_tx = storage->uart_pins.roboclaw_tx_pin;
+    uint8_t stored_rx = storage->uart_pins.roboclaw_rx_pin;
+    if (stored_tx != 0 || stored_rx != 0) {
+        uint8_t inst;
+        if (uart_pin_pair_lookup(stored_tx, stored_rx, &inst)) {
+            roboclaw_tx_pin = stored_tx;
+            roboclaw_rx_pin = stored_rx;
+            configured_serial_port = inst;
+        } else {
+            Serial.printf("RoboClaw: invalid stored pin pair tx=%d rx=%d, using defaults\n",
+                          stored_tx, stored_rx);
+        }
+    }
 
     if (storage->roboclaw_config.unit_count == 0) return true;
 

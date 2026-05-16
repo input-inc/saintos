@@ -83,6 +83,9 @@ bool flash_storage_load(flash_storage_data_t* data)
         if (mutable_data->version <= 3) {
             memset(&mutable_data->syren_config, 0, sizeof(mutable_data->syren_config));
         }
+        if (mutable_data->version <= 7) {
+            memset(&mutable_data->uart_pins, 0, sizeof(mutable_data->uart_pins));
+        }
         mutable_data->version = FLASH_STORAGE_VERSION;
     }
 
@@ -175,6 +178,12 @@ bool flash_storage_load(flash_storage_data_t* data)
         }
         if (data->version <= 2) {
             memset(&data->maestro_config, 0, sizeof(data->maestro_config));
+        }
+        if (data->version <= 3) {
+            memset(&data->syren_config, 0, sizeof(data->syren_config));
+        }
+        if (data->version <= 7) {
+            memset(&data->uart_pins, 0, sizeof(data->uart_pins));
         }
         data->version = FLASH_STORAGE_VERSION;
     }
