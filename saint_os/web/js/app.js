@@ -24,6 +24,18 @@ class SaintApp {
         // Telemetry refresh interval
         this.telemetryInterval = null;
 
+        // Live FAS100 telemetry. Updated from pin_state/<node> messages
+        // when any adopted node publishes virtual GPIOs 232..235.
+        this.fas100Live = {
+            current: null,    // amps    (GPIO 232)
+            voltage: null,    // volts   (GPIO 233)
+            temp1: null,      // celsius (GPIO 234)
+            temp2: null,      // celsius (GPIO 235)
+            lastUpdate: 0,    // epoch ms of the latest update; 0 = never seen
+            sourceNode: null, // node_id that last reported FAS100 values
+        };
+        this._pinStateSubscriptions = new Set();
+
         // Settings dirty tracking
         this.settingsOriginalValues = {};
         this.settingsDirty = false;
@@ -852,6 +864,34 @@ class SaintApp {
             }
             // Update UI based on current page
             this.updateNodesUI();
+        } else if (message.node && message.node.startsWith('pin_state/')) {
+            const nodeId = message.node.slice('pin_state/'.length);
+            this.ingestPinState(nodeId, message.data);
+        }
+    }
+
+    /**
+     * Pull FAS100 values out of an incoming pin_state message. The firmware
+     * publishes virtual GPIOs 232 (current), 233 (voltage), 234 (temp1)
+     * when an FAS100 sensor is configured and connected.
+     */
+    ingestPinState(nodeId, data) {
+        if (!data || !Array.isArray(data.pins)) return;
+
+        let touched = false;
+        for (const pin of data.pins) {
+            if (pin.actual === undefined || pin.actual === null) continue;
+            switch (pin.gpio) {
+                case 232: this.fas100Live.current = pin.actual; touched = true; break;
+                case 233: this.fas100Live.voltage = pin.actual; touched = true; break;
+                case 234: this.fas100Live.temp1   = pin.actual; touched = true; break;
+                case 235: this.fas100Live.temp2   = pin.actual; touched = true; break;
+                default: break;
+            }
+        }
+        if (touched) {
+            this.fas100Live.lastUpdate = Date.now();
+            this.fas100Live.sourceNode = nodeId;
         }
     }
 
@@ -870,6 +910,12 @@ class SaintApp {
         // If on control page and controlPage is loaded, update node status
         if (this.currentPage === 'control' && typeof window.controlPage !== 'undefined') {
             window.controlPage.updateNodeStatus(this.nodes.adopted);
+        }
+
+        // Keep pin_state subscriptions in sync with the adopted node list
+        // while the dashboard telemetry widgets are running.
+        if (this.telemetryInterval) {
+            this.subscribePinStateForAdoptedNodes();
         }
     }
 
@@ -2216,6 +2262,10 @@ class SaintApp {
             maestroGrid.dataset.initialized = '1';
         }
 
+        // Subscribe to live pin_state for adopted nodes so real FAS100
+        // readings flow into ingestPinState().
+        this.subscribePinStateForAdoptedNodes();
+
         // Initial update
         this.updateTelemetryWidgets();
 
@@ -2227,37 +2277,55 @@ class SaintApp {
     }
 
     /**
-     * Stop telemetry refresh interval.
+     * Subscribe to pin_state/<id> for every currently-adopted node.
+     * Safe to call repeatedly; only new node IDs trigger a subscribe.
+     */
+    async subscribePinStateForAdoptedNodes() {
+        const ws = window.saintWS;
+        if (!ws) return;
+
+        const desired = new Set(
+            (this.nodes.adopted || []).map(n => `pin_state/${n.node_id}`)
+        );
+        const toAdd = [...desired].filter(t => !this._pinStateSubscriptions.has(t));
+        if (toAdd.length === 0) return;
+
+        try {
+            await ws.subscribe(toAdd, 5);
+            for (const t of toAdd) this._pinStateSubscriptions.add(t);
+        } catch (err) {
+            console.warn('pin_state subscribe failed:', err);
+        }
+    }
+
+    /**
+     * Stop telemetry refresh interval and release pin_state subscriptions.
      */
     stopTelemetryRefresh() {
         if (this.telemetryInterval) {
             clearInterval(this.telemetryInterval);
             this.telemetryInterval = null;
         }
+
+        if (this._pinStateSubscriptions.size > 0) {
+            const ws = window.saintWS;
+            const topics = [...this._pinStateSubscriptions];
+            this._pinStateSubscriptions.clear();
+            if (ws) {
+                ws.unsubscribe(topics).catch(() => {});
+            }
+        }
     }
 
     /**
-     * Update all telemetry widgets with mock data + small random fluctuations.
+     * Update all telemetry widgets. FAS100 reads from live pin_state
+     * cache; other peripherals are still mocked.
      */
     updateTelemetryWidgets() {
         const jitter = (base, range) => base + (Math.random() - 0.5) * 2 * range;
 
-        // ── FAS100 ──
-        const fasVoltage = jitter(12.4, 0.3);
-        const fasCurrent = jitter(2.3, 0.4);
-        const fasTemp = jitter(35, 3);
-
-        this.setTelemetryValue('telem-fas-voltage', `${fasVoltage.toFixed(1)}V`);
-        this.setTelemetryBar('telem-fas-voltage-bar', fasVoltage, 0, 30);
-
-        this.setTelemetryValue('telem-fas-current', `${fasCurrent.toFixed(1)}A`);
-        this.setTelemetryBar('telem-fas-current-bar', fasCurrent, 0, 50);
-
-        const fasTempEl = document.getElementById('telem-fas-temp');
-        if (fasTempEl) {
-            fasTempEl.textContent = this.formatTemperature(fasTemp);
-            fasTempEl.className = 'stat-value telemetry-temp ' + this.tempColorClass(fasTemp);
-        }
+        // ── FAS100 (live) ──
+        this.renderFas100Widget();
 
         // ── RoboClaw ──
         const rcDuty = jitter(67, 5);
@@ -2296,6 +2364,71 @@ class SaintApp {
             if (el) el.textContent = `${clamped}°`;
             const bar = document.getElementById(`telem-servo-bar-${i}`);
             if (bar) bar.style.width = `${(clamped / 180 * 100).toFixed(1)}%`;
+        }
+    }
+
+    /**
+     * Render the FAS100 widget from the live cache, with a status pill
+     * reflecting how fresh the data is.
+     */
+    renderFas100Widget() {
+        const live = this.fas100Live;
+        const now = Date.now();
+        const ageMs = live.lastUpdate > 0 ? (now - live.lastUpdate) : Infinity;
+
+        const FRESH_MS = 3000;
+        const STALE_MS = 15000;
+
+        // Status pill (replaces the old "Mock Data" label).
+        const card = document.getElementById('telemetry-fas100');
+        const pill = card ? card.querySelector('span.px-2.py-0\\.5.text-xs.font-medium.rounded-full') : null;
+        if (pill) {
+            let label, classes;
+            if (ageMs < FRESH_MS) {
+                label = 'Live';
+                classes = 'bg-emerald-500/20 text-emerald-300';
+            } else if (ageMs < STALE_MS) {
+                label = 'Stale';
+                classes = 'bg-amber-500/20 text-amber-300';
+            } else {
+                label = 'No data';
+                classes = 'bg-slate-700 text-slate-400';
+            }
+            pill.textContent = label;
+            pill.className = `px-2 py-0.5 text-xs font-medium rounded-full ${classes}`;
+        }
+
+        const show = ageMs < STALE_MS;
+        const voltage = show ? live.voltage : null;
+        const current = show ? live.current : null;
+        const temp1 = show ? live.temp1 : null;
+        const temp2 = show ? live.temp2 : null;
+
+        this.setTelemetryValue(
+            'telem-fas-voltage',
+            voltage !== null ? `${voltage.toFixed(1)}V` : '--'
+        );
+        this.setTelemetryBar('telem-fas-voltage-bar', voltage ?? 0, 0, 30);
+
+        this.setTelemetryValue(
+            'telem-fas-current',
+            current !== null ? `${current.toFixed(1)}A` : '--'
+        );
+        this.setTelemetryBar('telem-fas-current-bar', current ?? 0, 0, 50);
+
+        this.renderFas100Temp('telem-fas-temp', temp1);
+        this.renderFas100Temp('telem-fas-temp2', temp2);
+    }
+
+    renderFas100Temp(elementId, celsius) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+        if (celsius !== null && celsius !== undefined) {
+            el.textContent = this.formatTemperature(celsius);
+            el.className = 'stat-value telemetry-temp ' + this.tempColorClass(celsius);
+        } else {
+            el.textContent = '--';
+            el.className = 'stat-value telemetry-temp';
         }
     }
 
