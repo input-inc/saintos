@@ -265,8 +265,11 @@ if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
         --shell /usr/sbin/nologin "${SERVICE_USER}"
 fi
 
-# Add to dialout/gpio if present (for RC receiver UART / GPIO).
-for grp in dialout gpio; do
+# Add to standard hardware-access groups so the service can:
+#   dialout — RC receiver / SBUS UART
+#   gpio    — direct GPIO from Python
+#   video   — vcgencmd (CPU temp / throttle status via /dev/vchiq)
+for grp in dialout gpio video; do
     if getent group "$grp" >/dev/null; then
         run usermod -aG "$grp" "${SERVICE_USER}"
     fi
