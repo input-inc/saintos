@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
 jobs:
   build:
     runs-on: ubuntu-22.04-arm
@@ -48,7 +45,7 @@ jobs:
       DEBIAN_RELEASE: bookworm
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ----------------------------------------------------------------------
       # Compute a content hash over the inputs that determine binary output.
@@ -110,7 +107,7 @@ jobs:
       - name: Restore from GHA cache (fast path)
         if: steps.release_check.outputs.exists != 'true'
         id: ros2_cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ros2-install.tar.gz
           key: ${{ steps.hash.outputs.tag }}
