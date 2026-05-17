@@ -299,9 +299,17 @@ class SaintWebSocket {
 
     _onMessage(event) {
         // Binary frames bypass JSON entirely — used by the terminal
-        // feature to stream PTY output straight into xterm.js.
+        // feature to stream PTY output straight into xterm.js. Handle
+        // both ArrayBuffer (preferred) and Blob (in case binaryType
+        // didn't take effect for any reason — older cached JS, weird
+        // browser state).
         if (event.data instanceof ArrayBuffer) {
             this._emit('binary', event.data);
+            return;
+        }
+        if (typeof Blob !== 'undefined' && event.data instanceof Blob) {
+            event.data.arrayBuffer().then((buf) => this._emit('binary', buf))
+                .catch((err) => console.warn('Failed to read binary frame:', err));
             return;
         }
         try {

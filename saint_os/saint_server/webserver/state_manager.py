@@ -8,11 +8,129 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import yaml
 import psutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable, Tuple
+
+# Installed-version metadata — populated once by _read_installed_version_info()
+# on first call to get_system_status() so we don't stat files every second.
+_INSTALL_PREFIX = Path(os.environ.get("SAINT_INSTALL_PREFIX", "/opt/saint-os"))
+_version_info_cache: Optional[Dict[str, Any]] = None
+
+
+def _read_cpu_temp() -> Optional[float]:
+    """Read the system CPU temperature in degrees Celsius.
+
+    Uses /sys/class/thermal/thermal_zone0/temp which is the most portable
+    source on Linux (Pi, Ubuntu Server, etc.). Returns None when the file
+    isn't readable — happens on dev machines without thermal zones.
+    """
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            return int(f.read().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
+
+
+# Bit positions returned by `vcgencmd get_throttled`. See:
+# https://www.raspberrypi.com/documentation/computers/os.html#get_throttled
+_THROTTLE_BITS = {
+    0x1:     ("undervolt",       "currently undervolted"),
+    0x2:     ("freq_cap",        "ARM frequency currently capped"),
+    0x4:     ("throttle",        "currently throttled"),
+    0x8:     ("soft_temp_limit", "currently at soft temperature limit"),
+    0x10000: ("undervolt_past",       "undervoltage has occurred"),
+    0x20000: ("freq_cap_past",        "ARM frequency capping has occurred"),
+    0x40000: ("throttle_past",        "throttling has occurred"),
+    0x80000: ("soft_temp_limit_past", "soft temperature limit has occurred"),
+}
+
+
+def _read_throttle_status() -> Optional[Dict[str, Any]]:
+    """Decode `vcgencmd get_throttled` into a structured dict.
+
+    Pi-specific. Returns None on systems without vcgencmd (dev boxes).
+    The raw value is a bitfield; we flag each set bit with a human-
+    readable name so the UI can render badges per condition.
+    """
+    try:
+        proc = subprocess.run(
+            ["vcgencmd", "get_throttled"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if proc.returncode != 0:
+            return None
+        # Output format: "throttled=0x50000"
+        raw_str = proc.stdout.strip().split("=", 1)[-1]
+        raw = int(raw_str, 16)
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return None
+
+    flags = []
+    descriptions = []
+    for bit, (name, desc) in _THROTTLE_BITS.items():
+        if raw & bit:
+            flags.append(name)
+            descriptions.append(desc)
+
+    # Status summary: ok | warning (only past events) | critical (currently)
+    currently_bad = bool(raw & 0xF)
+    historically_bad = bool(raw & 0xF0000)
+    if currently_bad:
+        status = "critical"
+        summary = "Currently throttled or undervolted"
+    elif historically_bad:
+        status = "warning"
+        summary = "Throttling has occurred previously"
+    else:
+        status = "ok"
+        summary = "No throttling"
+
+    return {
+        "raw": f"0x{raw:x}",
+        "status": status,
+        "summary": summary,
+        "flags": flags,
+        "descriptions": descriptions,
+    }
+
+
+def _read_installed_version_info() -> Dict[str, Any]:
+    """Read the installed version from /opt/saint-os/VERSION and manifest.json.
+
+    Cached after first successful read since these files don't change at
+    runtime — the systemd unit restarts on install which re-imports this
+    module.
+    """
+    global _version_info_cache
+    if _version_info_cache is not None:
+        return _version_info_cache
+
+    info: Dict[str, Any] = {"version": "unknown", "git_sha": None, "built_at": None}
+    vf = _INSTALL_PREFIX / "VERSION"
+    if vf.is_file():
+        try:
+            info["version"] = vf.read_text().strip() or "unknown"
+        except OSError:
+            pass
+    mf = _INSTALL_PREFIX / "manifest.json"
+    if mf.is_file():
+        try:
+            m = json.loads(mf.read_text())
+            info["git_sha"] = m.get("git_sha")
+            info["built_at"] = m.get("built_at")
+            # Prefer manifest's version if VERSION file was missing.
+            if info["version"] == "unknown":
+                info["version"] = m.get("version", "unknown")
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    _version_info_cache = info
+    return info
 
 # Timeout for considering a node offline (no announcements received)
 # Increased from 5.0 to 10.0 to handle network jitter and temporary disconnects
@@ -513,15 +631,23 @@ class StateManager:
             cpu_usage = 0.0
             memory_usage = 0.0
 
+        cpu_temp = _read_cpu_temp()
+        throttle = _read_throttle_status()
+        version_info = _read_installed_version_info()
+
         # Get server firmware info
         fw_info = self.get_server_firmware_info()
 
         return {
             "server_online": self.state.server_online,
             "server_name": self.state.server_name,
-            "server_version": self.state.server_version,
+            "server_version": version_info["version"],
+            "server_git_sha": version_info["git_sha"],
+            "server_built_at": version_info["built_at"],
             "uptime_seconds": int(time.time() - self.state.start_time),
             "cpu_usage": cpu_usage,
+            "cpu_temp_c": cpu_temp,
+            "throttle": throttle,
             "memory_usage": memory_usage,
             "adopted_node_count": len(self.state.adopted_nodes),
             "unadopted_node_count": len(self.state.unadopted_nodes),

@@ -967,6 +967,61 @@ class SaintApp {
         const memValue = status.memory_usage?.toFixed(1) || '0';
         document.getElementById('server-memory').textContent = `${memValue}%`;
         document.getElementById('memory-bar').style.width = `${memValue}%`;
+
+        // CPU temperature — color-coded against the Pi's throttle thresholds
+        // (warns at 65°C, critical at 80°C where soft-throttle kicks in).
+        const tempEl = document.getElementById('server-cpu-temp');
+        if (tempEl) {
+            const tempC = status.cpu_temp_c;
+            if (typeof tempC === 'number') {
+                tempEl.textContent = this.formatTemperature(tempC);
+                let cls = 'stat-value';
+                if (tempC >= 80) cls += ' text-red-400';
+                else if (tempC >= 65) cls += ' text-amber-400';
+                else cls += ' text-emerald-400';
+                tempEl.className = cls;
+            } else {
+                tempEl.textContent = '--';
+                tempEl.className = 'stat-value text-slate-500';
+            }
+        }
+
+        // Throttle status — comes from `vcgencmd get_throttled` on Pi
+        const throttleEl = document.getElementById('server-throttle');
+        if (throttleEl) {
+            const t = status.throttle;
+            if (!t) {
+                throttleEl.textContent = 'n/a';
+                throttleEl.className = 'stat-value text-sm text-slate-500';
+                throttleEl.title = 'vcgencmd not available on this host';
+            } else if (t.status === 'ok') {
+                throttleEl.textContent = 'OK';
+                throttleEl.className = 'stat-value text-sm text-emerald-400';
+                throttleEl.title = `${t.summary} (${t.raw})`;
+            } else if (t.status === 'warning') {
+                throttleEl.textContent = 'Past events';
+                throttleEl.className = 'stat-value text-sm text-amber-400';
+                throttleEl.title = `${t.summary} (${t.raw}): ${(t.descriptions || []).join(', ')}`;
+            } else {
+                throttleEl.textContent = 'Active';
+                throttleEl.className = 'stat-value text-sm text-red-400';
+                throttleEl.title = `${t.summary} (${t.raw}): ${(t.descriptions || []).join(', ')}`;
+            }
+        }
+
+        // Footer: full version + git hash so the operator always knows
+        // which build is running.
+        const versionEl = document.getElementById('version');
+        if (versionEl && status.server_version) {
+            versionEl.textContent = status.server_version;
+        }
+        const hashEl = document.getElementById('version-hash');
+        if (hashEl) {
+            const sha = status.server_git_sha;
+            hashEl.textContent = sha ? `(${sha.slice(0, 7)})` : '';
+            hashEl.title = status.server_built_at
+                ? `Built ${status.server_built_at}` : '';
+        }
     }
 
     /**
