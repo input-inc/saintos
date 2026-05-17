@@ -72,6 +72,10 @@ if [[ -f .github/dist/apply-update.sh ]]; then
     cp .github/dist/apply-update.sh "${PKG_DIR}/apply-update.sh"
     chmod +x "${PKG_DIR}/apply-update.sh"
 fi
+if [[ -f .github/dist/usb-helper.sh ]]; then
+    cp .github/dist/usb-helper.sh "${PKG_DIR}/usb-helper.sh"
+    chmod +x "${PKG_DIR}/usb-helper.sh"
+fi
 mkdir -p "${PKG_DIR}/systemd"
 cp .github/dist/saint-os.service "${PKG_DIR}/systemd/saint-os.service"
 

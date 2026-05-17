@@ -40,10 +40,10 @@ except ImportError:  # pragma: no cover - dev fallback
 
 GITHUB_REPO = os.environ.get("SAINT_UPDATE_REPO", "input-inc/saintos")
 GITHUB_API_TIMEOUT_S = 5.0
-USB_SCAN_ROOTS = ("/media", "/mnt")
 INSTALL_PREFIX = Path(os.environ.get("SAINT_INSTALL_PREFIX", "/opt/saint-os"))
 UPDATE_STAGING = Path(os.environ.get("SAINT_UPDATE_STAGING", "/var/lib/saint-os/updates"))
 APPLY_WRAPPER = INSTALL_PREFIX / "bin" / "apply-update.sh"
+USB_HELPER = INSTALL_PREFIX / "bin" / "usb-helper.sh"
 
 # Tarballs published by the dist workflow look like:
 #   saint-os_0.5.1_arm64_jazzy.tar.gz
@@ -271,8 +271,70 @@ class UpdateManager:
             return self.state
 
     def _scan_usb_blocking(self) -> List[ReleaseInfo]:
+        """Shell out to usb-helper.sh via sudo so we can traverse
+        privately-mounted (mode 0700) udisks2 paths under /media/<user>/."""
+        if not USB_HELPER.exists():
+            self.logger.warning(
+                "USB helper not installed at %s — USB scan will see only "
+                "world-readable mount points", USB_HELPER,
+            )
+            return self._scan_usb_unprivileged()
+
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", str(USB_HELPER), "scan"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except subprocess.CalledProcessError as e:
+            self.logger.warning("usb-helper scan failed (rc=%d): %s",
+                                e.returncode, (e.stderr or e.stdout or "").strip())
+            return []
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            self.logger.warning("usb-helper scan unavailable: %s", e)
+            return []
+
         found: List[ReleaseInfo] = []
-        for root in USB_SCAN_ROOTS:
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Format: "<size>\t<path>"
+            try:
+                size_str, path = line.split("\t", 1)
+                size = int(size_str)
+            except ValueError:
+                continue
+            name = os.path.basename(path)
+            m = TARBALL_RE.match(name)
+            if not m:
+                continue
+            version = m.group("version")
+            if not _version_newer(version, self.state.installed_version):
+                continue
+            found.append(ReleaseInfo(
+                version=version,
+                source="usb",
+                asset_name=name,
+                asset_size=size,
+                local_path=path,
+            ))
+
+        # De-dup by version, prefer larger files (likely complete).
+        by_version: dict = {}
+        for r in found:
+            existing = by_version.get(r.version)
+            if existing is None or (r.asset_size or 0) > (existing.asset_size or 0):
+                by_version[r.version] = r
+        return sorted(by_version.values(), key=lambda r: r.version, reverse=True)
+
+    def _scan_usb_unprivileged(self) -> List[ReleaseInfo]:
+        """Fallback scanner for dev installs without the helper. Only sees
+        world-readable mount points (e.g., /mnt manually mounted with 0755)."""
+        found: List[ReleaseInfo] = []
+        for root in ("/media", "/mnt", "/run/media"):
             if not os.path.isdir(root):
                 continue
             for entry in self._walk_mounts(root):
@@ -287,25 +349,14 @@ class UpdateManager:
                 except OSError:
                     continue
                 found.append(ReleaseInfo(
-                    version=version,
-                    source="usb",
+                    version=version, source="usb",
                     asset_name=os.path.basename(entry),
-                    asset_size=size,
-                    local_path=entry,
+                    asset_size=size, local_path=entry,
                 ))
-        # De-dup by version, prefer larger files (likely complete).
-        by_version: dict = {}
-        for r in found:
-            existing = by_version.get(r.version)
-            if existing is None or (r.asset_size or 0) > (existing.asset_size or 0):
-                by_version[r.version] = r
-        return sorted(by_version.values(), key=lambda r: r.version, reverse=True)
+        return found
 
     @staticmethod
     def _walk_mounts(root: str):
-        """Yield tarball paths up to 3 levels deep — covers typical
-        auto-mount layouts (/media/<user>/<label>/file or /mnt/<label>/file)
-        without scanning huge filesystems."""
         try:
             entries = os.scandir(root)
         except OSError:
@@ -390,32 +441,45 @@ class UpdateManager:
             tmp.replace(dest)
 
     async def stage_usb_release(self, version: str) -> UpdateState:
-        """Copy a USB-detected tarball into the staging directory."""
+        """Copy a USB-detected tarball into the staging directory.
+
+        Uses the sudo usb-helper.sh wrapper because the USB source is
+        typically mounted at /media/<user>/ with mode 0700 — unreadable
+        from the saint service user.
+        """
         match = next(
             (r for r in self.state.usb_releases if r.version == version),
             None,
         )
         if match is None or not match.local_path:
             raise RuntimeError(f"USB release {version} not in scan results")
-        dest_dir = UPDATE_STAGING
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / os.path.basename(match.local_path)
 
         async with self._lock:
             self._set_status("downloading", download_total=match.asset_size, download_received=0)
 
         try:
-            await asyncio.get_event_loop().run_in_executor(
-                None, shutil.copy2, match.local_path, dest
+            dest = await asyncio.get_event_loop().run_in_executor(
+                None, self._run_usb_stage, match.local_path
             )
-        except OSError as e:
-            self._set_status("error", last_error=f"USB copy failed: {e}")
+        except subprocess.CalledProcessError as e:
+            self._set_status(
+                "error",
+                last_error=f"USB stage failed (rc={e.returncode}): {(e.stderr or e.stdout or '').strip()}",
+            )
             return self.state
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            self._set_status("error", last_error=f"USB stage failed: {e}")
+            return self.state
+
+        try:
+            staged_size = os.path.getsize(dest)
+        except OSError:
+            staged_size = match.asset_size or 0
 
         self._set_status(
             "downloaded",
             staged_tarball=str(dest),
-            download_received=os.path.getsize(dest),
+            download_received=staged_size,
             github_release=ReleaseInfo(
                 version=match.version,
                 source="usb",
@@ -425,6 +489,24 @@ class UpdateManager:
             ),
         )
         return self.state
+
+    @staticmethod
+    def _run_usb_stage(src: str) -> str:
+        """Invoke usb-helper.sh stage <src>; returns the destination path."""
+        if USB_HELPER.exists():
+            result = subprocess.run(
+                ["sudo", "-n", str(USB_HELPER), "stage", src],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            return result.stdout.strip()
+        # Fallback for dev installs without the helper.
+        UPDATE_STAGING.mkdir(parents=True, exist_ok=True)
+        dest = UPDATE_STAGING / os.path.basename(src)
+        shutil.copy2(src, dest)
+        return str(dest)
 
     # ── Install ──────────────────────────────────────────────────────
 

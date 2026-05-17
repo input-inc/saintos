@@ -28,6 +28,12 @@ lib64/
 # CI installer payload is source, not a Python build dir
 !.github/dist/
 !.github/dist/**
+
+# Local-builder scratch dirs (scripts/build-local-dist.sh)
+/_debs/
+/_ros2/
+/_ros2_src/
+/_fw/
 parts/
 sdist/
 var/

@@ -166,6 +166,7 @@ PY311_DEPS=(libpython3.11 python3.11)
 # bundled debs match the target ABI).
 
 LOCAL_APT_LIST="/etc/apt/sources.list.d/saint-os-local.list"
+LOCAL_APT_CONF="/etc/apt/apt.conf.d/00saint-os-install"
 LOCAL_REPO_ENABLED=0
 APT_UPDATE_OPTS=()
 
@@ -187,9 +188,17 @@ setup_local_apt_repo() {
     log "Configuring local apt repo at ${PAYLOAD_DIR}/deps"
     if (( DRY_RUN )); then
         echo "+ write ${LOCAL_APT_LIST}"
+        echo "+ write ${LOCAL_APT_CONF}"
     else
         # trusted=yes accepts the unsigned local repo.
         echo "deb [trusted=yes] file://${PAYLOAD_DIR}/deps ./" > "${LOCAL_APT_LIST}"
+
+        # apt drops privileges to the _apt user when fetching, which
+        # blows up when the payload lives under /home/<user>/ (mode
+        # 0700 — _apt can't traverse in). Disable the sandbox just for
+        # this install run; the conf file is removed on exit.
+        echo 'APT::Sandbox::User "root";' > "${LOCAL_APT_CONF}"
+        chmod 0644 "${LOCAL_APT_CONF}"
     fi
 
     # Restrict apt-get update to ONLY the local source — avoids hanging on
@@ -203,8 +212,9 @@ setup_local_apt_repo() {
 }
 
 teardown_local_apt_repo() {
-    if (( LOCAL_REPO_ENABLED )) && [[ -f "${LOCAL_APT_LIST}" ]]; then
-        rm -f "${LOCAL_APT_LIST}"
+    if (( LOCAL_REPO_ENABLED )); then
+        [[ -f "${LOCAL_APT_LIST}" ]] && rm -f "${LOCAL_APT_LIST}"
+        [[ -f "${LOCAL_APT_CONF}" ]] && rm -f "${LOCAL_APT_CONF}"
     fi
 }
 trap teardown_local_apt_repo EXIT
@@ -336,6 +346,14 @@ if [[ -f "${PAYLOAD_DIR}/apply-update.sh" ]]; then
     run install -m 0755 -o root -g root \
         "${PAYLOAD_DIR}/apply-update.sh" "${PREFIX}/bin/apply-update.sh"
 
+    # USB helper — scans/stages tarballs on mounted removable media.
+    # Needed because udisks2 mounts USB sticks at 0700 paths only the
+    # mounting user can read; the saint service needs root to traverse.
+    if [[ -f "${PAYLOAD_DIR}/usb-helper.sh" ]]; then
+        run install -m 0755 -o root -g root \
+            "${PAYLOAD_DIR}/usb-helper.sh" "${PREFIX}/bin/usb-helper.sh"
+    fi
+
     log "Writing sudoers rule for update applier"
     SUDOERS_FILE="/etc/sudoers.d/saint-os-updater"
     if (( DRY_RUN )); then
@@ -344,6 +362,7 @@ if [[ -f "${PAYLOAD_DIR}/apply-update.sh" ]]; then
         cat > "${SUDOERS_FILE}" <<SUDOERS
 # SAINT.OS web UI applies updates via this single wrapper.
 ${SERVICE_USER} ALL=(root) NOPASSWD: ${PREFIX}/bin/apply-update.sh
+${SERVICE_USER} ALL=(root) NOPASSWD: ${PREFIX}/bin/usb-helper.sh
 SUDOERS
         chmod 0440 "${SUDOERS_FILE}"
         # Sanity check syntax — broken sudoers can lock the host out.
