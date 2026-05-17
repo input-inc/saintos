@@ -508,10 +508,11 @@ NETPLAN
     local need_apply=1
     if nmcli -g connection.id connection show "$conn" >/dev/null 2>&1; then
         local cur_ssid cur_mode cur_band cur_keymgmt cur_psk cur_ipmethod cur_iface
-        local cur_proto cur_pairwise cur_group
+        local cur_proto cur_pairwise cur_group cur_powersave
         cur_ssid=$(nmcli -g 802-11-wireless.ssid connection show "$conn" 2>/dev/null || true)
         cur_mode=$(nmcli -g 802-11-wireless.mode connection show "$conn" 2>/dev/null || true)
         cur_band=$(nmcli -g 802-11-wireless.band connection show "$conn" 2>/dev/null || true)
+        cur_powersave=$(nmcli -g 802-11-wireless.powersave connection show "$conn" 2>/dev/null || true)
         cur_keymgmt=$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$conn" 2>/dev/null || true)
         cur_psk=$(nmcli -s -g 802-11-wireless-security.psk connection show "$conn" 2>/dev/null || true)
         cur_proto=$(nmcli -g 802-11-wireless-security.proto connection show "$conn" 2>/dev/null || true)
@@ -523,6 +524,7 @@ NETPLAN
         if [[ "$cur_ssid"    == "$WIFI_SSID" \
            && "$cur_mode"    == "ap" \
            && "$cur_band"    == "bg" \
+           && "$cur_powersave" == "2" \
            && "$cur_keymgmt" == "wpa-psk" \
            && "$cur_psk"     == "$WIFI_PASS" \
            && "$cur_proto"   == "rsn" \
@@ -541,9 +543,13 @@ NETPLAN
         run nmcli connection delete "$conn" 2>/dev/null || true
         run nmcli connection add type wifi ifname "$wlan" \
             con-name "$conn" autoconnect yes ssid "$WIFI_SSID"
+        # 802-11-wireless.powersave=2 disables Pi WiFi power-save on the AP.
+        # The brcmfmac default leaves it on, which causes idle SSH sessions
+        # over WiFi to lock up while the radio dozes between beacons.
         run nmcli connection modify "$conn" \
             802-11-wireless.mode ap \
             802-11-wireless.band bg \
+            802-11-wireless.powersave 2 \
             ipv4.method shared \
             wifi-sec.key-mgmt wpa-psk \
             wifi-sec.proto rsn \
