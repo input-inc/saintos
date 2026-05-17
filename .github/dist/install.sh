@@ -495,24 +495,73 @@ NETPLAN
     # Set regulatory domain — required by most adapters before AP mode works.
     run iw reg set "${WIFI_COUNTRY}" || warn "Could not set WiFi country to ${WIFI_COUNTRY}"
 
-    # (Re)create the AP profile. Deleting first keeps this idempotent across
-    # repeated installs / SSID changes.
+    # Idempotent reconfigure: if the existing profile already matches what
+    # we'd write, don't touch it. Tearing down the AP just to re-add the
+    # same settings kicks every connected client — including the operator's
+    # SSH session over WiFi.
+    #
+    # Security: nmcli's default `key-mgmt=wpa-psk` accepts both WPA-TKIP
+    # and WPA2-AES, which macOS / iOS now flag as "weak security." Pin to
+    # WPA2-only (proto=rsn) with AES/CCMP for both pairwise and group
+    # ciphers — same UX, no insecure-network warning.
     local conn=saint-os-ap
-    run nmcli connection delete "$conn" || true
-    run nmcli connection add type wifi ifname "$wlan" \
-        con-name "$conn" autoconnect yes ssid "$WIFI_SSID"
-    run nmcli connection modify "$conn" \
-        802-11-wireless.mode ap \
-        802-11-wireless.band bg \
-        ipv4.method shared \
-        wifi-sec.key-mgmt wpa-psk \
-        wifi-sec.psk "$WIFI_PASS"
+    local need_apply=1
+    if nmcli -g connection.id connection show "$conn" >/dev/null 2>&1; then
+        local cur_ssid cur_mode cur_band cur_keymgmt cur_psk cur_ipmethod cur_iface
+        local cur_proto cur_pairwise cur_group
+        cur_ssid=$(nmcli -g 802-11-wireless.ssid connection show "$conn" 2>/dev/null || true)
+        cur_mode=$(nmcli -g 802-11-wireless.mode connection show "$conn" 2>/dev/null || true)
+        cur_band=$(nmcli -g 802-11-wireless.band connection show "$conn" 2>/dev/null || true)
+        cur_keymgmt=$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$conn" 2>/dev/null || true)
+        cur_psk=$(nmcli -s -g 802-11-wireless-security.psk connection show "$conn" 2>/dev/null || true)
+        cur_proto=$(nmcli -g 802-11-wireless-security.proto connection show "$conn" 2>/dev/null || true)
+        cur_pairwise=$(nmcli -g 802-11-wireless-security.pairwise connection show "$conn" 2>/dev/null || true)
+        cur_group=$(nmcli -g 802-11-wireless-security.group connection show "$conn" 2>/dev/null || true)
+        cur_ipmethod=$(nmcli -g ipv4.method connection show "$conn" 2>/dev/null || true)
+        cur_iface=$(nmcli -g connection.interface-name connection show "$conn" 2>/dev/null || true)
+
+        if [[ "$cur_ssid"    == "$WIFI_SSID" \
+           && "$cur_mode"    == "ap" \
+           && "$cur_band"    == "bg" \
+           && "$cur_keymgmt" == "wpa-psk" \
+           && "$cur_psk"     == "$WIFI_PASS" \
+           && "$cur_proto"   == "rsn" \
+           && "$cur_pairwise" == "ccmp" \
+           && "$cur_group"   == "ccmp" \
+           && "$cur_ipmethod" == "shared" \
+           && "$cur_iface"   == "$wlan" ]]; then
+            log "WiFi AP profile '${conn}' already matches — not reconfiguring"
+            need_apply=0
+        else
+            log "WiFi AP profile differs from desired — reconfiguring (this will briefly drop connected clients)"
+        fi
+    fi
+
+    if (( need_apply )); then
+        run nmcli connection delete "$conn" 2>/dev/null || true
+        run nmcli connection add type wifi ifname "$wlan" \
+            con-name "$conn" autoconnect yes ssid "$WIFI_SSID"
+        run nmcli connection modify "$conn" \
+            802-11-wireless.mode ap \
+            802-11-wireless.band bg \
+            ipv4.method shared \
+            wifi-sec.key-mgmt wpa-psk \
+            wifi-sec.proto rsn \
+            wifi-sec.pairwise ccmp \
+            wifi-sec.group ccmp \
+            wifi-sec.psk "$WIFI_PASS"
+    fi
 
     if (( NO_START )); then
         log "WiFi AP profile created (autostarts on next boot)"
-    else
+    elif (( need_apply )); then
         run nmcli connection up "$conn" \
             || warn "Failed to bring up AP now (will retry on boot)"
+    elif ! nmcli -g GENERAL.STATE connection show "$conn" 2>/dev/null | grep -q activated; then
+        run nmcli connection up "$conn" \
+            || warn "Failed to bring up AP now (will retry on boot)"
+    else
+        log "WiFi AP already active — not touching it"
     fi
 }
 
@@ -544,14 +593,12 @@ setup_mdns() {
         fi
     fi
 
-    # Advertise SAINT.OS as a Bonjour HTTP service. Optional — pure cosmetic
-    # for Bonjour browsers; .local resolution works without it.
+    # Advertise SAINT.OS as a Bonjour HTTP service. Avahi watches this
+    # directory and re-publishes when files change — so we only write if
+    # the content actually differs from what's already there.
     local svc_file=/etc/avahi/services/saint-os.service
-    if (( DRY_RUN )); then
-        echo "+ write ${svc_file}"
-    else
-        install -d /etc/avahi/services
-        cat > "${svc_file}" <<AVAHI
+    local svc_tmp; svc_tmp=$(mktemp)
+    cat > "$svc_tmp" <<AVAHI
 <?xml version="1.0" standalone='no'?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
@@ -562,9 +609,24 @@ setup_mdns() {
   </service>
 </service-group>
 AVAHI
-        chmod 0644 "${svc_file}"
+
+    if (( DRY_RUN )); then
+        if [[ ! -f "$svc_file" ]] || ! cmp -s "$svc_tmp" "$svc_file"; then
+            echo "+ write ${svc_file}"
+        else
+            echo "+ ${svc_file} unchanged"
+        fi
+        rm -f "$svc_tmp"
+    elif [[ ! -f "$svc_file" ]] || ! cmp -s "$svc_tmp" "$svc_file"; then
+        install -d /etc/avahi/services
+        install -m 0644 "$svc_tmp" "$svc_file"
+        rm -f "$svc_tmp"
+    else
+        rm -f "$svc_tmp"
     fi
 
+    # `enable --now` is idempotent: it won't restart an already-running
+    # daemon, just makes sure it's enabled + started.
     run systemctl enable --now avahi-daemon || \
         warn "Could not start avahi-daemon — clients will need the IP address"
 }
@@ -589,33 +651,52 @@ setup_internal_dhcp() {
         return
     fi
 
-    log "Configuring ${SAINT_INTERNAL_IFACE} with static IP ${SAINT_INTERNAL_IP}/${SAINT_INTERNAL_CIDR}"
-
-    # Set the interface address. nmcli is the consistent path across Pi OS
-    # Bookworm and Ubuntu noble. The connection profile is idempotent —
-    # deleting first keeps re-installs clean.
+    # Idempotent reconfigure: only touch eth0 if the desired state differs
+    # from what's already there. Avoids briefly dropping nodes that are
+    # currently leased through this interface.
     local conn=saint-os-internal
+    local desired_addr="${SAINT_INTERNAL_IP}/${SAINT_INTERNAL_CIDR}"
+    local need_apply=1
     if command -v nmcli >/dev/null 2>&1; then
-        run nmcli connection delete "$conn" 2>/dev/null || true
-        run nmcli connection add type ethernet ifname "${SAINT_INTERNAL_IFACE}" \
-            con-name "$conn" autoconnect yes \
-            ipv4.method manual \
-            ipv4.addresses "${SAINT_INTERNAL_IP}/${SAINT_INTERNAL_CIDR}" \
-            ipv6.method ignore
-        if ! (( NO_START )); then
-            run nmcli connection up "$conn" \
-                || warn "Failed to bring up internal interface now (will retry on boot)"
+        if nmcli -g connection.id connection show "$conn" >/dev/null 2>&1; then
+            local cur_method cur_addrs cur_iface
+            cur_method=$(nmcli -g ipv4.method connection show "$conn" 2>/dev/null || true)
+            cur_addrs=$(nmcli -g ipv4.addresses connection show "$conn" 2>/dev/null || true)
+            cur_iface=$(nmcli -g connection.interface-name connection show "$conn" 2>/dev/null || true)
+            if [[ "$cur_method" == "manual" \
+               && "$cur_addrs"  == "$desired_addr" \
+               && "$cur_iface"  == "$SAINT_INTERNAL_IFACE" ]]; then
+                log "Internal interface ${SAINT_INTERNAL_IFACE} already at ${desired_addr} — not reconfiguring"
+                need_apply=0
+            else
+                log "Internal interface config differs — reconfiguring (briefly drops node leases)"
+            fi
+        else
+            log "Configuring ${SAINT_INTERNAL_IFACE} with static IP ${desired_addr}"
+        fi
+
+        if (( need_apply )); then
+            run nmcli connection delete "$conn" 2>/dev/null || true
+            run nmcli connection add type ethernet ifname "${SAINT_INTERNAL_IFACE}" \
+                con-name "$conn" autoconnect yes \
+                ipv4.method manual \
+                ipv4.addresses "${desired_addr}" \
+                ipv6.method ignore
+            if ! (( NO_START )); then
+                run nmcli connection up "$conn" \
+                    || warn "Failed to bring up internal interface now (will retry on boot)"
+            fi
         fi
     else
         warn "nmcli not available — set ${SAINT_INTERNAL_IFACE}'s IP manually"
     fi
 
-    log "Writing dnsmasq config for ${SAINT_INTERNAL_IFACE}"
+    # dnsmasq config — only write + restart if the contents actually changed.
+    # The whole point of this block is "don't bounce running services when
+    # nothing meaningful changed."
     local dnsmasq_conf=/etc/dnsmasq.d/saint-os.conf
-    if (( DRY_RUN )); then
-        echo "+ write ${dnsmasq_conf}"
-    else
-        cat > "$dnsmasq_conf" <<DNSMASQ
+    local dnsmasq_tmp; dnsmasq_tmp=$(mktemp)
+    cat > "$dnsmasq_tmp" <<DNSMASQ
 # SAINT.OS internal node network
 # Generated by install.sh — edit and restart dnsmasq to apply changes.
 
@@ -636,13 +717,34 @@ local=/local/
 # Reasonable default cache size for a small fleet.
 cache-size=512
 DNSMASQ
-        chmod 0644 "$dnsmasq_conf"
+
+    local dnsmasq_changed=1
+    if [[ -f "$dnsmasq_conf" ]] && cmp -s "$dnsmasq_tmp" "$dnsmasq_conf"; then
+        dnsmasq_changed=0
+    fi
+
+    if (( DRY_RUN )); then
+        if (( dnsmasq_changed )); then
+            echo "+ write ${dnsmasq_conf}"
+        else
+            echo "+ ${dnsmasq_conf} unchanged"
+        fi
+        rm -f "$dnsmasq_tmp"
+    elif (( dnsmasq_changed )); then
+        log "Updating dnsmasq config for ${SAINT_INTERNAL_IFACE}"
+        install -m 0644 "$dnsmasq_tmp" "$dnsmasq_conf"
+        rm -f "$dnsmasq_tmp"
+    else
+        log "dnsmasq config unchanged — not restarting service"
+        rm -f "$dnsmasq_tmp"
     fi
 
     run systemctl enable dnsmasq
     if ! (( NO_START )); then
-        run systemctl restart dnsmasq \
-            || warn "dnsmasq failed to start — check 'journalctl -u dnsmasq'"
+        if (( dnsmasq_changed )) || ! systemctl is-active --quiet dnsmasq; then
+            run systemctl restart dnsmasq \
+                || warn "dnsmasq failed to start — check 'journalctl -u dnsmasq'"
+        fi
     fi
 }
 

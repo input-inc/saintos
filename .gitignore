@@ -37,6 +37,13 @@ lib64/
 /_ros2/
 /_ros2_src/
 /_fw/
+# Locally-built firmware artifacts staged into the dist tarball.
+# The committed info.json files (manifests) ARE tracked, but the actual
+# binaries are build outputs — let CI / local builds regenerate them.
+/saint_os/resources/firmware/rp2040/*.uf2
+/saint_os/resources/firmware/rp2040/*.elf
+/saint_os/resources/firmware/teensy41/*.hex
+/saint_os/resources/firmware/rpi5/saint_firmware_rpi5_*-local.*.zip
 parts/
 sdist/
 var/

@@ -1,13 +1,16 @@
 """
 SAINT.OS Server Launch File
 
-Launches the main SAINT.OS server node with configurable parameters.
+Launches the main SAINT.OS server node alongside the micro-ROS agent
+that microcontroller nodes connect to. The agent runs as a separate
+process so its lifecycle is tied to ros2 launch (and therefore to the
+systemd unit), not embedded in the Python server.
 """
 
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -39,6 +42,13 @@ def generate_launch_description():
         'websocket_port',
         default_value='9090',
         description='WebSocket port for client connections'
+    )
+
+    agent_port_arg = DeclareLaunchArgument(
+        'agent_port',
+        default_value='8888',
+        description='UDP port for the micro-ROS agent — must match the port '
+                    'advertised by the discovery service'
     )
 
     livelink_enabled_arg = DeclareLaunchArgument(
@@ -74,12 +84,33 @@ def generate_launch_description():
         ],
     )
 
+    # micro-ROS agent — XRCE-DDS bridge listening on UDP. Without this,
+    # node controllers complete the discovery handshake but can't actually
+    # publish their announcement, so they never appear in the UI list.
+    micro_ros_agent = ExecuteProcess(
+        cmd=[
+            'ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
+            'udp4', '--port', LaunchConfiguration('agent_port'),
+            '-v4',
+        ],
+        name='micro_ros_agent',
+        output='screen',
+    )
+
+    agent_info = LogInfo(
+        msg=['micro-ROS agent listening on UDP port ',
+             LaunchConfiguration('agent_port')],
+    )
+
     return LaunchDescription([
         config_arg,
         server_name_arg,
         web_port_arg,
         websocket_port_arg,
+        agent_port_arg,
         livelink_enabled_arg,
         rc_enabled_arg,
+        agent_info,
         server_node,
+        micro_ros_agent,
     ])
