@@ -354,15 +354,21 @@ if [[ -f "${PAYLOAD_DIR}/apply-update.sh" ]]; then
             "${PAYLOAD_DIR}/usb-helper.sh" "${PREFIX}/bin/usb-helper.sh"
     fi
 
-    log "Writing sudoers rule for update applier"
+    log "Writing sudoers rule for ${SERVICE_USER}"
     SUDOERS_FILE="/etc/sudoers.d/saint-os-updater"
     if (( DRY_RUN )); then
         echo "+ write ${SUDOERS_FILE}"
     else
+        # The web terminal runs as ${SERVICE_USER} but the operator
+        # needs to run privileged commands (systemctl, apt, edit /etc,
+        # etc.) so we grant full NOPASSWD sudo. Effectively makes the
+        # dashboard's WebSocket password the root-access password —
+        # leave a comment so future readers understand the trade.
         cat > "${SUDOERS_FILE}" <<SUDOERS
-# SAINT.OS web UI applies updates via this single wrapper.
-${SERVICE_USER} ALL=(root) NOPASSWD: ${PREFIX}/bin/apply-update.sh
-${SERVICE_USER} ALL=(root) NOPASSWD: ${PREFIX}/bin/usb-helper.sh
+# SAINT.OS service account. NOPASSWD sudo lets the web terminal and
+# update flow run privileged commands. Anyone with the dashboard
+# password can reach root through this rule — protect it accordingly.
+${SERVICE_USER} ALL=(root) NOPASSWD: ALL
 SUDOERS
         chmod 0440 "${SUDOERS_FILE}"
         # Sanity check syntax — broken sudoers can lock the host out.

@@ -389,6 +389,14 @@ class SaintApp {
             this.stopTelemetryRefresh();
         }
 
+        // Close the terminal session when leaving the Terminal page so
+        // we don't keep an idle shell running on the server.
+        if (this.currentPage === 'terminal' && pageId !== 'terminal') {
+            if (window.terminalManager) {
+                window.terminalManager.closeSession();
+            }
+        }
+
         // Update navigation
         document.querySelectorAll('.nav-link').forEach(link => {
             if (link.dataset.page === pageId) {
@@ -454,6 +462,11 @@ class SaintApp {
                     break;
                 case 'settings':
                     await this.loadSettingsPageData();
+                    break;
+                case 'terminal':
+                    if (window.terminalManager) {
+                        await window.terminalManager.openSession();
+                    }
                     break;
                 default:
                     console.log(`loadPageData: no match for "${pageId}"`);

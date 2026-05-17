@@ -28,6 +28,9 @@ lib64/
 # CI installer payload is source, not a Python build dir
 !.github/dist/
 !.github/dist/**
+# Web frontend's bundled JS libraries are checked-in source
+!saint_os/web/js/lib/
+!saint_os/web/js/lib/**
 
 # Local-builder scratch dirs (scripts/build-local-dist.sh)
 /_debs/

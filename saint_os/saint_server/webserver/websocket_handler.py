@@ -125,6 +125,7 @@ class WebSocketClient:
     ip_address: str = ""  # Client's IP address
     user_agent: str = ""  # Client's User-Agent header
     client_name: str = ""  # Optional client-provided name
+    terminal_session: Optional[Any] = None  # TerminalSession when one is open
 
 
 class WebSocketHandler:
@@ -361,6 +362,14 @@ class WebSocketHandler:
             # Clean up ROS subscriptions for this client
             if self._ros_bridge:
                 self._ros_bridge.client_disconnected(client_id)
+
+            # Tear down any open terminal session — never leak shells.
+            if client.terminal_session is not None:
+                try:
+                    await client.terminal_session.close()
+                except Exception:
+                    self.log('warn', f'terminal cleanup error for {client_id}')
+                client.terminal_session = None
 
             self.log('info', f'WebSocket client disconnected: {client_id}')
 
@@ -880,6 +889,16 @@ class WebSocketHandler:
             await self.broadcast_activity('Installing software update — server will restart', 'info')
             asyncio.create_task(self._update_manager.install_staged())
             return {"status": "ok", "data": self._update_manager.state.to_dict()}
+
+        # Web Terminal Actions -----------------------------------------------
+        elif action == 'terminal.open':
+            return await self._handle_terminal_open(client, params)
+        elif action == 'terminal.input':
+            return self._handle_terminal_input(client, params)
+        elif action == 'terminal.resize':
+            return self._handle_terminal_resize(client, params)
+        elif action == 'terminal.close':
+            return await self._handle_terminal_close(client)
 
         # Firmware Management Actions
         elif action == 'get_server_firmware':
@@ -1722,6 +1741,97 @@ class WebSocketHandler:
         state = self.state_manager.get_runtime_state(node_id)
         if state:
             await self.broadcast_state(f'pin_state/{node_id}', state)
+
+    # ── Web terminal ─────────────────────────────────────────────────
+
+    async def _handle_terminal_open(self, client: WebSocketClient, params: dict) -> dict:
+        """Spawn a PTY-backed bash session for this client."""
+        if client.terminal_session is not None:
+            # One session per client. Close the old one first so resize/
+            # reload always lands on a fresh shell.
+            try:
+                await client.terminal_session.close()
+            except Exception:
+                self.log('warn', f'terminal: prior close failed for {client.id}')
+            client.terminal_session = None
+
+        try:
+            from saint_server.terminal_session import TerminalSession
+        except ImportError as e:
+            return {"status": "error", "message": f"Terminal module unavailable: {e}"}
+
+        cols = int(params.get('cols') or 80)
+        rows = int(params.get('rows') or 24)
+        loop = asyncio.get_event_loop()
+
+        async def on_output(chunk: bytes):
+            try:
+                # Forward as a binary WebSocket frame — xterm.js writes
+                # bytes directly, so no UTF-8 split surprises.
+                await client.ws.send_bytes(chunk)
+            except Exception:
+                self.log('warn', f'terminal: send_bytes failed for {client.id}')
+
+        async def on_exit(code: int):
+            self.log('info', f'terminal: shell exited code={code} for {client.id}')
+            client.terminal_session = None
+            try:
+                await client.ws.send_json({
+                    "type": "state",
+                    "node": "terminal",
+                    "data": {"event": "exit", "code": code},
+                })
+            except Exception:
+                pass
+
+        session = TerminalSession(
+            on_output=on_output,
+            on_exit=on_exit,
+            client_id=client.id,
+            logger=self.logger,
+        )
+        try:
+            await session.start(cols=cols, rows=rows)
+        except Exception as e:
+            self.log('error', f'terminal: spawn failed: {e}')
+            return {"status": "error", "message": f"Failed to start shell: {e}"}
+
+        client.terminal_session = session
+        return {"status": "ok", "data": {"cols": cols, "rows": rows}}
+
+    def _handle_terminal_input(self, client: WebSocketClient, params: dict) -> dict:
+        """Forward keystrokes to the shell. Data is a string (utf-8)."""
+        if client.terminal_session is None:
+            return {"status": "error", "message": "No terminal session"}
+        data = params.get('data', '')
+        if isinstance(data, str):
+            data = data.encode('utf-8', errors='replace')
+        elif not isinstance(data, (bytes, bytearray)):
+            return {"status": "error", "message": "Invalid input data"}
+        client.terminal_session.write(data)
+        return {"status": "ok"}
+
+    def _handle_terminal_resize(self, client: WebSocketClient, params: dict) -> dict:
+        """Send TIOCSWINSZ to the PTY so apps reflow."""
+        if client.terminal_session is None:
+            return {"status": "error", "message": "No terminal session"}
+        try:
+            cols = int(params.get('cols') or 80)
+            rows = int(params.get('rows') or 24)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "Invalid cols/rows"}
+        client.terminal_session.resize(cols, rows)
+        return {"status": "ok"}
+
+    async def _handle_terminal_close(self, client: WebSocketClient) -> dict:
+        """Tear down this client's shell."""
+        if client.terminal_session is None:
+            return {"status": "ok"}
+        try:
+            await client.terminal_session.close()
+        finally:
+            client.terminal_session = None
+        return {"status": "ok"}
 
     async def broadcast_state(self, topic: str, data: dict):
         """Broadcast state update to subscribed clients."""

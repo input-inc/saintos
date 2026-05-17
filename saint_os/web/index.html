@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SAINT.OS Administration</title>
     <link rel="stylesheet" href="css/fonts.css">
+    <link rel="stylesheet" href="js/lib/xterm/xterm.css">
     <script src="css/tailwind.js"></script>
     <script>
         tailwind.config = {
@@ -163,6 +164,10 @@
                     <a href="#logs" class="nav-link" data-page="logs">
                         <span class="material-icons icon-sm">description</span>
                         Logs
+                    </a>
+                    <a href="#terminal" class="nav-link" data-page="terminal">
+                        <span class="material-icons icon-sm">terminal</span>
+                        Terminal
                     </a>
                 </div>
             </div>
@@ -1621,6 +1626,27 @@
                 </div>
             </section>
 
+            <!-- Terminal Page -->
+            <section id="page-terminal" class="page">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-2xl font-bold text-white">Terminal</h2>
+                    <div class="flex items-center gap-3">
+                        <span id="terminal-status" class="text-xs text-slate-400">Not connected</span>
+                        <button id="terminal-restart-btn" class="btn-secondary text-sm hidden">
+                            <span class="material-icons text-sm">refresh</span>
+                            Restart shell
+                        </button>
+                    </div>
+                </div>
+                <p class="text-sm text-slate-400 mb-3">
+                    Shell runs as the <code class="text-cyan-300">saint</code> user. Use
+                    <code class="text-cyan-300">sudo</code> for privileged operations
+                    (e.g., <code class="text-cyan-300">sudo systemctl status saint-os</code>).
+                    Every command is logged to journald: <code class="text-cyan-300">journalctl -t saint-os-terminal -f</code>.
+                </p>
+                <div id="terminal-mount" class="rounded border border-slate-700 bg-black p-2" style="height: 70vh;"></div>
+            </section>
+
             <!-- Logs Page -->
             <section id="page-logs" class="page">
                 <h2 class="text-2xl font-bold text-white mb-6">System Logs</h2>
@@ -2255,6 +2281,8 @@
         }
     </style>
 
+    <script src="js/lib/xterm/xterm.js"></script>
+    <script src="js/lib/xterm/addon-fit.js"></script>
     <script src="js/websocket.js"></script>
     <script src="js/pinconfig.js"></script>
     <script src="js/pincontrol.js"></script>
@@ -2262,6 +2290,7 @@
     <script src="js/moods.js"></script>
     <script src="js/livelink.js"></script>
     <script src="js/updates.js"></script>
+    <script src="js/terminal.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

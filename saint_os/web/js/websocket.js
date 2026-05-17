@@ -86,6 +86,9 @@ class SaintWebSocket {
 
         try {
             this.ws = new WebSocket(url);
+            // The terminal feature streams shell output as binary frames;
+            // ArrayBuffer is easier to forward into xterm.js than Blob.
+            this.ws.binaryType = 'arraybuffer';
 
             this.ws.onopen = () => this._onOpen();
             this.ws.onclose = (event) => this._onClose(event);
@@ -295,6 +298,12 @@ class SaintWebSocket {
     }
 
     _onMessage(event) {
+        // Binary frames bypass JSON entirely — used by the terminal
+        // feature to stream PTY output straight into xterm.js.
+        if (event.data instanceof ArrayBuffer) {
+            this._emit('binary', event.data);
+            return;
+        }
         try {
             const message = JSON.parse(event.data);
 
