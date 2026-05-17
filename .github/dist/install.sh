@@ -41,6 +41,10 @@ WIFI_SSID="${SAINT_WIFI_SSID:-OpenSAINT}"
 WIFI_PASS="${SAINT_WIFI_PASS:-ifeelalive}"
 WIFI_COUNTRY="${SAINT_WIFI_COUNTRY:-US}"
 
+# mDNS hostname — clients on the SAINT-OS network reach the server at
+# <hostname>.local. Override via env to use a different name.
+SAINT_HOSTNAME="${SAINT_HOSTNAME:-opensaint}"
+
 for arg in "$@"; do
     case "$arg" in
         --no-start) NO_START=1 ;;
@@ -126,6 +130,11 @@ COMMON_DEPS=(
     python3-empy
     python3-catkin-pkg
     python3-importlib-metadata
+    # mDNS — so clients on the SAINT-OS AP can reach opensaint.local
+    # without knowing the assigned IP. libnss-mdns lets the Pi itself
+    # resolve .local hostnames (useful for any local tooling).
+    avahi-daemon
+    libnss-mdns
 )
 
 # Python 3.11 specifically: the bundled ROS2 was built against libpython3.11.
@@ -469,6 +478,59 @@ NETPLAN
 
 setup_wifi_ap
 
+# --- mDNS hostname -----------------------------------------------------------
+#
+# Set a stable hostname and make sure avahi-daemon is running so clients
+# joining the SAINT-OS AP can navigate to http://<hostname>.local
+# regardless of the auto-assigned IP. macOS resolves .local via Bonjour
+# natively; Linux clients need libnss-mdns (or avahi-resolve) installed.
+
+setup_mdns() {
+    log "Setting hostname to ${SAINT_HOSTNAME}"
+    if (( DRY_RUN )); then
+        echo "+ hostnamectl set-hostname ${SAINT_HOSTNAME}"
+    else
+        # Idempotent — hostnamectl is a no-op if the hostname is already set.
+        hostnamectl set-hostname "${SAINT_HOSTNAME}" || \
+            warn "hostnamectl failed; falling back to /etc/hostname"
+        echo "${SAINT_HOSTNAME}" > /etc/hostname
+
+        # Keep /etc/hosts in sync so local lookups of the hostname work
+        # even when avahi isn't queried (e.g., sudo's reverse lookup).
+        if ! grep -qE "^127\.0\.1\.1[[:space:]]+${SAINT_HOSTNAME}\b" /etc/hosts; then
+            # Strip any prior 127.0.1.1 entry and append the new one.
+            sed -i.saint-bak '/^127\.0\.1\.1[[:space:]]/d' /etc/hosts
+            echo "127.0.1.1   ${SAINT_HOSTNAME}" >> /etc/hosts
+        fi
+    fi
+
+    # Advertise SAINT.OS as a Bonjour HTTP service. Optional — pure cosmetic
+    # for Bonjour browsers; .local resolution works without it.
+    local svc_file=/etc/avahi/services/saint-os.service
+    if (( DRY_RUN )); then
+        echo "+ write ${svc_file}"
+    else
+        install -d /etc/avahi/services
+        cat > "${svc_file}" <<AVAHI
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">SAINT.OS on %h</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>80</port>
+  </service>
+</service-group>
+AVAHI
+        chmod 0644 "${svc_file}"
+    fi
+
+    run systemctl enable --now avahi-daemon || \
+        warn "Could not start avahi-daemon — clients will need the IP address"
+}
+
+setup_mdns
+
 # --- Summary -----------------------------------------------------------------
 
 if (( NO_WIFI )); then
@@ -485,7 +547,7 @@ cat <<EOF
   Logs:      journalctl -u ${SERVICE_NAME} -f
   Configs:   ${CONFIG_DIR}/
   Payload:   ${PREFIX}/
-  Web UI:    http://\$(hostname -I | awk '{print \$1}')/
+  Web UI:    http://${SAINT_HOSTNAME}.local/   (or http://\$(hostname -I | awk '{print \$1}')/)
 ${WIFI_SUMMARY}
 
 EOF

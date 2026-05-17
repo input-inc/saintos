@@ -262,7 +262,8 @@ jobs:
               python3-packaging python3-lark python3-empy \
               python3-catkin-pkg python3-importlib-metadata \
               libpython3.11 python3.11 \
-              network-manager wireless-regdb rfkill iw
+              network-manager wireless-regdb rfkill iw \
+              avahi-daemon libnss-mdns
 
           cp /var/cache/apt/archives/*.deb /debs/
 
