@@ -150,24 +150,32 @@ class SaintServerNode(Node):
 
     def _on_node_announcement(self, msg: String):
         """Handle node announcement from micro-ROS nodes."""
+        raw = msg.data
         try:
             # Log announcement for debugging
-            self.get_logger().debug(f'Received announcement: {msg.data[:100]}...')
-            is_new = self.state_manager.update_node_from_announcement(msg.data)
+            self.get_logger().debug(f'Received announcement ({len(raw)} bytes): {raw[:100]}...')
+            is_new = self.state_manager.update_node_from_announcement(raw)
             if is_new:
                 self.get_logger().info(f'New node discovered via announcement')
             else:
                 # Parse to get node_id for logging
                 import json
                 try:
-                    data = json.loads(msg.data)
+                    data = json.loads(raw)
                     node_id = data.get('node_id', 'unknown')
                     fw = data.get('fw', '?')
                     self.get_logger().debug(f'Updated node {node_id} (fw: {fw})')
                 except:
                     pass
         except Exception as e:
-            self.get_logger().error(f'Error processing announcement: {e}')
+            # Dump the full raw payload so operators can see exactly what
+            # arrived — the bare error message ("unterminated string at
+            # column 251") tells you the symptom but not the cause.
+            preview_len = len(raw) if raw is not None else 0
+            self.get_logger().error(
+                f'Error processing announcement ({preview_len} bytes): {e}\n'
+                f'  RAW: {raw!r}'
+            )
 
     def _periodic_update(self):
         """Periodic update - check timeouts, publish status."""
