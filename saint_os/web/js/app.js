@@ -226,6 +226,9 @@ class SaintApp {
             this.updateConnectionStatus('ready');
             this.showMainApp();
             this.requestInitialData();
+            if (window.updateManager) {
+                window.updateManager.init();
+            }
         });
 
         ws.on('auth_required', () => {

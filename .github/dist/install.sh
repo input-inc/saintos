@@ -133,12 +133,71 @@ COMMON_DEPS=(
 # universe and apt installs it alongside.
 PY311_DEPS=(libpython3.11 python3.11)
 
+# --- Local apt repo from bundled .debs (offline support) --------------------
+#
+# Air-gapped installs: the dist tarball ships a deps/ directory containing
+# .deb files for every runtime dependency plus a Packages index. install.sh
+# wires it up as a temporary local apt source so apt can satisfy deps
+# without internet access. Used only on Debian/Pi OS hosts (where the
+# bundled debs match the target ABI).
+
+LOCAL_APT_LIST="/etc/apt/sources.list.d/saint-os-local.list"
+LOCAL_REPO_ENABLED=0
+APT_UPDATE_OPTS=()
+
+setup_local_apt_repo() {
+    if [[ ! -d "${PAYLOAD_DIR}/deps" ]]; then
+        return
+    fi
+    if ! ls "${PAYLOAD_DIR}/deps"/*.deb >/dev/null 2>&1; then
+        return
+    fi
+    case "${OS_ID}" in
+        debian|raspbian) ;;
+        *)
+            log "Bundled debs present but OS is ${OS_ID} — using online apt instead"
+            return
+            ;;
+    esac
+
+    log "Configuring local apt repo at ${PAYLOAD_DIR}/deps"
+    if (( DRY_RUN )); then
+        echo "+ write ${LOCAL_APT_LIST}"
+    else
+        # trusted=yes accepts the unsigned local repo.
+        echo "deb [trusted=yes] file://${PAYLOAD_DIR}/deps ./" > "${LOCAL_APT_LIST}"
+    fi
+
+    # Restrict apt-get update to ONLY the local source — avoids hanging on
+    # unreachable online mirrors when the robot is offline.
+    APT_UPDATE_OPTS=(
+        -o "Dir::Etc::sourcelist=${LOCAL_APT_LIST}"
+        -o "Dir::Etc::sourceparts=-"
+        -o "APT::Get::List-Cleanup=0"
+    )
+    LOCAL_REPO_ENABLED=1
+}
+
+teardown_local_apt_repo() {
+    if (( LOCAL_REPO_ENABLED )) && [[ -f "${LOCAL_APT_LIST}" ]]; then
+        rm -f "${LOCAL_APT_LIST}"
+    fi
+}
+trap teardown_local_apt_repo EXIT
+
+setup_local_apt_repo
+
 log "Installing runtime dependencies via apt"
-run apt-get update
-if [[ "${OS_FAMILY}" == "ubuntu" ]]; then
-    run apt-get install -y software-properties-common
-    run add-apt-repository -y universe
+if (( LOCAL_REPO_ENABLED )); then
+    log "Using bundled .deb repo (no internet required)"
+    run apt-get update "${APT_UPDATE_OPTS[@]}"
+else
     run apt-get update
+    if [[ "${OS_FAMILY}" == "ubuntu" ]]; then
+        run apt-get install -y software-properties-common
+        run add-apt-repository -y universe
+        run apt-get update
+    fi
 fi
 run apt-get install -y "${COMMON_DEPS[@]}" "${PY311_DEPS[@]}"
 
@@ -226,7 +285,53 @@ if [[ -d "${PREFIX}/install/share/saint_os/config" ]]; then
     done
 fi
 
+# Persist version + manifest so the update manager can read the installed
+# version cheaply (without parsing the ROS package.xml).
+if (( DRY_RUN )); then
+    echo "+ write ${PREFIX}/VERSION"
+    echo "+ copy manifest.json -> ${PREFIX}/"
+else
+    echo "${VERSION}" > "${PREFIX}/VERSION"
+    if [[ -f "${PAYLOAD_DIR}/manifest.json" ]]; then
+        cp "${PAYLOAD_DIR}/manifest.json" "${PREFIX}/manifest.json"
+    fi
+fi
+
 run chown -R "${SERVICE_USER}:${SERVICE_USER}" "${PREFIX}"
+
+# --- Update wrapper + sudoers -----------------------------------------------
+#
+# Install the apply-update.sh wrapper so the web UI (running as the saint
+# user) can apply downloaded updates without a full root shell. The
+# sudoers rule grants NOPASSWD access to that single command and nothing
+# else.
+
+if [[ -f "${PAYLOAD_DIR}/apply-update.sh" ]]; then
+    log "Installing update wrapper to ${PREFIX}/bin/apply-update.sh"
+    run install -d -m 0755 "${PREFIX}/bin"
+    run install -m 0755 -o root -g root \
+        "${PAYLOAD_DIR}/apply-update.sh" "${PREFIX}/bin/apply-update.sh"
+
+    log "Writing sudoers rule for update applier"
+    SUDOERS_FILE="/etc/sudoers.d/saint-os-updater"
+    if (( DRY_RUN )); then
+        echo "+ write ${SUDOERS_FILE}"
+    else
+        cat > "${SUDOERS_FILE}" <<SUDOERS
+# SAINT.OS web UI applies updates via this single wrapper.
+${SERVICE_USER} ALL=(root) NOPASSWD: ${PREFIX}/bin/apply-update.sh
+SUDOERS
+        chmod 0440 "${SUDOERS_FILE}"
+        # Sanity check syntax — broken sudoers can lock the host out.
+        if command -v visudo >/dev/null 2>&1; then
+            visudo -cf "${SUDOERS_FILE}" >/dev/null
+        fi
+    fi
+
+    # Updates staging directory (writable by service user; tarballs land here).
+    run install -d -m 0755 -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+        "${STATE_DIR}/updates"
+fi
 
 # --- systemd unit ------------------------------------------------------------
 
