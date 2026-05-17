@@ -28,9 +28,20 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
-NoNewPrivileges=true
+
+# NoNewPrivileges intentionally OFF: the server invokes a small set of
+# sudoers-restricted root wrappers (apply-update.sh, usb-helper.sh) and
+# the web terminal lets operators run `sudo <cmd>` for admin tasks.
+# NoNewPrivileges=true is kernel-enforced and blocks setuid binaries
+# (including sudo) regardless of sudoers config, so it directly breaks
+# every escalation path we rely on. Other hardening (ProtectSystem,
+# ProtectHome, PrivateTmp, ReadWritePaths) remains in place.
+NoNewPrivileges=false
 
 ReadWritePaths=@STATE_DIR@ @LOG_DIR@ @CONFIG_DIR@
+# /tmp is private to this service (PrivateTmp=true). The update applier
+# writes its install log under /var/log/saint-os/ which is already in
+# ReadWritePaths above.
 
 [Install]
 WantedBy=multi-user.target
