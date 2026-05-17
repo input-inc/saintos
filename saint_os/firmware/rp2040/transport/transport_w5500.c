@@ -253,28 +253,54 @@ bool transport_w5500_connect(void)
 
     printf("Connecting to network...\n");
 
-    // Wait for link
-    int link_wait = 0;
+    // Show "connecting" on the LED while we wait. The animation needs
+    // led_update() called periodically; we do that inside the sleeps.
+    led_set_state(NODE_STATE_CONNECTING);
+
+    // Wait for link indefinitely. The server (Pi) powers up alongside
+    // the nodes, and the switch may not have come up yet — giving up
+    // after 5s strands the node on its useless static fallback.
+    uint32_t link_wait_ms = 0;
     while (!wizchip_port_link_up()) {
         sleep_ms(100);
-        link_wait++;
-        if (link_wait > 50) {  // 5 second timeout
-            printf("No ethernet link\n");
-            return false;
+        led_update();
+        link_wait_ms += 100;
+        if (link_wait_ms % 5000 == 0) {
+            printf("Still waiting for ethernet link (%lu s)...\n",
+                   (unsigned long)(link_wait_ms / 1000));
         }
     }
-    printf("Ethernet link detected\n");
+    printf("Ethernet link detected after %lu ms\n", (unsigned long)link_wait_ms);
 
-    // Try DHCP first
+    // DHCP, retrying forever with backoff. The server's dnsmasq takes
+    // tens of seconds to come up from cold boot — one 10-second attempt
+    // isn't enough. We never fall back to the static IP when DHCP is on
+    // because the compile-time fallback is on a different subnet than
+    // the server: a "successful" fallback would just IP-conflict with
+    // every other node doing the same thing.
     if (g_node.use_dhcp) {
-        if (run_dhcp(DHCP_TIMEOUT_MS)) {
-            connected = true;
-            return true;
+        uint32_t attempt = 0;
+        while (true) {
+            attempt++;
+            printf("DHCP attempt %lu...\n", (unsigned long)attempt);
+            if (run_dhcp(DHCP_TIMEOUT_MS)) {
+                connected = true;
+                return true;
+            }
+            // Backoff: 2s for the first few attempts (server might be
+            // about to finish booting), then 5s to keep log volume sane.
+            uint32_t backoff_ms = (attempt < 5) ? 2000 : 5000;
+            printf("DHCP attempt %lu failed; retrying in %lu ms\n",
+                   (unsigned long)attempt, (unsigned long)backoff_ms);
+            // Sleep in 100ms chunks so the LED keeps animating.
+            for (uint32_t slept = 0; slept < backoff_ms; slept += 100) {
+                sleep_ms(100);
+                led_update();
+            }
         }
-        printf("DHCP failed, falling back to static IP\n");
     }
 
-    // Static IP fallback
+    // Static IP path — only reached when DHCP is explicitly disabled.
     use_static_ip();
     connected = true;
 
