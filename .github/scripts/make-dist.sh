@@ -54,9 +54,24 @@ if [[ -d saint_os/resources/firmware ]]; then
     cp -a saint_os/resources/firmware/. "${PKG_DIR}/firmware/"
 fi
 
-# Installer + systemd unit template.
+# Bundled apt runtime deps (.deb cache + Packages.gz). Lets install.sh
+# satisfy runtime dependencies on air-gapped hosts via a local apt repo.
+# Optional — make-dist.sh works without _debs/ for older callers.
+if [[ -d _debs ]] && ls _debs/*.deb >/dev/null 2>&1; then
+    mkdir -p "${PKG_DIR}/deps"
+    cp -a _debs/*.deb "${PKG_DIR}/deps/"
+    [[ -f _debs/Packages ]] && cp _debs/Packages "${PKG_DIR}/deps/"
+    [[ -f _debs/Packages.gz ]] && cp _debs/Packages.gz "${PKG_DIR}/deps/"
+    echo "Bundled $(ls -1 ${PKG_DIR}/deps/*.deb | wc -l) runtime debs"
+fi
+
+# Installer + systemd unit template + privilege wrapper.
 cp .github/dist/install.sh "${PKG_DIR}/install.sh"
 chmod +x "${PKG_DIR}/install.sh"
+if [[ -f .github/dist/apply-update.sh ]]; then
+    cp .github/dist/apply-update.sh "${PKG_DIR}/apply-update.sh"
+    chmod +x "${PKG_DIR}/apply-update.sh"
+fi
 mkdir -p "${PKG_DIR}/systemd"
 cp .github/dist/saint-os.service "${PKG_DIR}/systemd/saint-os.service"
 

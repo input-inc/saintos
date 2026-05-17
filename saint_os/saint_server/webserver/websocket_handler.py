@@ -176,6 +176,9 @@ class WebSocketHandler:
         # ROS Bridge (set by server_node)
         self._ros_bridge: Optional['ROSBridge'] = None
 
+        # Update manager (set by server_node)
+        self._update_manager = None
+
         # Authentication settings (loaded from config)
         self._auth_password: Optional[str] = None
         self._auth_timeout: float = 10.0
@@ -224,6 +227,24 @@ class WebSocketHandler:
     def set_estop_node_callback(self, callback: Callable[[str], None]):
         """Set callback for sending emergency stop to node. Callback takes (node_id)."""
         self._estop_node_callback = callback
+
+    def set_update_manager(self, update_manager):
+        """Wire the update manager and subscribe to state changes."""
+        self._update_manager = update_manager
+        # Broadcast state changes to subscribed clients on the 'update' topic.
+        loop = asyncio.get_event_loop()
+
+        def _on_change(state):
+            payload = state.to_dict()
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self.broadcast_state('update', payload))
+                )
+            except RuntimeError:
+                # Event loop may not be running yet during early init.
+                pass
+
+        update_manager.add_listener(_on_change)
 
     def set_livelink_callbacks(
         self,
@@ -817,6 +838,48 @@ class WebSocketHandler:
             level = params.get('level')
             logs = self.state_manager.get_logs(limit=limit, level=level)
             return {"status": "ok", "data": {"logs": logs}}
+
+        # Software Update Actions ---------------------------------------------
+        elif action == 'update.get_status':
+            if not self._update_manager:
+                return {"status": "error", "message": "Update manager not available"}
+            return {"status": "ok", "data": self._update_manager.state.to_dict()}
+
+        elif action == 'update.check_now':
+            if not self._update_manager:
+                return {"status": "error", "message": "Update manager not available"}
+            state = await self._update_manager.check_github()
+            return {"status": "ok", "data": state.to_dict()}
+
+        elif action == 'update.scan_usb':
+            if not self._update_manager:
+                return {"status": "error", "message": "Update manager not available"}
+            state = await self._update_manager.scan_usb()
+            return {"status": "ok", "data": state.to_dict()}
+
+        elif action == 'update.download':
+            if not self._update_manager:
+                return {"status": "error", "message": "Update manager not available"}
+            # Run as a background task so the response can return immediately
+            # while download progress streams over the broadcast channel.
+            asyncio.create_task(self._update_manager.download_github_release())
+            return {"status": "ok", "data": self._update_manager.state.to_dict()}
+
+        elif action == 'update.stage_usb':
+            if not self._update_manager:
+                return {"status": "error", "message": "Update manager not available"}
+            version = params.get('version')
+            if not version:
+                return {"status": "error", "message": "Missing version"}
+            asyncio.create_task(self._update_manager.stage_usb_release(version))
+            return {"status": "ok", "data": self._update_manager.state.to_dict()}
+
+        elif action == 'update.install':
+            if not self._update_manager:
+                return {"status": "error", "message": "Update manager not available"}
+            await self.broadcast_activity('Installing software update — server will restart', 'info')
+            asyncio.create_task(self._update_manager.install_staged())
+            return {"status": "ok", "data": self._update_manager.state.to_dict()}
 
         # Firmware Management Actions
         elif action == 'get_server_firmware':

@@ -894,6 +894,22 @@ class SaintServerNode(Node):
 
             self.get_logger().info(f'Web server started on http://localhost:{self.web_port}/')
 
+            # Update manager: GitHub release polling + USB scan + apply.
+            # Wired to the WebSocket handler so state changes broadcast to
+            # clients on the 'update' topic.
+            try:
+                from saint_server.update_manager import UpdateManager
+                self.update_manager = UpdateManager(logger=self.get_logger())
+                if self.web_server.ws_handler:
+                    self.web_server.ws_handler.set_update_manager(self.update_manager)
+                # Fire a non-blocking startup check. Offline robots will
+                # land on 'no_network' status quickly (5s timeout) and the
+                # UI will surface a "Check for Updates" button.
+                asyncio.create_task(self.update_manager.check_github())
+                self.get_logger().info('Update manager initialized')
+            except Exception as e:
+                self.get_logger().warn(f'Update manager not available: {e}')
+
         except ImportError as e:
             self.get_logger().warn(f'Web server not available: {e}')
         except Exception as e:

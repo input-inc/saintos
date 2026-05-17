@@ -1295,6 +1295,122 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Software Update -->
+                    <div class="card mb-6" id="update-card">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-cyan-400">system_update</span>
+                            Software Update
+                        </h3>
+
+                        <div class="flex items-center justify-between flex-wrap gap-3">
+                            <div class="flex items-center gap-3">
+                                <div>
+                                    <div class="text-xs text-slate-500">Installed version</div>
+                                    <div class="text-base font-mono text-white" id="update-installed-version">--</div>
+                                </div>
+                                <span id="update-status-pill" class="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-700 text-slate-400">Unknown</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button id="update-check-btn" class="btn-secondary text-sm hidden">
+                                    <span class="material-icons text-sm">refresh</span>
+                                    Check for Updates
+                                </button>
+                                <button id="update-download-btn" class="btn-primary text-sm hidden">
+                                    <span class="material-icons text-sm">download</span>
+                                    Download Update
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Available state details -->
+                        <div id="update-available-info" class="mt-4 hidden">
+                            <div class="flex items-baseline gap-2">
+                                <span class="text-sm text-slate-400">Available:</span>
+                                <span id="update-available-version" class="text-sm font-mono text-cyan-300">--</span>
+                                <a id="update-release-link" href="#" target="_blank" rel="noopener" class="text-xs text-slate-400 hover:text-cyan-300 ml-2">
+                                    <span class="material-icons text-xs align-middle">open_in_new</span>
+                                    View release on GitHub
+                                </a>
+                            </div>
+                        </div>
+
+                        <!-- Download progress -->
+                        <div id="update-progress" class="mt-4 hidden">
+                            <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
+                                <span>Downloading…</span>
+                                <span id="update-progress-pct">0%</span>
+                            </div>
+                            <div class="h-2 bg-slate-700 rounded-full overflow-hidden">
+                                <div id="update-progress-bar" class="h-full bg-cyan-500 transition-all" style="width: 0%"></div>
+                            </div>
+                        </div>
+
+                        <!-- Last error -->
+                        <div id="update-error" class="mt-4 hidden p-3 rounded bg-red-900/40 border border-red-700 text-red-200 text-sm"></div>
+
+                        <!-- USB section -->
+                        <div id="update-usb-section" class="mt-6 pt-4 border-t border-slate-700">
+                            <div class="flex items-center justify-between mb-2">
+                                <h4 class="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                                    <span class="material-icons text-amber-400 text-base">usb</span>
+                                    Install from USB
+                                </h4>
+                                <button id="update-scan-usb-btn" class="text-xs text-slate-400 hover:text-cyan-300">
+                                    <span class="material-icons text-xs align-middle">refresh</span>
+                                    Scan
+                                </button>
+                            </div>
+                            <div id="update-usb-results" class="text-sm text-slate-400">
+                                No USB media scanned yet.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Install confirmation modal -->
+                <div id="update-install-modal" class="fixed inset-0 z-50 hidden">
+                    <div class="absolute inset-0 bg-black/70" onclick="updateManager.closeInstallModal()"></div>
+                    <div class="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
+                        <div class="card max-w-2xl w-full pointer-events-auto">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Install Update</h3>
+                                <button onclick="updateManager.closeInstallModal()" class="text-slate-400 hover:text-white">
+                                    <span class="material-icons">close</span>
+                                </button>
+                            </div>
+                            <div class="mb-4">
+                                <div class="text-xs text-slate-500">Version</div>
+                                <div class="text-lg font-mono text-cyan-300" id="update-modal-version">--</div>
+                                <div id="update-modal-source" class="text-xs text-slate-500 mt-1"></div>
+                            </div>
+                            <div class="mb-4">
+                                <div class="text-xs text-slate-500 mb-1">Release notes</div>
+                                <div id="update-modal-notes" class="text-sm text-slate-300 bg-slate-900 border border-slate-700 rounded p-3 max-h-96 overflow-y-auto whitespace-pre-wrap font-mono">No release notes available.</div>
+                            </div>
+                            <div class="p-3 rounded bg-amber-900/30 border border-amber-700/50 text-xs text-amber-200 mb-4">
+                                <span class="material-icons text-sm align-middle">warning</span>
+                                The server will restart during installation (~60 seconds). The web interface will reconnect automatically.
+                            </div>
+                            <div class="flex items-center justify-end gap-3">
+                                <button onclick="updateManager.closeInstallModal()" class="btn-secondary">Cancel</button>
+                                <button id="update-modal-install-btn" onclick="updateManager.confirmInstall()" class="btn-primary">
+                                    <span class="material-icons text-sm">system_update</span>
+                                    Install
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Installing overlay -->
+                <div id="update-installing-overlay" class="fixed inset-0 z-50 hidden bg-black/80 flex items-center justify-center">
+                    <div class="text-center text-white">
+                        <div class="material-icons text-6xl text-cyan-400 mb-4 animate-spin">autorenew</div>
+                        <h3 class="text-xl font-semibold mb-2">Installing update…</h3>
+                        <p class="text-slate-400 mb-4">The server is restarting. This page will reload when it's back online.</p>
+                        <div class="text-sm text-slate-500" id="update-installing-detail">Waiting for server…</div>
+                    </div>
                 </div>
 
                 <!-- Interface Settings Tab -->
@@ -2145,6 +2261,7 @@
     <script src="js/controlpage.js"></script>
     <script src="js/moods.js"></script>
     <script src="js/livelink.js"></script>
+    <script src="js/updates.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

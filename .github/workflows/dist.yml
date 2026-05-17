@@ -236,6 +236,46 @@ jobs:
           ls -la saint_os/resources/firmware/*/
 
       # ------------------------------------------------------------------------
+      # Download all runtime apt deps as .deb files into _debs/ so the dist
+      # tarball is self-contained — air-gapped targets can install without
+      # internet. install.sh will mount this as a local apt repo at install
+      # time. Targets bookworm only; non-bookworm hosts fall back to online
+      # apt in install.sh.
+      - name: Bundle runtime apt dependencies
+        run: |
+          set -eo pipefail
+          mkdir -p _debs
+          docker run --rm -i --platform linux/arm64 \
+            -v "${PWD}/_debs:/debs" \
+            "debian:${DEBIAN_RELEASE}-slim" \
+            bash -eo pipefail <<'CONTAINER_EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+
+          # --reinstall forces re-download even when slim image happens to
+          # have a package already installed — so the bundled cache is
+          # self-contained for any target Pi state.
+          apt-get install -y --download-only --reinstall \
+              libssl3 libtinyxml2-9 libyaml-0-2 libxml2 libacl1 libcurl4 \
+              python3 python3-yaml python3-numpy \
+              python3-aiohttp python3-websockets python3-psutil \
+              python3-packaging python3-lark python3-empy \
+              python3-catkin-pkg python3-importlib-metadata \
+              libpython3.11 python3.11 \
+              network-manager wireless-regdb rfkill iw
+
+          cp /var/cache/apt/archives/*.deb /debs/
+
+          # Local apt repo index. install.sh adds a temporary sources.list
+          # entry pointing at this directory.
+          apt-get install -y --no-install-recommends apt-utils
+          cd /debs
+          apt-ftparchive packages . > Packages
+          gzip -kf Packages
+          echo "Bundled $(ls -1 *.deb | wc -l) .deb files, $(du -sh . | cut -f1) total"
+          CONTAINER_EOF
+
+      # ------------------------------------------------------------------------
       # Build saint_os inside the same Debian Bookworm environment the bundled
       # ROS2 was built against — this guarantees libstdc++, libpython, and
       # rosidl typesupport ABIs all match.
