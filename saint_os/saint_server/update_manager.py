@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import time
+import traceback
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -168,7 +169,7 @@ class UpdateManager:
             try:
                 fn(self.state)
             except Exception:
-                self.logger.exception("update listener raised")
+                self.logger.error(f"update listener raised\n{traceback.format_exc()}")
 
     def _set_status(self, status: str, **changes):
         self.state.status = status
@@ -191,7 +192,7 @@ class UpdateManager:
                     None, self._fetch_latest_release
                 )
             except (urllib.error.URLError, TimeoutError, OSError) as e:
-                self.logger.info("GitHub release check failed: %s", e)
+                self.logger.info(f"GitHub release check failed: {e}")
                 self._set_status(
                     "no_network",
                     last_check_at=time.time(),
@@ -200,7 +201,7 @@ class UpdateManager:
                 )
                 return self.state
             except Exception as e:  # noqa: BLE001
-                self.logger.exception("GitHub release check raised")
+                self.logger.error(f"GitHub release check raised\n{traceback.format_exc()}")
                 self._set_status(
                     "error",
                     last_check_at=time.time(),
@@ -275,8 +276,8 @@ class UpdateManager:
         privately-mounted (mode 0700) udisks2 paths under /media/<user>/."""
         if not USB_HELPER.exists():
             self.logger.warning(
-                "USB helper not installed at %s — USB scan will see only "
-                "world-readable mount points", USB_HELPER,
+                f"USB helper not installed at {USB_HELPER} — USB scan will see only "
+                "world-readable mount points"
             )
             return self._scan_usb_unprivileged()
 
@@ -289,11 +290,11 @@ class UpdateManager:
                 timeout=20,
             )
         except subprocess.CalledProcessError as e:
-            self.logger.warning("usb-helper scan failed (rc=%d): %s",
-                                e.returncode, (e.stderr or e.stdout or "").strip())
+            stderr = (e.stderr or e.stdout or "").strip()
+            self.logger.warning(f"usb-helper scan failed (rc={e.returncode}): {stderr}")
             return []
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            self.logger.warning("usb-helper scan unavailable: %s", e)
+            self.logger.warning(f"usb-helper scan unavailable: {e}")
             return []
 
         found: List[ReleaseInfo] = []
@@ -408,7 +409,7 @@ class UpdateManager:
                 None, self._download_to, release.asset_url, dest
             )
         except Exception as e:  # noqa: BLE001
-            self.logger.exception("download failed")
+            self.logger.error(f"download failed\n{traceback.format_exc()}")
             self._set_status("error", last_error=f"download failed: {e}")
             return self.state
 

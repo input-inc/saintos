@@ -24,6 +24,7 @@ import shutil
 import signal
 import struct
 import termios
+import traceback
 from typing import Awaitable, Callable, Optional
 
 # Audit logger. Uses syslog on /dev/log so systemd-journald picks it up
@@ -123,8 +124,7 @@ class TerminalSession:
         fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
         self._logger.info(
-            "terminal: spawned shell pid=%d for client=%s (%dx%d)",
-            pid, self._client_id, cols, rows,
+            f"terminal: spawned shell pid={pid} for client={self._client_id} ({cols}x{rows})"
         )
 
         loop = asyncio.get_event_loop()
@@ -149,7 +149,7 @@ class TerminalSession:
             except asyncio.CancelledError:
                 pass
             except Exception:
-                self._logger.exception("terminal read loop error during close")
+                self._logger.error(f"terminal read loop error during close\n{traceback.format_exc()}")
             self._read_task = None
 
         if self._master_fd is not None:
@@ -167,7 +167,7 @@ class TerminalSession:
                 pass
             self._pid = None
 
-        self._logger.info("terminal: closed for client=%s", self._client_id)
+        self._logger.info(f"terminal: closed for client={self._client_id}")
 
     # ── I/O ─────────────────────────────────────────────────────────
 
@@ -178,7 +178,7 @@ class TerminalSession:
         try:
             os.write(self._master_fd, data)
         except OSError as e:
-            self._logger.warning("terminal: write failed: %s", e)
+            self._logger.warning(f"terminal: write failed: {e}")
             return
 
         # Audit: accumulate and emit on each LF / CR.
@@ -208,7 +208,7 @@ class TerminalSession:
                         self._client_id, self._pid, text,
                     )
                 except Exception:
-                    self._logger.exception("audit log emit failed")
+                    self._logger.error(f"audit log emit failed\n{traceback.format_exc()}")
 
     def resize(self, cols: int, rows: int):
         if self._master_fd is None or self._closed:
@@ -223,7 +223,7 @@ class TerminalSession:
         try:
             fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, winsize)
         except OSError as e:
-            self._logger.debug("terminal: TIOCSWINSZ failed: %s", e)
+            self._logger.debug(f"terminal: TIOCSWINSZ failed: {e}")
 
     async def _read_loop(self):
         """Read from the PTY master and push to the client.
@@ -250,11 +250,11 @@ class TerminalSession:
                 try:
                     await self._on_output(chunk)
                 except Exception:
-                    self._logger.exception("terminal: on_output handler raised")
+                    self._logger.error(f"terminal: on_output handler raised\n{traceback.format_exc()}")
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._logger.exception("terminal: read loop unexpected error")
+            self._logger.error(f"terminal: read loop unexpected error\n{traceback.format_exc()}")
         finally:
             # Notify handler of shell exit (best-effort).
             if self._on_exit is not None and not self._closed:
@@ -268,4 +268,4 @@ class TerminalSession:
                 try:
                     await self._on_exit(exit_code)
                 except Exception:
-                    self._logger.exception("terminal: on_exit handler raised")
+                    self._logger.error(f"terminal: on_exit handler raised\n{traceback.format_exc()}")

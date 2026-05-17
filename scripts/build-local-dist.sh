@@ -12,13 +12,19 @@
 # Usage:
 #   scripts/build-local-dist.sh [options]
 #
+# Default behavior: builds RP2040 / Teensy / Pi5 firmware locally so the
+# server tarball ships the matching node firmware. Override with one of
+# --fetch-firmware, --skip-firmware-build, or --skip-firmware below.
+#
 # Options:
 #   --version VER         Override version string (default: <VERSION>-local.<sha7>)
 #   --rebundle-debs       Re-download the bundled .deb cache (slow; usually unneeded)
 #   --refetch-ros2        Force re-download of the bundled ROS2 install tree
 #   --fetch-firmware      Pull the latest CI firmware artifacts from GitHub via `gh`
-#                         (requires `gh auth login`)
-#   --skip-firmware       Don't stage firmware/ (server-only update; smaller tarball)
+#                         instead of building locally (requires `gh auth login`)
+#   --skip-firmware-build Use whatever firmware is already staged under
+#                         saint_os/resources/firmware/ — fastest server-only iteration
+#   --skip-firmware       Don't stage any firmware (smallest tarball, server-only)
 #   --clean               Remove the local build dirs (_ros2/, _debs/, install/) first
 #   -h, --help            Show this help
 #
@@ -49,6 +55,7 @@ REBUNDLE_DEBS=0
 REFETCH_ROS2=0
 FETCH_FIRMWARE=0
 SKIP_FIRMWARE=0
+SKIP_FIRMWARE_BUILD=0
 CLEAN=0
 
 while (( "$#" )); do
@@ -58,8 +65,9 @@ while (( "$#" )); do
         --refetch-ros2) REFETCH_ROS2=1; shift ;;
         --fetch-firmware) FETCH_FIRMWARE=1; shift ;;
         --skip-firmware) SKIP_FIRMWARE=1; shift ;;
+        --skip-firmware-build) SKIP_FIRMWARE_BUILD=1; shift ;;
         --clean) CLEAN=1; shift ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -136,6 +144,59 @@ fi
     || die "ROS2 setup.bash missing after extract"
 
 # --- firmware --------------------------------------------------------------
+#
+# The server tarball is the source of truth for node firmware — operators
+# expect installing a new server build to ship the matching firmware.
+# Default behavior here is therefore to *build* firmware locally before
+# packaging. Override with --skip-firmware-build (use whatever's already
+# staged), --fetch-firmware (pull from CI artifacts), or --skip-firmware
+# (omit firmware entirely).
+
+build_firmware_rp2040() {
+    if [[ ! -x "saint_os/firmware/rp2040/build.sh" ]]; then
+        warn "RP2040 build script missing — skipping"
+        return
+    fi
+    log "Building RP2040 hardware firmware"
+    ( cd saint_os/firmware/rp2040 && ./build.sh hw ) \
+        || { warn "RP2040 firmware build failed — leaving existing staged files"; return; }
+    mkdir -p saint_os/resources/firmware/rp2040
+    find saint_os/firmware/rp2040/build_hardware -maxdepth 1 -type f \
+        \( -name '*.uf2' -o -name '*.elf' \) \
+        -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+}
+
+build_firmware_teensy41() {
+    if [[ ! -x "saint_os/firmware/teensy41/build.sh" ]]; then
+        warn "Teensy build script missing — skipping"
+        return
+    fi
+    log "Building Teensy 4.1 hardware firmware (best-effort; needs PlatformIO + binutils)"
+    if ! ( cd saint_os/firmware/teensy41 && ./build.sh hw 2>&1 ); then
+        warn "Teensy firmware build failed — leaving existing staged files (run 'brew install binutils' if missing)"
+        return
+    fi
+    local hex=saint_os/firmware/teensy41/.pio/build/hardware/firmware.hex
+    if [[ -f "$hex" ]]; then
+        mkdir -p saint_os/resources/firmware/teensy41
+        cp -v "$hex" saint_os/resources/firmware/teensy41/
+    fi
+}
+
+build_firmware_rpi5() {
+    local pkg=saint_os/firmware/rpi5/scripts/package.sh
+    if [[ ! -x "$pkg" ]]; then
+        warn "Pi5 package script missing — skipping"
+        return
+    fi
+    log "Packaging Pi5 firmware"
+    ( cd saint_os/firmware/rpi5/scripts && ./package.sh "${VERSION}" ) \
+        || { warn "Pi5 firmware package failed — leaving existing staged files"; return; }
+    if [[ -d saint_os/firmware/rpi5/dist ]]; then
+        mkdir -p saint_os/resources/firmware/rpi5
+        cp -rv saint_os/firmware/rpi5/dist/. saint_os/resources/firmware/rpi5/
+    fi
+}
 
 if (( SKIP_FIRMWARE )); then
     log "Skipping firmware staging (--skip-firmware)"
@@ -158,8 +219,13 @@ elif (( FETCH_FIRMWARE )); then
     [[ -d _fw/firmware-teensy41 ]] && find _fw/firmware-teensy41 -type f \
         -name '*.hex' -exec cp {} saint_os/resources/firmware/teensy41/ \;
     [[ -d _fw/firmware-rpi5 ]] && cp -r _fw/firmware-rpi5/. saint_os/resources/firmware/rpi5/
+elif (( SKIP_FIRMWARE_BUILD )); then
+    log "Using existing saint_os/resources/firmware/ (--skip-firmware-build)"
 else
-    log "Using existing saint_os/resources/firmware/ (re-run with --fetch-firmware to refresh)"
+    log "Building firmware locally so the server tarball contains the latest"
+    build_firmware_rp2040
+    build_firmware_teensy41
+    build_firmware_rpi5
 fi
 
 # --- bundled apt deps (cached) ---------------------------------------------
