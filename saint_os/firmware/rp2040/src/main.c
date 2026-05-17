@@ -97,7 +97,7 @@ static rcl_timer_t state_timer;            // State publish timer (10Hz)
 
 // Message buffers
 static std_msgs__msg__String announcement_msg;
-static char announcement_buffer[256];
+static char announcement_buffer[512];
 
 static std_msgs__msg__String capabilities_msg;
 static char capabilities_buffer[2048];  // Larger buffer for capabilities JSON
