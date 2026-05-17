@@ -117,9 +117,19 @@ fi
         "https://raw.githubusercontent.com/ros2/ros2/${ROS_DISTRO}/ros2.repos" \
         -o ros2.repos
   fi
-  MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git \
-    "refs/heads/${MICRO_ROS_REF}" | awk '{print $1}')
-  echo "micro_ros_setup_sha=${MICRO_SHA}" > micro_ros.txt
+  # Reuse the cached micro-ROS SHA when we already have one. git ls-remote
+  # requires internet, and an offline build with warm caches should just
+  # work — the cached ROS2 tarball was built against a known-good SHA so
+  # the existing micro_ros.txt is fine for re-deriving the cache key.
+  if [[ ! -f micro_ros.txt || $REFETCH_ROS2 -eq 1 ]]; then
+      if MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git \
+            "refs/heads/${MICRO_ROS_REF}" 2>/dev/null | awk '{print $1}') \
+            && [[ -n "$MICRO_SHA" ]]; then
+          echo "micro_ros_setup_sha=${MICRO_SHA}" > micro_ros.txt
+      else
+          die "Cannot resolve micro-ROS SHA and no cached micro_ros.txt to fall back to. Connect to a network or run with --refetch-ros2 once online."
+      fi
+  fi
 )
 ROS_HASH=$(cat _ros2_src/ros2.repos _ros2_src/micro_ros.txt | $SHA256 | cut -c1-12)
 ROS_TAG="ros2-${ROS_DISTRO}-${ARCH}-${ROS_HASH}"
@@ -160,8 +170,15 @@ build_firmware_rp2040() {
     log "Building RP2040 hardware firmware"
     ( cd saint_os/firmware/rp2040 && ./build.sh hw ) \
         || { warn "RP2040 firmware build failed — leaving existing staged files"; return; }
+    # build.sh hw actually outputs to build/ (not build_hardware/ — that's a
+    # stale dir from older manual experiments). Match CI's path here.
+    local fw_out=saint_os/firmware/rp2040/build
+    if [[ ! -f "${fw_out}/saint_node.uf2" ]]; then
+        warn "RP2040 build produced no saint_node.uf2 at ${fw_out}/ — staged files unchanged"
+        return
+    fi
     mkdir -p saint_os/resources/firmware/rp2040
-    find saint_os/firmware/rp2040/build_hardware -maxdepth 1 -type f \
+    find "${fw_out}" -maxdepth 1 -type f \
         \( -name '*.uf2' -o -name '*.elf' \) \
         -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
 }
