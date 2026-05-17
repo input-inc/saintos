@@ -191,7 +191,8 @@ apt-get install -y --download-only --reinstall \
     python3-catkin-pkg python3-importlib-metadata \
     libpython3.11 python3.11 \
     network-manager wireless-regdb rfkill iw \
-    avahi-daemon libnss-mdns
+    avahi-daemon libnss-mdns \
+    dnsmasq
 
 cp /var/cache/apt/archives/*.deb /debs/
 
