@@ -182,6 +182,10 @@ static uint32_t extract_version_timestamp(const char* version)
     return timestamp;
 }
 
+#ifndef SIMULATION
+#include "teensy_ota.h"
+#endif
+
 static void handle_firmware_update(const char* json, size_t len)
 {
     if (!json || len == 0 || len > 512) return;
@@ -219,13 +223,41 @@ static void handle_firmware_update(const char* json, size_t len)
         }
     }
 
-    Serial.printf("Rebooting for firmware update...\n====================================\n\n");
-    delay(500);
+    /* Parse the OTA image metadata. Size + CRC32 are required for the
+     * in-app FlashTxx download path; if either is missing we fall back
+     * to the legacy bare-restart so old server flows still degrade
+     * gracefully (the chip won't actually re-flash, same as before). */
+    uint32_t img_size = 0, img_crc = 0;
+    const char* p;
+    if ((p = strstr(json, "\"size\"")) != NULL) {
+        p = strchr(p, ':');
+        if (p) { p++; while (*p == ' ') p++; img_size = (uint32_t)strtoul(p, NULL, 10); }
+    }
+    if ((p = strstr(json, "\"crc32\"")) != NULL) {
+        p = strchr(p, ':');
+        if (p) {
+            p++;
+            while (*p == ' ' || *p == '"') p++;
+            int base = (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) ? 16 : 10;
+            img_crc = (uint32_t)strtoul(p, NULL, base);
+        }
+    }
 
 #ifdef SIMULATION
+    Serial.printf("Simulation: halt — node manager restarts with new ELF\n====================================\n\n");
+    delay(500);
     while (1) { yield(); }
 #else
-    // Teensy restart
+    if (img_size > 0 && img_crc != 0) {
+        Serial.printf("Performing in-app OTA (size=%lu crc=0x%08lx)\n",
+                       (unsigned long)img_size, (unsigned long)img_crc);
+        saint_ota_result_t r = saint_ota_perform(img_size, img_crc);
+        Serial.printf("OTA returned %d — staying on existing firmware\n", (int)r);
+        return;
+    }
+    Serial.printf("Update message lacks size/crc32 — bare restart (no OTA)\n");
+    Serial.printf("====================================\n\n");
+    delay(500);
     SCB_AIRCR = 0x05FA0004;
     while (1) { }
 #endif
