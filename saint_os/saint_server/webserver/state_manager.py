@@ -29,6 +29,7 @@ from saint_server.peripheral_model import (
     WidgetType,
     detect_pin_conflicts,
 )
+from saint_server.board_config import BoardConfigManager, derive_capabilities
 
 # Installed-version metadata — populated once by _read_installed_version_info()
 # on first call to get_system_status() so we don't stat files every second.
@@ -379,6 +380,14 @@ class NodeInfo:
     # Adopted node specific
     display_name: str = ""
     role: str = ""
+    # Chip family the node announced (e.g. "rp2040"). The server matches
+    # this against ``config/boards/<chip_family>/global.conf``.
+    chip_family: str = ""
+    # Board the operator picked at adoption time (e.g. "feather_rp2040_w5500").
+    # Pin layout, reserved pins, and built-in peripherals are derived from
+    # the chip + board YAML on the server — the firmware doesn't advertise
+    # them any more.
+    board_id: str = ""
     # Peripheral attachments + per-pin capabilities reported by the firmware.
     capabilities: Optional[NodeCapabilities] = None
     peripheral_config: Optional[NodePeripheralConfig] = None
@@ -434,6 +443,7 @@ class StateManager:
         self.config_dir = os.path.abspath(config_dir)
         self.nodes_config_dir = os.path.join(self.config_dir, 'nodes')
         self.system_routing_path = os.path.join(self.config_dir, 'system_routing.yaml')
+        self.boards_config_dir = os.path.join(self.config_dir, 'boards')
 
         # In-memory peripheral type catalog. Starts from the built-in
         # DEFAULT_CATALOG and gets extended when nodes report platform-
@@ -441,8 +451,16 @@ class StateManager:
         self.peripheral_catalog: Dict[str, PeripheralType] = dict(DEFAULT_CATALOG)
         self.widget_catalog: Dict[str, WidgetType] = dict(DEFAULT_WIDGET_CATALOG)
 
+        # Chip + board YAML catalog. Replaces the firmware-emitted
+        # capability JSON as the source of truth for "what pins this
+        # node has." Loaded at startup; the Settings UI will support
+        # adding operator-authored boards in a later phase.
+        self.board_config = BoardConfigManager(self.boards_config_dir, logger=self.logger)
+
         # Load adopted nodes from disk on startup
         self.load_all_node_configs()
+        # Migrate any pre-board_id nodes so their pin layouts resolve.
+        self._migrate_missing_board_ids()
         # Load system-wide routes + widgets
         self._load_system_routing()
         # Always-present synthetic node for the host controller itself
@@ -553,6 +571,12 @@ class StateManager:
         node.cpu_temp = data.get("cpu_temp", node.cpu_temp)
         node.state = data.get("state", node.state)
         node.last_seen = time.time()
+        # Chip family the firmware identifies itself as (set when the
+        # firmware emits the new announcement format). Used to pick a
+        # matching board YAML and to populate the chip-family dropdown
+        # in the adopt dialog.
+        if "chip_family" in data:
+            node.chip_family = str(data["chip_family"])
 
         # Clear any pending offline state and mark online
         was_offline = not node.online
@@ -725,7 +749,9 @@ class StateManager:
                 "uptime_seconds": node.uptime_seconds,
                 "state": node.state,
                 "last_seen": node.last_seen,
-                "has_capabilities": node.capabilities is not None,
+                "has_capabilities": node.capabilities is not None or bool(node.board_id),
+                "chip_family": node.chip_family,
+                "board_id": node.board_id,
                 "peripheral_count": len(node.peripheral_config.peripherals) if node.peripheral_config else 0,
                 "peripheral_sync_status": (
                     node.peripheral_config.sync_status if node.peripheral_config else "unconfigured"
@@ -756,12 +782,23 @@ class StateManager:
                 "state": node.state,
                 "last_seen": node.last_seen,
                 "online": node.online,
+                # Chip family the firmware announced — populates the
+                # board picker on the Adopt dialog.
+                "chip_family": node.chip_family,
             }
             for node in self.state.unadopted_nodes.values()
         ]
 
-    def adopt_node(self, node_id: str, role: str, display_name: Optional[str] = None) -> Dict[str, Any]:
-        """Adopt an unadopted node."""
+    def adopt_node(self, node_id: str, role: str,
+                    display_name: Optional[str] = None,
+                    board_id: Optional[str] = None) -> Dict[str, Any]:
+        """Adopt an unadopted node, assigning it a role + board.
+
+        The operator picks the board_id from the Adopt dialog; the
+        server uses it to derive the node's pin layout. If board_id
+        is omitted, defaults to the first matching board for the
+        node's chip family (with a warning logged).
+        """
         if node_id not in self.state.unadopted_nodes:
             return {"success": False, "message": f"Node {node_id} not found"}
 
@@ -769,6 +806,31 @@ class StateManager:
         node.role = role
         node.display_name = display_name or f"{role.title()} Node"
         node.online = True
+
+        # Resolve board: explicit > default for chip > none (operator can fix later).
+        if board_id:
+            if not self.board_config.get_board(board_id):
+                # Put the node back in unadopted so the operator can retry.
+                self.state.unadopted_nodes[node_id] = node
+                return {"success": False, "message": f"Unknown board_id '{board_id}'"}
+            board = self.board_config.get_board(board_id)
+            if node.chip_family and board.chip_family != node.chip_family:
+                self.state.unadopted_nodes[node_id] = node
+                return {"success": False,
+                        "message": f"Board '{board_id}' is for chip '{board.chip_family}' "
+                                   f"but node reports '{node.chip_family}'"}
+            node.board_id = board_id
+            if not node.chip_family:
+                node.chip_family = board.chip_family
+        elif node.chip_family:
+            default_board = self.board_config.default_board_for_chip(node.chip_family)
+            if default_board:
+                node.board_id = default_board.board_id
+                if self.logger:
+                    self.logger.info(
+                        f"adopt_node({node_id}): no board_id given, defaulted "
+                        f"to '{node.board_id}' (chip {node.chip_family})"
+                    )
 
         self.state.adopted_nodes[node_id] = node
 
@@ -779,6 +841,9 @@ class StateManager:
         if not node.peripheral_config:
             node.peripheral_config = NodePeripheralConfig()
 
+        # Seed built-in peripherals declared by the board YAML.
+        self._seed_builtin_peripherals_from_board(node)
+
         # Save initial config
         self._save_node_config(node_id)
 
@@ -787,7 +852,69 @@ class StateManager:
             "success": True,
             "message": "Node adopted successfully",
             "assigned_topic_prefix": topic_prefix,
+            "board_id": node.board_id,
         }
+
+    def list_chips(self) -> List[Dict[str, Any]]:
+        """JSON-friendly list of known chip families (for the UI)."""
+        return [c.to_dict() for c in self.board_config.list_chips()]
+
+    def list_boards(self, chip_family: Optional[str] = None) -> List[Dict[str, Any]]:
+        """JSON-friendly list of known boards, optionally filtered by chip."""
+        boards = (self.board_config.get_boards_for_chip(chip_family)
+                  if chip_family else self.board_config.list_boards())
+        return [b.to_dict() for b in boards]
+
+    def set_node_board(self, node_id: str, board_id: str) -> Dict[str, Any]:
+        """Change which board a node is assigned to. Re-derives capabilities."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return {"success": False, "message": f"Node {node_id} not found"}
+        board = self.board_config.get_board(board_id)
+        if not board:
+            return {"success": False, "message": f"Unknown board_id '{board_id}'"}
+        if node.chip_family and board.chip_family != node.chip_family:
+            return {"success": False,
+                    "message": f"Board '{board_id}' is for chip '{board.chip_family}' "
+                               f"but node reports '{node.chip_family}'"}
+        node.board_id = board_id
+        if not node.chip_family:
+            node.chip_family = board.chip_family
+        self._seed_builtin_peripherals_from_board(node)
+        self._save_node_config(node_id)
+        self._log_activity(
+            f"Node {node.display_name or node_id}: board set to '{board_id}'", "info"
+        )
+        return {"success": True, "board_id": board_id}
+
+    def _seed_builtin_peripherals_from_board(self, node: NodeInfo) -> None:
+        """Apply builtin_peripherals from the node's board YAML.
+
+        This used to happen via update_node_capabilities when the
+        firmware emitted them. Now the source is the board YAML so the
+        seeding has to happen here (and again on board change). Idempotent.
+        """
+        if not node.board_id:
+            return
+        board = self.board_config.get_board(node.board_id)
+        if not board:
+            return
+        if not node.peripheral_config:
+            node.peripheral_config = NodePeripheralConfig()
+        for entry in board.builtin_peripherals:
+            if entry.type not in self.peripheral_catalog:
+                continue
+            if node.peripheral_config.get(entry.id):
+                continue   # already seeded
+            node.peripheral_config.peripherals.append(PeripheralInstance(
+                id=entry.id,
+                type=entry.type,
+                label=entry.label or entry.id,
+                pins=dict(entry.pins),
+                params=dict(entry.params),
+                builtin=True,
+            ))
+            node.peripheral_config.version += 1
 
     def reset_node(self, node_id: str, factory_reset: bool = False) -> Dict[str, Any]:
         """Reset an adopted node."""
@@ -947,9 +1074,33 @@ class StateManager:
         }
 
     def get_node_capabilities(self, node_id: str) -> Optional[Dict[str, Any]]:
-        """Get capabilities for a node."""
+        """Get capabilities for a node.
+
+        Preferred path: when the node has a board_id assigned, the
+        capability view is *derived* from the chip + board YAML on the
+        server. No round-trip to the firmware needed — the operator
+        sees pins immediately on adoption.
+
+        Fallback: if board_id isn't set yet (truly fresh node before
+        adoption picks a board), fall back to whatever capability JSON
+        the firmware reported. With the new flow that should be empty,
+        but it keeps old firmware on existing nodes working.
+        """
         node = self.state.adopted_nodes.get(node_id) or self.state.unadopted_nodes.get(node_id)
-        if not node or not node.capabilities:
+        if not node:
+            return None
+
+        # YAML-derived path
+        if node.board_id:
+            board = self.board_config.get_board(node.board_id)
+            chip = self.board_config.get_chip(node.chip_family) if board else None
+            if board and chip:
+                view = derive_capabilities(chip, board)
+                view["node_id"] = node.node_id
+                return view
+
+        # Firmware-emitted fallback (old flow)
+        if not node.capabilities:
             return None
         return node.capabilities.to_dict()
 
@@ -1245,6 +1396,42 @@ class StateManager:
     # Host controller — the Pi server modeled as a built-in node
     # =========================================================================
 
+    def _migrate_missing_board_ids(self) -> None:
+        """Assign a default board_id to already-adopted nodes that don't have one.
+
+        Picks the first board matching the node's chip family. If the
+        firmware didn't report chip_family either (older firmware), tries
+        to infer from node_id prefix or hardware_model. Logs every
+        defaulted node so the operator can re-pick from Settings later.
+        """
+        for node in self.state.adopted_nodes.values():
+            if node.board_id:
+                continue
+            # Infer chip family if missing.
+            chip = node.chip_family
+            if not chip:
+                if node.node_id.startswith("rp2040_") or "RP2040" in node.hardware_model:
+                    chip = "rp2040"
+                elif node.node_id.startswith("teensy41_") or "Teensy 4" in node.hardware_model:
+                    chip = "teensy41"
+            if not chip:
+                continue   # nothing to default to
+            node.chip_family = chip
+            default_board = self.board_config.default_board_for_chip(chip)
+            if not default_board:
+                if self.logger:
+                    self.logger.warning(
+                        f"No board YAML for chip '{chip}' — node {node.node_id} "
+                        f"has no pin layout. Add a board in Settings → Boards."
+                    )
+                continue
+            node.board_id = default_board.board_id
+            if self.logger:
+                self.logger.info(
+                    f"Migrated node {node.node_id} → default board '{node.board_id}' "
+                    f"(chip {chip}); operator can change in Settings → Boards."
+                )
+
     def _ensure_host_controller_node(self) -> None:
         """Create the synthetic host_controller node + system_monitor peripheral.
 
@@ -1349,6 +1536,8 @@ class StateManager:
             "role": node.role,
             "hardware_model": node.hardware_model,
             "mac_address": node.mac_address,
+            "chip_family": node.chip_family,
+            "board_id": node.board_id,
         }
         if node.peripheral_config:
             config["peripherals"] = node.peripheral_config.to_dict()
@@ -1416,6 +1605,8 @@ class StateManager:
                 role=config.get('role', ''),
                 hardware_model=config.get('hardware_model', 'Unknown'),
                 mac_address=config.get('mac_address', ''),
+                chip_family=config.get('chip_family', ''),
+                board_id=config.get('board_id', ''),
                 online=False,
                 last_seen=0,
             )

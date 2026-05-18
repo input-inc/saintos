@@ -1,0 +1,54 @@
+# Board definition: Adafruit Feather RP2040 + Ethernet FeatherWing (W5500).
+#
+# Layers on top of ../global.conf for the rp2040 chip. Says which of
+# the chip's GPIOs are exposed at the Feather's header pads (the
+# operator-configurable set), which are reserved by the FeatherWing
+# stack (W5500 SPI, NeoPixel), and what built-in peripherals exist.
+
+board_id: feather_rp2040_w5500
+display_name: "Adafruit Feather RP2040 + Ethernet FeatherWing"
+chip_family: rp2040
+builtin: true        # shipped with SAINT.OS — UI marks uneditable
+
+# Pins broken out to header pads, in the order Adafruit silkscreens
+# them. The operator picks from these in the Peripherals tab. Names
+# override default_name from the chip's global.conf so the UI shows
+# "D5" / "TX" / "A0" instead of "GP5" / "GP0" / "GP26".
+available_pins:
+  - {gpio:  0, name: "TX"}
+  - {gpio:  1, name: "RX"}
+  - {gpio:  2, name: "SDA"}
+  - {gpio:  3, name: "SCL"}
+  - {gpio:  5, name: "D5"}
+  - {gpio:  6, name: "D6"}
+  - {gpio:  9, name: "D9"}
+  - {gpio: 12, name: "D12"}
+  - {gpio: 13, name: "D13"}
+  - {gpio: 24, name: "D24"}
+  - {gpio: 25, name: "D25"}
+  - {gpio: 26, name: "A0"}
+  - {gpio: 27, name: "A1"}
+  - {gpio: 28, name: "A2"}
+  - {gpio: 29, name: "A3"}
+
+# Pins claimed by the FeatherWing / onboard hardware. The operator
+# cannot route peripherals to these.
+reserved_pins:
+  - {gpio: 10, name: "ETH_CS",   reason: "W5500 chip select (Ethernet FeatherWing)"}
+  - {gpio: 11, name: "ETH_RST",  reason: "W5500 reset (Ethernet FeatherWing)"}
+  - {gpio: 16, name: "NEOPIXEL", reason: "Onboard WS2812 NeoPixel"}
+  - {gpio: 18, name: "SPI_SCK",  reason: "W5500 SPI clock"}
+  - {gpio: 19, name: "SPI_MOSI", reason: "W5500 SPI MOSI"}
+  - {gpio: 20, name: "SPI_MISO", reason: "W5500 SPI MISO"}
+
+# Peripherals permanently wired on this board. The server auto-seeds
+# these into the operator's peripheral_config on first capability
+# receipt, with builtin=True so they can't be removed (only re-routed
+# to widgets and signals).
+builtin_peripherals:
+  - id: onboard_neopixel
+    type: neopixel
+    label: "Onboard NeoPixel"
+    pins:
+      data: 16
+    params: {}
