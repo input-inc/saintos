@@ -139,11 +139,22 @@ class WebServer:
 
         self.log('info', 'HTTP server stopped')
 
+    # Cache-control for the dashboard's HTML and JS/CSS. We don't want
+    # the browser to silently serve a months-old peripherals.js the next
+    # time the operator hits the dashboard after a server upgrade. With
+    # this header set, aiohttp still emits an ETag, so unchanged files
+    # respond 304 and the actual transfer is tiny — we only pay for the
+    # round trip, not the bytes. Files under /api/firmware/ (.uf2/.bin)
+    # don't go through these handlers and keep their default caching.
+    NO_CACHE_HEADERS = {
+        "Cache-Control": "no-cache, must-revalidate",
+    }
+
     async def _handle_index(self, request: web.Request) -> web.Response:
         """Handle requests to root path - serve index.html."""
         index_path = os.path.join(self.web_root, 'index.html')
         if os.path.isfile(index_path):
-            return web.FileResponse(index_path)
+            return web.FileResponse(index_path, headers=self.NO_CACHE_HEADERS)
         else:
             return web.Response(
                 text='SAINT.OS Server - Web interface not found',
@@ -183,7 +194,7 @@ class WebServer:
             content_type = 'application/octet-stream'
 
         self.log('debug', f'Serving: {file_path} as {content_type}')
-        return web.FileResponse(file_path)
+        return web.FileResponse(file_path, headers=self.NO_CACHE_HEADERS)
 
     def _get_firmware_info(self, fw_type: str) -> Optional[Dict[str, Any]]:
         """Get firmware info for a specific type."""
