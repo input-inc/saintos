@@ -167,24 +167,41 @@ build_firmware_rp2040() {
         warn "RP2040 build script missing — skipping"
         return
     fi
-    log "Building RP2040 hardware firmware"
-    ( cd saint_os/firmware/rp2040 && ./build.sh hw ) \
+    log "Building RP2040 hardware firmware (OTA bootloader ON)"
+    # Build with the OTA bootloader enabled so the dist tarball contains
+    # both the combined first-flash .uf2 and the body-only .bin the
+    # bootloader fetches over HTTP.
+    ( cd saint_os/firmware/rp2040 && rm -rf build && mkdir build && cd build \
+        && cmake -DSIMULATION=OFF -DSAINT_OS_OTA_BOOTLOADER=ON .. > /dev/null \
+        && make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
+               saint_node saint_ota_bootloader saint_node_combined ) \
         || { warn "RP2040 firmware build failed — leaving existing staged files"; return; }
-    # build.sh hw actually outputs to build/ (not build_hardware/ — that's a
-    # stale dir from older manual experiments). Match CI's path here.
+
     local fw_out=saint_os/firmware/rp2040/build
+    local fw_bl=saint_os/firmware/rp2040/build/bootloader
+
     if [[ ! -f "${fw_out}/saint_node.uf2" ]]; then
-        warn "RP2040 build produced no saint_node.uf2 at ${fw_out}/ — staged files unchanged"
+        warn "RP2040 build produced no saint_node.uf2 — staged files unchanged"
         return
     fi
     mkdir -p saint_os/resources/firmware/rp2040
+    # App artifacts: .uf2 (legacy first-flash), .elf (debug), .bin (OTA fetch).
     find "${fw_out}" -maxdepth 1 -type f \
-        \( -name '*.uf2' -o -name '*.elf' \) \
+        \( -name 'saint_node.uf2' -o -name 'saint_node.elf' -o -name 'saint_node.bin' \) \
         -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+    # Combined .uf2 = bootloader + app, for first-time BOOTSEL flash.
+    if [[ -f "${fw_out}/saint_node_combined.uf2" ]]; then
+        cp -v "${fw_out}/saint_node_combined.uf2" \
+            saint_os/resources/firmware/rp2040/
+    fi
+    # Bootloader-only .uf2, for ad-hoc bootloader reflashing.
+    if [[ -f "${fw_bl}/saint_ota_bootloader.uf2" ]]; then
+        cp -v "${fw_bl}/saint_ota_bootloader.uf2" \
+            saint_os/resources/firmware/rp2040/
+    fi
     # version.h carries FIRMWARE_VERSION_STRING / FIRMWARE_VERSION_FULL /
     # FIRMWARE_GIT_HASH / FIRMWARE_BUILD_TIMESTAMP. The server reads it
-    # to display the build version + decide whether an update is needed
-    # — without it everything is "0.0.0" and the operator has to force.
+    # to display the build version + decide whether an update is needed.
     if [[ -f "${fw_out}/generated/version.h" ]]; then
         mkdir -p saint_os/resources/firmware/rp2040/generated
         cp -v "${fw_out}/generated/version.h" \

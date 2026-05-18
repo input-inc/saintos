@@ -1593,6 +1593,24 @@ class StateManager:
         except Exception:
             return None
 
+    def _calculate_file_crc32(self, file_path: str) -> Optional[int]:
+        """Calculate CRC32 of a file (matches the OTA bootloader's CRC).
+
+        Standard zlib polynomial — same as the firmware-side crc32_update().
+        Returned as an unsigned 32-bit int so callers can hex-format it.
+        """
+        if not file_path or not os.path.isfile(file_path):
+            return None
+        try:
+            import zlib
+            crc = 0
+            with open(file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(65536), b''):
+                    crc = zlib.crc32(chunk, crc)
+            return crc & 0xFFFFFFFF
+        except Exception:
+            return None
+
     def get_server_firmware_info(self) -> Dict[str, Any]:
         """
         Get the latest server firmware version and build info.
@@ -1615,6 +1633,9 @@ class StateManager:
             "build_date": None,
             "elf_path": None,
             "uf2_path": None,
+            "bin_path": None,
+            "bin_size": None,
+            "bin_crc32": None,
             "available": False,
         }
 
@@ -1630,6 +1651,7 @@ class StateManager:
         for build_type, build_dir in candidates:
             elf_path = os.path.join(build_dir, 'saint_node.elf')
             uf2_path = os.path.join(build_dir, 'saint_node.uf2')
+            bin_path = os.path.join(build_dir, 'saint_node.bin')
 
             if os.path.isfile(elf_path):
                 result["elf_path"] = elf_path
@@ -1654,6 +1676,14 @@ class StateManager:
                 if not result["build_date"]:
                     mtime = os.path.getmtime(uf2_path)
                     result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
+
+            # Raw .bin — what the OTA bootloader fetches over HTTP. Size +
+            # CRC32 are the values the bootloader will verify against, so
+            # they go into the firmware_update control message.
+            if os.path.isfile(bin_path) and not result.get("bin_path"):
+                result["bin_path"]  = bin_path
+                result["bin_size"]  = os.path.getsize(bin_path)
+                result["bin_crc32"] = self._calculate_file_crc32(bin_path)
 
             # Try to read version info from generated version.h
             version_h_path = os.path.join(build_dir, 'generated', 'version.h')
@@ -1893,13 +1923,56 @@ class StateManager:
         }
 
         if fw_type == 'rp2040':
-            # Use existing method for RP2040
+            # Use existing method for RP2040 — includes bin size + crc32
+            # so the OTA update message has what it needs.
             rp2040_info = self.get_server_firmware_info()
-            result["available"] = rp2040_info.get("available", False)
-            result["version"] = rp2040_info.get("version", "0.0.0")
-            result["build_date"] = rp2040_info.get("build_date")
-            result["elf_path"] = rp2040_info.get("elf_path")
-            result["uf2_path"] = rp2040_info.get("uf2_path")
+            result["available"]   = rp2040_info.get("available", False)
+            result["version"]     = rp2040_info.get("version", "0.0.0")
+            result["build_date"]  = rp2040_info.get("build_date")
+            result["elf_path"]    = rp2040_info.get("elf_path")
+            result["uf2_path"]    = rp2040_info.get("uf2_path")
+            result["bin_path"]    = rp2040_info.get("bin_path")
+            result["bin_size"]    = rp2040_info.get("bin_size")
+            result["bin_crc32"]   = rp2040_info.get("bin_crc32")
+            return result
+
+        elif fw_type == 'teensy41':
+            # Teensy artifacts staged into resources/firmware/teensy41/.
+            # We look for saint_node.bin (raw flash image — what the
+            # in-app OTA downloads) and a version.h sidecar.
+            here = os.path.dirname(__file__)
+            candidates = [
+                str(_INSTALL_PREFIX / 'resources' / 'firmware' / 'teensy41'),
+                os.path.abspath(os.path.join(here, '..', '..', 'resources', 'firmware', 'teensy41')),
+            ]
+            fw_dir = None
+            for path in candidates:
+                if os.path.isdir(path):
+                    fw_dir = path
+                    break
+            if not fw_dir:
+                return result
+
+            bin_path = os.path.join(fw_dir, 'saint_node.bin')
+            if os.path.isfile(bin_path):
+                result["available"]   = True
+                result["bin_path"]    = bin_path
+                result["bin_size"]    = os.path.getsize(bin_path)
+                result["bin_crc32"]   = self._calculate_file_crc32(bin_path)
+                mtime = os.path.getmtime(bin_path)
+                result["build_date"]  = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
+
+            # Try to read version from generated version.h if staged.
+            version_h_path = os.path.join(fw_dir, 'generated', 'version.h')
+            if os.path.isfile(version_h_path):
+                try:
+                    with open(version_h_path, 'r') as f:
+                        content = f.read()
+                    m = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
+                    if m:
+                        result["version"] = m.group(1)
+                except Exception:
+                    pass
             return result
 
         elif fw_type == 'rpi5':

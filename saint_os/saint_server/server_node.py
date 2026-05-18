@@ -515,8 +515,12 @@ class SaintServerNode(Node):
         if 'Raspberry Pi' in hw_type or 'rpi5' in hw_type.lower():
             # Pi 5 node - send download URL
             self._send_rpi5_firmware_update(pub, node_id, force)
+        elif 'Teensy' in hw_type or 'teensy' in node_id.lower():
+            # Teensy 4.1 — same OTA wire format as RP2040 (size + crc32),
+            # different resource path so the server serves the right .bin.
+            self._send_teensy41_firmware_update(pub, node_id, force)
         else:
-            # RP2040 node - original behavior
+            # RP2040 node
             self._send_rp2040_firmware_update(pub, node_id, simulation, force)
 
     def _send_rpi5_firmware_update(self, pub, node_id: str, force: bool = False):
@@ -551,11 +555,53 @@ class SaintServerNode(Node):
         pub.publish(msg)
         self.get_logger().info(f'Sent Pi 5 firmware update command to {node_id} (version: {fw_info.get("version")}, force: {force})')
 
-    def _send_rp2040_firmware_update(self, pub, node_id: str, simulation: bool, force: bool = False):
-        """Send firmware update command to an RP2040 node."""
+    def _send_teensy41_firmware_update(self, pub, node_id: str, force: bool = False):
+        """Send firmware update command to a Teensy 4.1 node.
+
+        Teensy reads `size` + `crc32` from this message and downloads
+        /api/firmware/teensy41/saint_node.bin over HTTP, then uses
+        FlashTxx to swap it in. Without those fields the node falls
+        back to a no-op SCB_AIRCR restart.
+        """
         import json
 
-        # Get firmware info from state manager
+        fw_info = self.state_manager.get_firmware_info_for_type('teensy41')
+        if not fw_info or not fw_info.get('available'):
+            self.get_logger().error('No Teensy 4.1 firmware available for update')
+            return
+
+        control_data = {
+            "action": "firmware_update",
+            "version": fw_info.get("version") or "0.0.0",
+            "build_date": fw_info.get("build_date"),
+            "force": force,
+        }
+
+        if fw_info.get("bin_size") and fw_info.get("bin_crc32") is not None:
+            control_data["size"]  = fw_info["bin_size"]
+            control_data["crc32"] = f"0x{fw_info['bin_crc32']:08x}"
+            control_data["url"]   = "/api/firmware/teensy41/saint_node.bin"
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+        pub.publish(msg)
+        self.get_logger().info(
+            f'Sent Teensy 4.1 firmware update command to {node_id} '
+            f'(size: {fw_info.get("bin_size")}, crc32: {control_data.get("crc32")}, '
+            f'force: {force})'
+        )
+
+    def _send_rp2040_firmware_update(self, pub, node_id: str, simulation: bool, force: bool = False):
+        """Send firmware update command to an RP2040 node.
+
+        With the OTA bootloader present, the node uses `size` + `crc32`
+        from this message to fetch /api/firmware/rp2040/saint_node.bin
+        from the server (DHCP-gateway) and verify the download. Without
+        a bootloader the node falls back to a no-op reboot.
+        """
+        import json
+
+        # Get firmware info from state manager (includes bin size + crc32)
         fw_info = self.state_manager.get_server_firmware_info()
 
         control_data = {
@@ -566,11 +612,28 @@ class SaintServerNode(Node):
             "force": force,
         }
 
+        # OTA metadata — present only if the build pipeline produced the
+        # raw .bin (i.e. the SAINT_OS_OTA_BOOTLOADER build path). When
+        # missing, the node sees no size/crc32 and falls back to legacy
+        # reboot behavior.
+        if fw_info.get("bin_size") and fw_info.get("bin_crc32") is not None:
+            control_data["size"] = fw_info["bin_size"]
+            control_data["crc32"] = f"0x{fw_info['bin_crc32']:08x}"
+            # vtor is fixed by the standalone linker layout — sent so the
+            # bootloader can sanity-check against its own WRITE_ADDR_MIN.
+            control_data["vtor"] = "0x10004000"
+            control_data["url"]  = f"/api/firmware/rp2040/saint_node.bin"
+
         msg = String()
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
-        self.get_logger().info(f'Sent RP2040 firmware update command to {node_id} (version: {fw_info.get("version_full") or fw_info.get("version")}, force: {force})')
+        self.get_logger().info(
+            f'Sent RP2040 firmware update command to {node_id} '
+            f'(version: {fw_info.get("version_full") or fw_info.get("version")}, '
+            f'size: {fw_info.get("bin_size")}, crc32: {control_data.get("crc32")}, '
+            f'force: {force})'
+        )
 
         # For simulation nodes, also trigger the node manager to install and restart
         if simulation:
