@@ -141,6 +141,7 @@ COMMON_DEPS=(
     python3-empy
     python3-catkin-pkg
     python3-importlib-metadata
+    python3-argcomplete
     # mDNS — so clients on the SAINT-OS AP can reach opensaint.local
     # without knowing the assigned IP. libnss-mdns lets the Pi itself
     # resolve .local hostnames (useful for any local tooling).

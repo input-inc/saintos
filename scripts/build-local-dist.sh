@@ -272,6 +272,7 @@ apt-get install -y --download-only --reinstall \
     python3-aiohttp python3-websockets python3-psutil \
     python3-packaging python3-lark python3-empy \
     python3-catkin-pkg python3-importlib-metadata \
+    python3-argcomplete \
     libpython3.11 python3.11 \
     network-manager wireless-regdb rfkill iw \
     avahi-daemon libnss-mdns \
