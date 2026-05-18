@@ -161,7 +161,17 @@ void fas100_init(void)
 {
 #ifndef SIMULATION
     // Resolve UART instance from configured pin pair, with fallback to defaults.
+    // The fallback used to be silent — if the operator-picked pair wasn't in
+    // the rp2040_uart_pairs table, the driver would silently switch to 0/1
+    // and the operator's wiring to (say) 28/29 would never be touched. Log
+    // the fallback so it's not invisible.
+    uint8_t req_tx = fas100_tx_pin;
+    uint8_t req_rx = fas100_rx_pin;
     if (!uart_pin_pair_lookup(fas100_tx_pin, fas100_rx_pin, &fas100_uart_instance)) {
+        saint_log_publish("warn",
+            "FAS100: requested pair TX=%d RX=%d isn't a valid RP2040 UART pair "
+            "— falling back to TX=%d RX=%d (UART0). Check board YAML uart_pairs.",
+            req_tx, req_rx, FAS100_DEFAULT_TX_PIN, FAS100_DEFAULT_RX_PIN);
         fas100_tx_pin = FAS100_DEFAULT_TX_PIN;
         fas100_rx_pin = FAS100_DEFAULT_RX_PIN;
         fas100_uart_instance = 0;
@@ -323,6 +333,13 @@ static bool fas100_drv_apply_config(uint8_t channel, const pin_config_t* config)
 static bool fas100_drv_parse_json(const char* json_start, const char* json_end,
                                    pin_config_t* config)
 {
+    // Track which pieces of the config we found in the JSON so the
+    // log line below tells the operator exactly what arrived. A silent
+    // "we didn't find uart_tx/uart_rx" is one of the failure modes
+    // that's hard to spot from the Logs tab otherwise.
+    bool got_poll = false;
+    bool got_pins = false;
+
     const char* p = strstr(json_start, "\"poll_interval_ms\"");
     if (p && p < json_end) {
         p = strchr(p, ':');
@@ -330,6 +347,7 @@ static bool fas100_drv_parse_json(const char* json_start, const char* json_end,
             p++;
             while (*p == ' ') p++;
             config->params.fas100.poll_interval_ms = (uint8_t)atoi(p);
+            got_poll = true;
         }
     }
 
@@ -338,6 +356,25 @@ static bool fas100_drv_parse_json(const char* json_start, const char* json_end,
         fas100_tx_pin = tx;
         fas100_rx_pin = rx;
         fas100_uart_instance = inst;
+        got_pins = true;
+    }
+
+    // Per-channel parse_json fires 4 times for a FAS100 (one per
+    // channel); the JSON contents are identical each call, so only
+    // log on channel 0 to avoid 4 identical lines per sync.
+    if (config->gpio == FAS100_VIRTUAL_GPIO_BASE + FAS100_CH_CURRENT) {
+        if (got_pins) {
+            saint_log_publish("info",
+                "FAS100 sync: pins TX=%d RX=%d (UART%d), poll=%d ms",
+                fas100_tx_pin, fas100_rx_pin, fas100_uart_instance,
+                got_poll ? config->params.fas100.poll_interval_ms
+                         : poll_interval_ms);
+        } else {
+            saint_log_publish("warn",
+                "FAS100 sync: didn't find uart_tx/uart_rx in JSON — "
+                "driver will keep using TX=%d RX=%d",
+                fas100_tx_pin, fas100_rx_pin);
+        }
     }
     return true;
 }
