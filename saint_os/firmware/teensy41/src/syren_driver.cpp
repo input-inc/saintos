@@ -265,14 +265,6 @@ static void syren_drv_estop(void)
     Serial.printf("SyRen: ESTOP - all channels stopped\n");
 }
 
-static int syren_drv_caps_json(uint8_t channel, char* buf, size_t remaining)
-{
-    uint8_t gpio = SYREN_VIRTUAL_GPIO_BASE + channel;
-    return snprintf(buf, remaining,
-        "{\"gpio\":%d,\"name\":\"SY%d\",\"capabilities\":[\"syren_motor\"]}",
-        gpio, channel);
-}
-
 static bool syren_drv_save(void* storage_ptr)
 {
     flash_storage_data_t* storage = (flash_storage_data_t*)storage_ptr;
@@ -357,7 +349,6 @@ static const peripheral_driver_t syren_peripheral = {
     .apply_config      = syren_drv_apply_config,
     .parse_json_params = syren_drv_parse_json,
     .estop             = syren_drv_estop,
-    .capabilities_to_json = syren_drv_caps_json,
     .save_config       = syren_drv_save,
     .load_config       = syren_drv_load,
 };

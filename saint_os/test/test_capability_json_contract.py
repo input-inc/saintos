@@ -1,17 +1,11 @@
-"""Shape contract: what `pin_config_capabilities_to_json()` MUST produce.
+"""Legacy capability-JSON shape contract.
 
-This isn't a test of the firmware's C code (that needs Pico SDK header
-stubbing — separate effort). It's a contract test: the JSON shape the
-server expects FROM the firmware, written down so:
-
-  * If the server's ingestion logic ever drifts, this fails.
-  * If/when we get host-compilation working for pin_config.c, the C
-    test runner can produce a JSON and assert it satisfies this same
-    shape contract (jsonschema-style).
-
-The capability JSON ships as the body of std_msgs/String on
-/saint/nodes/<node_id>/capabilities. The server's
-StateManager.update_node_capabilities() parses it.
+Current firmware doesn't emit a capability JSON — the server derives
+pin layout from config/boards/<chip>/<board>.yaml once the node is
+adopted with a board_id. The server's update_node_capabilities()
+still accepts this format from older firmware as a fallback, so this
+contract documents what those older firmwares produce and what the
+server's ingestion path will tolerate.
 """
 from __future__ import annotations
 

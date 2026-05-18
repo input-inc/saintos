@@ -76,7 +76,6 @@ static rclc_executor_t executor;
 
 // Publishers
 static rcl_publisher_t announcement_pub;
-static rcl_publisher_t capabilities_pub;
 static rcl_publisher_t state_pub;
 
 // Subscribers
@@ -91,10 +90,6 @@ static rcl_timer_t state_timer;
 static std_msgs__msg__String announcement_msg;
 static char announcement_buffer[512];
 
-// NOTE: Current Msg is over 4K in size
-static std_msgs__msg__String capabilities_msg;
-static char capabilities_buffer[10 *1024];
-
 static std_msgs__msg__String config_msg;
 static char config_buffer[2048];
 
@@ -103,9 +98,6 @@ static char control_buffer[512];
 
 static std_msgs__msg__String state_msg;
 static char state_buffer[2048];
-
-// Flags
-static bool capabilities_requested = false;
 
 #define STATE_PUBLISH_INTERVAL_MS 100
 
@@ -146,12 +138,6 @@ static void config_subscription_callback(const void* msgin)
                    (int)(msg->data.size < 100 ? msg->data.size : 100),
                    msg->data.data);
 
-    if (strstr(msg->data.data, "\"action\":\"request_capabilities\"") ||
-        strstr(msg->data.data, "\"action\": \"request_capabilities\"")) {
-        capabilities_requested = true;
-        return;
-    }
-
     if (strstr(msg->data.data, "\"action\":\"configure\"") ||
         strstr(msg->data.data, "\"action\": \"configure\"")) {
         if (pin_config_apply_json(msg->data.data, msg->data.size)) {
@@ -163,7 +149,6 @@ static void config_subscription_callback(const void* msgin)
                 node_set_state(NODE_STATE_ACTIVE);
                 led_set_state(NODE_STATE_ACTIVE);
             }
-            capabilities_requested = true;
         }
     }
 }
@@ -323,23 +308,6 @@ static void control_subscription_callback(const void* msgin)
 // Publishing
 // ============================================================================
 
-static void publish_capabilities(void)
-{
-    int len = pin_config_capabilities_to_json(
-        capabilities_buffer, sizeof(capabilities_buffer), g_node.node_id);
-    if (len < 0) 
-    {
-        Serial.printf("Failed to generate capabilities JSON\n");
-        return;
-    }
-
-    capabilities_msg.data.data = capabilities_buffer;
-    capabilities_msg.data.size = (size_t)len;
-    capabilities_msg.data.capacity = sizeof(capabilities_buffer);
-
-    rcl_publish(&capabilities_pub, &capabilities_msg, NULL);
-}
-
 static void publish_state(void)
 {
     pin_control_update_state();
@@ -367,11 +335,6 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
 {
     (void)last_call_time;
     if (!timer) return;
-
-    if (capabilities_requested) {
-        capabilities_requested = false;
-        publish_capabilities();
-    }
 
     if (g_node.state != NODE_STATE_UNADOPTED && g_node.state != NODE_STATE_ACTIVE) {
         return;
@@ -466,15 +429,8 @@ static bool init_micro_ros(void)
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), "/saint/nodes/announce");
     if (ret != RCL_RET_OK) return false;
 
-    // Capabilities publisher
-    char topic[64];
-    snprintf(topic, sizeof(topic), "/saint/nodes/%s/capabilities", g_node.node_id);
-    for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
-    ret = rclc_publisher_init_default(&capabilities_pub, &ros_node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic);
-    if (ret != RCL_RET_OK) return false;
-
     // Config subscriber
+    char topic[64];
     snprintf(topic, sizeof(topic), "/saint/nodes/%s/config", g_node.node_id);
     for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
     ret = rclc_subscription_init_default(&config_sub, &ros_node,
@@ -530,7 +486,6 @@ static void cleanup_micro_ros(void)
     rcl_subscription_fini(&control_sub, &ros_node);
     rcl_subscription_fini(&config_sub, &ros_node);
     rcl_publisher_fini(&state_pub, &ros_node);
-    rcl_publisher_fini(&capabilities_pub, &ros_node);
     rcl_publisher_fini(&announcement_pub, &ros_node);
     rcl_timer_fini(&state_timer);
     rcl_timer_fini(&announce_timer);
@@ -596,7 +551,6 @@ static bool check_agent_connection(void)
         last_successful_comm = now;
         reconnect_attempts = 0;
         led_set_state(g_node.state);
-        capabilities_requested = true;
     }
 
     return agent_connected;

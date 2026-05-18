@@ -1,6 +1,6 @@
 # Board definition: Adafruit Feather RP2040 + Ethernet FeatherWing (W5500).
 #
-# Layers on top of ../global.conf for the rp2040 chip. Says which of
+# Layers on top of ../global.yaml for the rp2040 chip. Says which of
 # the chip's GPIOs are exposed at the Feather's header pads (the
 # operator-configurable set), which are reserved by the FeatherWing
 # stack (W5500 SPI, NeoPixel), and what built-in peripherals exist.
@@ -12,7 +12,7 @@ builtin: true        # shipped with SAINT.OS — UI marks uneditable
 
 # Pins broken out to header pads, in the order Adafruit silkscreens
 # them. The operator picks from these in the Peripherals tab. Names
-# override default_name from the chip's global.conf so the UI shows
+# override default_name from the chip's global.yaml so the UI shows
 # "D5" / "TX" / "A0" instead of "GP5" / "GP0" / "GP26".
 available_pins:
   - {gpio:  0, name: "TX"}

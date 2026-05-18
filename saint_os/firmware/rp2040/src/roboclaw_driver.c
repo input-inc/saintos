@@ -447,20 +447,6 @@ static void roboclaw_drv_estop(void)
     PLATFORM_PRINTF("RoboClaw: ESTOP - all units stopped\n");
 }
 
-static int roboclaw_drv_caps_json(uint8_t channel, char* buf, size_t remaining)
-{
-    uint16_t gpio = ROBOCLAW_VIRTUAL_GPIO_BASE + channel;
-    uint8_t unit = channel / ROBOCLAW_CHANNELS_PER_UNIT;
-    uint8_t sub = channel % ROBOCLAW_CHANNELS_PER_UNIT;
-
-    static const char* sub_names[] = {"Motor", "Encoder", "Voltage", "Current", "Temp"};
-    const char* sub_name = (sub < 5) ? sub_names[sub] : "?";
-
-    return snprintf(buf, remaining,
-        "{\"gpio\":%d,\"name\":\"RC%d_%s\",\"capabilities\":[\"roboclaw_motor\"]}",
-        gpio, unit, sub_name);
-}
-
 static bool roboclaw_drv_save(void* storage_ptr)
 {
     flash_storage_data_t* storage = (flash_storage_data_t*)storage_ptr;
@@ -538,7 +524,6 @@ static const peripheral_driver_t roboclaw_peripheral = {
     .apply_config      = roboclaw_drv_apply_config,
     .parse_json_params = roboclaw_drv_parse_json,
     .estop             = roboclaw_drv_estop,
-    .capabilities_to_json = roboclaw_drv_caps_json,
     .save_config       = roboclaw_drv_save,
     .load_config       = roboclaw_drv_load,
 };

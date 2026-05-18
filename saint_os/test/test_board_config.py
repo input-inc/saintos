@@ -28,7 +28,7 @@ def _write(path, text):
 def boards_root(tmp_path):
     """Synthetic chip + board layout under a temp dir."""
     root = tmp_path / "boards"
-    _write(str(root / "rp2040" / "global.conf"), """
+    _write(str(root / "rp2040" / "global.yaml"), """
         chip_family: rp2040
         display_name: "Test RP2040"
         chip_id_value: 0x927CC777
@@ -164,7 +164,7 @@ class TestShippedConfigs:
         m = BoardConfigManager(root)
         chip = m.get_chip("rp2040")
         board = m.get_board("feather_rp2040_w5500")
-        assert chip is not None, "chip global.conf failed to load"
+        assert chip is not None, "chip global.yaml failed to load"
         assert board is not None, "board YAML failed to load"
         view = derive_capabilities(chip, board)
         gpios = {p["gpio"] for p in view["pins"]}

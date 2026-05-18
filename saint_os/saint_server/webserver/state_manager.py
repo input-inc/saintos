@@ -381,7 +381,7 @@ class NodeInfo:
     display_name: str = ""
     role: str = ""
     # Chip family the node announced (e.g. "rp2040"). The server matches
-    # this against ``config/boards/<chip_family>/global.conf``.
+    # this against ``config/boards/<chip_family>/global.yaml``.
     chip_family: str = ""
     # Board the operator picked at adoption time (e.g. "feather_rp2040_w5500").
     # Pin layout, reserved pins, and built-in peripherals are derived from

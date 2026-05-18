@@ -386,19 +386,6 @@ static void maestro_drv_estop(void)
     }
 }
 
-static int maestro_drv_caps_json(uint8_t channel, char* buf, size_t remaining)
-{
-    if (channel >= MAESTRO_MAX_CHANNELS || !buf) return -1;
-
-    char name[8];
-    int gpio = MAESTRO_VIRTUAL_GPIO_BASE + channel;
-    snprintf(name, sizeof(name), "M%d", channel);
-
-    return snprintf(buf, remaining,
-        "{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[\"maestro_servo\"]}",
-        gpio, name);
-}
-
 static bool maestro_drv_save(void* storage)
 {
     flash_storage_data_t* s = (flash_storage_data_t*)storage;
@@ -461,7 +448,6 @@ static const peripheral_driver_t maestro_peripheral = {
     .apply_config     = maestro_drv_apply_config,
     .parse_json_params = maestro_drv_parse_json,
     .estop            = maestro_drv_estop,
-    .capabilities_to_json = maestro_drv_caps_json,
     .save_config      = maestro_drv_save,
     .load_config      = maestro_drv_load,
 };

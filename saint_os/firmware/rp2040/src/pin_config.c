@@ -16,63 +16,18 @@
 #include "pin_config.h"
 #include "flash_storage.h"
 #include "saint_node.h"
-#include "uart_pin_pairs.h"
 #include "peripheral_driver.h"
-
-// =============================================================================
-// Available Pins Definition (Feather RP2040 + Ethernet FeatherWing)
-// =============================================================================
-
-// Pins available for user configuration
-static const pin_definition_t available_pins[] = {
-    // Digital pins with PWM capability
-    { 5,  "D5",  PIN_CAP_GPIO_PWM },
-    { 6,  "D6",  PIN_CAP_GPIO_PWM },
-    { 9,  "D9",  PIN_CAP_GPIO_PWM },
-    { 12, "D12", PIN_CAP_GPIO_PWM },
-    { 13, "D13", PIN_CAP_GPIO_PWM },     // Also onboard LED
-    { 24, "D24", PIN_CAP_GPIO_PWM },
-    { 25, "D25", PIN_CAP_GPIO_PWM },
-
-    // Analog pins (ADC + digital + PWM)
-    { 26, "A0",  PIN_CAP_GPIO_PWM | PIN_CAP_ADC },
-    { 27, "A1",  PIN_CAP_GPIO_PWM | PIN_CAP_ADC },
-    { 28, "A2",  PIN_CAP_GPIO_PWM | PIN_CAP_ADC },
-    { 29, "A3",  PIN_CAP_GPIO_PWM | PIN_CAP_ADC },
-
-    // I2C pins
-    { 2,  "SDA", PIN_CAP_GPIO_PWM | PIN_CAP_I2C_SDA },
-    { 3,  "SCL", PIN_CAP_GPIO_PWM | PIN_CAP_I2C_SCL },
-
-    // UART pins
-    { 0,  "TX",  PIN_CAP_GPIO_PWM | PIN_CAP_UART_TX },
-    { 1,  "RX",  PIN_CAP_GPIO_PWM | PIN_CAP_UART_RX },
-};
-
-#define AVAILABLE_PIN_COUNT (sizeof(available_pins) / sizeof(available_pins[0]))
-
-// Reserved pins (used by system - ethernet, NeoPixel, etc.)
-static const uint8_t reserved_pins[] = {
-    10,     // ETH_PIN_CS
-    11,     // ETH_PIN_RST
-    16,     // NEOPIXEL_PIN
-    18,     // ETH_PIN_SCK
-    19,     // ETH_PIN_MOSI
-    20,     // ETH_PIN_MISO
-};
-
-#define RESERVED_PIN_COUNT (sizeof(reserved_pins) / sizeof(reserved_pins[0]))
 
 // =============================================================================
 // Static Variables
 // =============================================================================
-
-static node_pin_capabilities_t node_capabilities = {
-    .available_pins = available_pins,
-    .available_count = AVAILABLE_PIN_COUNT,
-    .reserved_pins = reserved_pins,
-    .reserved_count = RESERVED_PIN_COUNT
-};
+//
+// Available + reserved pin tables used to live here as static arrays
+// hardcoded for the Feather RP2040 + Ethernet FeatherWing. They now
+// live in saint_os/config/boards/rp2040/feather_rp2040_w5500.yaml on
+// the server, and the server validates peripheral assignments against
+// that file before pushing the configure message. The firmware just
+// trusts the incoming peripheral list and wires the hardware.
 
 // Current pin configurations (runtime state)
 static pin_config_t pin_configs[PIN_CONFIG_MAX_PINS];
@@ -107,53 +62,6 @@ static const char* mode_strings[] = {
 // =============================================================================
 
 /**
- * Scratch space for peripheral virtual pin definitions.
- */
-static pin_definition_t virtual_pin_scratch;
-
-/**
- * Find pin definition by GPIO number.
- * Searches physical pins first, then registered peripheral virtual pins.
- */
-static const pin_definition_t* find_pin_definition(uint8_t gpio)
-{
-    for (size_t i = 0; i < AVAILABLE_PIN_COUNT; i++) {
-        if (available_pins[i].gpio == gpio) {
-            return &available_pins[i];
-        }
-    }
-
-    // Check peripheral virtual pins
-    const peripheral_driver_t* drv = peripheral_find_by_gpio(gpio);
-    if (drv) {
-        uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
-        virtual_pin_scratch.gpio = gpio;
-        virtual_pin_scratch.capabilities = (uint16_t)drv->capability_flag;
-        snprintf(virtual_pin_scratch.name, sizeof(virtual_pin_scratch.name),
-                 "%s%d",
-                 (drv->pin_mode == PIN_MODE_MAESTRO_SERVO) ? "M" :
-                 (drv->pin_mode == PIN_MODE_SYREN_MOTOR) ? "SY" : "P",
-                 ch);
-        return &virtual_pin_scratch;
-    }
-
-    return NULL;
-}
-
-/**
- * Check if GPIO is reserved.
- */
-static bool is_pin_reserved(uint8_t gpio)
-{
-    for (size_t i = 0; i < RESERVED_PIN_COUNT; i++) {
-        if (reserved_pins[i] == gpio) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/**
  * Find or create config entry for GPIO.
  */
 static pin_config_t* find_or_create_config(uint8_t gpio)
@@ -177,59 +85,6 @@ static pin_config_t* find_or_create_config(uint8_t gpio)
     return NULL;
 }
 
-/**
- * Check if mode is compatible with pin capabilities.
- */
-static bool is_mode_compatible(uint16_t capabilities, pin_mode_t mode)
-{
-    switch (mode) {
-        case PIN_MODE_UNCONFIGURED:
-            return true;
-        case PIN_MODE_DIGITAL_IN:
-            return (capabilities & PIN_CAP_DIGITAL_IN) != 0;
-        case PIN_MODE_DIGITAL_OUT:
-            return (capabilities & PIN_CAP_DIGITAL_OUT) != 0;
-        case PIN_MODE_PWM:
-        case PIN_MODE_SERVO:
-            return (capabilities & PIN_CAP_PWM) != 0;
-        case PIN_MODE_ADC:
-            return (capabilities & PIN_CAP_ADC) != 0;
-        case PIN_MODE_I2C_SDA:
-            return (capabilities & PIN_CAP_I2C_SDA) != 0;
-        case PIN_MODE_I2C_SCL:
-            return (capabilities & PIN_CAP_I2C_SCL) != 0;
-        case PIN_MODE_UART_TX:
-            return (capabilities & PIN_CAP_UART_TX) != 0;
-        case PIN_MODE_UART_RX:
-            return (capabilities & PIN_CAP_UART_RX) != 0;
-        default:
-        {
-            const peripheral_driver_t* drv = peripheral_find_by_mode(mode);
-            if (drv) {
-                return (capabilities & drv->capability_flag) != 0;
-            }
-            return false;
-        }
-    }
-}
-
-/**
- * Simple JSON string escape (escapes quotes and backslashes).
- */
-static void json_escape_string(char* dest, size_t dest_size, const char* src)
-{
-    size_t di = 0;
-    for (size_t si = 0; src[si] && di < dest_size - 1; si++) {
-        if (src[si] == '"' || src[si] == '\\') {
-            if (di < dest_size - 2) {
-                dest[di++] = '\\';
-            }
-        }
-        dest[di++] = src[si];
-    }
-    dest[di] = '\0';
-}
-
 // =============================================================================
 // Public API Implementation
 // =============================================================================
@@ -244,15 +99,9 @@ void pin_config_init(void)
     // Initialize ADC hardware
     adc_init();
 
-    printf("Pin config: initialized (%d available, %d reserved)\n",
-           AVAILABLE_PIN_COUNT, RESERVED_PIN_COUNT);
+    printf("Pin config: initialized\n");
 
     initialized = true;
-}
-
-const node_pin_capabilities_t* pin_config_get_capabilities(void)
-{
-    return &node_capabilities;
 }
 
 const pin_config_t* pin_config_get(uint8_t gpio)
@@ -271,155 +120,6 @@ const pin_config_t* pin_config_get_all(uint8_t* count)
         *count = pin_config_count;
     }
     return pin_configs;
-}
-
-/**
- * Helper: Build capability string list for a pin's capabilities bitmask.
- */
-static int build_caps_string(uint16_t capabilities, char* caps_str, size_t caps_size)
-{
-    int caps_len = 0;
-
-    struct { uint16_t flag; const char* name; } cap_map[] = {
-        { PIN_CAP_DIGITAL_IN,  "digital_in" },
-        { PIN_CAP_DIGITAL_OUT, "digital_out" },
-        { PIN_CAP_PWM,         "pwm" },
-        { PIN_CAP_ADC,         "adc" },
-        { PIN_CAP_I2C_SDA,     "i2c_sda" },
-        { PIN_CAP_I2C_SCL,     "i2c_scl" },
-        { PIN_CAP_UART_TX,     "uart_tx" },
-        { PIN_CAP_UART_RX,     "uart_rx" },
-    };
-
-    for (size_t j = 0; j < sizeof(cap_map) / sizeof(cap_map[0]); j++) {
-        if (capabilities & cap_map[j].flag) {
-            caps_len += snprintf(caps_str + caps_len, caps_size - caps_len,
-                "%s\"%s\"", caps_len > 0 ? "," : "", cap_map[j].name);
-        }
-    }
-
-    // Peripheral capability flags
-    for (uint8_t d = 0; d < peripheral_get_count(); d++) {
-        const peripheral_driver_t* drv = peripheral_get(d);
-        if (drv && (capabilities & drv->capability_flag)) {
-            caps_len += snprintf(caps_str + caps_len, caps_size - caps_len,
-                "%s\"%s\"", caps_len > 0 ? "," : "", drv->mode_string);
-        }
-    }
-
-    return caps_len;
-}
-
-int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char* node_id)
-{
-    if (!buffer || buffer_size < 256) return -1;
-
-    int written = 0;
-    int ret;
-    bool first_pin = true;
-
-    // Start JSON object
-    ret = snprintf(buffer + written, buffer_size - written,
-        "{\"node_id\":\"%s\",\"pins\":[", node_id);
-    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-    written += ret;
-
-    // Write physical pins
-    for (size_t i = 0; i < AVAILABLE_PIN_COUNT; i++) {
-        const pin_definition_t* pin = &available_pins[i];
-
-        char caps_str[256] = "";
-        build_caps_string(pin->capabilities, caps_str, sizeof(caps_str));
-
-        ret = snprintf(buffer + written, buffer_size - written,
-            "%s{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[%s]}",
-            first_pin ? "" : ",", pin->gpio, pin->name, caps_str);
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-        written += ret;
-        first_pin = false;
-    }
-
-    // Write virtual pins from registered peripheral drivers
-    for (uint8_t d = 0; d < peripheral_get_count(); d++) {
-        const peripheral_driver_t* drv = peripheral_get(d);
-        if (!drv) continue;
-
-        for (uint8_t ch = 0; ch < drv->channel_count; ch++) {
-            if (drv->capabilities_to_json) {
-                ret = snprintf(buffer + written, buffer_size - written,
-                    "%s", first_pin ? "" : ",");
-                if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-                written += ret;
-
-                int frag = drv->capabilities_to_json(ch, buffer + written,
-                                                      buffer_size - written);
-                if (frag < 0) return -1;
-                written += frag;
-            } else {
-                uint16_t gpio = drv->virtual_gpio_base + ch;
-                char pin_name[8];
-                snprintf(pin_name, sizeof(pin_name), "P%d", ch);
-
-                ret = snprintf(buffer + written, buffer_size - written,
-                    "%s{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[\"%s\"]}",
-                    first_pin ? "" : ",", gpio, pin_name, drv->mode_string);
-                if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-                written += ret;
-            }
-            first_pin = false;
-        }
-    }
-
-    // Write reserved pins array
-    ret = snprintf(buffer + written, buffer_size - written, "],\"reserved_pins\":[");
-    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-    written += ret;
-
-    for (size_t i = 0; i < RESERVED_PIN_COUNT; i++) {
-        ret = snprintf(buffer + written, buffer_size - written,
-            "%s%d", i > 0 ? "," : "", reserved_pins[i]);
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-        written += ret;
-    }
-
-    // Write UART pin pairs the platform supports
-    ret = snprintf(buffer + written, buffer_size - written, "],\"uart_pairs\":[");
-    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-    written += ret;
-
-    size_t pair_count = 0;
-    const uart_pin_pair_t* pairs = uart_pin_pairs_table(&pair_count);
-    for (size_t i = 0; i < pair_count; i++) {
-        ret = snprintf(buffer + written, buffer_size - written,
-            "%s{\"uart\":%d,\"tx\":%d,\"rx\":%d}",
-            i > 0 ? "," : "",
-            pairs[i].uart_instance, pairs[i].tx_pin, pairs[i].rx_pin);
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-        written += ret;
-    }
-
-    // Built-in peripherals: hardware that's permanently wired onto this
-    // board. The server seeds these into the operator's peripheral list
-    // on receipt so they show up alongside operator-added peripherals.
-    //
-    // Feather RP2040 has one onboard WS2812 NeoPixel on GP16.
-    ret = snprintf(buffer + written, buffer_size - written,
-        "],\"builtin_peripherals\":[{"
-        "\"id\":\"onboard_neopixel\","
-        "\"type\":\"neopixel\","
-        "\"label\":\"Onboard NeoPixel\","
-        "\"pins\":{\"data\":16},"
-        "\"params\":{}"
-        "}");
-    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-    written += ret;
-
-    // Close JSON
-    ret = snprintf(buffer + written, buffer_size - written, "]}");
-    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-    written += ret;
-
-    return written;
 }
 
 // =============================================================================
@@ -891,25 +591,10 @@ bool pin_config_has_configured_pins(void)
 
 bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
 {
-    // Verify GPIO is available
-    const pin_definition_t* def = find_pin_definition(gpio);
-    if (!def) {
-        printf("Pin config: GPIO %d not available\n", gpio);
-        return false;
-    }
-
-    // Verify pin is not reserved
-    if (is_pin_reserved(gpio)) {
-        printf("Pin config: GPIO %d is reserved\n", gpio);
-        return false;
-    }
-
-    // Verify mode is compatible
-    if (!is_mode_compatible(def->capabilities, mode)) {
-        printf("Pin config: mode %s not compatible with GPIO %d\n",
-               pin_mode_to_string(mode), gpio);
-        return false;
-    }
+    // Validation against pin tables used to live here. The server now
+    // owns that — it checks against config/boards/<chip>/<board>.yaml
+    // before sending the configure message, so we just trust whatever
+    // (gpio, mode) pair arrives.
 
     // Find or create config entry
     pin_config_t* cfg = find_or_create_config(gpio);

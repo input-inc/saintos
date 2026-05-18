@@ -48,9 +48,6 @@ typedef struct peripheral_driver {
     // Emergency stop
     void (*estop)(void);
 
-    // Capabilities JSON fragment (returns bytes written, -1 on error)
-    int (*capabilities_to_json)(uint8_t channel, char* buf, size_t remaining);
-
     // Flash persistence
     bool (*save_config)(void* storage);
     bool (*load_config)(const void* storage);

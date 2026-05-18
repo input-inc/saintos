@@ -52,7 +52,9 @@ def _adopt(sm: StateManager, node_id: str = "rp2040_TEST01"):
 
 
 def _sample_capabilities(node_id: str = "rp2040_TEST01") -> dict:
-    """Shape of the JSON the firmware sends from pin_config_capabilities_to_json."""
+    """Legacy capability JSON — current firmware doesn't emit this any more;
+    the server derives pins from board YAML once a board_id is assigned.
+    Kept as a shape sample for the ingestion-fallback path."""
     return {
         "node_id": node_id,
         "pins": [

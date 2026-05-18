@@ -2,7 +2,7 @@
 
 Reads the YAML files under ``saint_os/config/boards/<chip_family>/``:
 
-  - ``global.conf`` per directory: the chip-family definition (what's
+  - ``global.yaml`` per directory: the chip-family definition (what's
     possible at the silicon level — every legal GPIO, every legal UART
     pair, ADC pins, the chip_id_value the firmware can sanity-check
     against).
@@ -54,7 +54,7 @@ class ChipPinCapability:
 
 @dataclass
 class ChipConfig:
-    """Parsed contents of ``<chip>/global.conf``."""
+    """Parsed contents of ``<chip>/global.yaml``."""
     chip_family: str
     display_name: str
     description: str = ""
@@ -241,7 +241,7 @@ def derive_capabilities(chip: ChipConfig, board: BoardConfig) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-GLOBAL_CONF_FILENAME = "global.conf"
+GLOBAL_CHIP_FILENAME = "global.yaml"
 
 
 class BoardConfigManager:
@@ -274,9 +274,9 @@ class BoardConfigManager:
             self._load_chip_dir(chip_dir)
 
     def _load_chip_dir(self, chip_dir: str) -> None:
-        global_path = os.path.join(chip_dir, GLOBAL_CONF_FILENAME)
+        global_path = os.path.join(chip_dir, GLOBAL_CHIP_FILENAME)
         if not os.path.isfile(global_path):
-            self._warn(f"Chip directory missing {GLOBAL_CONF_FILENAME}: {chip_dir}")
+            self._warn(f"Chip directory missing {GLOBAL_CHIP_FILENAME}: {chip_dir}")
             return
         try:
             with open(global_path, "r") as f:
@@ -287,7 +287,7 @@ class BoardConfigManager:
         self.chips[chip.chip_family] = chip
 
         for fname in sorted(os.listdir(chip_dir)):
-            if fname == GLOBAL_CONF_FILENAME:
+            if fname == GLOBAL_CHIP_FILENAME:
                 continue
             if not fname.endswith((".yaml", ".yml")):
                 continue
@@ -357,7 +357,7 @@ class BoardConfigManager:
         if not chip:
             return {"success": False,
                     "message": f"Unknown chip_family '{chip_family}' "
-                               f"(no global.conf under boards/{chip_family}/)"}
+                               f"(no global.yaml under boards/{chip_family}/)"}
 
         # Existing built-in? Refuse.
         existing = self.get_board(board_id)

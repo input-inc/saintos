@@ -383,22 +383,6 @@ static void bms_drv_estop(void)
     PLATFORM_PRINTF("Pathfinder BMS: ESTOP (no action needed for read-only sensor)\n");
 }
 
-static int bms_drv_caps_json(uint8_t channel, char* buf, size_t remaining)
-{
-    uint16_t gpio = JBD_BMS_VIRTUAL_GPIO_BASE + channel;
-
-    const char* names[] = {
-        "PackV", "Amps", "SOC", "RemCap", "Tmp1", "Tmp2", "Cyc", "Prot",
-        "Cel01", "Cel02", "Cel03", "Cel04", "Cel05", "Cel06", "Cel07", "Cel08",
-        "Cel09", "Cel10", "Cel11", "Cel12", "Cel13", "Cel14", "Cel15", "Cel16"
-    };
-    const char* name = (channel < JBD_BMS_CHANNEL_COUNT) ? names[channel] : "???";
-
-    return snprintf(buf, remaining,
-        "{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[\"pathfinder_bms_sensor\"]}",
-        gpio, name);
-}
-
 static bool bms_drv_save(void* storage_ptr)
 {
     flash_storage_data_t* storage = (flash_storage_data_t*)storage_ptr;
@@ -460,7 +444,6 @@ static const peripheral_driver_t pathfinder_bms_peripheral = {
     .apply_config      = bms_drv_apply_config,
     .parse_json_params = bms_drv_parse_json,
     .estop             = bms_drv_estop,
-    .capabilities_to_json = bms_drv_caps_json,
     .save_config       = bms_drv_save,
     .load_config       = bms_drv_load,
 };

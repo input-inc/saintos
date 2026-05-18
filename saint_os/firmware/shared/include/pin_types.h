@@ -75,16 +75,6 @@ typedef enum {
 #define PIN_CONFIG_SERVO_MAX_PULSE_US   2500    // 2.5ms
 
 // =============================================================================
-// Pin Definition Structure
-// =============================================================================
-
-typedef struct {
-    uint8_t gpio;
-    char name[8];
-    uint16_t capabilities;
-} pin_definition_t;
-
-// =============================================================================
 // Pin Configuration Structure
 // =============================================================================
 
@@ -157,25 +147,12 @@ typedef struct __attribute__((packed)) {
 } pin_config_storage_t;
 
 // =============================================================================
-// Node Capabilities Structure
-// =============================================================================
-
-typedef struct {
-    const pin_definition_t* available_pins;
-    uint8_t available_count;
-    const uint8_t* reserved_pins;
-    uint8_t reserved_count;
-} node_pin_capabilities_t;
-
-// =============================================================================
 // Function Declarations (per-platform implementations)
 // =============================================================================
 
 void pin_config_init(void);
-const node_pin_capabilities_t* pin_config_get_capabilities(void);
 const pin_config_t* pin_config_get(uint8_t gpio);
 const pin_config_t* pin_config_get_all(uint8_t* count);
-int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char* node_id);
 bool pin_config_apply_json(const char* json, size_t json_len);
 bool pin_config_save(void);
 bool pin_config_load(void);

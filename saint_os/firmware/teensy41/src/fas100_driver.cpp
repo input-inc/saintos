@@ -266,17 +266,6 @@ static void fas100_drv_estop(void)
     Serial.printf("FAS100: ESTOP (no action needed for read-only sensor)\n");
 }
 
-static int fas100_drv_caps_json(uint8_t channel, char* buf, size_t remaining)
-{
-    uint8_t gpio = FAS100_VIRTUAL_GPIO_BASE + channel;
-    const char* names[] = { "AMPS", "VOLTS", "TMP1", "TMP2" };
-    const char* name = (channel < 4) ? names[channel] : "???";
-
-    return snprintf(buf, remaining,
-        "{\"gpio\":%d,\"name\":\"%s\",\"capabilities\":[\"fas100_sensor\"]}",
-        gpio, name);
-}
-
 static bool fas100_drv_save(void* storage_ptr)
 {
     flash_storage_data_t* storage = (flash_storage_data_t*)storage_ptr;
@@ -338,7 +327,6 @@ static const peripheral_driver_t fas100_peripheral = {
     .apply_config      = fas100_drv_apply_config,
     .parse_json_params = fas100_drv_parse_json,
     .estop             = fas100_drv_estop,
-    .capabilities_to_json = fas100_drv_caps_json,
     .save_config       = fas100_drv_save,
     .load_config       = fas100_drv_load,
 };
