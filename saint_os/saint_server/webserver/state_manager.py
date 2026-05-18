@@ -1349,19 +1349,15 @@ class StateManager:
     # =========================================================================
 
     def _get_firmware_dir(self) -> Optional[str]:
-        """Get the firmware build directory path."""
-        # Method 1: Try relative to this file (saint_server/webserver/state_manager.py)
-        # Path: ../.. -> saint_os, then firmware/rp2040
+        """Locate the RP2040 firmware *source* directory (parent of build/)."""
         current_dir = os.path.dirname(__file__)
         firmware_dir = os.path.abspath(os.path.join(current_dir, '..', '..', 'firmware', 'rp2040'))
         if os.path.isdir(firmware_dir):
             return firmware_dir
 
-        # Method 2: Try to find firmware directory relative to ROS2 package
         try:
             from ament_index_python.packages import get_package_share_directory
             package_dir = get_package_share_directory('saint_os')
-            # install/saint_os/share/saint_os -> source/saint_os/firmware/rp2040
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(package_dir))))
             firmware_dir = os.path.join(base_dir, 'saint_os', 'firmware', 'rp2040')
             if os.path.isdir(firmware_dir):
@@ -1369,7 +1365,6 @@ class StateManager:
         except Exception:
             pass
 
-        # Method 3: Check common development paths
         dev_paths = [
             os.path.expanduser('~/Projects/OpenSAINT/SaintOS/source/saint_os/firmware/rp2040'),
             '/opt/saint_os/firmware/rp2040',
@@ -1379,6 +1374,47 @@ class StateManager:
                 return path
 
         return None
+
+    def _firmware_artifact_dirs(self) -> List[Tuple[str, str]]:
+        """Candidate directories holding RP2040 .elf/.uf2 artifacts.
+
+        Returns a list of (build_type, dir_path) tuples in priority order:
+            - ``saint_os/resources/firmware/rp2040`` — the production install
+              location, populated by build-local-dist.sh / the CI tarball
+              into ``/opt/saint-os/resources/firmware/rp2040``.
+            - ``firmware/rp2040/build`` — what ``./build.sh hw`` writes in
+              dev. (``build_hardware`` was an older path; kept for compat
+              with anyone still using it.)
+            - ``firmware/rp2040/build_sim`` — sim build output.
+        """
+        candidates: List[Tuple[str, str]] = []
+
+        # Resource artifact paths (production-style and dev-fallback)
+        here = os.path.dirname(__file__)
+        resource_candidates = [
+            str(_INSTALL_PREFIX / 'resources' / 'firmware' / 'rp2040'),
+            os.path.abspath(os.path.join(here, '..', '..', 'resources', 'firmware', 'rp2040')),
+        ]
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            package_dir = get_package_share_directory('saint_os')
+            resource_candidates.append(os.path.join(package_dir, 'resources', 'firmware', 'rp2040'))
+        except Exception:
+            pass
+        for path in resource_candidates:
+            if os.path.isdir(path):
+                candidates.append(('hardware', path))
+
+        # Build-directory paths (dev)
+        fw_src = self._get_firmware_dir()
+        if fw_src:
+            for sub, btype in [('build', 'hardware'),
+                               ('build_hardware', 'hardware'),
+                               ('build_sim', 'simulation')]:
+                p = os.path.join(fw_src, sub)
+                if os.path.isdir(p):
+                    candidates.append((btype, p))
+        return candidates
 
     def _parse_version(self, version_str: str) -> tuple:
         """Parse version string into comparable tuple."""
@@ -1429,17 +1465,16 @@ class StateManager:
             "available": False,
         }
 
-        firmware_dir = self._get_firmware_dir()
-        if not firmware_dir:
-            result["error"] = "Firmware directory not found"
+        candidates = self._firmware_artifact_dirs()
+        firmware_dir = self._get_firmware_dir()  # used for CMakeLists fallback
+        if not candidates:
+            result["error"] = "Firmware artifacts not found"
             return result
 
-        # Try hardware build first, then simulation build
-        for build_type in ['build_hardware', 'build_sim']:
-            build_dir = os.path.join(firmware_dir, build_type)
-            if not os.path.isdir(build_dir):
-                continue
-
+        # Walk candidate dirs in priority order; first one with an
+        # artifact wins. Production install (resources/firmware/rp2040)
+        # ranks above local dev build dirs.
+        for build_type, build_dir in candidates:
             elf_path = os.path.join(build_dir, 'saint_node.elf')
             uf2_path = os.path.join(build_dir, 'saint_node.uf2')
 
@@ -1457,9 +1492,15 @@ class StateManager:
 
             if os.path.isfile(uf2_path):
                 result["uf2_path"] = uf2_path
-                # If we have UF2 but no ELF, calculate hash of UF2
+                result["available"] = True
+                if not result.get("build_type"):
+                    result["build_type"] = build_type
+                # If we have UF2 but no ELF, hash and date come from UF2
                 if not result["file_hash"]:
                     result["file_hash"] = self._calculate_file_md5(uf2_path)
+                if not result["build_date"]:
+                    mtime = os.path.getmtime(uf2_path)
+                    result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
 
             # Try to read version info from generated version.h
             version_h_path = os.path.join(build_dir, 'generated', 'version.h')
@@ -1526,49 +1567,53 @@ class StateManager:
             "build_type": build_type,
         }
 
-        firmware_dir = self._get_firmware_dir()
-        if not firmware_dir:
+        # Walk the same candidate list get_server_firmware_info uses,
+        # but filter to the requested build type.
+        candidates = [(bt, d) for (bt, d) in self._firmware_artifact_dirs()
+                      if bt == build_type]
+        if not candidates:
             return result
 
-        build_dir_name = 'build_sim' if build_type == 'simulation' else 'build_hardware'
-        build_dir = os.path.join(firmware_dir, build_dir_name)
+        for _bt, build_dir in candidates:
+            elf_path = os.path.join(build_dir, 'saint_node.elf')
+            uf2_path = os.path.join(build_dir, 'saint_node.uf2')
 
-        if not os.path.isdir(build_dir):
-            return result
+            if os.path.isfile(elf_path):
+                result["elf_path"] = elf_path
+                result["available"] = True
+                mtime = os.path.getmtime(elf_path)
+                result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
 
-        elf_path = os.path.join(build_dir, 'saint_node.elf')
-        uf2_path = os.path.join(build_dir, 'saint_node.uf2')
+            if os.path.isfile(uf2_path):
+                result["uf2_path"] = uf2_path
+                result["available"] = True
+                if not result["build_date"]:
+                    mtime = os.path.getmtime(uf2_path)
+                    result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
 
-        if os.path.isfile(elf_path):
-            result["elf_path"] = elf_path
-            result["available"] = True
+            # Read version from generated version.h (only present in build dirs)
+            version_h_path = os.path.join(build_dir, 'generated', 'version.h')
+            if os.path.isfile(version_h_path):
+                try:
+                    with open(version_h_path, 'r') as f:
+                        content = f.read()
+                    version_match = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
+                    if version_match:
+                        result["version"] = version_match.group(1)
+                    full_match = re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
+                    if full_match:
+                        result["version_full"] = full_match.group(1)
+                    hash_match = re.search(r'FIRMWARE_GIT_HASH\s+"([^"]+)"', content)
+                    if hash_match:
+                        result["git_hash"] = hash_match.group(1)
+                    build_match = re.search(r'FIRMWARE_BUILD_TIMESTAMP\s+"([^"]+)"', content)
+                    if build_match:
+                        result["build_date"] = build_match.group(1)
+                except Exception:
+                    pass
 
-            mtime = os.path.getmtime(elf_path)
-            result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
-
-        if os.path.isfile(uf2_path):
-            result["uf2_path"] = uf2_path
-
-        # Read version from generated version.h
-        version_h_path = os.path.join(build_dir, 'generated', 'version.h')
-        if os.path.isfile(version_h_path):
-            try:
-                with open(version_h_path, 'r') as f:
-                    content = f.read()
-                version_match = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
-                if version_match:
-                    result["version"] = version_match.group(1)
-                full_match = re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
-                if full_match:
-                    result["version_full"] = full_match.group(1)
-                hash_match = re.search(r'FIRMWARE_GIT_HASH\s+"([^"]+)"', content)
-                if hash_match:
-                    result["git_hash"] = hash_match.group(1)
-                build_match = re.search(r'FIRMWARE_BUILD_TIMESTAMP\s+"([^"]+)"', content)
-                if build_match:
-                    result["build_date"] = build_match.group(1)
-            except Exception:
-                pass
+            if result["available"]:
+                break
 
         return result
 
