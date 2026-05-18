@@ -632,7 +632,10 @@ class PeripheralManager {
     }
 
     async syncToNode() {
-        if (!this.selectedNode) return;
+        if (!this.selectedNode) {
+            alert('No node selected — open a node first.');
+            return;
+        }
         try {
             const result = await window.saintWS.management('sync_node_peripherals', {
                 node_id: this.selectedNode,
@@ -645,6 +648,7 @@ class PeripheralManager {
         } catch (err) {
             console.error('Sync failed:', err);
             this.updateSyncStatus('error');
+            alert('Sync failed: ' + (err.message || err));
         }
     }
 
