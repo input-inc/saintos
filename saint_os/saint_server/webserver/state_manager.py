@@ -865,6 +865,18 @@ class StateManager:
                   if chip_family else self.board_config.list_boards())
         return [b.to_dict() for b in boards]
 
+    def get_board_yaml(self, board_id: str) -> Optional[str]:
+        """Read the raw YAML text for a board (for the Settings editor)."""
+        return self.board_config.get_board_yaml_text(board_id)
+
+    def save_board_yaml(self, yaml_text: str) -> Dict[str, Any]:
+        """Persist an operator-authored board. Forbids built-in overwrites."""
+        return self.board_config.save_operator_board(yaml_text)
+
+    def delete_board(self, board_id: str) -> Dict[str, Any]:
+        """Delete an operator-authored board. Forbids built-in deletion."""
+        return self.board_config.delete_operator_board(board_id)
+
     def set_node_board(self, node_id: str, board_id: str) -> Dict[str, Any]:
         """Change which board a node is assigned to. Re-derives capabilities."""
         node = self.state.adopted_nodes.get(node_id)

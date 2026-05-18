@@ -710,6 +710,29 @@ class WebSocketHandler:
             result = self.state_manager.set_node_board(node_id, board_id)
             return {"status": "ok", "data": result}
 
+        elif action == 'get_board_yaml':
+            board_id = params.get('board_id')
+            if not board_id:
+                return {"status": "error", "message": "Missing board_id"}
+            text = self.state_manager.get_board_yaml(board_id)
+            if text is None:
+                return {"status": "error", "message": f"Unknown board '{board_id}'"}
+            return {"status": "ok", "data": {"board_id": board_id, "yaml": text}}
+
+        elif action == 'save_board':
+            yaml_text = params.get('yaml')
+            if not yaml_text:
+                return {"status": "error", "message": "Missing yaml"}
+            result = self.state_manager.save_board_yaml(yaml_text)
+            return {"status": "ok", "data": result}
+
+        elif action == 'delete_board':
+            board_id = params.get('board_id')
+            if not board_id:
+                return {"status": "error", "message": "Missing board_id"}
+            result = self.state_manager.delete_board(board_id)
+            return {"status": "ok", "data": result}
+
         elif action == 'reset_node':
             node_id = params.get('node_id')
             factory_reset = params.get('factory_reset', False)

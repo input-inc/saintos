@@ -329,6 +329,90 @@ class BoardConfigManager:
         )
         return boards[0] if boards else None
 
+    # ─── operator-authored board CRUD ────────────────────────────────
+
+    def save_operator_board(self, board_yaml_text: str) -> Dict[str, Any]:
+        """Write an operator-authored board YAML to disk + reload.
+
+        Refuses to overwrite a board whose existing record has
+        builtin=True. Validates chip_family points at a known chip
+        directory. Returns {success, board_id} or {success: False,
+        message}.
+        """
+        try:
+            payload = yaml.safe_load(board_yaml_text) or {}
+        except yaml.YAMLError as e:
+            return {"success": False, "message": f"YAML parse error: {e}"}
+
+        if not isinstance(payload, dict):
+            return {"success": False, "message": "Top-level YAML must be a mapping"}
+
+        for required in ("board_id", "display_name", "chip_family"):
+            if required not in payload:
+                return {"success": False, "message": f"Missing required field: {required}"}
+
+        board_id = payload["board_id"]
+        chip_family = payload["chip_family"]
+        chip = self.get_chip(chip_family)
+        if not chip:
+            return {"success": False,
+                    "message": f"Unknown chip_family '{chip_family}' "
+                               f"(no global.conf under boards/{chip_family}/)"}
+
+        # Existing built-in? Refuse.
+        existing = self.get_board(board_id)
+        if existing and existing.builtin:
+            return {"success": False,
+                    "message": f"'{board_id}' is a built-in board and cannot be modified. "
+                               f"Use a different board_id."}
+
+        # Force builtin=false for operator-authored boards so the UI marks
+        # them editable even if the operator pasted in builtin: true.
+        payload["builtin"] = False
+
+        chip_dir = os.path.join(self.root, chip_family)
+        os.makedirs(chip_dir, exist_ok=True)
+        out_path = os.path.join(chip_dir, f"{board_id}.yaml")
+
+        try:
+            with open(out_path, "w") as f:
+                yaml.safe_dump(payload, f, sort_keys=False)
+        except OSError as e:
+            return {"success": False, "message": f"Write failed: {e}"}
+
+        self.reload()
+        return {"success": True, "board_id": board_id, "path": out_path}
+
+    def delete_operator_board(self, board_id: str) -> Dict[str, Any]:
+        """Delete an operator-authored board file. Refuses built-ins."""
+        board = self.get_board(board_id)
+        if not board:
+            return {"success": False, "message": f"Unknown board_id '{board_id}'"}
+        if board.builtin:
+            return {"success": False,
+                    "message": f"'{board_id}' is built-in and cannot be deleted"}
+        if not board.source_path or not os.path.isfile(board.source_path):
+            return {"success": False, "message": "Board has no source file on disk"}
+
+        try:
+            os.remove(board.source_path)
+        except OSError as e:
+            return {"success": False, "message": f"Delete failed: {e}"}
+
+        self.reload()
+        return {"success": True, "board_id": board_id}
+
+    def get_board_yaml_text(self, board_id: str) -> Optional[str]:
+        """Read the raw YAML for a board (for the editor view)."""
+        board = self.get_board(board_id)
+        if not board or not board.source_path:
+            return None
+        try:
+            with open(board.source_path, "r") as f:
+                return f.read()
+        except OSError:
+            return None
+
     def _warn(self, msg: str) -> None:
         if self.logger:
             self.logger.warning(msg)

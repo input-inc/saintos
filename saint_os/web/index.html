@@ -1088,6 +1088,10 @@
                             <span class="material-icons text-sm">memory</span>
                             Firmware
                         </button>
+                        <button class="settings-tab" data-settings-tab="boards">
+                            <span class="material-icons text-sm">developer_board</span>
+                            Boards
+                        </button>
                     </nav>
                 </div>
 
@@ -1487,7 +1491,66 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Boards Settings Tab -->
+                <div id="settings-panel-boards" class="settings-panel">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+                                <span class="material-icons text-cyan-400">developer_board</span>
+                                Board Configurations
+                            </h3>
+                            <button id="boards-add-btn" class="btn-primary text-sm">
+                                <span class="material-icons icon-sm">add</span>
+                                New Board
+                            </button>
+                        </div>
+                        <p class="text-sm text-slate-400 mb-4">
+                            Pin layouts and built-in peripherals per board. Built-in entries ship
+                            with SAINT.OS and can be viewed but not edited. Operator-authored
+                            entries are stored as YAML under
+                            <code class="text-cyan-300">saint_os/config/boards/&lt;chip&gt;/</code>
+                            and can be created, edited, or deleted from here.
+                        </p>
+                        <div id="boards-list" class="space-y-3">
+                            <p class="text-slate-500 text-sm italic">Loading…</p>
+                        </div>
+                    </div>
+                </div>
             </section>
+
+            <!-- Board Editor / Viewer Modal -->
+            <div id="board-editor-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="boardsManager.closeEditor()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-3xl">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 id="board-editor-title" class="text-lg font-semibold text-white">Board</h3>
+                            <button onclick="boardsManager.closeEditor()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <p id="board-editor-help" class="text-xs text-slate-500 mb-2">
+                            Edit the YAML directly. Required keys:
+                            <code>board_id</code>, <code>display_name</code>,
+                            <code>chip_family</code>. Lists:
+                            <code>available_pins</code>, <code>reserved_pins</code>,
+                            <code>builtin_peripherals</code>.
+                        </p>
+                        <textarea id="board-editor-yaml"
+                                  class="input-field w-full font-mono text-xs"
+                                  style="min-height: 50vh;"
+                                  spellcheck="false"></textarea>
+                        <div id="board-editor-error"
+                             class="hidden mt-2 p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        <div class="flex justify-end gap-2 mt-4">
+                            <button onclick="boardsManager.closeEditor()" class="btn-secondary">Close</button>
+                            <button id="board-editor-save-btn" onclick="boardsManager.saveEditor()" class="btn-primary">Save</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
             <!-- Terminal Page -->
             <section id="page-terminal" class="page">
@@ -2211,6 +2274,7 @@
     <script src="js/peripherals.js"></script>
     <script src="js/routing.js"></script>
     <script src="js/widgets.js"></script>
+    <script src="js/boards.js"></script>
     <script src="js/pincontrol.js"></script>
     <script src="js/controlpage.js"></script>
     <script src="js/moods.js"></script>

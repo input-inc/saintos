@@ -1497,6 +1497,12 @@ class SaintApp {
                 panel.classList.remove('active');
             }
         });
+
+        // Boards tab fetches its data on activation (lazy — saves a
+        // round-trip until the operator actually opens it).
+        if (tabId === 'boards' && window.boardsManager) {
+            window.boardsManager.activate();
+        }
     }
 
     /**
