@@ -308,7 +308,11 @@ static void handle_firmware_update(const char* json, size_t len)
 #if defined(SAINT_OS_OTA_BOOTLOADER) && !defined(SIMULATION)
     // Pull image metadata (size, CRC32, vtor) out of the control JSON
     // and hand off to the bootloader for an HTTP-over-W5500 download.
-    uint32_t img_size = 0, img_crc = 0, img_vtor = 0x10004000u;
+    // Default vtor matches the bootloader_shell.ld layout (bootloader
+    // reserves 360 KB + a 4 KB image-header sector, so app starts at
+    // 0x10000000 + 364 KB = 0x1005B000). Keep in sync with
+    // WRITE_ADDR_MIN in firmware/rp2040/bootloader/main.c.
+    uint32_t img_size = 0, img_crc = 0, img_vtor = 0x1005B000u;
     const char* p;
     if ((p = strstr(json, "\"size\"")) != NULL) {
         p = strchr(p, ':');

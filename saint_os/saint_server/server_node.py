@@ -621,7 +621,11 @@ class SaintServerNode(Node):
             control_data["crc32"] = f"0x{fw_info['bin_crc32']:08x}"
             # vtor is fixed by the standalone linker layout — sent so the
             # bootloader can sanity-check against its own WRITE_ADDR_MIN.
-            control_data["vtor"] = "0x10004000"
+            # Bootloader reserves 360 KB (bootloader_shell.ld FLASH), then
+            # a 4 KB image-header sector, so the app vtor lands at
+            # 0x10000000 + 364 KB = 0x1005B000. Keep in sync with
+            # WRITE_ADDR_MIN in firmware/rp2040/bootloader/main.c.
+            control_data["vtor"] = "0x1005B000"
             control_data["url"]  = f"/api/firmware/rp2040/saint_node.bin"
 
         msg = String()
