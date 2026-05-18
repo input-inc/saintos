@@ -249,9 +249,50 @@ fi
 
 DEB_CACHE_DIR="${CACHE_ROOT}/debs-${DEBIAN_RELEASE}-${ARCH}"
 
+# The runtime deb list lives here as a heredoc so we can both (a) feed it
+# to the container and (b) hash it to detect when it's changed. If you
+# edit this list, the cache invalidates automatically on next run — no
+# need for callers to remember --rebundle-debs.
+read -r -d '' RUNTIME_DEB_LIST <<'DEB_LIST' || true
+libssl3
+libtinyxml2-9
+libyaml-0-2
+libxml2
+libacl1
+libcurl4
+python3
+python3-yaml
+python3-numpy
+python3-aiohttp
+python3-websockets
+python3-psutil
+python3-packaging
+python3-lark
+python3-empy
+python3-catkin-pkg
+python3-importlib-metadata
+python3-argcomplete
+libpython3.11
+python3.11
+network-manager
+wireless-regdb
+rfkill
+iw
+avahi-daemon
+libnss-mdns
+dnsmasq
+DEB_LIST
+
+DEB_LIST_HASH=$(printf '%s' "$RUNTIME_DEB_LIST" | shasum -a 256 | awk '{print $1}' | cut -c1-12)
+CACHE_SENTINEL="$DEB_CACHE_DIR/.deb-list.sha256"
+
 needs_rebundle=0
 if [[ $REBUNDLE_DEBS -eq 1 ]]; then needs_rebundle=1; fi
 if [[ ! -d "$DEB_CACHE_DIR" || -z "$(ls -A "$DEB_CACHE_DIR"/*.deb 2>/dev/null)" ]]; then
+    needs_rebundle=1
+fi
+if [[ -d "$DEB_CACHE_DIR" && ( ! -f "$CACHE_SENTINEL" || "$(cat "$CACHE_SENTINEL" 2>/dev/null)" != "$DEB_LIST_HASH" ) ]]; then
+    log "Deb list changed since last bundle; cache will be rebuilt"
     needs_rebundle=1
 fi
 
@@ -259,24 +300,18 @@ if (( needs_rebundle )); then
     log "Bundling runtime apt deps in debian:${DEBIAN_RELEASE}-slim container (this takes a few minutes)"
     rm -rf "$DEB_CACHE_DIR"
     mkdir -p "$DEB_CACHE_DIR"
+    # Pass the deb list to the container via stdin so a single source of
+    # truth covers both the hash and the actual install command.
     docker run --rm -i --platform "linux/${ARCH}" \
       -v "${DEB_CACHE_DIR}:/debs" \
+      -e RUNTIME_DEB_LIST="${RUNTIME_DEB_LIST}" \
       "debian:${DEBIAN_RELEASE}-slim" \
       bash -eo pipefail <<'CONTAINER_EOF'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 
-apt-get install -y --download-only --reinstall \
-    libssl3 libtinyxml2-9 libyaml-0-2 libxml2 libacl1 libcurl4 \
-    python3 python3-yaml python3-numpy \
-    python3-aiohttp python3-websockets python3-psutil \
-    python3-packaging python3-lark python3-empy \
-    python3-catkin-pkg python3-importlib-metadata \
-    python3-argcomplete \
-    libpython3.11 python3.11 \
-    network-manager wireless-regdb rfkill iw \
-    avahi-daemon libnss-mdns \
-    dnsmasq
+# shellcheck disable=SC2086
+apt-get install -y --download-only --reinstall ${RUNTIME_DEB_LIST}
 
 cp /var/cache/apt/archives/*.deb /debs/
 
@@ -286,8 +321,9 @@ apt-ftparchive packages . > Packages
 gzip -kf Packages
 echo "Bundled $(ls -1 *.deb | wc -l) .deb files, $(du -sh . | cut -f1) total"
 CONTAINER_EOF
+    printf '%s' "$DEB_LIST_HASH" > "$CACHE_SENTINEL"
 else
-    log "Using cached .deb bundle ($(ls -1 "$DEB_CACHE_DIR"/*.deb | wc -l) packages)"
+    log "Using cached .deb bundle ($(ls -1 "$DEB_CACHE_DIR"/*.deb | wc -l) packages, deb-list hash ${DEB_LIST_HASH})"
 fi
 
 # make-dist.sh expects _debs/ at repo root.
