@@ -10,6 +10,7 @@
 #include "peripheral_driver.h"
 #include "flash_types.h"
 #include "platform.h"
+#include "saint_log.h"
 #include "uart_pin_pairs.h"
 
 #include <string.h>
@@ -34,6 +35,14 @@ static uart_inst_t* fas100_uart = NULL;
 static uint8_t fas100_tx_pin = FAS100_DEFAULT_TX_PIN;
 static uint8_t fas100_rx_pin = FAS100_DEFAULT_RX_PIN;
 static uint8_t fas100_uart_instance = 0;
+
+// Active pins are what the UART hardware is currently bound to. If the
+// operator picks a different pair (e.g. GPIO 28/29 instead of 0/1) we
+// need to deinit the old pins before re-binding — otherwise the old
+// pair keeps chattering at 57600 baud onto whatever's wired there.
+static uint8_t fas100_active_tx_pin = 0xFF;     // 0xFF = "no UART bound yet"
+static uint8_t fas100_active_rx_pin = 0xFF;
+static uint8_t fas100_active_uart   = 0xFF;
 
 // Response buffer (enough for one de-stuffed frame)
 #define FAS100_RX_BUF_SIZE   16
@@ -119,7 +128,12 @@ static void parse_response(const uint8_t* frame, uint8_t len)
                    | ((uint32_t)frame[5] << 16)
                    | ((uint32_t)frame[6] << 24);
 
+    bool was_disconnected = !sensor_responded;
     sensor_responded = true;
+    if (was_disconnected) {
+        saint_log_publish("info",
+            "FAS100: first response received (data_id=0x%04x)", data_id);
+    }
 
     switch (data_id) {
         case SPORT_DATA_ID_CURRENT:
@@ -152,6 +166,32 @@ void fas100_init(void)
         fas100_rx_pin = FAS100_DEFAULT_RX_PIN;
         fas100_uart_instance = 0;
     }
+
+    // If the UART is already bound to these exact pins, nothing to do.
+    // Re-binding the same pins would just toggle them briefly and lose
+    // any S.Port byte mid-flight on the bus.
+    if (fas100_active_tx_pin == fas100_tx_pin &&
+        fas100_active_rx_pin == fas100_rx_pin &&
+        fas100_active_uart   == fas100_uart_instance) {
+        return;
+    }
+
+    // Detach the previously-bound pins so they stop driving the bus
+    // when we move to a different pair (or to a different UART).
+    if (fas100_active_tx_pin != 0xFF) {
+        gpio_set_outover(fas100_active_tx_pin, GPIO_OVERRIDE_NORMAL);
+        gpio_set_function(fas100_active_tx_pin, GPIO_FUNC_SIO);
+        gpio_set_dir(fas100_active_tx_pin, GPIO_IN);
+    }
+    if (fas100_active_rx_pin != 0xFF) {
+        gpio_set_inover(fas100_active_rx_pin, GPIO_OVERRIDE_NORMAL);
+        gpio_set_function(fas100_active_rx_pin, GPIO_FUNC_SIO);
+        gpio_set_dir(fas100_active_rx_pin, GPIO_IN);
+    }
+    if (fas100_active_uart != 0xFF && fas100_active_uart != fas100_uart_instance) {
+        uart_deinit(fas100_active_uart == 0 ? uart0 : uart1);
+    }
+
     fas100_uart = (fas100_uart_instance == 0) ? uart0 : uart1;
 
     uart_init(fas100_uart, SPORT_BAUD_RATE);
@@ -162,15 +202,20 @@ void fas100_init(void)
     // S.Port uses inverted signaling
     gpio_set_outover(fas100_tx_pin, GPIO_OVERRIDE_INVERT);
     gpio_set_inover(fas100_rx_pin, GPIO_OVERRIDE_INVERT);
+
+    fas100_active_tx_pin = fas100_tx_pin;
+    fas100_active_rx_pin = fas100_rx_pin;
+    fas100_active_uart   = fas100_uart_instance;
 #endif
 
     rx_pos = 0;
     sensor_responded = false;
     port_initialized = true;
 
-    PLATFORM_PRINTF("FAS100: initialized on UART%d TX=%d RX=%d at %d baud (poll %dms)\n",
-                    fas100_uart_instance, fas100_tx_pin, fas100_rx_pin,
-                    SPORT_BAUD_RATE, poll_interval_ms);
+    saint_log_publish("info",
+        "FAS100: UART%d on TX=%d RX=%d at %d baud (poll %d ms)",
+        fas100_uart_instance, fas100_tx_pin, fas100_rx_pin,
+        SPORT_BAUD_RATE, poll_interval_ms);
 }
 
 void fas100_update(void)
@@ -263,6 +308,15 @@ static bool fas100_drv_apply_config(uint8_t channel, const pin_config_t* config)
     if (interval >= 20) {
         poll_interval_ms = interval;
     }
+
+    // The operator may have picked a different UART pin pair (e.g.
+    // GPIO 28/29 instead of the default 0/1). parse_json_params already
+    // updated fas100_tx_pin / fas100_rx_pin / fas100_uart_instance from
+    // the JSON. fas100_init() is idempotent — it no-ops when the active
+    // pins already match — so call it here to bind the UART hardware
+    // to the configured pair. Without this, the driver keeps reading
+    // from whatever pins it was initialized on at boot (defaults).
+    fas100_init();
     return true;
 }
 

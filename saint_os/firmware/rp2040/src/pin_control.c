@@ -482,8 +482,14 @@ int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node
         const pin_config_t* cfg = &configs[i];
         if (cfg->mode == PIN_MODE_UNCONFIGURED) continue;
 
+        // If there's no runtime entry for this pin, the driver
+        // either hasn't sampled yet (peripheral disconnected, init
+        // problem, sensor silent) or this is an output pin no one
+        // has read. Emit value:null so the UI can show "—" instead
+        // of a misleading 0.000. find_or_create_runtime() is called
+        // by pin_control_update_state() only when get_value()
+        // succeeds, so missing rv == "no real reading."
         pin_runtime_value_t* rv = find_runtime(cfg->gpio);
-        float value = rv ? rv->value : 0.0f;
 
         const char* mode_str = pin_mode_to_string(cfg->mode);
         char escaped_name[PIN_CONFIG_MAX_NAME_LEN * 2];
@@ -500,18 +506,24 @@ int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node
         }
         escaped_name[j] = '\0';
 
-        ret = snprintf(buffer + written, buffer_size - written,
-            "%s{\"gpio\":%d,\"mode\":\"%s\",\"value\":%.2f,\"name\":\"%s\"",
-            first ? "" : ",",
-            cfg->gpio, mode_str, value, escaped_name);
+        if (rv) {
+            ret = snprintf(buffer + written, buffer_size - written,
+                "%s{\"gpio\":%d,\"mode\":\"%s\",\"value\":%.2f,\"name\":\"%s\"",
+                first ? "" : ",",
+                cfg->gpio, mode_str, rv->value, escaped_name);
+        } else {
+            ret = snprintf(buffer + written, buffer_size - written,
+                "%s{\"gpio\":%d,\"mode\":\"%s\",\"value\":null,\"name\":\"%s\"",
+                first ? "" : ",",
+                cfg->gpio, mode_str, escaped_name);
+        }
         if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
         written += ret;
 
-        // Add voltage for ADC pins
-        if (cfg->mode == PIN_MODE_ADC) {
-            float voltage = value;  // Already stored as voltage
+        // Add voltage for ADC pins (only when we actually have a reading).
+        if (cfg->mode == PIN_MODE_ADC && rv) {
             ret = snprintf(buffer + written, buffer_size - written,
-                ",\"voltage\":%.3f", voltage);
+                ",\"voltage\":%.3f", rv->value);
             if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
             written += ret;
         }
