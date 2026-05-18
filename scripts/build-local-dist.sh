@@ -171,7 +171,17 @@ build_firmware_rp2040() {
     # Build with the OTA bootloader enabled so the dist tarball contains
     # both the combined first-flash .uf2 and the body-only .bin the
     # bootloader fetches over HTTP.
-    ( cd saint_os/firmware/rp2040 && rm -rf build && mkdir build && cd build \
+    #
+    # Robust build-dir clean: macOS' Finder / Spotlight occasionally drops
+    # a fresh .DS_Store into the directory while `rm -rf` is iterating,
+    # which makes rm bail with "Directory not empty". Try once, sleep
+    # briefly to let any racing Finder write settle, try again, then
+    # mkdir. The second rm is a no-op on the happy path.
+    ( cd saint_os/firmware/rp2040 \
+        && rm -rf build 2>/dev/null || true \
+        && sleep 0.2 \
+        && rm -rf build \
+        && mkdir build && cd build \
         && cmake -DSIMULATION=OFF -DSAINT_OS_OTA_BOOTLOADER=ON .. > /dev/null \
         && make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
                saint_node saint_ota_bootloader saint_node_combined ) \
