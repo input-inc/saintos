@@ -405,6 +405,14 @@ class SaintServerNode(Node):
         Firmware emits {"level": "info|warn|error", "text": "…", "uptime_ms": N}.
         Anything malformed gets stored as a raw-payload "warn" so we never lose
         a hint that the firmware tried to say something.
+
+        We also use specific log texts as sync acks. Since the firmware
+        no longer publishes a capabilities message after applying
+        config (stripped in 1b42bd6), the pre-existing sync_status
+        flow had no signal to flip from "pending" to "synced". The
+        "Config saved to flash" log line is now that signal — it fires
+        from main.c's config_subscription_callback after pin_config_save()
+        returns true.
         """
         try:
             import json
@@ -417,9 +425,21 @@ class SaintServerNode(Node):
             if not text:
                 return
             self.state_manager.log_node_event(node_id, text, level)
+            self._maybe_handle_sync_ack(node_id, text)
         except Exception as e:
             self.state_manager.log_node_event(
                 node_id, f'(malformed log frame: {e}) {msg.data[:120]!r}', 'warn')
+
+    def _maybe_handle_sync_ack(self, node_id: str, text: str) -> None:
+        """If the firmware reported it finished applying + saving config,
+        flip the node's sync_status to ``synced`` and broadcast the
+        update so the UI's "Sync to Node" pill updates."""
+        if "Config saved to flash" in text:
+            self.state_manager.mark_node_synced(node_id, success=True)
+            self._broadcast_sync_status(node_id)
+        elif "Config apply failed" in text or "Flash save failed" in text:
+            self.state_manager.mark_node_synced(node_id, success=False)
+            self._broadcast_sync_status(node_id)
 
     def _on_node_state(self, node_id: str, msg: String):
         """Handle state message from a node."""

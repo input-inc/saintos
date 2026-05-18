@@ -1317,10 +1317,14 @@ class SaintApp {
                 await peripheralManager.loadNodeData(this.currentNodeId, this.currentNodeInfo);
             }
 
-            // Point the Logs tab at this node so it's ready when the
-            // operator clicks over. The setNode() call also (re)subscribes.
+            // Point the Logs + Live tabs at this node so they're ready
+            // when the operator clicks over. Each setNode() call also
+            // (re)subscribes to its server topic.
             if (typeof window.nodeLogsManager !== 'undefined') {
                 window.nodeLogsManager.setNode(this.currentNodeId);
+            }
+            if (typeof window.nodeLiveManager !== 'undefined') {
+                window.nodeLiveManager.setNode(this.currentNodeId);
             }
 
             // Start periodic refresh for live data
@@ -1483,6 +1487,10 @@ class SaintApp {
         if (tabId === 'logs' && this.currentNodeId
                 && typeof window.nodeLogsManager !== 'undefined') {
             window.nodeLogsManager.setNode(this.currentNodeId);
+        }
+        if (tabId === 'live' && this.currentNodeId
+                && typeof window.nodeLiveManager !== 'undefined') {
+            window.nodeLiveManager.setNode(this.currentNodeId);
         }
     }
 

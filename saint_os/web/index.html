@@ -331,6 +331,7 @@
                 <div class="flex items-center gap-1 mb-6 border-b border-slate-700">
                     <button class="node-tab active" data-tab="overview">Overview</button>
                     <button class="node-tab" data-tab="pins">Peripherals</button>
+                    <button class="node-tab" data-tab="live">Live readings</button>
                     <button class="node-tab" data-tab="state">State</button>
                     <button class="node-tab" data-tab="logs">Logs</button>
                     <button class="node-tab" data-tab="control">Control</button>
@@ -527,6 +528,23 @@
                         <div id="node-logs" class="log-container h-96 overflow-y-auto space-y-1 font-mono text-sm">
                             <p class="text-slate-500">No logs available.</p>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: Live readings -->
+                <div id="node-tab-live" class="node-tab-content hidden">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="text-lg font-semibold text-white">Live readings</h3>
+                        <span id="node-live-status" class="text-xs text-slate-500">--</span>
+                    </div>
+                    <p class="text-xs text-slate-400 mb-4">
+                        Raw per-channel values streaming from the firmware via the
+                        routing system. If a peripheral's card shows <span class="font-mono">—</span>,
+                        either the firmware isn't sampling that channel yet or the
+                        driver reports the peripheral as disconnected.
+                    </p>
+                    <div id="node-live-grid" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <p class="text-slate-500 italic text-sm">Loading…</p>
                     </div>
                 </div>
 
@@ -2278,6 +2296,7 @@
     <script src="js/websocket.js"></script>
     <script src="js/peripherals.js"></script>
     <script src="js/nodelogs.js"></script>
+    <script src="js/nodelive.js"></script>
     <script src="js/routing.js"></script>
     <script src="js/widgets.js"></script>
     <script src="js/boards.js"></script>

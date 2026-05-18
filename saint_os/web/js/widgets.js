@@ -167,28 +167,11 @@ class WidgetsDashboard {
             }
         }
 
-        // Legacy path: firmware nodes (RP2040 FAS100) still report on
-        // virtual GPIOs. Translate to (peripheral_id, channel_id) via
-        // a small per-type map and reuse the same dispatch.
-        if (Array.isArray(data.pins)) {
-            const legacyMap = {};
-            for (const p of node.peripherals) {
-                if (p.type === 'fas100') {
-                    legacyMap[232] = { peripheralId: p.id, channelId: 'amps'  };
-                    legacyMap[233] = { peripheralId: p.id, channelId: 'volts' };
-                    legacyMap[234] = { peripheralId: p.id, channelId: 'temp1' };
-                    legacyMap[235] = { peripheralId: p.id, channelId: 'temp2' };
-                }
-            }
-            for (const pin of data.pins) {
-                if (pin.actual === undefined || pin.actual === null) continue;
-                const m = legacyMap[pin.gpio];
-                if (!m) continue;
-                if (this._dispatchChannelValue(nodeId, m.peripheralId, m.channelId, pin.actual)) {
-                    touched = true;
-                }
-            }
-        }
+        // (Legacy `data.pins` path retired — the server now translates
+        // firmware virtual GPIOs to (peripheral_id, channel_id) and
+        // emits them through `data.channels` above. The pin_state
+        // broadcast still includes a `pins` array for the State tab
+        // and inspection, but widgets sink only from `channels`.)
 
         if (touched && this._active) this.renderValues();
     }

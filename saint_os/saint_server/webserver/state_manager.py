@@ -162,6 +162,67 @@ NODE_OFFLINE_GRACE_SECONDS = 3.0
 # system the rest of the dashboard uses.
 # ─────────────────────────────────────────────────────────────────────────────
 HOST_CONTROLLER_NODE_ID = "host_controller"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Virtual-GPIO → channel translation (transitional)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# RP2040 firmware still publishes peripheral readings on a per-type
+# `virtual_gpio_base + firmware_channel_index` integer (see
+# firmware/shared/include/*_protocol.h). The routing system addresses
+# things as (peripheral_id, channel_id) — operator-visible names. This
+# table bridges the two so the server can emit channel-shaped readings
+# regardless of the firmware's internal encoding. Once the firmware
+# emits channel-addressed data directly, _firmware_channel_id() can
+# return None for every mode and this table can be deleted.
+#
+# Keys: the `mode` string the firmware emits in pin_state pin entries.
+# Values: (virtual_gpio_base, {firmware_channel_index: catalog_channel_id})
+# A firmware channel that doesn't map to any operator-visible catalog
+# channel (e.g. BMS REMAIN_CAP, cycle count, individual cell voltages
+# beyond what the BMS catalog exposes) is omitted — those values are
+# kept in the per-pin runtime state but don't fire route dispatches.
+
+_FIRMWARE_CHANNEL_MAP: Dict[str, Tuple[int, Dict[int, str]]] = {
+    # FAS100_VIRTUAL_GPIO_BASE = 232, 4 channels
+    "fas100_sensor": (232, {
+        0: "amps", 1: "volts", 2: "temp1", 3: "temp2",
+    }),
+    # SYREN_VIRTUAL_GPIO_BASE = 224. Each SyRen peripheral instance has
+    # a single "motor" channel; the firmware-side channel index just
+    # picks which of the 8 multi-drop slots the instance occupies.
+    # The peripheral_id (from pin_config_t.logical_name) disambiguates.
+    "syren_motor": (224, {i: "motor" for i in range(8)}),
+    # ROBOCLAW_VIRTUAL_GPIO_BASE = 236, 5 channels per unit * 8 units.
+    # Same disambiguation pattern as syren.
+    "roboclaw_motor": (236, {
+        (unit * 5 + sub): name
+        for unit in range(8)
+        for sub, name in enumerate(("motor", "encoder", "voltage", "current", "temp"))
+    }),
+    # JBD_BMS_VIRTUAL_GPIO_BASE = 276. Catalog exposes 5 channels;
+    # firmware indexes 3 (REMAIN_CAP), 6 (CYCLES), 7 (PROTECTION) and
+    # 8..23 (per-cell) have no catalog channel and are intentionally
+    # skipped from this map.
+    "pathfinder_bms_sensor": (276, {
+        0: "pack_voltage", 1: "current", 2: "soc", 4: "temp_1", 5: "temp_2",
+    }),
+}
+
+
+def _firmware_channel_id(mode: str, gpio: int) -> Optional[str]:
+    """Resolve a (mode, virtual gpio) into a catalog channel_id.
+
+    Returns None if this gpio doesn't represent an operator-visible
+    peripheral channel (e.g. a physical GPIO running PWM, or a
+    firmware-internal BMS channel that isn't routed to widgets).
+    """
+    entry = _FIRMWARE_CHANNEL_MAP.get(mode)
+    if not entry:
+        return None
+    base, channel_map = entry
+    return channel_map.get(gpio - base)
 HOST_CONTROLLER_PERIPHERAL_ID = "system_monitor"
 
 
@@ -327,7 +388,15 @@ class NodeRuntimeState:
             self.pins[gpio].desired_value = value
 
     def update_from_firmware(self, pins_data: List[Dict[str, Any]]):
-        """Update actual values from firmware feedback."""
+        """Update actual values from firmware feedback.
+
+        The firmware still publishes its peripheral channels on
+        ``virtual GPIO`` slots (a transitional artifact of the
+        peripheral-first refactor). We translate them here into the
+        peripheral-first ``channels`` view that the routing graph
+        and the UI consume. Once the firmware grows a channel-
+        addressed publisher, this translation goes away.
+        """
         now = time.time()
         self.last_feedback = now
 
@@ -350,6 +419,16 @@ class NodeRuntimeState:
             pin.actual_value = pin_data.get('value')
             pin.voltage = pin_data.get('voltage')
             pin.last_updated = now
+
+            # Peripheral-first translation: if this pin belongs to a
+            # peripheral driver, also surface the reading as a
+            # (peripheral_id, channel_id) channel value.
+            value = pin_data.get('value')
+            mode = pin.mode
+            peripheral_id = pin.logical_name
+            channel_id = _firmware_channel_id(mode, gpio)
+            if value is not None and peripheral_id and channel_id:
+                self.set_channel(peripheral_id, channel_id, float(value))
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
