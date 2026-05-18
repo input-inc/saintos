@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * SAINT.OS fork: added saint_ota_reboot_with_image() so the app can
- * pass image metadata (size / CRC32 / vtor) to the bootloader via
- * watchdog scratch registers, then reboot into it to perform an HTTP
- * OTA download.
+ * pass image metadata (size / CRC32) to the bootloader via watchdog
+ * scratch registers, then reboot into it to perform an HTTP OTA
+ * download. The app slot address is owned by the bootloader's linker
+ * script — the app doesn't transmit it.
  */
 
 #ifndef __PICOWOTA_REBOOT_H__
@@ -31,13 +32,12 @@ void picowota_reboot(bool to_bootloader);
  *
  *      scratch[0]  expected image size in bytes
  *      scratch[1]  expected image CRC32
- *      scratch[2]  expected vtor (typically 0x10004000 for the app slot)
  *      scratch[5]  magic ( PICOWOTA_BOOTLOADER_ENTRY_MAGIC )
  *      scratch[6]  ~magic ( verification )
  *
  *  Server IP is discovered via the DHCP gateway in the bootloader.
  *  Firmware path is hardcoded to /api/firmware/rp2040/saint_node.bin. */
-void saint_ota_reboot_with_image(uint32_t size, uint32_t crc32, uint32_t vtor);
+void saint_ota_reboot_with_image(uint32_t size, uint32_t crc32);
 
 #ifdef __cplusplus
 }

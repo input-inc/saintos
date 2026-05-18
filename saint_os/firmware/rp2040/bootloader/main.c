@@ -306,18 +306,18 @@ static bool run_dhcp(uint32_t timeout_ms)
  * OTA download driver
  * ============================================================ */
 
-static bool perform_ota(uint32_t expected_size, uint32_t expected_crc, uint32_t expected_vtor)
+static bool perform_ota(uint32_t expected_size, uint32_t expected_crc)
 {
+	/* App load address is owned by the bootloader's linker script
+	 * (WRITE_ADDR_MIN), not transmitted from the app — that field
+	 * used to drift every time the bootloader layout changed. */
+	const uint32_t expected_vtor = WRITE_ADDR_MIN;
+
 	printf("OTA: expected size=%u crc=0x%08x vtor=0x%08x\n",
 	       (unsigned)expected_size, (unsigned)expected_crc, (unsigned)expected_vtor);
 
 	if (expected_size == 0 || expected_size > FLASH_ADDR_MAX - WRITE_ADDR_MIN) {
 		printf("OTA: bad expected_size\n");
-		return false;
-	}
-	if (expected_vtor != WRITE_ADDR_MIN) {
-		printf("OTA: vtor 0x%08x doesn't match WRITE_ADDR_MIN 0x%08x\n",
-		       (unsigned)expected_vtor, (unsigned)WRITE_ADDR_MIN);
 		return false;
 	}
 
@@ -399,13 +399,12 @@ static bool perform_ota(uint32_t expected_size, uint32_t expected_crc, uint32_t 
  * Entry
  * ============================================================ */
 
-static bool ota_requested_by_app(uint32_t* out_size, uint32_t* out_crc, uint32_t* out_vtor)
+static bool ota_requested_by_app(uint32_t* out_size, uint32_t* out_crc)
 {
 	if (watchdog_hw->scratch[5] != PICOWOTA_BOOTLOADER_ENTRY_MAGIC) return false;
 	if (watchdog_hw->scratch[6] != ~PICOWOTA_BOOTLOADER_ENTRY_MAGIC) return false;
 	*out_size = watchdog_hw->scratch[0];
 	*out_crc  = watchdog_hw->scratch[1];
-	*out_vtor = watchdog_hw->scratch[2];
 	return true;
 }
 
@@ -417,8 +416,8 @@ int main(void)
 
 	critical_section_init(&flash_cs);
 
-	uint32_t exp_size, exp_crc, exp_vtor;
-	bool ota_now = ota_requested_by_app(&exp_size, &exp_crc, &exp_vtor);
+	uint32_t exp_size, exp_crc;
+	bool ota_now = ota_requested_by_app(&exp_size, &exp_crc);
 
 	/* Fast path: app present and not asked to stay in bootloader → run it. */
 	if (!ota_now && image_header_ok(&app_image_header)) {
@@ -444,7 +443,7 @@ int main(void)
 		}
 	}
 
-	bool ok = perform_ota(exp_size, exp_crc, exp_vtor);
+	bool ok = perform_ota(exp_size, exp_crc);
 	clear_ota_magic();
 
 	if (ok) {

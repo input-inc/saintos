@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * SAINT.OS fork: added saint_ota_reboot_with_image() which stashes
- * image metadata in watchdog scratch[0..2] before triggering the
- * bootloader entry.
+ * image metadata in watchdog scratch[0..1] before triggering the
+ * bootloader entry. The app load address is owned by the bootloader,
+ * not passed in via scratch.
  */
 
 #include "pico/stdlib.h"
@@ -30,13 +31,12 @@ void picowota_reboot(bool to_bootloader)
 	}
 }
 
-void saint_ota_reboot_with_image(uint32_t size, uint32_t crc32, uint32_t vtor)
+void saint_ota_reboot_with_image(uint32_t size, uint32_t crc32)
 {
 	hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
 	/* Image metadata for the bootloader to validate the download. */
 	watchdog_hw->scratch[0] = size;
 	watchdog_hw->scratch[1] = crc32;
-	watchdog_hw->scratch[2] = vtor;
 	/* Magic to keep the bootloader in OTA mode after reset. */
 	watchdog_hw->scratch[5] = PICOWOTA_BOOTLOADER_ENTRY_MAGIC;
 	watchdog_hw->scratch[6] = ~PICOWOTA_BOOTLOADER_ENTRY_MAGIC;

@@ -39,7 +39,6 @@ def _build_rp2040_update_message(fw_info: dict, force: bool) -> dict:
     if fw_info.get("bin_size") and fw_info.get("bin_crc32") is not None:
         msg["size"]  = fw_info["bin_size"]
         msg["crc32"] = f"0x{fw_info['bin_crc32']:08x}"
-        msg["vtor"]  = "0x10004000"
         msg["url"]   = "/api/firmware/rp2040/saint_node.bin"
     return msg
 
@@ -81,7 +80,7 @@ class TestRP2040UpdateMessage:
         msg = _build_rp2040_update_message(fw_info, force=False)
         assert msg["size"] == 189600
         assert msg["crc32"] == "0xdeadbeef"
-        assert msg["vtor"] == "0x10004000"
+        assert "vtor" not in msg  # app load addr is owned by the bootloader
         assert msg["url"]  == "/api/firmware/rp2040/saint_node.bin"
         assert msg["version"] == "1.2.0-1779075119"  # prefers version_full
 

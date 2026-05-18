@@ -306,13 +306,10 @@ static void handle_firmware_update(const char* json, size_t len)
     printf("====================================\n");
 
 #if defined(SAINT_OS_OTA_BOOTLOADER) && !defined(SIMULATION)
-    // Pull image metadata (size, CRC32, vtor) out of the control JSON
-    // and hand off to the bootloader for an HTTP-over-W5500 download.
-    // Default vtor matches the bootloader_shell.ld layout (bootloader
-    // reserves 360 KB + a 4 KB image-header sector, so app starts at
-    // 0x10000000 + 364 KB = 0x1005B000). Keep in sync with
-    // WRITE_ADDR_MIN in firmware/rp2040/bootloader/main.c.
-    uint32_t img_size = 0, img_crc = 0, img_vtor = 0x1005B000u;
+    // Pull image size + CRC32 out of the control JSON and hand off to
+    // the bootloader for an HTTP-over-W5500 download. The bootloader
+    // knows its own app load address — we don't transmit it.
+    uint32_t img_size = 0, img_crc = 0;
     const char* p;
     if ((p = strstr(json, "\"size\"")) != NULL) {
         p = strchr(p, ':');
@@ -328,23 +325,14 @@ static void handle_firmware_update(const char* json, size_t len)
             img_crc = (uint32_t)strtoul(p, NULL, base);
         }
     }
-    if ((p = strstr(json, "\"vtor\"")) != NULL) {
-        p = strchr(p, ':');
-        if (p) {
-            p++;
-            while (*p == ' ' || *p == '"') p++;
-            int base = (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) ? 16 : 10;
-            img_vtor = (uint32_t)strtoul(p, NULL, base);
-        }
-    }
     if (img_size == 0 || img_crc == 0) {
         printf("Firmware update: missing size or crc32 in control message — aborting\n");
         return;
     }
-    printf("Handing off to OTA bootloader (size=%lu crc=0x%08lx vtor=0x%08lx)\n",
-           (unsigned long)img_size, (unsigned long)img_crc, (unsigned long)img_vtor);
+    printf("Handing off to OTA bootloader (size=%lu crc=0x%08lx)\n",
+           (unsigned long)img_size, (unsigned long)img_crc);
     sleep_ms(200);
-    saint_ota_reboot_with_image(img_size, img_crc, img_vtor);
+    saint_ota_reboot_with_image(img_size, img_crc);
     /* not reached */
 #else
     printf("Rebooting (no OTA bootloader present — chip will boot the same firmware)\n");
