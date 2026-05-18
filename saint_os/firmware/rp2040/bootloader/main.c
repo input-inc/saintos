@@ -306,29 +306,68 @@ static bool run_dhcp(uint32_t timeout_ms)
  * OTA download driver
  * ============================================================ */
 
-static bool perform_ota(uint32_t expected_size, uint32_t expected_crc)
+/* perform_ota() failure reason codes. Stashed in scratch[2] before
+ * giving up so the app can surface the cause in the Logs tab. Keep
+ * these numerically stable — the app's saint_log line keys off them
+ * and old apps reading new codes will fall back to "unknown reason."
+ *
+ * Mirror this list in firmware/rp2040/src/main.c's ota_fail_reason_str(). */
+#define OTA_FAIL_NONE                  0
+#define OTA_FAIL_BAD_SIZE              1   /* size==0 or > flash region    */
+#define OTA_FAIL_W5500_INIT            2   /* SPI/W5500 hardware silent    */
+#define OTA_FAIL_DHCP                  3   /* no IP after 30s              */
+#define OTA_FAIL_HTTP_OPEN             4   /* TCP connect failed           */
+#define OTA_FAIL_HTTP_STATUS           5   /* server returned 4xx/5xx      */
+#define OTA_FAIL_HTTP_NO_LENGTH        6   /* Content-Length header missing */
+#define OTA_FAIL_HTTP_TRUNCATED        7   /* peer closed mid-stream       */
+#define OTA_FAIL_HTTP_RECV             8   /* recv() error during body     */
+#define OTA_FAIL_HTTP_OTHER            9   /* any other http_get failure   */
+#define OTA_FAIL_SIZE_MISMATCH         10  /* got != expected bytes        */
+#define OTA_FAIL_STREAM_CRC            11  /* CRC32 mismatch on stream     */
+#define OTA_FAIL_FLASH_CRC             12  /* post-write flash readback bad */
+
+static uint8_t map_http_status(http_status_t s)
+{
+	switch (s) {
+		case HTTP_OK:             return OTA_FAIL_NONE;
+		case HTTP_ERR_OPEN:       return OTA_FAIL_HTTP_OPEN;
+		case HTTP_ERR_STATUS:     return OTA_FAIL_HTTP_STATUS;
+		case HTTP_ERR_NO_LENGTH:  return OTA_FAIL_HTTP_NO_LENGTH;
+		case HTTP_ERR_TRUNCATED:  return OTA_FAIL_HTTP_TRUNCATED;
+		case HTTP_ERR_RECV:       return OTA_FAIL_HTTP_RECV;
+		default:                  return OTA_FAIL_HTTP_OTHER;
+	}
+}
+
+/* Returns OTA_FAIL_NONE on success, otherwise a reason code from the
+ * OTA_FAIL_* set above. On non-zero return, http result (when relevant)
+ * is also stashed in *out_http_code so the app can include it in the
+ * log line for HTTP_STATUS failures. */
+static uint8_t perform_ota(uint32_t expected_size, uint32_t expected_crc,
+                           uint32_t* out_http_code)
 {
 	/* App load address is owned by the bootloader's linker script
 	 * (WRITE_ADDR_MIN), not transmitted from the app — that field
 	 * used to drift every time the bootloader layout changed. */
 	const uint32_t expected_vtor = WRITE_ADDR_MIN;
+	*out_http_code = 0;
 
 	printf("OTA: expected size=%u crc=0x%08x vtor=0x%08x\n",
 	       (unsigned)expected_size, (unsigned)expected_crc, (unsigned)expected_vtor);
 
 	if (expected_size == 0 || expected_size > FLASH_ADDR_MAX - WRITE_ADDR_MIN) {
 		printf("OTA: bad expected_size\n");
-		return false;
+		return OTA_FAIL_BAD_SIZE;
 	}
 
 	uint8_t mac[6];
 	if (!bootloader_w5500_init(mac)) {
 		printf("OTA: W5500 init failed\n");
-		return false;
+		return OTA_FAIL_W5500_INIT;
 	}
 	if (!run_dhcp(30000)) {
 		printf("OTA: DHCP failed\n");
-		return false;
+		return OTA_FAIL_DHCP;
 	}
 	printf("OTA: IP=%d.%d.%d.%d gw=%d.%d.%d.%d\n",
 	       local_ip[0], local_ip[1], local_ip[2], local_ip[3],
@@ -359,10 +398,11 @@ static bool perform_ota(uint32_t expected_size, uint32_t expected_crc)
 	http_status_t s = http_get(&req, &res);
 
 	if (s != HTTP_OK) {
+		*out_http_code = (uint32_t)res.http_code;
 		printf("OTA: http_get failed s=%d code=%d recv=%u/%u\n",
 		       (int)s, res.http_code,
 		       (unsigned)res.bytes_received, (unsigned)res.content_length);
-		return false;
+		return map_http_status(s);
 	}
 
 	/* Flush any trailing partial page so the body is fully committed. */
@@ -371,12 +411,12 @@ static bool perform_ota(uint32_t expected_size, uint32_t expected_crc)
 	if (st.bytes_written != expected_size) {
 		printf("OTA: size mismatch: got %u expected %u\n",
 		       (unsigned)st.bytes_written, (unsigned)expected_size);
-		return false;
+		return OTA_FAIL_SIZE_MISMATCH;
 	}
 	if (st.crc32_running != expected_crc) {
 		printf("OTA: CRC mismatch: got 0x%08x expected 0x%08x\n",
 		       (unsigned)st.crc32_running, (unsigned)expected_crc);
-		return false;
+		return OTA_FAIL_STREAM_CRC;
 	}
 
 	/* Image body is in flash. Verify by recomputing CRC over the
@@ -384,7 +424,7 @@ static bool perform_ota(uint32_t expected_size, uint32_t expected_crc)
 	uint32_t fcrc = crc32_update(0, (const uint8_t*)expected_vtor, expected_size);
 	if (fcrc != expected_crc) {
 		printf("OTA: post-write flash CRC mismatch (0x%08x)\n", (unsigned)fcrc);
-		return false;
+		return OTA_FAIL_FLASH_CRC;
 	}
 
 	/* All good — write the image header LAST so partial-failure leaves
@@ -392,7 +432,7 @@ static bool perform_ota(uint32_t expected_size, uint32_t expected_crc)
 	 * which keeps us in the bootloader for retry. */
 	write_image_header(expected_vtor, expected_size, expected_crc);
 	printf("OTA: image header written; rebooting into new app\n");
-	return true;
+	return OTA_FAIL_NONE;
 }
 
 /* ============================================================
@@ -460,9 +500,10 @@ int main(void)
 		}
 	}
 
-	bool ok = perform_ota(exp_size, exp_crc);
+	uint32_t http_code = 0;
+	uint8_t reason = perform_ota(exp_size, exp_crc, &http_code);
 
-	if (ok) {
+	if (reason == OTA_FAIL_NONE) {
 		/* Success — clear retry counter + OTA magic, reboot into the
 		 * new app via image_header_ok(). */
 		watchdog_hw->scratch[4] = 0;
@@ -476,7 +517,14 @@ int main(void)
 	 * the network running the previous firmware (if any). */
 	uint32_t retries = watchdog_hw->scratch[4] + 1;
 	watchdog_hw->scratch[4] = retries;
-	printf("OTA: attempt %u/%u failed\n", (unsigned)retries, MAX_OTA_RETRIES);
+	/* Save the most recent failure reason + http code so the app can
+	 * surface them after a give-up. Reason goes in the low byte of
+	 * scratch[2], http_code in the high 16 bits. Survives the reboots
+	 * between retries; only the LAST reason is reported. */
+	watchdog_hw->scratch[2] = ((http_code & 0xFFFF) << 16) | (uint32_t)reason;
+	printf("OTA: attempt %u/%u failed (reason=%u http=%u)\n",
+	       (unsigned)retries, MAX_OTA_RETRIES,
+	       (unsigned)reason, (unsigned)http_code);
 
 	if (retries < MAX_OTA_RETRIES) {
 		/* Re-arm magic and retry. Size/crc stay in scratch[0..1] from
@@ -490,7 +538,8 @@ int main(void)
 	/* Budget exhausted. Clear the OTA magic so the next boot takes
 	 * the fast path. Set the give-up sentinel so the app knows why
 	 * it's running the old firmware. Reset retry counter so a future
-	 * operator-initiated OTA starts fresh. */
+	 * operator-initiated OTA starts fresh. Leave scratch[2] alone so
+	 * the app can read the last failure reason. */
 	printf("OTA: budget exhausted, falling back to existing app\n");
 	clear_ota_magic();
 	watchdog_hw->scratch[4] = 0;

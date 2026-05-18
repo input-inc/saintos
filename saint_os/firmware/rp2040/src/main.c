@@ -23,6 +23,30 @@
  * firmware/rp2040/bootloader/main.c. */
 #define OTA_GAVE_UP_MAGIC 0xFA11ED01u
 
+/* Bootloader failure reason codes. Must mirror the OTA_FAIL_* set in
+ * firmware/rp2040/bootloader/main.c. We don't share a header because
+ * the bootloader builds in isolation; an unknown code maps to
+ * "unknown reason" via ota_fail_reason_str() below. */
+static const char* ota_fail_reason_str(uint8_t reason)
+{
+    switch (reason) {
+        case 0:  return "unknown";
+        case 1:  return "bad image size";
+        case 2:  return "W5500 init failed";
+        case 3:  return "DHCP failed — node has no IP";
+        case 4:  return "couldn't open TCP to server";
+        case 5:  return "server returned non-2xx";
+        case 6:  return "server response missing Content-Length";
+        case 7:  return "server closed connection mid-stream";
+        case 8:  return "TCP recv error during download";
+        case 9:  return "HTTP error";
+        case 10: return "size mismatch (got != expected bytes)";
+        case 11: return "stream CRC mismatch";
+        case 12: return "post-write flash CRC mismatch";
+        default: return "unrecognized failure code";
+    }
+}
+
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
@@ -1052,11 +1076,18 @@ int main(void)
     // Also capture the OTA-gave-up sentinel from the bootloader before
     // anything touches scratch[3]. If non-zero, the previous OTA
     // attempt exceeded its retry budget and we're running the
-    // PREVIOUS firmware. Clear it so we only report once.
+    // PREVIOUS firmware. scratch[2] holds the failure reason in the
+    // low byte and an optional http response code in the high 16
+    // bits — see OTA_FAIL_* in bootloader/main.c. Clear both so we
+    // only report once.
     bool boot_after_ota_giveup = (watchdog_hw->scratch[3] == OTA_GAVE_UP_MAGIC);
+    uint32_t ota_fail_word = boot_after_ota_giveup ? watchdog_hw->scratch[2] : 0;
     if (boot_after_ota_giveup) {
         watchdog_hw->scratch[3] = 0;
+        watchdog_hw->scratch[2] = 0;
     }
+    uint8_t ota_fail_reason = (uint8_t)(ota_fail_word & 0xFF);
+    uint16_t ota_fail_http  = (uint16_t)((ota_fail_word >> 16) & 0xFFFF);
 
     // Brief delay for UART to stabilize
     sleep_ms(100);
@@ -1233,11 +1264,22 @@ int main(void)
     }
     // The bootloader sets the OTA-gave-up sentinel when it exhausts
     // its retry budget and falls back to this app. Tell the operator
-    // so they don't think the firmware update "just disappeared."
+    // so they don't think the firmware update "just disappeared." The
+    // reason byte tells them which stage failed — without it they'd
+    // have to plug in a serial console to see the bootloader's UART
+    // output.
     if (boot_after_ota_giveup) {
-        saint_log_publish("error",
-            "OTA attempt failed after retries — running previous firmware. "
-            "Check that the node can reach the server (DHCP gateway = server IP).");
+        const char* reason = ota_fail_reason_str(ota_fail_reason);
+        if (ota_fail_reason == 5 /* HTTP_STATUS */ && ota_fail_http) {
+            saint_log_publish("error",
+                "OTA failed after retries: %s (HTTP %u). "
+                "Running previous firmware.",
+                reason, (unsigned)ota_fail_http);
+        } else {
+            saint_log_publish("error",
+                "OTA failed after retries: %s. Running previous firmware.",
+                reason);
+        }
     }
 
     // Check if we have a saved configuration (previously adopted)
