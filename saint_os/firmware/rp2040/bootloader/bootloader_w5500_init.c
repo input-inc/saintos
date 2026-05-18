@@ -30,15 +30,22 @@ bool bootloader_w5500_init(uint8_t out_mac[6])
 		return false;
 	}
 
-	/* Derive a locally administered MAC from the RP2040 unique ID — same
-	 * scheme used by transport_w5500.c so a single board keeps the same
-	 * DHCP identity across bootloader and runtime. */
+	/* Derive a locally administered MAC from the RP2040 unique ID — must
+	 * match transport_w5500.c so the bootloader and the runtime app
+	 * present the SAME MAC to the DHCP server. Otherwise dnsmasq sees
+	 * two distinct identities for one physical board, allocates two
+	 * leases, and OTA-time DHCP can take dramatically longer than it
+	 * does in the running app (or fail entirely).
+	 *
+	 * transport_w5500.c uses hardware_get_unique_id() which formats the
+	 * LAST SIX bytes (id[2..7]) as hex, then re-parses them, so its MAC
+	 * ends up as 0x02:id[2]:id[3]:id[4]:id[5]:id[6]. Mirror that here. */
 	pico_unique_board_id_t uid;
 	pico_get_unique_board_id(&uid);
 	uint8_t mac[6];
 	mac[0] = 0x02;  /* locally administered, unicast */
 	for (int i = 0; i < 5; i++) {
-		mac[i + 1] = uid.id[i];
+		mac[i + 1] = uid.id[i + 2];
 	}
 	setSHAR(mac);
 	memcpy(out_mac, mac, 6);
