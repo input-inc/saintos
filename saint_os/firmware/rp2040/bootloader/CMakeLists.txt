@@ -74,6 +74,12 @@ pico_enable_stdio_uart(saint_ota_bootloader 0)
 # Use the bootloader linker script (bootloader lives at 0x10000000).
 pico_set_linker_script(saint_ota_bootloader ${SAINT_OTA_BL_DIR}/bootloader_shell.ld)
 
+# Emit a linker map alongside the ELF — saint_ota_build_combined reads
+# it to find the .app_bin section's actual flash address.
+target_link_options(saint_ota_bootloader PRIVATE
+    -Wl,-Map=$<TARGET_FILE:saint_ota_bootloader>.map
+)
+
 pico_add_extra_outputs(saint_ota_bootloader)
 
 # -----------------------------------------------------------------------------
@@ -100,19 +106,68 @@ function(saint_ota_apply_app target)
     )
 endfunction()
 
-# Build a combined .uf2: bootloader + app at their respective slot offsets.
-# Use for first-time BOOTSEL flash; subsequent updates use OTA.
+# Build a combined .uf2: bootloader's ELF, with its `.app_hdr` and
+# `.app_bin` placeholder sections patched in-place to carry the real
+# image-header (vtor/size/CRC32 from gen_imghdr.py) and the real app
+# binary. Then convert the patched ELF to .uf2.
+#
+# This is the only safe way to produce a single first-flash artifact —
+# the placeholder sections in the bootloader linker output (filled with
+# 0xdeaddead) MUST be overwritten or the bootloader sees a bad header,
+# fails image_header_ok(), and sits in OTA-wait forever.
 function(saint_ota_build_combined app_target)
-    set(combined_uf2 ${CMAKE_CURRENT_BINARY_DIR}/${app_target}_combined.uf2)
-    add_custom_target(${app_target}_combined ALL
-        COMMAND ${Python3_EXECUTABLE} ${SAINT_OTA_BL_DIR}/../tools/combine_uf2.py
-                ${combined_uf2}
-                $<TARGET_FILE_DIR:saint_ota_bootloader>/saint_ota_bootloader.uf2
-                $<TARGET_FILE_DIR:${app_target}>/${app_target}.uf2
-        DEPENDS saint_ota_bootloader ${app_target}
-        COMMENT "Combining bootloader + ${app_target} into single .uf2"
+    # Use literal paths — generator expressions can't appear in
+    # add_custom_command(OUTPUT ...) because the dependency graph is
+    # built before they're evaluated. Both the app and the bootloader
+    # land in the top-level build dir under known subpaths.
+    set(BL_ELF       ${CMAKE_BINARY_DIR}/bootloader/saint_ota_bootloader.elf)
+    set(BL_MAP       ${BL_ELF}.map)
+    set(APP_BIN      ${CMAKE_BINARY_DIR}/${app_target}_app.bin)
+    set(HDR_BIN      ${CMAKE_BINARY_DIR}/${app_target}_imghdr_combined.bin)
+    set(COMBINED_ELF ${CMAKE_BINARY_DIR}/${app_target}_combined.elf)
+    set(COMBINED_UF2 ${CMAKE_BINARY_DIR}/${app_target}_combined.uf2)
+
+    # Modern Pico SDKs ship picotool instead of elf2uf2; the parent build
+    # already triggers find_package(picotool) via pico_add_extra_outputs,
+    # so the `picotool` imported target should exist by the time we get
+    # here. Use $<TARGET_FILE:picotool> to resolve its executable path.
+    if (NOT TARGET picotool)
+        find_package(picotool QUIET)
+    endif()
+    if (NOT TARGET picotool)
+        message(WARNING "picotool not found — combined .uf2 won't be built")
+        return()
+    endif()
+
+    # Regenerate the image header using the actual app slot address read
+    # from the bootloader's linker map (.app_bin section).
+    add_custom_command(
+        OUTPUT ${HDR_BIN}
+        COMMAND ${Python3_EXECUTABLE} ${SAINT_OTA_BL_DIR}/gen_imghdr.py
+                --map ${BL_MAP} --section .app_bin
+                ${APP_BIN} ${HDR_BIN}
+        DEPENDS ${app_target} saint_ota_bootloader
+        COMMENT "Computing combined image header for ${app_target}"
         VERBATIM
     )
+
+    # Patch the bootloader's ELF, replacing the placeholder .app_hdr and
+    # .app_bin sections with the real header bytes and the real app
+    # bytes. Then convert the patched ELF to UF2.
+    add_custom_command(
+        OUTPUT ${COMBINED_UF2}
+        COMMAND ${CMAKE_OBJCOPY}
+                --update-section .app_hdr=${HDR_BIN}
+                --update-section .app_bin=${APP_BIN}
+                ${BL_ELF} ${COMBINED_ELF}
+        COMMAND $<TARGET_FILE:picotool> uf2 convert -t elf
+                ${COMBINED_ELF} ${COMBINED_UF2}
+        DEPENDS ${HDR_BIN} ${BL_ELF} ${APP_BIN}
+        COMMENT "Building combined bootloader+app .uf2 (${app_target}_combined.uf2)"
+        VERBATIM
+    )
+
+    add_custom_target(${app_target}_combined ALL DEPENDS ${COMBINED_UF2})
 endfunction()
 
 # Make the Python interpreter available for gen_imghdr.py.
