@@ -238,60 +238,30 @@ class ControlPage {
             return;
         }
 
+        // Per-peripheral controls land with the routing engine. Until then,
+        // surface peripheral count + a "rebuilding" notice so the Control
+        // page doesn't look broken.
         try {
-            const ws = window.saintWS;
-
-            // Get pin configuration
-            const configResult = await ws.management('get_pin_config', {
-                node_id: nodeId
+            const periph = await window.saintWS.management('get_node_peripherals', {
+                node_id: nodeId,
             });
-
-            // Convert config to pins array
-            const pins = [];
-            if (configResult?.pins) {
-                for (const [gpio, config] of Object.entries(configResult.pins)) {
-                    if (config.mode && config.mode !== 'unconfigured') {
-                        pins.push({
-                            gpio: parseInt(gpio),
-                            mode: config.mode,
-                            logical_name: config.logical_name || ''
-                        });
-                    }
-                }
-            }
-
-            // Update pin count
+            const count = (periph && periph.peripherals) ? periph.peripherals.length : 0;
             const panel = this.container.querySelector(`[data-node-id="${nodeId}"]`);
-            const countEl = panel.querySelector('.node-pin-count');
+            const countEl = panel ? panel.querySelector('.node-pin-count') : null;
             if (countEl) {
-                countEl.textContent = pins.length > 0 ? `${pins.length} pins` : '';
+                countEl.textContent = count > 0 ? `${count} peripheral${count === 1 ? '' : 's'}` : '';
             }
-
-            if (pins.length === 0) {
-                container.innerHTML = `
-                    <div class="flex items-center gap-3 p-3 bg-slate-800/50 rounded-lg border border-slate-700">
-                        <span class="material-icons md-20 text-slate-500">add_circle_outline</span>
-                        <div>
-                            <p class="text-sm font-medium text-slate-300">No Pins Configured</p>
-                            <p class="text-xs text-slate-500">Go to node detail page to configure pins</p>
-                        </div>
+            container.innerHTML = `
+                <div class="flex items-center gap-3 p-3 bg-slate-800/50 rounded-lg border border-slate-700">
+                    <span class="material-icons md-20 text-slate-500">construction</span>
+                    <div>
+                        <p class="text-sm font-medium text-slate-300">Controls rebuilding</p>
+                        <p class="text-xs text-slate-500">
+                            Per-pin control is being replaced by per-channel controls dispatched
+                            through the routing engine.
+                        </p>
                     </div>
-                `;
-                return;
-            }
-
-            // Create or get manager for this node
-            if (!this.nodeManagers[nodeId]) {
-                this.nodeManagers[nodeId] = new PinControlManager();
-                this.nodeManagers[nodeId].init();
-            }
-
-            const manager = this.nodeManagers[nodeId];
-            await manager.setNode(nodeId);
-
-            // Render controls
-            manager.renderControls(container, pins);
-
+                </div>`;
         } catch (e) {
             console.error(`Failed to load controls for ${nodeId}:`, e);
             container.innerHTML = `
@@ -301,8 +271,7 @@ class ControlPage {
                         <p class="text-sm font-medium text-red-400">Failed to Load Controls</p>
                         <p class="text-xs text-red-300/70">${e.message || 'Unknown error'}</p>
                     </div>
-                </div>
-            `;
+                </div>`;
         }
     }
 

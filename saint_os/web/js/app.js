@@ -1357,9 +1357,9 @@ class SaintApp {
             // Update overview tab
             this.updateNodeOverview();
 
-            // Load pin config data
-            if (typeof pinConfigManager !== 'undefined') {
-                await pinConfigManager.loadNodeData(this.currentNodeId, this.currentNodeInfo);
+            // Load peripherals
+            if (typeof peripheralManager !== 'undefined') {
+                await peripheralManager.loadNodeData(this.currentNodeId, this.currentNodeInfo);
             }
 
             // Start periodic refresh for live data
@@ -1546,69 +1546,29 @@ class SaintApp {
 
     /**
      * Load pin controls for the State tab.
+     *
+     * NOTE: this tab used to render per-GPIO sliders driven by the old
+     * pin_config. With the peripheral-first model, controls belong on
+     * per-channel widgets dispatched through the routing engine. Until
+     * that ships, the State tab shows a placeholder and a runtime-state
+     * dump so the operator can still see what the firmware is reporting.
      */
     async loadStateTabControls() {
-        console.log('Loading State tab controls for node:', this.currentNodeId);
+        if (!this.currentNodeId || !this.currentNodeInfo) return;
 
-        if (!this.currentNodeId || !this.currentNodeInfo) {
-            console.warn('No current node selected');
-            return;
+        const container = document.getElementById('pin-controls-container');
+        if (container) {
+            container.innerHTML = `
+                <div class="p-4 bg-slate-900/40 border border-slate-700 rounded-lg text-sm text-slate-300">
+                    Per-pin controls are being rewritten to operate on peripheral channels
+                    via the routing engine. Use the Peripherals tab to configure attachments
+                    and the Routing page (coming soon) to wire them up.
+                </div>`;
         }
 
-        // Set node for pin control manager
-        if (typeof pinControlManager !== 'undefined') {
-            await pinControlManager.setNode(this.currentNodeId);
-
-            // Get configured pins from node info
-            const ws = window.saintWS;
-            try {
-                console.log('Fetching pin config for', this.currentNodeId);
-                const configResult = await ws.management('get_pin_config', {
-                    node_id: this.currentNodeId
-                });
-                console.log('Pin config result:', configResult);
-
-                // Convert config to pins array
-                const pins = [];
-                if (configResult?.pins) {
-                    for (const [gpio, config] of Object.entries(configResult.pins)) {
-                        if (config.mode && config.mode !== 'unconfigured') {
-                            pins.push({
-                                gpio: parseInt(gpio),
-                                mode: config.mode,
-                                logical_name: config.logical_name || ''
-                            });
-                        }
-                    }
-                }
-                console.log('Extracted pins:', pins);
-
-                // Render controls
-                const container = document.getElementById('pin-controls-container');
-                pinControlManager.renderControls(container, pins);
-
-                // Update summary
-                document.getElementById('state-node-status').textContent =
-                    this.currentNodeInfo.online ? 'Online' : 'Offline';
-                document.getElementById('state-pin-count').textContent =
-                    pins.length.toString();
-
-                // Setup quick action buttons
-                this.setupQuickActionButtons(pins);
-            } catch (e) {
-                console.error('Failed to load pin config:', e);
-                const container = document.getElementById('pin-controls-container');
-                if (container) {
-                    container.innerHTML = `
-                        <div class="p-4 bg-red-900/20 border border-red-800/50 rounded-lg">
-                            <p class="text-red-400">Failed to load pin configuration: ${e.message}</p>
-                        </div>
-                    `;
-                }
-            }
-        } else {
-            console.warn('pinControlManager not defined');
-        }
+        document.getElementById('state-node-status').textContent =
+            this.currentNodeInfo.online ? 'Online' : 'Offline';
+        document.getElementById('state-pin-count').textContent = '—';
     }
 
     /**

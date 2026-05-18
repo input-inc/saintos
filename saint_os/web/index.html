@@ -302,8 +302,8 @@
                             </div>
                         </div>
 
-                        <!-- RoboClaw Motor Controller -->
-                        <div class="card" id="telemetry-roboclaw">
+                        <!-- RoboClaw Motor Controller (hidden — mock data only; brought back when wired to live telemetry per peripheral instance) -->
+                        <div class="card hidden" id="telemetry-roboclaw">
                             <div class="flex items-center justify-between mb-4">
                                 <div class="flex items-center gap-2">
                                     <span class="material-icons text-cyan-400 icon-md">settings</span>
@@ -346,8 +346,8 @@
                             </div>
                         </div>
 
-                        <!-- Maestro Servo Controller -->
-                        <div class="card" id="telemetry-maestro">
+                        <!-- Maestro Servo Controller (hidden — mock data only; brought back when wired to live telemetry per peripheral instance) -->
+                        <div class="card hidden" id="telemetry-maestro">
                             <div class="flex items-center justify-between mb-4">
                                 <div class="flex items-center gap-2">
                                     <span class="material-icons text-violet-400 icon-md">precision_manufacturing</span>
@@ -423,7 +423,7 @@
                 <!-- Tab Navigation -->
                 <div class="flex items-center gap-1 mb-6 border-b border-slate-700">
                     <button class="node-tab active" data-tab="overview">Overview</button>
-                    <button class="node-tab" data-tab="pins">Pin Configuration</button>
+                    <button class="node-tab" data-tab="pins">Peripherals</button>
                     <button class="node-tab" data-tab="state">State</button>
                     <button class="node-tab" data-tab="logs">Logs</button>
                     <button class="node-tab" data-tab="control">Control</button>
@@ -490,24 +490,15 @@
                     </div>
                 </div>
 
-                <!-- Tab Content: Pin Configuration -->
+                <!-- Tab Content: Peripherals -->
                 <div id="node-tab-pins" class="node-tab-content hidden">
-                    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
-                        <!-- Role Functions -->
-                        <div class="lg:col-span-1">
-                            <div class="card">
-                                <h3 class="text-lg font-semibold text-white mb-4">Logical Functions</h3>
-                                <div id="pinconfig-functions" class="space-y-2">
-                                    <p class="text-slate-400 text-sm">Loading functions...</p>
-                                </div>
-                            </div>
-                        </div>
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-                        <!-- Pin Configuration -->
-                        <div class="lg:col-span-3">
+                        <!-- Peripherals list (main column) -->
+                        <div class="lg:col-span-2">
                             <div class="card">
-                                <div class="flex items-center justify-between mb-4">
-                                    <h3 class="text-lg font-semibold text-white">Available Pins</h3>
+                                <div class="flex items-center justify-between mb-3">
+                                    <h3 class="text-lg font-semibold text-white">Peripherals on this node</h3>
                                     <div class="flex items-center gap-2">
                                         <button id="btn-refresh-capabilities" class="btn-secondary text-sm">
                                             <span class="material-icons icon-sm">refresh</span>
@@ -517,20 +508,41 @@
                                             <span class="material-icons icon-sm">sync</span>
                                             Sync to Node
                                         </button>
+                                        <button id="btn-add-peripheral" class="btn-primary">
+                                            <span class="material-icons icon-sm">add</span>
+                                            Add peripheral
+                                        </button>
                                     </div>
                                 </div>
+                                <p class="text-xs text-slate-400 mb-4">
+                                    Everything attached to this node — from a single-pin button to a multi-channel
+                                    sensor — is a peripheral. Each one owns the pins it needs and exposes channels
+                                    you can route to widgets and other peripherals.
+                                </p>
 
-                                <div id="pinconfig-pins-grid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                                    <p class="text-slate-400 col-span-full text-center py-8">Loading pins...</p>
+                                <div id="peripheral-list" class="space-y-3">
+                                    <p class="text-slate-400 text-sm">Loading peripherals...</p>
                                 </div>
-                            </div>
 
-                            <!-- Configuration Summary -->
-                            <div class="card mt-4">
-                                <h3 class="text-lg font-semibold text-white mb-4">Configuration Summary</h3>
-                                <div id="pinconfig-conflicts" class="hidden mb-3 p-3 rounded bg-red-900/40 border border-red-700 text-red-200 text-sm space-y-1"></div>
-                                <div id="pinconfig-summary" class="space-y-2">
-                                    <p class="text-slate-400 text-sm">No pins configured.</p>
+                                <div id="peripheral-conflicts"
+                                     class="hidden mt-4 p-3 rounded bg-red-900/40 border border-red-700 text-red-200 text-sm space-y-1"></div>
+                            </div>
+                        </div>
+
+                        <!-- Pin availability sidebar -->
+                        <div class="lg:col-span-1">
+                            <div class="card">
+                                <h3 class="text-sm font-semibold text-white mb-2">Pin availability</h3>
+                                <p class="text-xs text-slate-500 mb-3">
+                                    Which pins are claimed and which are still free.
+                                </p>
+                                <div class="mb-3">
+                                    <div class="stat-label">Free</div>
+                                    <div id="peripheral-free-pins" class="mt-1 flex flex-wrap"></div>
+                                </div>
+                                <div>
+                                    <div class="stat-label">Claimed</div>
+                                    <div id="peripheral-claimed-pins" class="mt-1 text-xs text-slate-400 space-y-1"></div>
                                 </div>
                             </div>
                         </div>
@@ -749,185 +761,40 @@
                 </div>
             </div>
 
-            <!-- Pin Config Modal (for editing individual pins) -->
-            <div id="pinconfig-modal" class="fixed inset-0 z-50 hidden">
-                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="pinConfigManager.closeModal()"></div>
-                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+            <!-- Peripheral add/edit modal -->
+            <div id="peripheral-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="peripheralManager.closeModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-lg">
                     <div class="card">
                         <div class="flex items-center justify-between mb-4">
-                            <h3 class="text-lg font-semibold text-white">Configure Pin</h3>
-                            <button onclick="pinConfigManager.closeModal()" class="text-slate-400 hover:text-white">
+                            <h3 id="peripheral-modal-title" class="text-lg font-semibold text-white">Add peripheral</h3>
+                            <button onclick="peripheralManager.closeModal()" class="text-slate-400 hover:text-white">
                                 <span class="material-icons md-20">close</span>
                             </button>
                         </div>
 
-                        <div id="pinconfig-modal-content" class="space-y-4">
-                            <!-- Pin info -->
-                            <div class="flex items-center gap-3 p-3 bg-slate-900 rounded-lg">
-                                <div class="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
-                                    <span id="modal-pin-name" class="text-cyan-400 font-mono font-bold">D5</span>
-                                </div>
-                                <div>
-                                    <p class="text-white font-medium">GPIO <span id="modal-pin-gpio">5</span></p>
-                                    <p id="modal-pin-caps" class="text-xs text-slate-400">Digital I/O, PWM</p>
-                                </div>
-                            </div>
-
-                            <!-- Function Assignment -->
+                        <div class="space-y-4">
                             <div>
-                                <label class="block text-sm font-medium text-slate-300 mb-2">Assign Function</label>
-                                <select id="modal-function-select" class="input-field w-full">
-                                    <option value="">-- Not Assigned --</option>
-                                </select>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Peripheral type</label>
+                                <select id="peripheral-modal-type" class="input-field w-full"></select>
+                                <p id="peripheral-modal-type-desc" class="text-xs text-slate-500 mt-1"></p>
                             </div>
 
-                            <!-- Mode Selection -->
+                            <div id="peripheral-modal-pin-section"></div>
+                            <div id="peripheral-modal-params-section"></div>
+
                             <div>
-                                <label class="block text-sm font-medium text-slate-300 mb-2">Pin Mode</label>
-                                <select id="modal-mode-select" class="input-field w-full">
-                                    <option value="">-- Select Mode --</option>
-                                </select>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label</label>
+                                <input id="peripheral-modal-label" class="input-field w-full" placeholder="Auto-generated if blank">
                             </div>
 
-                            <!-- PWM Parameters (conditional) -->
-                            <div id="modal-pwm-params" class="hidden space-y-3">
-                                <div>
-                                    <label class="block text-sm font-medium text-slate-300 mb-2">PWM Frequency (Hz)</label>
-                                    <input type="number" id="modal-pwm-freq" class="input-field w-full" value="50" min="1" max="100000">
-                                </div>
-                            </div>
-
-                            <!-- Servo Pulse Range Parameters (conditional) -->
-                            <div id="modal-servo-params" class="hidden space-y-3">
-                                <div>
-                                    <label class="block text-sm font-medium text-slate-300 mb-2">Pulse Range Preset</label>
-                                    <select id="modal-servo-preset" class="input-field w-full">
-                                        <option value="standard">Standard (0.5 - 2.5 ms)</option>
-                                        <option value="narrow">Narrow (1.0 - 2.0 ms)</option>
-                                        <option value="custom">Custom</option>
-                                    </select>
-                                </div>
-                                <div id="modal-servo-custom" class="hidden grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Min Pulse (us)</label>
-                                        <input type="number" id="modal-servo-min-pulse" class="input-field w-full" value="500" min="100" max="3000">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Max Pulse (us)</label>
-                                        <input type="number" id="modal-servo-max-pulse" class="input-field w-full" value="2500" min="100" max="3000">
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Digital Input Parameters (conditional) -->
-                            <div id="modal-digital-in-params" class="hidden space-y-3">
-                                <div class="flex items-center gap-4">
-                                    <label class="flex items-center gap-2">
-                                        <input type="checkbox" id="modal-pull-up" class="rounded bg-slate-700 border-slate-600">
-                                        <span class="text-sm text-slate-300">Pull-up</span>
-                                    </label>
-                                    <label class="flex items-center gap-2">
-                                        <input type="checkbox" id="modal-pull-down" class="rounded bg-slate-700 border-slate-600">
-                                        <span class="text-sm text-slate-300">Pull-down</span>
-                                    </label>
-                                </div>
-                            </div>
-
-                            <!-- Maestro Servo Parameters (conditional) -->
-                            <div id="modal-maestro-params" class="hidden space-y-3">
-                                <div class="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Min Pulse (us)</label>
-                                        <input type="number" id="modal-maestro-min-pulse" class="input-field w-full" value="992" min="64" max="4000">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Max Pulse (us)</label>
-                                        <input type="number" id="modal-maestro-max-pulse" class="input-field w-full" value="2000" min="64" max="4000">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Neutral (us)</label>
-                                        <input type="number" id="modal-maestro-neutral" class="input-field w-full" value="1500" min="64" max="4000">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Home (us)</label>
-                                        <input type="number" id="modal-maestro-home" class="input-field w-full" value="0" min="0" max="4000">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Speed</label>
-                                        <input type="number" id="modal-maestro-speed" class="input-field w-full" value="0" min="0" max="1000">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Acceleration</label>
-                                        <input type="number" id="modal-maestro-accel" class="input-field w-full" value="0" min="0" max="255">
-                                    </div>
-                                </div>
-                                <p class="text-xs text-slate-500">Speed/Acceleration: 0 = unlimited/none</p>
-                            </div>
-
-                            <!-- SyRen Motor Parameters (conditional) -->
-                            <div id="modal-syren-params" class="hidden space-y-3">
-                                <div class="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Address</label>
-                                        <input type="number" id="modal-syren-address" class="input-field w-full" value="128" min="128" max="135">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Deadband</label>
-                                        <input type="number" id="modal-syren-deadband" class="input-field w-full" value="3" min="0" max="127">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Ramping</label>
-                                        <input type="number" id="modal-syren-ramping" class="input-field w-full" value="0" min="0" max="80">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Timeout (ms)</label>
-                                        <input type="number" id="modal-syren-timeout" class="input-field w-full" value="0" min="0" max="65535">
-                                    </div>
-                                </div>
-                                <p class="text-xs text-slate-500">Address: 128-135 (up to 8 SyRen units on one serial line). Timeout: 0 = disabled</p>
-                            </div>
-
-                            <!-- FAS100 Sensor Parameters (conditional) -->
-                            <div id="modal-fas100-params" class="hidden space-y-3">
-                                <div>
-                                    <label class="block text-xs text-slate-400 mb-1">Poll Interval (ms)</label>
-                                    <input type="number" id="modal-fas100-poll-interval" class="input-field w-full" value="50" min="20" max="1000">
-                                </div>
-                                <p class="text-xs text-slate-500">How often to poll the FAS100 sensor. Default 50ms. Min 20ms.</p>
-                            </div>
-
-                            <!-- RoboClaw Motor Parameters (conditional) -->
-                            <div id="modal-roboclaw-params" class="hidden space-y-3">
-                                <div class="grid grid-cols-3 gap-3">
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Address</label>
-                                        <input type="number" id="modal-roboclaw-address" class="input-field w-full" value="128" min="128" max="135">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Deadband</label>
-                                        <input type="number" id="modal-roboclaw-deadband" class="input-field w-full" value="0" min="0" max="127">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-slate-400 mb-1">Max Current (mA)</label>
-                                        <input type="number" id="modal-roboclaw-max-current" class="input-field w-full" value="0" min="0" max="60000">
-                                    </div>
-                                </div>
-                                <p class="text-xs text-slate-500">Address: 128-135 (0x80-0x87). Max Current: 0 = unlimited. 5 channels per unit (motor, encoder, voltage, current, temp).</p>
-                            </div>
-
-                            <!-- UART Pin Selection (appears for any UART peripheral) -->
-                            <div id="modal-uart-pair-params" class="hidden space-y-3 pt-3 border-t border-slate-700">
-                                <div>
-                                    <label class="block text-xs text-slate-400 mb-1">UART Pins</label>
-                                    <select id="modal-uart-pair" class="input-field w-full"></select>
-                                </div>
-                                <p class="text-xs text-slate-500">Selects which hardware UART and pin pair this peripheral uses. Shared across all channels of this peripheral. Cannot overlap with another active UART peripheral.</p>
-                            </div>
+                            <div id="peripheral-modal-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
                         </div>
 
                         <div class="flex items-center gap-3 mt-6">
-                            <button onclick="pinConfigManager.closeModal()" class="btn-secondary flex-1">Cancel</button>
-                            <button onclick="pinConfigManager.saveModalConfig()" class="btn-primary flex-1">Save</button>
+                            <button onclick="peripheralManager.closeModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button id="peripheral-modal-save" onclick="peripheralManager.saveModal()" class="btn-primary flex-1">Save</button>
                         </div>
                     </div>
                 </div>
@@ -2295,7 +2162,7 @@
     <script src="js/lib/xterm/xterm.js"></script>
     <script src="js/lib/xterm/addon-fit.js"></script>
     <script src="js/websocket.js"></script>
-    <script src="js/pinconfig.js"></script>
+    <script src="js/peripherals.js"></script>
     <script src="js/pincontrol.js"></script>
     <script src="js/controlpage.js"></script>
     <script src="js/moods.js"></script>
