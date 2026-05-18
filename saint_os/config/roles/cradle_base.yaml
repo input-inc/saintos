@@ -1,0 +1,54 @@
+# SAINT.OS Role Definition - Cradle Base
+#
+# Node mounted at the base of the cradle. Carries the battery current/
+# voltage sensing for the whole robot via an FAS100 ADV. The current
+# reading is the primary signal — voltage and temperatures come from the
+# same physical sensor and are exposed as optional functions so they can
+# be left unconnected without flagging the configuration as incomplete.
+role: cradle_base
+display_name: "Cradle Base"
+description: "Battery and power telemetry node mounted at the cradle base"
+
+# Sensor-only node — no motion control to map.
+control_type: single_axis
+
+logical_functions:
+  - name: battery_current
+    display_name: "Battery Current"
+    type: sensor_input
+    required: true
+    description: "Pack current draw from the FrSky FAS100 ADV (channel 0)"
+    compatible_modes:
+      - fas100_sensor
+    default_params:
+      poll_interval_ms: 50
+
+  - name: battery_voltage
+    display_name: "Battery Voltage"
+    type: sensor_input
+    required: false
+    description: "Pack voltage from the FrSky FAS100 ADV (channel 1)"
+    compatible_modes:
+      - fas100_sensor
+    default_params:
+      poll_interval_ms: 50
+
+  - name: battery_temp_1
+    display_name: "Battery Temp 1"
+    type: sensor_input
+    required: false
+    description: "Temperature probe 1 from the FrSky FAS100 ADV (channel 2)"
+    compatible_modes:
+      - fas100_sensor
+    default_params:
+      poll_interval_ms: 50
+
+  - name: battery_temp_2
+    display_name: "Battery Temp 2"
+    type: sensor_input
+    required: false
+    description: "Temperature probe 2 from the FrSky FAS100 ADV (channel 3)"
+    compatible_modes:
+      - fas100_sensor
+    default_params:
+      poll_interval_ms: 50

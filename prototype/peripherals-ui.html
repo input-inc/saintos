@@ -1,0 +1,1372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SAINT.OS — peripheral-first config (prototype v2)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#0f172a; color:#e2e8f0; }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1rem 1.25rem; }
+  .stat-label { font-size:.75rem; color:#94a3b8; text-transform:uppercase; letter-spacing:.05em; }
+  .stat-value { font-weight:600; color:#fff; }
+  .input { background:#0f172a; border:1px solid #334155; color:#e2e8f0; border-radius:.375rem; padding:.4rem .65rem; font-size:.875rem; width:100%; }
+  .input:focus { outline:none; border-color:#22d3ee; }
+  .btn-primary { background:#0891b2; color:#fff; padding:.5rem 1rem; border-radius:.375rem; font-size:.875rem; font-weight:500; cursor:pointer; }
+  .btn-primary:hover { background:#0e7490; }
+  .btn-secondary { background:transparent; color:#cbd5e1; border:1px solid #334155; padding:.5rem 1rem; border-radius:.375rem; font-size:.875rem; cursor:pointer; }
+  .btn-secondary:hover { background:#1e293b; }
+  .btn-danger { background:transparent; color:#f87171; padding:.25rem .5rem; font-size:.75rem; cursor:pointer; }
+  .btn-danger:hover { background:#7f1d1d33; border-radius:.25rem; }
+  .pill { display:inline-block; padding:.125rem .5rem; border-radius:9999px; font-size:.7rem; font-weight:500; }
+  .pill-ok    { background:#10b98133; color:#6ee7b7; }
+  .pill-warn  { background:#f59e0b33; color:#fcd34d; }
+  .pill-err   { background:#ef444433; color:#fca5a5; }
+  .pill-slate { background:#33415555; color:#cbd5e1; }
+  .tab { padding:.5rem 1rem; font-size:.875rem; font-weight:500; color:#94a3b8; border-bottom:2px solid transparent; cursor:pointer; }
+  .tab.active { color:#22d3ee; border-bottom-color:#22d3ee; }
+  .hidden { display:none !important; }
+  .channel-pill { background:#334155; color:#cbd5e1; padding:.125rem .5rem; border-radius:.25rem; font-size:.7rem; font-family:monospace; }
+  .row { display:flex; justify-content:space-between; align-items:center; padding:.625rem 0; border-bottom:1px solid #334155; }
+  .row:last-child { border-bottom:none; }
+  .pin-chip { display:inline-block; background:#334155; color:#cbd5e1; font-family:monospace; font-size:.7rem; padding:.125rem .375rem; border-radius:.25rem; margin:.125rem; }
+  .pin-chip.free { background:#0f766e44; color:#5eead4; }
+  .meter { height:.4rem; background:#334155; border-radius:9999px; overflow:hidden; }
+  .meter > div { height:100%; background:#22d3ee; }
+  details > summary { cursor:pointer; list-style:none; }
+  details > summary::-webkit-details-marker { display:none; }
+
+  /* ------------------------------------------------------------------- */
+  /* Node-graph routing editor                                            */
+  /* ------------------------------------------------------------------- */
+  .graph-canvas {
+    position: relative;
+    height: 640px;
+    background:
+      radial-gradient(circle at 1px 1px, #334155 1px, transparent 1px) 0 0 / 24px 24px,
+      #0b1220;
+    border: 1px solid #334155;
+    border-radius: .5rem;
+    overflow: hidden;
+    user-select: none;
+  }
+  .graph-canvas svg.wires {
+    position: absolute; inset: 0; pointer-events: none;
+    z-index: 1;
+    width: 100%; height: 100%;
+    overflow: visible;
+  }
+  .graph-canvas svg.wires path { pointer-events: stroke; cursor: pointer; }
+  .graph-canvas svg.wires path:hover { stroke: #f87171 !important; }
+  .graph-node {
+    position: absolute;
+    min-width: 180px;
+    background: #1e293b;
+    border: 1px solid #475569;
+    border-radius: .5rem;
+    z-index: 2;
+    box-shadow: 0 4px 12px rgba(0,0,0,.4);
+  }
+  .graph-node.dragging { z-index: 10; opacity: .9; }
+  .graph-node-header {
+    padding: .5rem .75rem;
+    border-bottom: 1px solid #334155;
+    font-size: .75rem; font-weight: 600;
+    cursor: move;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: .25rem;
+  }
+  .graph-node-kind { font-size: .65rem; color:#94a3b8; font-weight: 400; }
+  .graph-node-body { padding: .25rem 0; }
+  .graph-pin-row {
+    display: flex; align-items: center; padding: .15rem .5rem;
+    font-size: .7rem; gap: .35rem;
+    position: relative;
+  }
+  .graph-pin-row.input { justify-content: flex-start; }
+  .graph-pin-row.output { justify-content: flex-end; }
+  .graph-pin {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #475569; border: 2px solid #1e293b;
+    cursor: pointer;
+    position: absolute;
+    top: 50%; transform: translateY(-50%);
+  }
+  .graph-pin-row.input .graph-pin { left: -6px; }
+  .graph-pin-row.output .graph-pin { right: -6px; }
+  .graph-pin.dir-in     { background: #06b6d4; }
+  .graph-pin.dir-out    { background: #f59e0b; }
+  .graph-pin:hover      { transform: translateY(-50%) scale(1.3); }
+  .graph-pin.connecting { background: #34d399; box-shadow: 0 0 8px #34d399; }
+  .graph-pin-label-in   { margin-left: .75rem; color:#cbd5e1; }
+  .graph-pin-label-out  { margin-right: .75rem; color:#cbd5e1; }
+  .graph-node-footer {
+    padding: .25rem .75rem; font-size: .65rem; color: #64748b;
+    border-top: 1px solid #33415544;
+  }
+  .graph-node[data-kind="peripheral"] .graph-node-header { background: #0f4c5c; }
+  .graph-node[data-kind="signal"]    .graph-node-header { background: #4a3b5c; }
+  .graph-node[data-kind="widget"]    .graph-node-header { background: #5c4a0f; }
+  .graph-node[data-builtin="true"]   .graph-node-header { background: #1e3a4a; }
+
+  .graph-toolbar {
+    display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+    margin-bottom: .5rem;
+  }
+  .graph-help {
+    font-size: .7rem; color: #64748b;
+    padding: .25rem .5rem;
+  }
+</style>
+</head>
+<body class="font-sans">
+
+<div class="max-w-6xl mx-auto p-6">
+
+  <!-- Header / context -->
+  <div class="mb-4 flex items-baseline justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-white">Node Configuration <span class="text-slate-500 text-sm font-normal ml-2">— prototype v2</span></h1>
+      <p class="text-sm text-slate-400">
+        <span class="font-mono text-cyan-300">rp2040_A1B2C3D4</span>
+        ·
+        Role: <span id="role-name" class="text-emerald-300">Cradle Base</span>
+        ·
+        <span class="pill pill-ok">Live</span>
+      </p>
+    </div>
+    <div class="text-xs text-slate-500 max-w-sm text-right">
+      Click-through mock. State is in-memory; nothing is persisted.
+      <br>"Live readings" values are fake jitter just to show the layout.
+    </div>
+  </div>
+
+  <!-- Tab bar. Per-node config is just Peripherals + Live readings now.
+       The (system-wide) Routing tab is included here only so the prototype
+       can show how peripheral channels connect to logical destinations —
+       in production this would be its own top-level page, not a node tab. -->
+  <div class="flex gap-1 border-b border-slate-700 mb-6">
+    <div class="tab active" data-tab="peripherals">Peripherals</div>
+    <div class="tab"        data-tab="live">Live readings</div>
+    <div class="tab"        data-tab="routing">Routing <span class="text-xs text-slate-500 ml-1">(system-wide)</span></div>
+  </div>
+
+  <!-- =========================================================================
+       Peripherals tab
+       ========================================================================= -->
+  <section data-panel="peripherals">
+    <div class="grid grid-cols-3 gap-6">
+
+      <!-- Main column: the peripherals list -->
+      <div class="col-span-2 card">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-lg font-semibold text-white">Peripherals on this node</h3>
+          <button class="btn-primary" id="add-peripheral-btn">+ Add peripheral</button>
+        </div>
+        <p class="text-xs text-slate-400 mb-4">
+          Everything attached to this node — from a single-pin button to a
+          multi-channel sensor — is a peripheral. Each one owns the pins it
+          needs and exposes the channels it provides.
+        </p>
+        <div id="peripheral-list" class="space-y-3"></div>
+
+        <!-- Conflict banner area -->
+        <div id="conflict-banner" class="hidden mt-4 p-3 rounded" style="background:#7f1d1d33; border:1px solid #dc2626;">
+          <div class="font-semibold text-red-300 mb-1">⚠ Pin conflict</div>
+          <div id="conflict-text" class="text-sm text-red-200"></div>
+        </div>
+      </div>
+
+      <!-- Side column: pin availability summary -->
+      <div class="card">
+        <h3 class="text-sm font-semibold text-white mb-2">Pin availability</h3>
+        <p class="text-xs text-slate-500 mb-3">
+          A read-only view of which pins are claimed and which are still free.
+        </p>
+        <div class="mb-3">
+          <div class="stat-label">Free</div>
+          <div id="free-pins" class="mt-1"></div>
+        </div>
+        <div>
+          <div class="stat-label">Claimed</div>
+          <div id="claimed-pins" class="mt-1 text-xs text-slate-400 space-y-1"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       Routing tab (system-wide — would be its own page in production)
+       =========================================================================
+       Routes are the wiring layer: each one connects a SOURCE (peripheral
+       input channel OR a logical signal) to a SINK (peripheral output
+       channel OR a logical signal). The role-function concept dissolves
+       into "pre-baked routes that a role's template suggests on adoption."
+  -->
+  <section data-panel="routing" class="hidden">
+    <div class="card mb-4">
+      <div class="graph-toolbar">
+        <h3 class="text-lg font-semibold text-white">Routing graph</h3>
+        <div class="ml-auto flex gap-2">
+          <button class="btn-secondary" onclick="addSignalNode()">+ Signal</button>
+          <button class="btn-secondary" onclick="openAddWidgetModal()">+ Widget</button>
+          <button class="btn-secondary" onclick="autoLayout()">Auto-layout</button>
+        </div>
+      </div>
+      <p class="text-xs text-slate-400 mb-3">
+        Drag node headers to reposition. Click an
+        <span class="inline-block" style="width:10px;height:10px;background:#f59e0b;border-radius:50%;vertical-align:middle;"></span>
+        output, then a
+        <span class="inline-block" style="width:10px;height:10px;background:#06b6d4;border-radius:50%;vertical-align:middle;"></span>
+        input to wire them. Click a wire to delete it.
+      </p>
+      <div id="graph-canvas" class="graph-canvas">
+        <svg class="wires" width="100%" height="100%" preserveAspectRatio="none"><g id="wire-layer"></g></svg>
+        <div id="node-layer"></div>
+      </div>
+      <div class="graph-help">
+        Peripheral nodes show channels coming from the node's hardware
+        (sources on the right, sinks on the left). Logical-signal nodes
+        are named pass-throughs. Widget nodes consume data and render it
+        on the operator's dashboard.
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       Live readings tab
+       ========================================================================= -->
+  <section data-panel="live" class="hidden">
+    <div class="mb-3 flex items-center justify-between">
+      <h3 class="text-lg font-semibold text-white">Live readings</h3>
+      <span class="text-xs text-slate-500">One widget per peripheral instance</span>
+    </div>
+    <div id="live-grid" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+  </section>
+</div>
+
+<!-- Add/Edit Peripheral modal -->
+<div id="peripheral-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,.7);">
+  <div class="card w-full max-w-lg" style="background:#1e293b;">
+    <div class="flex items-center justify-between mb-4">
+      <h3 id="modal-title" class="text-lg font-semibold text-white">Add peripheral</h3>
+      <button class="text-slate-400 hover:text-white" onclick="closeModal()">✕</button>
+    </div>
+
+    <div class="space-y-4">
+      <div>
+        <label class="stat-label block mb-1">Peripheral type</label>
+        <select id="modal-type" class="input" onchange="onTypeChange()"></select>
+        <p id="modal-type-desc" class="text-xs text-slate-500 mt-1"></p>
+      </div>
+
+      <!-- Pin selector — shape varies by peripheral type -->
+      <div id="modal-pin-section"></div>
+
+      <!-- Type-specific params -->
+      <div id="modal-params-section"></div>
+
+      <!-- Optional friendly name -->
+      <div>
+        <label class="stat-label block mb-1">Label</label>
+        <input id="modal-label" class="input" placeholder="Auto-generated if blank">
+      </div>
+    </div>
+
+    <div class="flex justify-end gap-2 mt-6">
+      <button class="btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn-primary" id="modal-save-btn">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// =============================================================================
+// Mock state
+// =============================================================================
+const PINS = [
+  { gpio: 0,  name: 'TX',  caps: ['gpio', 'pwm', 'uart_tx'] },
+  { gpio: 1,  name: 'RX',  caps: ['gpio', 'pwm', 'uart_rx'] },
+  { gpio: 2,  name: 'SDA', caps: ['gpio', 'pwm', 'i2c_sda'] },
+  { gpio: 3,  name: 'SCL', caps: ['gpio', 'pwm', 'i2c_scl'] },
+  { gpio: 5,  name: 'D5',  caps: ['gpio', 'pwm'] },
+  { gpio: 6,  name: 'D6',  caps: ['gpio', 'pwm'] },
+  { gpio: 9,  name: 'D9',  caps: ['gpio', 'pwm'] },
+  { gpio: 12, name: 'D12', caps: ['gpio', 'pwm', 'uart_tx'] },
+  { gpio: 13, name: 'D13', caps: ['gpio', 'pwm', 'uart_rx'] },
+  { gpio: 24, name: 'D24', caps: ['gpio', 'pwm'] },
+  { gpio: 25, name: 'D25', caps: ['gpio', 'pwm'] },
+  { gpio: 26, name: 'A0',  caps: ['gpio', 'pwm', 'adc'] },
+  { gpio: 27, name: 'A1',  caps: ['gpio', 'pwm', 'adc'] },
+  { gpio: 28, name: 'A2',  caps: ['gpio', 'pwm', 'adc', 'uart_tx'] },
+  { gpio: 29, name: 'A3',  caps: ['gpio', 'pwm', 'adc', 'uart_rx'] },
+];
+
+const UART_PAIRS = [
+  { uart: 0, tx: 0,  rx: 1  },
+  { uart: 0, tx: 12, rx: 13 },
+  { uart: 0, tx: 28, rx: 29 },
+  { uart: 1, tx: 24, rx: 25 },
+];
+
+// =============================================================================
+// Peripheral type catalog
+// =============================================================================
+// The unifying shape: every peripheral has a "pin_kind" telling the UI what
+// pin-shape it needs, plus a list of channels it exposes. Single-pin generic
+// peripherals (button, LED, ADC input) live alongside complex multi-channel
+// ones (FAS100, SyRen) under the same model.
+//
+// Channels are bidirectional in spirit: { dir: 'in' | 'out' } describes
+// whether the operator reads the channel or writes to it. The role-function
+// binding code uses this to decide which functions accept which channels.
+
+const PERIPHERAL_TYPES = {
+  // -- Generic single-pin --
+  button: {
+    label: 'Button',
+    description: 'A momentary or latching switch on a single GPIO pin.',
+    pin_kind: 'gpio',
+    direction: 'input',
+    channels: [
+      { id: 'pressed', display: 'Pressed', dir: 'in', cap: 'digital_in' },
+    ],
+    params: [
+      { id: 'pull_up',  label: 'Pull-up resistor', type: 'bool', default: true },
+      { id: 'active_low', label: 'Active low (pressed = 0)', type: 'bool', default: true },
+      { id: 'debounce_ms', label: 'Debounce (ms)', type: 'int', default: 20, min: 0, max: 200 },
+    ],
+  },
+  led: {
+    label: 'LED',
+    description: 'A digital output on a single GPIO pin.',
+    pin_kind: 'gpio',
+    direction: 'output',
+    channels: [
+      { id: 'on', display: 'On', dir: 'out', cap: 'digital_out' },
+    ],
+    params: [
+      { id: 'active_low',   label: 'Active low (on = 0)',     type: 'bool', default: false },
+      { id: 'initial_on',   label: 'Initial state on',        type: 'bool', default: false },
+    ],
+  },
+  analog_in: {
+    label: 'Analog Input',
+    description: 'A voltage reading on an ADC pin.',
+    pin_kind: 'adc',
+    direction: 'input',
+    channels: [
+      { id: 'voltage', display: 'Voltage', dir: 'in', cap: 'adc' },
+    ],
+    params: [
+      { id: 'divider_ratio', label: 'Voltage divider ratio', type: 'float', default: 1.0 },
+    ],
+  },
+  servo: {
+    label: 'Servo (PWM)',
+    description: 'Standard hobby servo on a PWM-capable pin.',
+    pin_kind: 'pwm',
+    direction: 'output',
+    channels: [
+      { id: 'angle', display: 'Angle (°)', dir: 'out', cap: 'servo' },
+    ],
+    params: [
+      { id: 'min_pulse_us', label: 'Min pulse (µs)', type: 'int', default: 500,  min: 100, max: 3000 },
+      { id: 'max_pulse_us', label: 'Max pulse (µs)', type: 'int', default: 2500, min: 100, max: 3000 },
+    ],
+  },
+
+  // -- Built-in (always present on the board, can't be removed) --
+  neopixel: {
+    label: 'NeoPixel (RGB)',
+    description: 'Onboard WS2812 RGB LED. Fixed at GP16 on the Feather RP2040.',
+    pin_kind: 'builtin',
+    direction: 'output',
+    channels: [
+      { id: 'color',      display: 'Color (RGB)',    dir: 'out', cap: 'rgb_color' },
+      { id: 'brightness', display: 'Brightness',     dir: 'out', cap: 'brightness' },
+    ],
+    params: [
+      { id: 'default_color', label: 'Idle color (hex)', type: 'string', default: '#1e293b' },
+    ],
+  },
+
+  // -- Complex multi-channel --
+  fas100: {
+    label: 'FAS100',
+    description: 'FrSky FAS100 current/voltage/temperature sensor over S.Port half-duplex UART.',
+    pin_kind: 'uart',
+    direction: 'input',
+    channels: [
+      { id: 'amps',  display: 'Current (A)',   dir: 'in', cap: 'fas100_amps'  },
+      { id: 'volts', display: 'Voltage (V)',   dir: 'in', cap: 'fas100_volts' },
+      { id: 'temp1', display: 'Temp 1 (°C)',   dir: 'in', cap: 'fas100_temp1' },
+      { id: 'temp2', display: 'Temp 2 (°C)',   dir: 'in', cap: 'fas100_temp2' },
+    ],
+    params: [
+      { id: 'poll_interval_ms', label: 'Poll interval (ms)', type: 'int', default: 50, min: 20, max: 1000 },
+    ],
+  },
+  syren: {
+    label: 'SyRen Motor',
+    description: 'Sabertooth SyRen motor controller over packetized serial.',
+    pin_kind: 'uart',
+    direction: 'output',
+    channels: [
+      { id: 'motor', display: 'Motor power', dir: 'out', cap: 'syren_motor' },
+    ],
+    params: [
+      { id: 'address',  label: 'Address',     type: 'int', default: 128, min: 128, max: 135 },
+      { id: 'deadband', label: 'Deadband',    type: 'int', default: 3,   min: 0,   max: 127 },
+    ],
+  },
+};
+
+// =============================================================================
+// Operator's saved state (seeded with a non-trivial config)
+// =============================================================================
+const STATE = {
+  // Two FAS100s to show the "two widgets" case, plus a button and an LED so
+  // the generic-peripheral case is visible too.
+  peripherals: [
+    // Built-in (advertised by the node's firmware — operator can't remove
+    // it, just configure and route it). The Feather RP2040 has this NeoPixel
+    // hardwired on GP16.
+    { id: 'neopixel-builtin', type: 'neopixel', label: 'Onboard NeoPixel',
+      pins: { gpio: 16 }, params: { default_color: '#1e293b' },
+      builtin: true },
+
+    { id: 'fas100-1', type: 'fas100', label: 'FAS100 (main battery)',
+      pins: { uart_tx: 0,  uart_rx: 1  },
+      params: { poll_interval_ms: 50 } },
+    { id: 'fas100-2', type: 'fas100', label: 'FAS100 (aux battery)',
+      pins: { uart_tx: 28, uart_rx: 29 },
+      params: { poll_interval_ms: 100 } },
+    { id: 'button-1', type: 'button', label: 'E-Stop',
+      pins: { gpio: 5 },
+      params: { pull_up: true, active_low: true, debounce_ms: 20 } },
+    { id: 'led-1',    type: 'led',   label: 'Status LED',
+      pins: { gpio: 13 },
+      params: { active_low: false, initial_on: false } },
+  ],
+
+  modal_mode: 'add',
+  modal_editing_id: null,
+};
+
+let _nextId = 100;
+function nextPeripheralId(typeKey) {
+  // Stable id for new ones the operator adds in the mock.
+  return `${typeKey}-${++_nextId}`;
+}
+
+// =============================================================================
+// Pin claim resolution — used in many places, compute once per render
+// =============================================================================
+function pinsClaimedByPeripheral(p) {
+  return Object.values(p.pins);
+}
+
+function buildPinClaimIndex() {
+  const claimed = {};  // gpio -> peripheral
+  for (const p of STATE.peripherals) {
+    for (const gpio of pinsClaimedByPeripheral(p)) {
+      claimed[gpio] = p;
+    }
+  }
+  return claimed;
+}
+
+// =============================================================================
+// Render: peripherals list + pin availability sidebar
+// =============================================================================
+function renderPeripherals() {
+  const el = document.getElementById('peripheral-list');
+  if (STATE.peripherals.length === 0) {
+    el.innerHTML = '<div class="text-sm text-slate-500 italic">No peripherals yet. Click "Add peripheral" to start.</div>';
+    return;
+  }
+  // Built-in peripherals get rendered first so they're visually grouped.
+  const sorted = [...STATE.peripherals].sort((a, b) =>
+    (b.builtin ? 1 : 0) - (a.builtin ? 1 : 0));
+  el.innerHTML = sorted.map(p => {
+    const type = PERIPHERAL_TYPES[p.type];
+    const pinDesc = describePins(p, type);
+    const channelChips = type.channels.map(c =>
+      `<span class="channel-pill" title="${c.display} (${c.dir})">${c.id} ${c.dir === 'in' ? '↑' : '↓'}</span>`
+    ).join(' ');
+    const builtinBadge = p.builtin
+      ? '<span class="pill pill-slate ml-2" title="Hardwired on this node — cannot be removed">Built-in</span>'
+      : '';
+    const removeBtn = p.builtin
+      ? '<button class="btn-danger" disabled style="opacity:0.3;cursor:not-allowed;" title="Built-in peripherals cannot be removed">Remove</button>'
+      : `<button class="btn-danger" onclick="removePeripheral('${p.id}')">Remove</button>`;
+    return `
+      <div class="border ${p.builtin ? 'border-slate-600 bg-slate-800/40' : 'border-slate-700 bg-slate-900/40'} rounded p-3">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="font-semibold text-white">${p.label}
+              <span class="text-xs text-slate-500 ml-2">${type.label}</span>
+              ${builtinBadge}
+            </div>
+            <div class="text-xs text-slate-400 mt-1">${pinDesc}</div>
+            <div class="mt-2 flex flex-wrap gap-1">${channelChips}</div>
+          </div>
+          <div class="flex items-center gap-1 shrink-0">
+            <button class="btn-secondary" onclick="openEditModal('${p.id}')">Edit</button>
+            ${removeBtn}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function describePins(p, type) {
+  if (type.pin_kind === 'uart') {
+    return `UART: <span class="font-mono">TX=GP${p.pins.uart_tx}, RX=GP${p.pins.uart_rx}</span>`;
+  }
+  if (type.pin_kind === 'builtin') {
+    const pin = PINS.find(x => x.gpio === p.pins.gpio);
+    return `Hardwired pin: <span class="font-mono">GP${p.pins.gpio}</span>${pin ? ' (' + pin.name + ')' : ''}`;
+  }
+  const pin = PINS.find(x => x.gpio === p.pins.gpio);
+  return `Pin: <span class="font-mono">GP${p.pins.gpio}</span>${pin ? ' (' + pin.name + ')' : ''}`;
+}
+
+function renderPinSidebar() {
+  const claimed = buildPinClaimIndex();
+  const freeEl = document.getElementById('free-pins');
+  const claimedEl = document.getElementById('claimed-pins');
+  freeEl.innerHTML = PINS
+    .filter(pin => !claimed[pin.gpio])
+    .map(pin => `<span class="pin-chip free">GP${pin.gpio}<span class="text-slate-500 ml-1">${pin.name}</span></span>`)
+    .join('') || '<span class="text-slate-500 text-xs italic">All pins claimed</span>';
+  const grouped = {};
+  for (const pin of PINS) {
+    const owner = claimed[pin.gpio];
+    if (!owner) continue;
+    grouped[owner.id] = grouped[owner.id] || { label: owner.label, gpios: [] };
+    grouped[owner.id].gpios.push(pin);
+  }
+  claimedEl.innerHTML = Object.values(grouped).map(g => {
+    const chips = g.gpios.map(pin =>
+      `<span class="pin-chip">GP${pin.gpio} ${pin.name}</span>`
+    ).join(' ');
+    return `<div>${g.label}<br>${chips}</div>`;
+  }).join('');
+}
+
+// =============================================================================
+// Routing — replaces the per-node "Role functions" concept
+// =============================================================================
+// A logical signal namespace. In production these would be ROS2 topics
+// (or named saint_server signals); here we just mock a useful catalog.
+// Each entry: { id, dir: 'in'|'out', display, type }
+//   dir = 'in'  : the logical signal accepts a peripheral input feeding it
+//   dir = 'out' : the logical signal can drive a peripheral output
+const LOGICAL_SIGNALS = [
+  // Inputs (peripheral channels write into these)
+  { id: '/battery/main/current',   dir: 'in',  display: 'Main battery — current',  type: 'analog' },
+  { id: '/battery/main/voltage',   dir: 'in',  display: 'Main battery — voltage',  type: 'analog' },
+  { id: '/battery/main/temp_1',    dir: 'in',  display: 'Main battery — temp 1',   type: 'analog' },
+  { id: '/battery/main/temp_2',    dir: 'in',  display: 'Main battery — temp 2',   type: 'analog' },
+  { id: '/battery/aux/current',    dir: 'in',  display: 'Aux battery — current',   type: 'analog' },
+  { id: '/battery/aux/voltage',    dir: 'in',  display: 'Aux battery — voltage',   type: 'analog' },
+  { id: '/safety/estop',           dir: 'in',  display: 'Safety — E-stop trigger', type: 'digital' },
+  { id: '/odometry/left',          dir: 'in',  display: 'Odometry — left ticks',   type: 'analog' },
+  { id: '/odometry/right',         dir: 'in',  display: 'Odometry — right ticks',  type: 'analog' },
+
+  // Outputs (peripheral output channels read from these)
+  { id: '/state/active',           dir: 'out', display: 'System active indicator',  type: 'digital' },
+  { id: '/state/error',            dir: 'out', display: 'Error indicator',          type: 'digital' },
+  { id: '/tracks/left_power',      dir: 'out', display: 'Tracks — left motor',     type: 'analog' },
+  { id: '/tracks/right_power',     dir: 'out', display: 'Tracks — right motor',    type: 'analog' },
+];
+
+// A second node's peripherals — to demonstrate the routing panel spans the
+// whole fleet, not just the currently-configured node.
+const OTHER_NODES = [
+  {
+    node_id: 'rp2040_F5E4D3C2',
+    label: 'Tracks',
+    peripherals: [
+      { id: 'syren-1',     type: 'syren', label: 'Left motor (SyRen)' },
+      { id: 'syren-2',     type: 'syren', label: 'Right motor (SyRen)' },
+      // Pretend an analog input for odometry — pseudo-type only used to
+      // populate sources; the prototype doesn't fully model it.
+    ],
+  },
+];
+
+// Seed routes. Each is { id, source: {…}, sink: {…} } where each endpoint
+// is either a peripheral channel or a logical signal.
+const ROUTES = [
+  { id: 'r1', source: ['periph', 'rp2040_A1B2C3D4', 'fas100-1', 'amps'],
+              sink:   ['logical', '/battery/main/current'] },
+  { id: 'r2', source: ['periph', 'rp2040_A1B2C3D4', 'fas100-1', 'volts'],
+              sink:   ['logical', '/battery/main/voltage'] },
+  { id: 'r3', source: ['periph', 'rp2040_A1B2C3D4', 'fas100-1', 'temp1'],
+              sink:   ['logical', '/battery/main/temp_1'] },
+  { id: 'r4', source: ['periph', 'rp2040_A1B2C3D4', 'fas100-2', 'amps'],
+              sink:   ['logical', '/battery/aux/current'] },
+  { id: 'r5', source: ['periph', 'rp2040_A1B2C3D4', 'button-1', 'pressed'],
+              sink:   ['logical', '/safety/estop'] },
+  { id: 'r6', source: ['logical', '/state/active'],
+              sink:   ['periph', 'rp2040_A1B2C3D4', 'led-1', 'on'] },
+  // Demonstrate routing TO a built-in peripheral.
+  { id: 'r7', source: ['logical', '/state/error'],
+              sink:   ['periph', 'rp2040_A1B2C3D4', 'neopixel-builtin', 'color'] },
+];
+
+let _nextRouteId = 100;
+
+// Build a flat list of every peripheral channel in the system, across all nodes.
+function enumerateAllChannels() {
+  const out = [];
+  const allNodes = [
+    { node_id: 'rp2040_A1B2C3D4', label: 'Cradle Base', peripherals: STATE.peripherals },
+    ...OTHER_NODES.map(n => ({ ...n })),
+  ];
+  for (const node of allNodes) {
+    for (const p of (node.peripherals || [])) {
+      const type = PERIPHERAL_TYPES[p.type];
+      if (!type) continue;
+      for (const ch of type.channels) {
+        out.push({
+          node_id: node.node_id,
+          node_label: node.label,
+          peripheral_id: p.id,
+          peripheral_label: p.label,
+          channel_id: ch.id,
+          channel_display: ch.display,
+          channel_dir: ch.dir,
+          cap: ch.cap,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+// =============================================================================
+// Dashboard widget catalog — widgets are the visual "sink" endpoints
+// =============================================================================
+const WIDGET_TYPES = {
+  battery_monitor: {
+    label: 'Battery Monitor',
+    description: 'Current, voltage, two temps.',
+    inputs: [
+      { id: 'current', display: 'Current', cap: 'analog' },
+      { id: 'voltage', display: 'Voltage', cap: 'analog' },
+      { id: 'temp1',   display: 'Temp 1',  cap: 'analog' },
+      { id: 'temp2',   display: 'Temp 2',  cap: 'analog' },
+    ],
+  },
+  estop_indicator: {
+    label: 'E-Stop Indicator',
+    description: 'Big red light when the e-stop is triggered.',
+    inputs: [
+      { id: 'triggered', display: 'Triggered', cap: 'digital' },
+    ],
+  },
+  single_gauge: {
+    label: 'Single-value Gauge',
+    description: 'One numeric reading with a meter.',
+    inputs: [
+      { id: 'value', display: 'Value', cap: 'analog' },
+    ],
+  },
+  status_led: {
+    label: 'Status LED',
+    description: 'Reflects a digital signal.',
+    inputs: [
+      { id: 'state', display: 'State', cap: 'digital' },
+    ],
+  },
+};
+
+// Widget instances the operator has placed on the dashboard. Each is its
+// own graph node with input pins fed by routes.
+const WIDGETS = [
+  { id: 'w-battery-main', type: 'battery_monitor', label: 'Battery Monitor (Main)' },
+  { id: 'w-battery-aux',  type: 'battery_monitor', label: 'Battery Monitor (Aux)' },
+  { id: 'w-estop',        type: 'estop_indicator', label: 'E-Stop Indicator' },
+];
+
+// =============================================================================
+// Routing graph — node positions, wires, connection state
+// =============================================================================
+// Each graph node is an object: { id, kind, ref, x, y }
+//   kind = 'peripheral' | 'signal' | 'widget'
+//   ref  = the underlying object id (peripheral.id, signal.id, widget.id)
+// Wires connect pin handles: { from: 'nodeId/pinId', to: 'nodeId/pinId' }
+
+const GRAPH = {
+  nodes: [
+    // Peripherals — first node's
+    { id: 'n-fas100-1', kind: 'peripheral', ref: 'fas100-1', x:  30, y:  20 },
+    { id: 'n-fas100-2', kind: 'peripheral', ref: 'fas100-2', x:  30, y: 240 },
+    { id: 'n-button-1', kind: 'peripheral', ref: 'button-1', x:  30, y: 460 },
+    { id: 'n-led-1',    kind: 'peripheral', ref: 'led-1',    x: 720, y: 460 },
+    { id: 'n-neopixel', kind: 'peripheral', ref: 'neopixel-builtin', x: 720, y: 540 },
+
+    // Logical signals
+    { id: 'n-sig-main-curr', kind: 'signal', ref: '/battery/main/current', x: 360, y:  20 },
+    { id: 'n-sig-main-volt', kind: 'signal', ref: '/battery/main/voltage', x: 360, y:  80 },
+    { id: 'n-sig-main-t1',   kind: 'signal', ref: '/battery/main/temp_1',  x: 360, y: 140 },
+    { id: 'n-sig-aux-curr',  kind: 'signal', ref: '/battery/aux/current',  x: 360, y: 240 },
+    { id: 'n-sig-estop',     kind: 'signal', ref: '/safety/estop',         x: 360, y: 470 },
+    { id: 'n-sig-error',     kind: 'signal', ref: '/state/error',          x: 360, y: 540 },
+
+    // Widgets
+    { id: 'n-w-battery-main', kind: 'widget', ref: 'w-battery-main', x: 720, y:  20 },
+    { id: 'n-w-battery-aux',  kind: 'widget', ref: 'w-battery-aux',  x: 720, y: 220 },
+    { id: 'n-w-estop',        kind: 'widget', ref: 'w-estop',        x: 720, y: 380 },
+  ],
+  wires: [
+    // FAS100 #1 outputs → signals → widget inputs
+    { from: 'n-fas100-1/amps',  to: 'n-sig-main-curr/in' },
+    { from: 'n-fas100-1/volts', to: 'n-sig-main-volt/in' },
+    { from: 'n-fas100-1/temp1', to: 'n-sig-main-t1/in'   },
+    { from: 'n-sig-main-curr/out', to: 'n-w-battery-main/current' },
+    { from: 'n-sig-main-volt/out', to: 'n-w-battery-main/voltage' },
+    { from: 'n-sig-main-t1/out',   to: 'n-w-battery-main/temp1'   },
+
+    { from: 'n-fas100-2/amps',  to: 'n-sig-aux-curr/in'  },
+    { from: 'n-sig-aux-curr/out', to: 'n-w-battery-aux/current' },
+
+    { from: 'n-button-1/pressed', to: 'n-sig-estop/in' },
+    { from: 'n-sig-estop/out',    to: 'n-w-estop/triggered' },
+
+    { from: 'n-sig-error/out',    to: 'n-neopixel/color' },
+  ],
+};
+
+let _connecting = null;          // { fromNode, fromPin, type } while wiring
+let _draggingNode = null;        // node id while dragging
+let _dragOffset   = { x: 0, y: 0 };
+let _nextNodeId   = 100;
+
+// --- Helpers ----------------------------------------------------------------
+
+function getNodeMeta(node) {
+  if (node.kind === 'peripheral') {
+    const p = [...STATE.peripherals,
+      ...OTHER_NODES.flatMap(n => n.peripherals.map(pp => ({...pp, _node: n})))]
+      .find(p => p.id === node.ref);
+    if (!p) return null;
+    const type = PERIPHERAL_TYPES[p.type];
+    const inputs  = type.channels.filter(c => c.dir === 'out')  // sink pins (data flows IN to the peripheral)
+                       .map(c => ({ id: c.id, label: c.display, cap: c.cap, dir: 'in' }));
+    const outputs = type.channels.filter(c => c.dir === 'in')   // source pins (data flows OUT of the peripheral)
+                       .map(c => ({ id: c.id, label: c.display, cap: c.cap, dir: 'out' }));
+    return {
+      title: p.label,
+      subtitle: type.label,
+      builtin: !!p.builtin,
+      inputs, outputs,
+    };
+  }
+  if (node.kind === 'signal') {
+    return {
+      title: node.ref,
+      subtitle: 'logical signal',
+      inputs:  [{ id: 'in',  label: 'in',  cap: 'any', dir: 'in'  }],
+      outputs: [{ id: 'out', label: 'out', cap: 'any', dir: 'out' }],
+    };
+  }
+  if (node.kind === 'widget') {
+    const w = WIDGETS.find(x => x.id === node.ref);
+    if (!w) return null;
+    const type = WIDGET_TYPES[w.type];
+    return {
+      title: w.label,
+      subtitle: type.label + ' widget',
+      inputs: type.inputs.map(i => ({ id: i.id, label: i.display, cap: i.cap, dir: 'in' })),
+      outputs: [],
+    };
+  }
+  return null;
+}
+
+// --- Rendering --------------------------------------------------------------
+
+function renderGraph() {
+  const nodeLayer = document.getElementById('node-layer');
+  const wireLayer = document.getElementById('wire-layer');
+  if (!nodeLayer || !wireLayer) return;
+
+  // Nodes
+  nodeLayer.innerHTML = GRAPH.nodes.map(n => renderNodeHtml(n)).join('');
+
+  // Wires — drawn after nodes so we can read pin DOM positions
+  requestAnimationFrame(() => renderWires());
+  attachNodeInteractions();
+}
+
+function renderNodeHtml(n) {
+  const meta = getNodeMeta(n);
+  if (!meta) return '';
+  const inputsHtml = meta.inputs.map(p => `
+    <div class="graph-pin-row input">
+      <div class="graph-pin dir-in" data-node="${n.id}" data-pin="${p.id}" data-dir="in"></div>
+      <span class="graph-pin-label-in">${p.label}</span>
+    </div>
+  `).join('');
+  const outputsHtml = meta.outputs.map(p => `
+    <div class="graph-pin-row output">
+      <span class="graph-pin-label-out">${p.label}</span>
+      <div class="graph-pin dir-out" data-node="${n.id}" data-pin="${p.id}" data-dir="out"></div>
+    </div>
+  `).join('');
+  const removeBtn = (n.kind !== 'peripheral')
+    ? `<span class="text-slate-500 hover:text-red-400 cursor-pointer" onclick="removeGraphNode('${n.id}')" title="Remove from graph">✕</span>`
+    : '';
+  return `
+    <div class="graph-node" data-kind="${n.kind}" data-builtin="${meta.builtin ? 'true' : 'false'}"
+         id="${n.id}" style="left:${n.x}px; top:${n.y}px;">
+      <div class="graph-node-header">
+        <div>
+          ${meta.title}
+          <div class="graph-node-kind">${meta.subtitle}</div>
+        </div>
+        ${removeBtn}
+      </div>
+      <div class="graph-node-body">
+        ${inputsHtml}
+        ${outputsHtml}
+      </div>
+    </div>
+  `;
+}
+
+function pinPosition(handle) {
+  // handle = 'nodeId/pinId'
+  const [nodeId, pinId] = handle.split('/');
+  const pin = document.querySelector(`.graph-pin[data-node="${nodeId}"][data-pin="${pinId}"]`);
+  if (!pin) return null;
+  const canvas = document.getElementById('graph-canvas');
+  const cr = canvas.getBoundingClientRect();
+  const pr = pin.getBoundingClientRect();
+  return {
+    x: pr.left + pr.width / 2 - cr.left,
+    y: pr.top + pr.height / 2 - cr.top,
+  };
+}
+
+function renderWires() {
+  const layer = document.getElementById('wire-layer');
+  if (!layer) return;
+  const paths = [];
+  for (const w of GRAPH.wires) {
+    const a = pinPosition(w.from);
+    const b = pinPosition(w.to);
+    if (!a || !b) continue;
+    paths.push(`<path d="${bezier(a, b)}" fill="none" stroke="#06b6d4" stroke-width="2"
+                  data-wire-from="${w.from}" data-wire-to="${w.to}"
+                  onclick="removeWire('${w.from}', '${w.to}')"/>`);
+  }
+  // Live wire (while connecting)
+  if (_connecting && _connecting.cursor) {
+    const a = pinPosition(_connecting.fromHandle);
+    if (a) {
+      paths.push(`<path d="${bezier(a, _connecting.cursor)}" fill="none" stroke="#34d399"
+                    stroke-width="2" stroke-dasharray="4,3"/>`);
+    }
+  }
+  layer.innerHTML = paths.join('');
+}
+
+function bezier(a, b) {
+  const dx = Math.max(Math.abs(b.x - a.x) * 0.5, 30);
+  return `M ${a.x},${a.y} C ${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`;
+}
+
+// --- Interactions ----------------------------------------------------------
+
+function attachNodeInteractions() {
+  // Header drag
+  document.querySelectorAll('.graph-node-header').forEach(h => {
+    h.addEventListener('mousedown', e => {
+      if (e.target.tagName === 'SPAN' && e.target.onclick) return;
+      const node = h.parentElement;
+      const id = node.id;
+      const g = GRAPH.nodes.find(n => n.id === id);
+      if (!g) return;
+      _draggingNode = id;
+      node.classList.add('dragging');
+      _dragOffset = { x: e.clientX - g.x, y: e.clientY - g.y };
+      e.preventDefault();
+    });
+  });
+  // Pin clicks
+  document.querySelectorAll('.graph-pin').forEach(p => {
+    p.addEventListener('mousedown', e => {
+      e.stopPropagation();
+      const nodeId = p.dataset.node;
+      const pinId = p.dataset.pin;
+      const dir = p.dataset.dir;
+      const handle = `${nodeId}/${pinId}`;
+      if (!_connecting) {
+        if (dir !== 'out') {
+          // Allow starting from an input pin too, but conventionally we
+          // start from outputs. Convert by swapping at completion time.
+          _connecting = { fromHandle: handle, fromDir: 'in' };
+        } else {
+          _connecting = { fromHandle: handle, fromDir: 'out' };
+        }
+        p.classList.add('connecting');
+      } else {
+        // Complete connection
+        const a = _connecting;
+        const b = { handle, dir };
+        let from, to;
+        if (a.fromDir === 'out' && b.dir === 'in') {
+          from = a.fromHandle; to = b.handle;
+        } else if (a.fromDir === 'in' && b.dir === 'out') {
+          from = b.handle; to = a.fromHandle;
+        } else {
+          // out → out or in → in: invalid
+          cancelConnecting();
+          return;
+        }
+        if (from === to) { cancelConnecting(); return; }
+        // Already wired?
+        if (GRAPH.wires.some(w => w.from === from && w.to === to)) {
+          cancelConnecting(); return;
+        }
+        GRAPH.wires.push({ from, to });
+        cancelConnecting();
+        renderWires();
+      }
+    });
+  });
+}
+
+document.addEventListener('mousemove', e => {
+  if (_draggingNode) {
+    const g = GRAPH.nodes.find(n => n.id === _draggingNode);
+    if (g) {
+      g.x = Math.max(0, e.clientX - _dragOffset.x);
+      g.y = Math.max(0, e.clientY - _dragOffset.y);
+      const node = document.getElementById(_draggingNode);
+      if (node) {
+        node.style.left = g.x + 'px';
+        node.style.top  = g.y + 'px';
+      }
+      renderWires();
+    }
+  }
+  if (_connecting) {
+    const canvas = document.getElementById('graph-canvas');
+    const cr = canvas.getBoundingClientRect();
+    _connecting.cursor = { x: e.clientX - cr.left, y: e.clientY - cr.top };
+    renderWires();
+  }
+});
+document.addEventListener('mouseup', () => {
+  if (_draggingNode) {
+    const node = document.getElementById(_draggingNode);
+    if (node) node.classList.remove('dragging');
+    _draggingNode = null;
+  }
+});
+document.getElementById('graph-canvas').addEventListener('click', e => {
+  // Click on empty canvas cancels in-progress wire
+  if (e.target.id === 'graph-canvas' || e.target.tagName === 'svg') {
+    cancelConnecting();
+  }
+});
+
+function cancelConnecting() {
+  document.querySelectorAll('.graph-pin').forEach(p => p.classList.remove('connecting'));
+  _connecting = null;
+  renderWires();
+}
+
+// --- Graph mutations -------------------------------------------------------
+
+function removeWire(from, to) {
+  const idx = GRAPH.wires.findIndex(w => w.from === from && w.to === to);
+  if (idx < 0) return;
+  if (!confirm('Remove this connection?')) return;
+  GRAPH.wires.splice(idx, 1);
+  renderWires();
+}
+window.removeWire = removeWire;
+
+function removeGraphNode(nodeId) {
+  const n = GRAPH.nodes.find(g => g.id === nodeId);
+  if (!n) return;
+  if (n.kind === 'peripheral') return;  // peripherals can't be removed from graph
+  if (!confirm('Remove this node from the graph? Wires touching it will also be removed.')) return;
+  GRAPH.wires = GRAPH.wires.filter(w =>
+    !w.from.startsWith(nodeId + '/') && !w.to.startsWith(nodeId + '/'));
+  GRAPH.nodes = GRAPH.nodes.filter(g => g.id !== nodeId);
+  renderGraph();
+}
+window.removeGraphNode = removeGraphNode;
+
+function addSignalNode() {
+  const name = prompt('Logical signal name (e.g. /tracks/left_power):');
+  if (!name) return;
+  const id = 'n-sig-' + (++_nextNodeId);
+  GRAPH.nodes.push({ id, kind: 'signal', ref: name, x: 360, y: 320 });
+  renderGraph();
+}
+window.addSignalNode = addSignalNode;
+
+function openAddWidgetModal() {
+  const types = Object.entries(WIDGET_TYPES)
+    .map(([k, v]) => `${k}  —  ${v.label}`).join('\n');
+  const typeKey = prompt(
+    `Pick a widget type:\n\n${types}\n\nEnter the key (e.g. battery_monitor):`,
+    'single_gauge');
+  if (!typeKey || !WIDGET_TYPES[typeKey]) return;
+  const label = prompt('Widget label:', WIDGET_TYPES[typeKey].label);
+  if (!label) return;
+  const widgetId = 'w-' + (++_nextNodeId);
+  WIDGETS.push({ id: widgetId, type: typeKey, label });
+  const nodeId = 'n-' + widgetId;
+  GRAPH.nodes.push({ id: nodeId, kind: 'widget', ref: widgetId, x: 720, y: 320 });
+  renderGraph();
+}
+window.openAddWidgetModal = openAddWidgetModal;
+
+function autoLayout() {
+  // Very simple: three columns by kind
+  const cols = { peripheral: 30, signal: 360, widget: 720 };
+  const yOffsets = { peripheral: 20, signal: 20, widget: 20 };
+  for (const n of GRAPH.nodes) {
+    n.x = cols[n.kind];
+    n.y = yOffsets[n.kind];
+    yOffsets[n.kind] += 110;
+  }
+  renderGraph();
+}
+window.autoLayout = autoLayout;
+
+// Shim — old name still called from renderAll()
+function renderRoutes() { renderGraph(); }
+
+// =============================================================================
+// Render: live readings (one widget per peripheral instance)
+// =============================================================================
+function renderLive() {
+  const grid = document.getElementById('live-grid');
+  grid.innerHTML = STATE.peripherals.map(p => {
+    const type = PERIPHERAL_TYPES[p.type];
+    // Fake jitter for the mock
+    const readings = type.channels.map(ch => {
+      const v = fakeReading(p, ch);
+      return `
+        <div class="row">
+          <span class="text-xs text-slate-400">${ch.display}</span>
+          <span class="text-sm font-mono ${ch.dir === 'in' ? 'text-cyan-300' : 'text-amber-300'}">${v}</span>
+        </div>
+      `;
+    }).join('');
+    return `
+      <div class="card">
+        <div class="flex items-center justify-between mb-2">
+          <div>
+            <h4 class="text-base font-semibold text-white">${p.label}</h4>
+            <div class="text-xs text-slate-500">${type.label}</div>
+          </div>
+          <span class="pill pill-ok">Live</span>
+        </div>
+        ${readings}
+      </div>
+    `;
+  }).join('');
+}
+
+function fakeReading(p, ch) {
+  const seed = (p.id + ch.id).split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  const jitter = ((Date.now() / 1000 + seed) % 7) - 3;
+  switch (ch.cap) {
+    case 'fas100_amps':  return (2.4 + jitter * 0.2).toFixed(1) + ' A';
+    case 'fas100_volts': return (12.4 + jitter * 0.05).toFixed(2) + ' V';
+    case 'fas100_temp1': return (35 + jitter).toFixed(1) + ' °C';
+    case 'fas100_temp2': return (34 + jitter).toFixed(1) + ' °C';
+    case 'digital_in':   return jitter > 0 ? 'pressed' : 'released';
+    case 'digital_out':  return jitter > 0 ? 'on' : 'off';
+    case 'adc':          return (jitter * 0.5 + 1.65).toFixed(2) + ' V';
+    case 'servo':        return Math.round(90 + jitter * 30) + ' °';
+    case 'syren_motor':  return Math.round(jitter * 40) + ' %';
+    default:             return '--';
+  }
+}
+
+// =============================================================================
+// Conflict detection
+// =============================================================================
+function renderConflicts() {
+  const conflicts = [];
+
+  // 1) two peripherals on the same physical pin
+  const claimed = {};
+  for (const p of STATE.peripherals) {
+    for (const gpio of pinsClaimedByPeripheral(p)) {
+      if (claimed[gpio] && claimed[gpio] !== p.id) {
+        const other = STATE.peripherals.find(x => x.id === claimed[gpio]);
+        conflicts.push(`${other.label} and ${p.label} both claim GP${gpio}`);
+      }
+      claimed[gpio] = p.id;
+    }
+  }
+
+  // 2) two UART peripherals on the same UART instance
+  const seenUart = {};
+  for (const p of STATE.peripherals) {
+    const type = PERIPHERAL_TYPES[p.type];
+    if (type.pin_kind !== 'uart') continue;
+    const pair = UART_PAIRS.find(u => u.tx === p.pins.uart_tx && u.rx === p.pins.uart_rx);
+    if (!pair) continue;
+    if (seenUart[pair.uart] && seenUart[pair.uart] !== p.id) {
+      const other = STATE.peripherals.find(x => x.id === seenUart[pair.uart]);
+      conflicts.push(`${other.label} and ${p.label} both use UART${pair.uart}`);
+    } else {
+      seenUart[pair.uart] = p.id;
+    }
+  }
+
+  const banner = document.getElementById('conflict-banner');
+  if (conflicts.length) {
+    banner.classList.remove('hidden');
+    document.getElementById('conflict-text').innerHTML =
+      [...new Set(conflicts)].map(c => `• ${c}`).join('<br>');
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
+// =============================================================================
+// Master rerender
+// =============================================================================
+function renderAll() {
+  renderPeripherals();
+  renderPinSidebar();
+  renderRoutes();
+  renderLive();
+  renderConflicts();
+}
+
+// =============================================================================
+// Tab routing
+// =============================================================================
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const target = tab.dataset.tab;
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('[data-panel]').forEach(p =>
+      p.classList.toggle('hidden', p.dataset.panel !== target));
+  });
+});
+
+// =============================================================================
+// Modal — add / edit peripheral
+// =============================================================================
+const modal = document.getElementById('peripheral-modal');
+
+function populateTypeSelector() {
+  const sel = document.getElementById('modal-type');
+  sel.innerHTML = Object.entries(PERIPHERAL_TYPES).map(([key, def]) =>
+    `<option value="${key}">${def.label} — ${def.description}</option>`
+  ).join('');
+}
+
+document.getElementById('add-peripheral-btn').addEventListener('click', () => {
+  STATE.modal_mode = 'add';
+  STATE.modal_editing_id = null;
+  document.getElementById('modal-title').textContent = 'Add peripheral';
+  populateTypeSelector();
+  document.getElementById('modal-type').disabled = false;
+  document.getElementById('modal-label').value = '';
+  onTypeChange();
+  modal.classList.remove('hidden');
+});
+
+function openEditModal(peripheralId) {
+  const p = STATE.peripherals.find(x => x.id === peripheralId);
+  if (!p) return;
+  STATE.modal_mode = 'edit';
+  STATE.modal_editing_id = peripheralId;
+  document.getElementById('modal-title').textContent = `Edit ${p.label}`;
+  populateTypeSelector();
+  document.getElementById('modal-type').value = p.type;
+  document.getElementById('modal-type').disabled = true;  // can't change type mid-edit
+  document.getElementById('modal-label').value = p.label;
+  onTypeChange(p);
+  modal.classList.remove('hidden');
+}
+window.openEditModal = openEditModal;
+
+function onTypeChange(editingPeripheral) {
+  const typeKey = document.getElementById('modal-type').value;
+  const def = PERIPHERAL_TYPES[typeKey];
+  document.getElementById('modal-type-desc').textContent = def.description;
+
+  // Build pin selector
+  const pinSection = document.getElementById('modal-pin-section');
+  pinSection.innerHTML = buildPinSelectorHtml(def, editingPeripheral);
+
+  // Build params section
+  const paramsSection = document.getElementById('modal-params-section');
+  paramsSection.innerHTML = (def.params || []).map(param => {
+    const val = (editingPeripheral && editingPeripheral.params[param.id] !== undefined)
+                  ? editingPeripheral.params[param.id]
+                  : param.default;
+    if (param.type === 'bool') {
+      return `
+        <label class="flex items-center gap-2 text-sm text-slate-300">
+          <input type="checkbox" id="modal-param-${param.id}" ${val ? 'checked' : ''}>
+          ${param.label}
+        </label>
+      `;
+    }
+    const min = param.min !== undefined ? `min="${param.min}"` : '';
+    const max = param.max !== undefined ? `max="${param.max}"` : '';
+    return `
+      <div class="mt-2">
+        <label class="stat-label block mb-1">${param.label}</label>
+        <input id="modal-param-${param.id}" class="input" type="number" ${min} ${max} value="${val}">
+      </div>
+    `;
+  }).join('');
+}
+window.onTypeChange = onTypeChange;
+
+function buildPinSelectorHtml(def, editingPeripheral) {
+  const claimed = buildPinClaimIndex();
+  if (def.pin_kind === 'builtin') {
+    // No selector — the pin is hardwired on the board.
+    if (!editingPeripheral) {
+      return `
+        <div class="p-3 rounded text-xs text-slate-400 italic" style="background:#33415544;">
+          This is a built-in peripheral. Its pin is fixed by the board and
+          can't be picked here. Built-ins are normally added automatically
+          when a node is adopted.
+        </div>
+      `;
+    }
+    const pin = PINS.find(x => x.gpio === editingPeripheral.pins.gpio);
+    return `
+      <div>
+        <label class="stat-label block mb-1">Hardwired pin</label>
+        <input class="input" value="GP${editingPeripheral.pins.gpio}${pin ? ' (' + pin.name + ')' : ''}" disabled style="opacity:0.6;">
+      </div>
+    `;
+  }
+  if (def.pin_kind === 'uart') {
+    const opts = UART_PAIRS.map(u => {
+      const conflict = (claimed[u.tx] && (!editingPeripheral || claimed[u.tx].id !== editingPeripheral.id)) ||
+                       (claimed[u.rx] && (!editingPeripheral || claimed[u.rx].id !== editingPeripheral.id));
+      const sel = (editingPeripheral &&
+                   editingPeripheral.pins.uart_tx === u.tx &&
+                   editingPeripheral.pins.uart_rx === u.rx) ? ' selected' : '';
+      const note = conflict
+        ? `  ⚠ pin already claimed`
+        : '';
+      return `<option value="${u.tx}:${u.rx}"${sel}>UART${u.uart}  (TX=GP${u.tx}, RX=GP${u.rx})${note}</option>`;
+    }).join('');
+    return `
+      <div>
+        <label class="stat-label block mb-1">UART pin pair</label>
+        <select id="modal-pin-uart" class="input">${opts}</select>
+      </div>
+    `;
+  }
+  // Single-pin selector filtered by required capability
+  const reqCap = def.pin_kind;  // 'gpio' | 'pwm' | 'adc'
+  const opts = PINS.filter(pin => pin.caps.includes(reqCap)).map(pin => {
+    const owner = claimed[pin.gpio];
+    const isSelf = editingPeripheral && owner && owner.id === editingPeripheral.id;
+    const conflict = owner && !isSelf;
+    const sel = (editingPeripheral && editingPeripheral.pins.gpio === pin.gpio) ? ' selected' : '';
+    const note = conflict ? `  ⚠ used by ${owner.label}` : '';
+    return `<option value="${pin.gpio}"${sel}>GP${pin.gpio} (${pin.name})${note}</option>`;
+  }).join('');
+  return `
+    <div>
+      <label class="stat-label block mb-1">Pin (${reqCap}-capable)</label>
+      <select id="modal-pin-single" class="input">${opts}</select>
+    </div>
+  `;
+}
+
+document.getElementById('modal-save-btn').addEventListener('click', () => {
+  const typeKey = document.getElementById('modal-type').value;
+  const def = PERIPHERAL_TYPES[typeKey];
+  if (def.pin_kind === 'builtin' && STATE.modal_mode === 'add') {
+    alert('Built-in peripherals are added automatically when the node is adopted. Edit existing ones to change params.');
+    return;
+  }
+  let pins;
+  if (def.pin_kind === 'uart') {
+    const [tx, rx] = document.getElementById('modal-pin-uart').value.split(':').map(Number);
+    pins = { uart_tx: tx, uart_rx: rx };
+  } else if (def.pin_kind === 'builtin') {
+    // Editing — keep the original pin
+    const orig = STATE.peripherals.find(x => x.id === STATE.modal_editing_id);
+    pins = orig.pins;
+  } else {
+    pins = { gpio: parseInt(document.getElementById('modal-pin-single').value) };
+  }
+  const params = {};
+  for (const param of (def.params || [])) {
+    const input = document.getElementById('modal-param-' + param.id);
+    if (param.type === 'bool') params[param.id] = input.checked;
+    else if (param.type === 'int') params[param.id] = parseInt(input.value) || param.default;
+    else if (param.type === 'float') params[param.id] = parseFloat(input.value) || param.default;
+    else params[param.id] = input.value;
+  }
+  const label = document.getElementById('modal-label').value.trim()
+    || `${def.label} ${STATE.peripherals.filter(p => p.type === typeKey).length + 1}`;
+
+  if (STATE.modal_mode === 'edit') {
+    const p = STATE.peripherals.find(x => x.id === STATE.modal_editing_id);
+    p.pins = pins;
+    p.params = params;
+    p.label = label;
+  } else {
+    STATE.peripherals.push({
+      id: nextPeripheralId(typeKey),
+      type: typeKey,
+      label,
+      pins,
+      params,
+    });
+  }
+  closeModal();
+  renderAll();
+});
+
+function removePeripheral(peripheralId) {
+  const p = STATE.peripherals.find(x => x.id === peripheralId);
+  if (!confirm(`Remove ${p.label}? Any routes referencing its channels will also be removed.`)) return;
+  // Cascade: drop any routes that touched this peripheral
+  for (let i = ROUTES.length - 1; i >= 0; i--) {
+    const r = ROUTES[i];
+    if ((r.source[0] === 'periph' && r.source[2] === peripheralId) ||
+        (r.sink[0]   === 'periph' && r.sink[2]   === peripheralId)) {
+      ROUTES.splice(i, 1);
+    }
+  }
+  STATE.peripherals = STATE.peripherals.filter(x => x.id !== peripheralId);
+  renderAll();
+}
+window.removePeripheral = removePeripheral;
+function closeModal() { modal.classList.add('hidden'); }
+window.closeModal = closeModal;
+
+// Live tab jitters readings
+setInterval(() => {
+  if (document.querySelector('[data-panel="live"]:not(.hidden)')) renderLive();
+}, 1500);
+
+renderAll();
+</script>
+</body>
+</html>
