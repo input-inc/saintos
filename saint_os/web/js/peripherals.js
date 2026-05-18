@@ -126,12 +126,45 @@ class PeripheralManager {
 
     async refreshCapabilities() {
         if (!this.selectedNode) return;
+        const btn = document.getElementById('btn-refresh-capabilities');
+        const origHtml = btn ? btn.innerHTML : null;
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="material-icons icon-sm animate-spin">refresh</span> Refreshing…';
+        }
         try {
-            await window.saintWS.management('request_node_capabilities', {
-                node_id: this.selectedNode,
-            });
-        } catch (e) {
-            console.warn('Failed to request capabilities:', e);
+            // Ask the firmware to re-publish capabilities. The host
+            // controller has no firmware backing it, so this is a no-op
+            // for that case — the synthetic state on the server is
+            // already current. We still always re-fetch below so the
+            // UI rerenders even when the broadcast path hasn't fired.
+            try {
+                await window.saintWS.management('request_node_capabilities', {
+                    node_id: this.selectedNode,
+                });
+            } catch (e) {
+                console.warn('request_node_capabilities failed:', e);
+            }
+
+            // Give the firmware a moment to publish, then re-fetch
+            // straight from the server's cached state. This makes
+            // Refresh feel responsive regardless of whether the
+            // broadcast arrives.
+            await new Promise(r => setTimeout(r, 500));
+            const ws = window.saintWS;
+            const [caps, periph] = await Promise.all([
+                ws.management('get_node_capabilities', { node_id: this.selectedNode }),
+                ws.management('get_node_peripherals',  { node_id: this.selectedNode }),
+            ]);
+            this.capabilities = caps || this.capabilities;
+            this.peripherals = (periph && periph.peripherals) ? periph.peripherals : this.peripherals;
+            this.updateSyncStatus(periph?.sync_status || this.syncStatus);
+            this.renderAll();
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
         }
     }
 
@@ -231,7 +264,14 @@ class PeripheralManager {
         const claimed = this.buildPinClaimIndex();
 
         if (pins.length === 0) {
-            freeEl.innerHTML = '<span class="text-slate-500 text-xs italic">No capabilities yet</span>';
+            // Distinguish "haven't heard from the firmware yet" from
+            // "this node has no operator-configurable pins" — the host
+            // controller is the latter even though it has channels via
+            // built-in peripherals.
+            const msg = this.capabilities
+                ? 'No operator-configurable pins on this node'
+                : 'No capabilities yet — click Refresh';
+            freeEl.innerHTML = `<span class="text-slate-500 text-xs italic">${msg}</span>`;
             claimedEl.innerHTML = '';
             return;
         }
