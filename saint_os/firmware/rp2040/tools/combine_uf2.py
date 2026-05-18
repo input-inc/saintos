@@ -3,8 +3,21 @@
 
 Each UF2 block is 512 bytes with its own target flash address. The
 "merge" is just concatenation of the block streams from each input,
-with `block_no` (offset 24) and `num_blocks` (offset 28) renumbered so
-the combined file presents as a single sequence.
+with `block_no` (offset 20) and `num_blocks` (offset 24) renumbered so
+the combined file presents as a single sequence. `family_id` at
+offset 28 is preserved per-block.
+
+UF2 block layout (per microsoft/uf2):
+    0..3    magic_start0  = 0x0A324655
+    4..7    magic_start1  = 0x9E5D5157
+    8..11   flags
+    12..15  target_addr
+    16..19  payload_size
+    20..23  block_no       <-- renumber
+    24..27  num_blocks     <-- renumber
+    28..31  file_size or family_id
+    32..507 data (padded)
+    508..511 magic_end     = 0x0AB16F30
 
 Usage:
     combine_uf2.py OUTPUT.uf2 INPUT1.uf2 [INPUT2.uf2 ...]
@@ -51,8 +64,9 @@ def main(argv):
 
     total = len(all_blocks)
     for i, b in enumerate(all_blocks):
-        struct.pack_into("<I", b, 24, i)       # block_no
-        struct.pack_into("<I", b, 28, total)   # num_blocks
+        struct.pack_into("<I", b, 20, i)       # block_no
+        struct.pack_into("<I", b, 24, total)   # num_blocks
+        # Leave offset 28 (family_id) alone — preserved from each input
 
     with open(out_path, "wb") as f:
         for b in all_blocks:
