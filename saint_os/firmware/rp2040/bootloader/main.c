@@ -147,7 +147,7 @@ static void clear_ota_magic(void)
  * Jump-to-app
  * ============================================================ */
 
-static void disable_interrupts(void)
+static void bl_disable_interrupts(void)
 {
 	SysTick->CTRL &= ~1;
 	NVIC->ICER[0] = 0xFFFFFFFFu;
@@ -423,7 +423,7 @@ int main(void)
 	/* Fast path: app present and not asked to stay in bootloader → run it. */
 	if (!ota_now && image_header_ok(&app_image_header)) {
 		uint32_t vtor = app_image_header.vtor;
-		disable_interrupts();
+		bl_disable_interrupts();
 		reset_peripherals();
 		jump_to_vtor(vtor);
 		/* not reached */

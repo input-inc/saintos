@@ -7,7 +7,7 @@
  * bootloader entry.
  */
 
-#include "RP2040.h"
+#include "pico/stdlib.h"
 #include "hardware/structs/watchdog.h"
 #include "hardware/watchdog.h"
 

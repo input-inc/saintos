@@ -253,6 +253,31 @@ SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections")
 pico_add_extra_outputs(saint_node)
 
 # =============================================================================
+# OTA bootloader integration (opt-in)
+# =============================================================================
+#
+# When SAINT_OS_OTA_BOOTLOADER=ON, build the bootloader as a separate
+# target and link the saint_node app against picowota_reboot + the
+# standalone linker script so it can sit behind the bootloader at
+# 0x10004000. Default OFF — current build flow keeps working unchanged.
+option(SAINT_OS_OTA_BOOTLOADER "Build the OTA bootloader + app slot layout" OFF)
+
+if(SAINT_OS_OTA_BOOTLOADER AND NOT SIMULATION)
+    add_subdirectory(bootloader)
+
+    # Move the app slot to 0x10004000 and emit an image header.
+    saint_ota_apply_app(saint_node)
+    # App links the reboot helper so it can hand off to the bootloader.
+    target_link_libraries(saint_node picowota_reboot)
+    # Combined .uf2 for first-time BOOTSEL install.
+    saint_ota_build_combined(saint_node)
+
+    message(STATUS "OTA bootloader: ENABLED — app slot at 0x10004000")
+else()
+    message(STATUS "OTA bootloader: disabled (set -DSAINT_OS_OTA_BOOTLOADER=ON to enable)")
+endif()
+
+# =============================================================================
 # Install Targets
 # =============================================================================
 
