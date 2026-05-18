@@ -680,14 +680,35 @@ class WebSocketHandler:
             node_id = params.get('node_id')
             role = params.get('role')
             display_name = params.get('display_name')
+            board_id = params.get('board_id')   # new: operator picks board on adoption
 
             if not node_id or not role:
                 return {"status": "error", "message": "Missing node_id or role"}
 
-            result = self.state_manager.adopt_node(node_id, role, display_name)
+            result = self.state_manager.adopt_node(node_id, role, display_name, board_id)
             if result['success']:
-                await self.broadcast_activity(f'Node {node_id} adopted as {role}', 'info')
+                board_note = f", board {result.get('board_id')}" if result.get('board_id') else ""
+                await self.broadcast_activity(
+                    f'Node {node_id} adopted as {role}{board_note}', 'info'
+                )
             return {"status": "ok" if result['success'] else "error", "data": result}
+
+        elif action == 'list_chips':
+            return {"status": "ok", "data": {"chips": self.state_manager.list_chips()}}
+
+        elif action == 'list_boards':
+            chip_family = params.get('chip_family')
+            return {"status": "ok", "data": {
+                "boards": self.state_manager.list_boards(chip_family)
+            }}
+
+        elif action == 'set_node_board':
+            node_id = params.get('node_id')
+            board_id = params.get('board_id')
+            if not node_id or not board_id:
+                return {"status": "error", "message": "Missing node_id or board_id"}
+            result = self.state_manager.set_node_board(node_id, board_id)
+            return {"status": "ok", "data": result}
 
         elif action == 'reset_node':
             node_id = params.get('node_id')

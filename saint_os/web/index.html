@@ -641,6 +641,23 @@
                                 <div id="adopt-node-id" class="input-field w-full bg-slate-900/50 text-slate-400 font-mono">--</div>
                             </div>
 
+                            <!-- Chip Family (read-only, detected from the announcement) -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Detected Chip</label>
+                                <div id="adopt-chip-family" class="input-field w-full bg-slate-900/50 text-slate-400">--</div>
+                            </div>
+
+                            <!-- Board Selection -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Board</label>
+                                <select id="adopt-board-select" class="input-field w-full">
+                                    <option value="">-- Select Board --</option>
+                                </select>
+                                <p id="adopt-board-description" class="text-xs text-slate-500 mt-1">
+                                    Determines pin layout, reserved pins, and built-in peripherals.
+                                </p>
+                            </div>
+
                             <!-- Role Selection -->
                             <div>
                                 <label class="block text-sm font-medium text-slate-300 mb-2">Role</label>

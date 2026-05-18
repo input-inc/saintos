@@ -2133,8 +2133,41 @@ class SaintApp {
         document.getElementById('adopt-display-name').value = '';
         document.getElementById('adopt-role-description').textContent = '';
 
-        // Fetch roles from server and populate dropdown
+        // Fetch the announced chip family from the unadopted node entry
+        // so we can filter the board picker to matching boards.
+        const node = this.nodes.unadopted.find(n => n.node_id === nodeId);
+        const chipFamily = node?.chip_family || '';
+        const chipEl = document.getElementById('adopt-chip-family');
+        if (chipEl) {
+            chipEl.textContent = chipFamily
+                ? chipFamily
+                : '(firmware did not report chip family — defaulting to rp2040)';
+        }
+
+        // Populate the board dropdown filtered to boards for this chip.
         const ws = window.saintWS;
+        try {
+            const boardResult = await ws.management(
+                'list_boards', chipFamily ? { chip_family: chipFamily } : {}
+            );
+            const boards = boardResult?.boards || [];
+            const boardSelect = document.getElementById('adopt-board-select');
+            boardSelect.innerHTML = '<option value="">-- Select Board --</option>';
+            for (const b of boards) {
+                const opt = document.createElement('option');
+                opt.value = b.board_id;
+                opt.textContent = `${b.display_name}${b.builtin ? '' : '  (custom)'}`;
+                boardSelect.appendChild(opt);
+            }
+            // Auto-select the only built-in match if there's exactly one.
+            const builtins = boards.filter(b => b.builtin);
+            if (builtins.length === 1) {
+                boardSelect.value = builtins[0].board_id;
+            }
+        } catch (e) {
+            console.warn('list_boards failed:', e);
+        }
+
         const roleSelect = document.getElementById('adopt-role-select');
 
         try {
@@ -2194,22 +2227,28 @@ class SaintApp {
 
         const role = document.getElementById('adopt-role-select').value;
         const displayName = document.getElementById('adopt-display-name').value.trim();
+        const boardId = document.getElementById('adopt-board-select').value;
 
-        if (!role) {
-            alert('Please select a role');
-            return;
-        }
+        if (!role) { alert('Please select a role'); return; }
+        if (!boardId) { alert('Please select a board'); return; }
 
         const ws = window.saintWS;
 
         try {
-            const params = { node_id: nodeId, role };
+            const params = { node_id: nodeId, role, board_id: boardId };
             if (displayName) {
                 params.display_name = displayName;
             }
 
-            await ws.management('adopt_node', params);
-            this.addActivityLogEntry({ text: `Node ${nodeId} adopted as ${role}`, level: 'info' });
+            const result = await ws.management('adopt_node', params);
+            if (result && result.success === false) {
+                alert(result.message || 'Adoption failed');
+                return;
+            }
+            this.addActivityLogEntry({
+                text: `Node ${nodeId} adopted as ${role} (board ${boardId})`,
+                level: 'info'
+            });
             this.closeAdoptModal();
             await this.loadNodesData();
         } catch (error) {
