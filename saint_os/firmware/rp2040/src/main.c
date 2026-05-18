@@ -530,13 +530,19 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     // Build announcement JSON string.
     //
     // chip_family identifies the silicon family ("rp2040") — the server
-    // matches this against saint_os/config/boards/<chip>/global.conf to
+    // matches this against saint_os/config/boards/<chip>/global.yaml to
     // pick a pin-layout YAML. Read from the SYSINFO_CHIP_ID register so
     // the value is observable, not just a compile-time string. Keeping
     // hw, fw, fw_build as before for display + version comparison.
+    //
+    // SYSINFO_CHIP_ID layout (RP2040 datasheet § 2.20.4):
+    //   bits 31:28  REVISION   (silicon stepping — variable across batches)
+    //   bits 27:12  PART       = 0x0002 for RP2040
+    //   bits 11:0   MANUFACTURER = 0x927 (Raspberry Pi)
+    // So the lower 28 bits = (PART << 12) | MANUFACTURER = 0x00002927.
     uint32_t chip_id_reg = *(volatile uint32_t *)0x40000000;
     const char* chip_family =
-        (chip_id_reg & 0x0FFFFFFF) == 0x027CC777 ? "rp2040" : "unknown";
+        (chip_id_reg & 0x0FFFFFFF) == 0x00002927u ? "rp2040" : "unknown";
 
     int ann_len = snprintf(announcement_buffer, sizeof(announcement_buffer),
         "{"

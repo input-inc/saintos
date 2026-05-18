@@ -31,7 +31,7 @@ def boards_root(tmp_path):
     _write(str(root / "rp2040" / "global.yaml"), """
         chip_family: rp2040
         display_name: "Test RP2040"
-        chip_id_value: 0x927CC777
+        chip_id_value: 0x00002927
         gpio_count: 30
         pin_capabilities:
           - {gpio: 0, default_name: "GP0", caps: ["digital_in", "digital_out", "uart_tx"]}
@@ -80,7 +80,7 @@ class TestLoader:
         assert chip is not None
         assert chip.display_name == "Test RP2040"
         assert chip.gpio_count == 30
-        assert chip.chip_id_value == 0x927CC777
+        assert chip.chip_id_value == 0x00002927
         assert len(chip.pin_capabilities) == 4
         assert {p.gpio for p in chip.pin_capabilities} == {0, 1, 5, 26}
 

@@ -15,7 +15,11 @@ description: "Dual Cortex-M0+ with 30 GPIO pins, two UARTs, two I²C, two SPI."
 
 # Sanity-check value the firmware can emit alongside its chip_family
 # string — read from the SYSINFO_CHIP_ID register at 0x40000000.
-chip_id_value: 0x927CC777
+# Layout (lower 28 bits, mask off the silicon-revision nibble):
+#   bits 27:12  PART         = 0x0002  (RP2040)
+#   bits 11:0   MANUFACTURER = 0x927   (Raspberry Pi)
+# So (chip_id_reg & 0x0FFFFFFF) == 0x00002927 on every RP2040 chip.
+chip_id_value: 0x00002927
 
 gpio_count: 30
 
