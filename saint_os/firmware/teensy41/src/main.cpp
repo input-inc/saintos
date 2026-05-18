@@ -379,9 +379,16 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
 
     float cpu_temp = hardware_get_cpu_temp();
 
+    // chip_family lets the server pick the right board YAML to derive
+    // pin layout from. Teensy 4.1 uses the NXP iMXRT1062 — we report
+    // "teensy41" as the family so the server matches
+    // saint_os/config/boards/teensy41/.
+    const char* chip_family = "teensy41";
+
     int ann_len = snprintf(announcement_buffer, sizeof(announcement_buffer),
         "{"
         "\"node_id\":\"%s\","
+        "\"chip_family\":\"%s\","
         "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
         "\"ip\":\"%d.%d.%d.%d\","
         "\"hw\":\"%s\","
@@ -392,6 +399,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"cpu_temp\":%.1f,"
         "\"peripherals\":{",
         g_node.node_id,
+        chip_family,
         g_node.mac_address[0], g_node.mac_address[1],
         g_node.mac_address[2], g_node.mac_address[3],
         g_node.mac_address[4], g_node.mac_address[5],

@@ -596,10 +596,22 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     // Get CPU temperature
     float cpu_temp = hardware_get_cpu_temp();
 
-    // Build announcement JSON string
+    // Build announcement JSON string.
+    //
+    // chip_family identifies the silicon family ("rp2040") — the server
+    // matches this against saint_os/config/boards/<chip>/global.conf to
+    // pick a pin-layout YAML. Read from the SYSINFO_CHIP_ID register so
+    // the value is observable, not just a compile-time string. Keeping
+    // hw, fw, fw_build as before for display + version comparison.
+    uint32_t chip_id_reg = *(volatile uint32_t *)0x40000000;
+    const char* chip_family =
+        (chip_id_reg & 0x0FFFFFFF) == 0x027CC777 ? "rp2040" : "unknown";
+
     int ann_len = snprintf(announcement_buffer, sizeof(announcement_buffer),
         "{"
         "\"node_id\":\"%s\","
+        "\"chip_family\":\"%s\","
+        "\"chip_id\":\"0x%08lx\","
         "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
         "\"ip\":\"%d.%d.%d.%d\","
         "\"hw\":\"%s\","
@@ -610,6 +622,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"cpu_temp\":%.1f,"
         "\"peripherals\":{",
         g_node.node_id,
+        chip_family,
+        (unsigned long)chip_id_reg,
         g_node.mac_address[0], g_node.mac_address[1],
         g_node.mac_address[2], g_node.mac_address[3],
         g_node.mac_address[4], g_node.mac_address[5],
