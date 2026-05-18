@@ -408,6 +408,21 @@ static bool ota_requested_by_app(uint32_t* out_size, uint32_t* out_crc)
 	return true;
 }
 
+/* Bootloader retry budget. Each failed OTA increments scratch[4]; once
+ * we've hit MAX_OTA_RETRIES we stop trying and fall back to the
+ * previous app if it's still valid in flash. That gives the operator
+ * a chance to see the node come back online (on the old version) and
+ * read the "Last OTA attempt failed" log line the app emits — instead
+ * of an indefinite "node offline" with no clue why. */
+#define MAX_OTA_RETRIES   3
+
+/* When the bootloader gives up on OTA and boots the old app, it
+ * leaves this sentinel in scratch[3] so the app can surface a log
+ * line about the failure. The app reads it once at startup and
+ * clears it. Picked to be non-zero and unlikely to collide with
+ * uninitialized scratch contents. */
+#define OTA_GAVE_UP_MAGIC 0xFA11ED01u
+
 int main(void)
 {
 	/* stdio early so panic prints are visible. */
@@ -430,7 +445,9 @@ int main(void)
 
 	printf("\n==== SAINT.OS RP2040 OTA Bootloader ====\n");
 	if (ota_now) {
-		printf("OTA mode: requested by app\n");
+		uint32_t attempt = watchdog_hw->scratch[4] + 1;
+		printf("OTA mode: requested by app (attempt %u/%u)\n",
+		       (unsigned)attempt, MAX_OTA_RETRIES);
 	} else {
 		printf("OTA mode: no valid app image, awaiting download\n");
 		/* No metadata from the app → we need defaults. The first-time
@@ -444,20 +461,49 @@ int main(void)
 	}
 
 	bool ok = perform_ota(exp_size, exp_crc);
-	clear_ota_magic();
 
 	if (ok) {
-		/* Reboot via watchdog — the new image header will be picked
-		 * up by image_header_ok() and we'll jump to the new app. */
+		/* Success — clear retry counter + OTA magic, reboot into the
+		 * new app via image_header_ok(). */
+		watchdog_hw->scratch[4] = 0;
+		clear_ota_magic();
 		watchdog_reboot(0, 0, 0);
-	} else {
-		/* Stay in OTA mode for retry. We need scratch magic to remain
-		 * set so the next boot still enters OTA. Re-set magic but
-		 * leave the size/crc/vtor in place so the operator can hit
-		 * retry from the server. */
+		while (1) { tight_loop_contents(); }
+	}
+
+	/* Failure path. Track how many times we've tried; if we've burned
+	 * through the budget, give up gracefully so the node reappears on
+	 * the network running the previous firmware (if any). */
+	uint32_t retries = watchdog_hw->scratch[4] + 1;
+	watchdog_hw->scratch[4] = retries;
+	printf("OTA: attempt %u/%u failed\n", (unsigned)retries, MAX_OTA_RETRIES);
+
+	if (retries < MAX_OTA_RETRIES) {
+		/* Re-arm magic and retry. Size/crc stay in scratch[0..1] from
+		 * the original handoff so the next attempt uses the same image. */
 		watchdog_hw->scratch[5] = PICOWOTA_BOOTLOADER_ENTRY_MAGIC;
 		watchdog_hw->scratch[6] = ~PICOWOTA_BOOTLOADER_ENTRY_MAGIC;
 		watchdog_reboot(0, 0, 0);
+		while (1) { tight_loop_contents(); }
 	}
+
+	/* Budget exhausted. Clear the OTA magic so the next boot takes
+	 * the fast path. Set the give-up sentinel so the app knows why
+	 * it's running the old firmware. Reset retry counter so a future
+	 * operator-initiated OTA starts fresh. */
+	printf("OTA: budget exhausted, falling back to existing app\n");
+	clear_ota_magic();
+	watchdog_hw->scratch[4] = 0;
+	watchdog_hw->scratch[3] = OTA_GAVE_UP_MAGIC;
+
+	if (image_header_ok(&app_image_header)) {
+		watchdog_reboot(0, 0, 0);
+		while (1) { tight_loop_contents(); }
+	}
+
+	/* No valid app to fall back to — first-time install where the OTA
+	 * was supposed to seed the app. Stay in bootloader so the operator
+	 * can BOOTSEL-reflash the combined .uf2. */
+	printf("OTA: no fallback app available; staying in bootloader\n");
 	while (1) { tight_loop_contents(); }
 }

@@ -172,7 +172,15 @@ class SaintServerNode(Node):
                 if announced_node_id:
                     self.get_logger().debug(f'Updated node {announced_node_id}')
             if announced_node_id:
+                # Subscribe to everything the firmware publishes for
+                # this node, so data flows whether or not the operator
+                # has triggered a control / config push yet. State at
+                # 10 Hz feeds the Live Readings tab + widget dashboard;
+                # log lines feed the per-node Logs tab; capabilities
+                # are kept for legacy nodes that still publish them.
                 self._ensure_node_log_subscriber(announced_node_id)
+                self._ensure_node_state_subscriber(announced_node_id)
+                self._ensure_node_capabilities_subscriber(announced_node_id)
         except Exception as e:
             # Dump the full raw payload so operators can see exactly what
             # arrived — the bare error message ("unterminated string at

@@ -15,6 +15,13 @@
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
 #include "hardware/watchdog.h"
+#include "hardware/structs/watchdog.h"
+
+/* Bootloader sentinel: when an OTA fails MAX_OTA_RETRIES times, the
+ * bootloader writes this to scratch[3] before booting the old app
+ * so we can report it. Must match the value in
+ * firmware/rp2040/bootloader/main.c. */
+#define OTA_GAVE_UP_MAGIC 0xFA11ED01u
 
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
@@ -1042,6 +1049,15 @@ int main(void)
     // after the previous boot's last log line in the Logs tab.
     bool boot_after_watchdog_timeout = watchdog_enable_caused_reboot();
 
+    // Also capture the OTA-gave-up sentinel from the bootloader before
+    // anything touches scratch[3]. If non-zero, the previous OTA
+    // attempt exceeded its retry budget and we're running the
+    // PREVIOUS firmware. Clear it so we only report once.
+    bool boot_after_ota_giveup = (watchdog_hw->scratch[3] == OTA_GAVE_UP_MAGIC);
+    if (boot_after_ota_giveup) {
+        watchdog_hw->scratch[3] = 0;
+    }
+
     // Brief delay for UART to stabilize
     sleep_ms(100);
 
@@ -1214,6 +1230,14 @@ int main(void)
         saint_log_publish("info",
             "Boot OK — fw %s, watchdog armed at %d ms",
             FIRMWARE_VERSION_FULL, WATCHDOG_TIMEOUT_MS);
+    }
+    // The bootloader sets the OTA-gave-up sentinel when it exhausts
+    // its retry budget and falls back to this app. Tell the operator
+    // so they don't think the firmware update "just disappeared."
+    if (boot_after_ota_giveup) {
+        saint_log_publish("error",
+            "OTA attempt failed after retries — running previous firmware. "
+            "Check that the node can reach the server (DHCP gateway = server IP).");
     }
 
     // Check if we have a saved configuration (previously adopted)
