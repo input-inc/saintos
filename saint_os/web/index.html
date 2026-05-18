@@ -257,110 +257,17 @@
                     </div>
                 </div>
 
-                <!-- Peripheral Telemetry -->
-                <div id="telemetry-section" class="mt-6">
-                    <h3 class="text-lg font-semibold text-slate-400 mb-4">Peripheral Telemetry</h3>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-
-                        <!-- FAS100 Power Monitor -->
-                        <div class="card" id="telemetry-fas100">
-                            <div class="flex items-center justify-between mb-4">
-                                <div class="flex items-center gap-2">
-                                    <span class="material-icons text-amber-400 icon-md">bolt</span>
-                                    <h4 class="text-base font-semibold text-white">FAS100 Power Monitor</h4>
-                                </div>
-                                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-700 text-slate-400">Mock Data</span>
-                            </div>
-                            <div class="telemetry-accent-bar bg-amber-500"></div>
-                            <div class="space-y-4 mt-3">
-                                <div class="stat-item">
-                                    <span class="stat-label">Battery Voltage</span>
-                                    <div class="flex items-center gap-2">
-                                        <span id="telem-fas-voltage" class="stat-value">--</span>
-                                        <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                                            <div id="telem-fas-voltage-bar" class="telemetry-bar bg-amber-500" style="width: 0%"></div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="stat-item">
-                                    <span class="stat-label">Current Draw</span>
-                                    <div class="flex items-center gap-2">
-                                        <span id="telem-fas-current" class="stat-value">--</span>
-                                        <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                                            <div id="telem-fas-current-bar" class="telemetry-bar bg-cyan-500" style="width: 0%"></div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="stat-item">
-                                    <span class="stat-label">Temp 1</span>
-                                    <span id="telem-fas-temp" class="stat-value telemetry-temp">--</span>
-                                </div>
-                                <div class="stat-item">
-                                    <span class="stat-label">Temp 2</span>
-                                    <span id="telem-fas-temp2" class="stat-value telemetry-temp">--</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- RoboClaw Motor Controller (hidden — mock data only; brought back when wired to live telemetry per peripheral instance) -->
-                        <div class="card hidden" id="telemetry-roboclaw">
-                            <div class="flex items-center justify-between mb-4">
-                                <div class="flex items-center gap-2">
-                                    <span class="material-icons text-cyan-400 icon-md">settings</span>
-                                    <h4 class="text-base font-semibold text-white">RoboClaw Motor</h4>
-                                </div>
-                                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-700 text-slate-400">Mock Data</span>
-                            </div>
-                            <div class="telemetry-accent-bar bg-cyan-500"></div>
-                            <div class="space-y-3 mt-3">
-                                <div class="stat-item">
-                                    <span class="stat-label">Motor Duty</span>
-                                    <span id="telem-rc-duty" class="stat-value">--</span>
-                                </div>
-                                <div class="stat-item">
-                                    <span class="stat-label">Encoder</span>
-                                    <span id="telem-rc-encoder" class="stat-value font-mono text-sm">--</span>
-                                </div>
-                                <div class="stat-item">
-                                    <span class="stat-label">Battery</span>
-                                    <div class="flex items-center gap-2">
-                                        <span id="telem-rc-battery" class="stat-value">--</span>
-                                        <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                                            <div id="telem-rc-battery-bar" class="telemetry-bar bg-emerald-500" style="width: 0%"></div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="stat-item">
-                                    <span class="stat-label">Motor Current</span>
-                                    <div class="flex items-center gap-2">
-                                        <span id="telem-rc-current" class="stat-value">--</span>
-                                        <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                                            <div id="telem-rc-current-bar" class="telemetry-bar bg-violet-500" style="width: 0%"></div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="stat-item">
-                                    <span class="stat-label">Temperature</span>
-                                    <span id="telem-rc-temp" class="stat-value telemetry-temp">--</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Maestro Servo Controller (hidden — mock data only; brought back when wired to live telemetry per peripheral instance) -->
-                        <div class="card hidden" id="telemetry-maestro">
-                            <div class="flex items-center justify-between mb-4">
-                                <div class="flex items-center gap-2">
-                                    <span class="material-icons text-violet-400 icon-md">precision_manufacturing</span>
-                                    <h4 class="text-base font-semibold text-white">Maestro Servos</h4>
-                                </div>
-                                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-700 text-slate-400">Mock Data</span>
-                            </div>
-                            <div class="telemetry-accent-bar bg-violet-500"></div>
-                            <div id="telem-maestro-grid" class="servo-grid mt-3">
-                                <!-- Servo channels populated by JS -->
-                            </div>
-                        </div>
-
+                <!-- Operator widgets — populated from system_routing.widgets -->
+                <div id="widget-section" class="mt-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold text-slate-400">Widgets</h3>
+                        <button id="btn-dashboard-add-widget" class="btn-secondary text-sm">
+                            <span class="material-icons icon-sm">add</span>
+                            Configure on Routing page
+                        </button>
+                    </div>
+                    <div id="widget-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        <p class="text-slate-500 col-span-full italic">No widgets yet — add one on the Routing page.</p>
                     </div>
                 </div>
             </section>
@@ -2286,6 +2193,7 @@
     <script src="js/websocket.js"></script>
     <script src="js/peripherals.js"></script>
     <script src="js/routing.js"></script>
+    <script src="js/widgets.js"></script>
     <script src="js/pincontrol.js"></script>
     <script src="js/controlpage.js"></script>
     <script src="js/moods.js"></script>
