@@ -17,6 +17,7 @@
 #include "flash_storage.h"
 #include "saint_node.h"
 #include "peripheral_driver.h"
+#include "saint_log.h"
 
 // =============================================================================
 // Static Variables
@@ -178,13 +179,13 @@ static bool apply_one_peripheral(const char* obj_start, const char* obj_end)
 {
     char type_id[32];
     if (!extract_string_field(obj_start, obj_end, "\"type\"", type_id, sizeof(type_id))) {
-        printf("Pin config: peripheral missing 'type'\n");
+        saint_log_publish("warn", "Peripheral missing 'type' — skipping");
         return false;
     }
 
     const peripheral_driver_t* drv = driver_for_type_id(type_id);
     if (!drv) {
-        printf("Pin config: no driver for type '%s' — skipping\n", type_id);
+        saint_log_publish("warn", "No driver for type '%s' — skipping", type_id);
         return false;
     }
 

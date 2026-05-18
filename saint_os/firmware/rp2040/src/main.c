@@ -9,6 +9,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 
 #include "pico/stdlib.h"
@@ -89,6 +90,7 @@ static rclc_executor_t executor;
 // Publishers
 static rcl_publisher_t announcement_pub;
 static rcl_publisher_t state_pub;          // Pin state publisher
+static rcl_publisher_t log_pub;            // Node log lines (best-effort)
 
 // Subscribers
 static rcl_subscription_t config_sub;
@@ -111,6 +113,9 @@ static char control_buffer[512];        // Buffer for incoming control commands
 static std_msgs__msg__String state_msg;
 static char state_buffer[2048];         // Buffer for outgoing state
 
+static std_msgs__msg__String log_msg;
+static char log_buffer[256];            // One log line at a time
+
 // State publish interval
 #define STATE_PUBLISH_INTERVAL_MS 100   // 10Hz
 
@@ -121,19 +126,16 @@ static char state_buffer[2048];         // Buffer for outgoing state
 #define ERROR_RECOVERY_DELAY_MS      30000  // Stay in ERROR for 30s, then try again
 // Note: RECONNECT_DELAY_MS is defined in saint_node.h
 
-// Hardware watchdog. The RP2040 watchdog hardware caps at ~8.4 seconds,
-// which turned out to be shorter than legitimate slow operations like
-// W5500 send() blocking through a retransmit (its default timeout is
-// several seconds). With the hardware watchdog armed, hitting Refresh
-// triggered a capability publish that occasionally took >8s and the
-// chip rebooted mid-publish.
-//
-// Set to 0 to disable. A software watchdog with longer reach is the
-// follow-up, but for now the priority is "Refresh doesn't reboot the
-// node." The DHCP keepalive and NODE_STATE_ERROR recovery from the
-// same commit (dce4f29) are still in place and cover the cases the
-// hardware watchdog was meant to catch.
-#define WATCHDOG_TIMEOUT_MS          0
+// Hardware watchdog. The RP2040 watchdog caps at ~8.4 seconds, which
+// is plenty for the post-strip apply path (parse JSON → set pin modes
+// → flash write → ACTIVE — all sub-second on real hardware). It used
+// to be 0 because pre-strip firmware did a synchronous capability
+// publish during apply which sometimes blocked >8 s on W5500 ARP
+// retransmit; that publish is gone. With this armed, an in-the-robot
+// hang is now visible: the chip resets, the server sees the node
+// drop, and the boot path emits a "Recovered from watchdog reset"
+// log line that pairs with the per-node Logs tab.
+#define WATCHDOG_TIMEOUT_MS          8000
 
 static uint32_t last_successful_comm = 0;   // Timestamp of last successful communication
 static uint32_t last_connection_check = 0;  // Timestamp of last connection check
@@ -145,6 +147,63 @@ static uint32_t error_entered_at = 0;       // When we entered NODE_STATE_ERROR 
 static void mark_agent_communication(void);
 static bool check_agent_connection(void);
 static bool init_micro_ros(void);
+
+// Track whether init_micro_ros() has run so saint_log_publish can be a
+// safe no-op during pre-agent boot. Set to true after the log publisher
+// is registered with the agent.
+static bool ros_log_ready = false;
+
+// =============================================================================
+// Remote logging
+// =============================================================================
+//
+// saint_log_publish() ships a single line to the server over the
+// /saint/nodes/<id>/log topic AND prints to UART. Best-effort: if the
+// agent isn't connected yet, the line is dropped after the printf.
+// Format: {"level":"info|warn|error","text":"...","uptime_ms":N}.
+//
+// Keep individual lines under ~200 chars to fit log_buffer with the
+// JSON envelope; longer ones are truncated. Don't call from ISRs
+// (printf isn't ISR-safe) and don't call faster than ~10 Hz; this is
+// for events, not telemetry.
+void saint_log_publish(const char* level, const char* fmt, ...)
+{
+    char text[200];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+
+    // Always echo to UART so a serial dev console still sees everything.
+    printf("[%s] %s\n", level, text);
+
+    if (!ros_log_ready) return;
+
+    uint32_t up = to_ms_since_boot(get_absolute_time());
+
+    // JSON-escape quote and backslash inside the text so the server can
+    // json.loads() it. Anything weirder than that we just leave alone.
+    char escaped[256];
+    size_t ei = 0;
+    for (size_t i = 0; text[i] && ei < sizeof(escaped) - 2; i++) {
+        if (text[i] == '"' || text[i] == '\\') {
+            if (ei < sizeof(escaped) - 3) escaped[ei++] = '\\';
+        }
+        escaped[ei++] = text[i];
+    }
+    escaped[ei] = '\0';
+
+    int len = snprintf(log_buffer, sizeof(log_buffer),
+        "{\"level\":\"%s\",\"text\":\"%s\",\"uptime_ms\":%lu}",
+        level, escaped, (unsigned long)up);
+    if (len < 0 || (size_t)len >= sizeof(log_buffer)) return;
+
+    log_msg.data.data = log_buffer;
+    log_msg.data.size = (size_t)len;
+    log_msg.data.capacity = sizeof(log_buffer);
+    /* Ignore the publish return — log is best-effort. */
+    (void)rcl_publish(&log_pub, &log_msg, NULL);
+}
 
 // =============================================================================
 // Subscription Callbacks
@@ -180,24 +239,27 @@ static void config_subscription_callback(const void* msgin)
     // Check for configure action
     if (strstr(msg->data.data, "\"action\":\"configure\"") ||
         strstr(msg->data.data, "\"action\": \"configure\"")) {
-        printf("Configuration request received\n");
+        saint_log_publish("info", "Config received (%zu bytes), applying…",
+                          msg->data.size);
 
         if (pin_config_apply_json(msg->data.data, msg->data.size)) {
-            printf("Pin configuration applied successfully\n");
+            saint_log_publish("info", "Config applied OK");
 
             // Save to flash
             if (pin_config_save()) {
-                printf("Pin configuration saved to flash\n");
+                saint_log_publish("info", "Config saved to flash");
+            } else {
+                saint_log_publish("error", "Flash save failed");
             }
 
             // Transition to ACTIVE state (node is now adopted)
             if (g_node.state != NODE_STATE_ACTIVE) {
-                printf("Node adopted - transitioning to ACTIVE state\n");
+                saint_log_publish("info", "Adopted — entering ACTIVE state");
                 node_set_state(NODE_STATE_ACTIVE);
                 led_set_state(NODE_STATE_ACTIVE);
             }
         } else {
-            printf("Failed to apply pin configuration\n");
+            saint_log_publish("error", "Config apply failed");
         }
     }
 }
@@ -726,6 +788,28 @@ static bool init_micro_ros(void)
     }
     printf("Created state publisher: %s\n", state_topic);
 
+    // Create log publisher (best-effort). The server subscribes per
+    // adopted node and feeds each line into the per-node Logs tab.
+    char log_topic[64];
+    snprintf(log_topic, sizeof(log_topic),
+             "/saint/nodes/%s/log", g_node.node_id);
+    for (char* p = log_topic; *p; p++) {
+        if (*p == '-' || *p == ':') *p = '_';
+    }
+
+    ret = rclc_publisher_init_default(
+        &log_pub,
+        &ros_node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+        log_topic
+    );
+    if (ret != RCL_RET_OK) {
+        printf("Failed to create log publisher: %d\n", ret);
+        return false;
+    }
+    printf("Created log publisher: %s\n", log_topic);
+    ros_log_ready = true;
+
     // Create announcement timer (1 second interval)
     ret = rclc_timer_init_default(
         &announce_timer,
@@ -808,6 +892,8 @@ static void cleanup_micro_ros(void)
 {
     rcl_subscription_fini(&control_sub, &ros_node);
     rcl_subscription_fini(&config_sub, &ros_node);
+    ros_log_ready = false;
+    rcl_publisher_fini(&log_pub, &ros_node);
     rcl_publisher_fini(&state_pub, &ros_node);
     rcl_publisher_fini(&announcement_pub, &ros_node);
     rcl_timer_fini(&state_timer);
@@ -932,7 +1018,7 @@ static bool check_agent_connection(void)
 
         // Restore LED state
         led_set_state(g_node.state);
-        printf("Reconnected successfully!\n");
+        saint_log_publish("info", "micro-ROS agent reconnected");
     }
 
     return agent_connected;
@@ -946,6 +1032,15 @@ int main(void)
 {
     // Initialize stdio (USB serial for hardware, UART for simulation)
     stdio_init_all();
+
+    // Capture the reset cause before anything else touches the
+    // watchdog. watchdog_enable_caused_reboot() returns true only when
+    // the *timeout* fired — not for the watchdog_reboot()-triggered
+    // OTA hand-off — so this cleanly distinguishes "we crashed" from
+    // "we asked to reboot." Used below as soon as the log channel is
+    // up so the operator sees "Recovered from watchdog reset" right
+    // after the previous boot's last log line in the Logs tab.
+    bool boot_after_watchdog_timeout = watchdog_enable_caused_reboot();
 
     // Brief delay for UART to stabilize
     sleep_ms(100);
@@ -1107,17 +1202,31 @@ int main(void)
         }
     }
 
+    // Now that the log publisher is alive, surface the boot context.
+    // Critical: if the previous boot crashed and triggered the
+    // watchdog, the line below pairs with the per-node Logs tab's
+    // history so the operator can see what the node was doing
+    // immediately before the reset.
+    if (boot_after_watchdog_timeout) {
+        saint_log_publish("error",
+            "Recovered from watchdog reset (previous boot crashed)");
+    } else {
+        saint_log_publish("info",
+            "Boot OK — fw %s, watchdog armed at %d ms",
+            FIRMWARE_VERSION_FULL, WATCHDOG_TIMEOUT_MS);
+    }
+
     // Check if we have a saved configuration (previously adopted)
     if (pin_config_has_configured_pins()) {
         // Node was previously adopted and has saved config
         node_set_state(NODE_STATE_ACTIVE);
         led_set_state(NODE_STATE_ACTIVE);
-        printf("Node ready. Restored from saved config (ACTIVE)\n");
+        saint_log_publish("info", "Restored from saved config (ACTIVE)");
     } else {
         // No saved config - enter unadopted state
         node_set_state(NODE_STATE_UNADOPTED);
         led_set_state(NODE_STATE_UNADOPTED);
-        printf("Node ready. Waiting for adoption...\n");
+        saint_log_publish("info", "Waiting for adoption (UNADOPTED)");
     }
     printf("========================================\n");
 

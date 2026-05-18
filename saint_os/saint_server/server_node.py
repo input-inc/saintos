@@ -95,6 +95,7 @@ class SaintServerNode(Node):
         self._node_caps_subs: Dict[str, Any] = {}    # node_id -> subscription
         self._node_control_pubs: Dict[str, Any] = {} # node_id -> control publisher
         self._node_state_subs: Dict[str, Any] = {}   # node_id -> state subscription
+        self._node_log_subs: Dict[str, Any] = {}     # node_id -> log subscription
 
         # Initialize components
         self._init_publishers()
@@ -155,18 +156,23 @@ class SaintServerNode(Node):
             # Log announcement for debugging
             self.get_logger().debug(f'Received announcement ({len(raw)} bytes): {raw[:100]}...')
             is_new = self.state_manager.update_node_from_announcement(raw)
+            # Parse node_id once; used for both the log line below and
+            # to register the per-node log subscriber lazily on first
+            # contact (so firmware boot lines from a fresh node get
+            # captured even before adoption).
+            announced_node_id = None
+            try:
+                import json
+                announced_node_id = json.loads(raw).get('node_id')
+            except Exception:
+                pass
             if is_new:
                 self.get_logger().info(f'New node discovered via announcement')
             else:
-                # Parse to get node_id for logging
-                import json
-                try:
-                    data = json.loads(raw)
-                    node_id = data.get('node_id', 'unknown')
-                    fw = data.get('fw', '?')
-                    self.get_logger().debug(f'Updated node {node_id} (fw: {fw})')
-                except:
-                    pass
+                if announced_node_id:
+                    self.get_logger().debug(f'Updated node {announced_node_id}')
+            if announced_node_id:
+                self._ensure_node_log_subscriber(announced_node_id)
         except Exception as e:
             # Dump the full raw payload so operators can see exactly what
             # arrived — the bare error message ("unterminated string at
@@ -364,6 +370,56 @@ class SaintServerNode(Node):
         )
         self._node_state_subs[node_id] = sub
         self.get_logger().info(f'Subscribed to state: {topic}')
+
+    def _ensure_node_log_subscriber(self, node_id: str):
+        """Ensure a log subscriber exists for a node.
+
+        The firmware publishes JSON-encoded lines to
+        /saint/nodes/<id>/log; we route each into the per-node
+        log buffer so they appear in the node-detail Logs tab.
+        """
+        if node_id in self._node_log_subs:
+            return
+
+        sanitized_id = self._sanitize_topic_name(node_id)
+        topic = f'/saint/nodes/{sanitized_id}/log'
+
+        def callback(msg: String):
+            self._on_node_log(node_id, msg)
+
+        # depth=20 since log bursts during config-apply can be a handful
+        # in quick succession; we'd rather buffer than drop.
+        sub = self.create_subscription(
+            String,
+            topic,
+            callback,
+            20,
+            callback_group=self.callback_group
+        )
+        self._node_log_subs[node_id] = sub
+        self.get_logger().info(f'Subscribed to log: {topic}')
+
+    def _on_node_log(self, node_id: str, msg: String):
+        """Receive a firmware log line and feed it into the per-node buffer.
+
+        Firmware emits {"level": "info|warn|error", "text": "…", "uptime_ms": N}.
+        Anything malformed gets stored as a raw-payload "warn" so we never lose
+        a hint that the firmware tried to say something.
+        """
+        try:
+            import json
+            data = json.loads(msg.data)
+            level = str(data.get('level', 'info'))
+            text = str(data.get('text', ''))
+            up = data.get('uptime_ms')
+            if up is not None:
+                text = f'[+{int(up) / 1000.0:.3f}s] {text}'
+            if not text:
+                return
+            self.state_manager.log_node_event(node_id, text, level)
+        except Exception as e:
+            self.state_manager.log_node_event(
+                node_id, f'(malformed log frame: {e}) {msg.data[:120]!r}', 'warn')
 
     def _on_node_state(self, node_id: str, msg: String):
         """Handle state message from a node."""
