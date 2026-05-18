@@ -57,6 +57,19 @@ class PeripheralManager {
                     this.updateSyncStatus(message.data.sync_status);
                 }
                 this.renderAll();
+                // If the Add/Edit modal happens to be open and was
+                // showing the "no capabilities yet" warning, re-render
+                // its body now that pins are available — so the user
+                // doesn't have to close + reopen.
+                const modal = document.getElementById('peripheral-modal');
+                if (modal && !modal.classList.contains('hidden')) {
+                    const err = document.getElementById('peripheral-modal-error');
+                    if (err) { err.textContent = ''; err.classList.add('hidden'); }
+                    const existing = this.modalEditingId
+                        ? this.peripherals.find(p => p.id === this.modalEditingId)
+                        : null;
+                    this.renderModalBody(existing);
+                }
             } else if (topic.startsWith('sync_status/')) {
                 const nodeId = topic.slice('sync_status/'.length);
                 if (nodeId !== this.selectedNode) return;
@@ -330,6 +343,27 @@ class PeripheralManager {
         this.modalEditingId = null;
         this.populateTypeSelect(null);
         this.openModal('Add peripheral');
+
+        // If the firmware hasn't reported its capabilities yet, the pin
+        // selectors will be empty and the user can't pick a valid pin.
+        // Surface an explicit warning + kick off a refresh — the modal
+        // re-renders when the broadcast arrives via setupWebSocketHandlers.
+        const hasPins = this.capabilities
+            && Array.isArray(this.capabilities.pins)
+            && this.capabilities.pins.length > 0;
+        const hasUart = this.capabilities
+            && Array.isArray(this.capabilities.uart_pairs)
+            && this.capabilities.uart_pairs.length > 0;
+        if (!hasPins && !hasUart) {
+            const err = document.getElementById('peripheral-modal-error');
+            if (err) {
+                err.textContent = 'Capabilities not loaded yet — refreshing from firmware. '
+                                + 'Wait a moment then re-open this dialog, or close and reopen the Peripherals tab.';
+                err.classList.remove('hidden');
+            }
+            this.refreshCapabilities();
+        }
+
         this.renderModalBody();
     }
 
