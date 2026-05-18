@@ -261,12 +261,11 @@ class SaintServerNode(Node):
             if self._async_loop:
                 caps = self.state_manager.get_node_capabilities(node_id)
                 if caps:
-                    # Include sync_status in capabilities broadcast
-                    pin_config = self.state_manager.get_node_pin_config(node_id)
-                    if pin_config:
-                        caps["sync_status"] = pin_config.get("sync_status", "unknown")
-                        caps["last_synced"] = pin_config.get("last_synced")
-                    # Make a copy to ensure data isn't modified before async send
+                    # Include peripheral sync_status in the capabilities payload
+                    peripherals = self.state_manager.get_node_peripherals(node_id)
+                    if peripherals:
+                        caps["sync_status"] = peripherals.get("sync_status", "unknown")
+                        caps["last_synced"] = peripherals.get("last_synced")
                     caps_copy = dict(caps)
                     topic = f'node_capabilities/{node_id}'
                     self._async_loop.call_soon_threadsafe(
@@ -276,15 +275,15 @@ class SaintServerNode(Node):
                     )
 
     def _broadcast_sync_status(self, node_id: str):
-        """Broadcast sync status update to WebSocket clients."""
+        """Broadcast peripheral sync status to WebSocket clients."""
         if self.web_server and self.web_server.ws_handler:
             if self._async_loop:
-                pin_config = self.state_manager.get_node_pin_config(node_id)
-                if pin_config:
+                peripherals = self.state_manager.get_node_peripherals(node_id)
+                if peripherals:
                     status_data = {
                         "node_id": node_id,
-                        "sync_status": pin_config.get("sync_status", "unknown"),
-                        "last_synced": pin_config.get("last_synced"),
+                        "sync_status": peripherals.get("sync_status", "unknown"),
+                        "last_synced": peripherals.get("last_synced"),
                     }
                     topic = f'sync_status/{node_id}'
                     self._async_loop.call_soon_threadsafe(
@@ -743,27 +742,18 @@ class SaintServerNode(Node):
             )
 
     def _livelink_output_callback(self, node_id: str, output_name: str, value: float):
+        """Callback from LiveLink router to send an output to a node.
+
+        TODO: rewire through the system routing graph. The old code did
+        a GPIO lookup via `pin_config.logical_name`; with peripherals owning
+        their pins, the right replacement is to find a Route whose source
+        is `livelink:<output_name>` (signal kind) and whose sink is a
+        peripheral channel, then dispatch accordingly. Disabled until the
+        routing engine ships.
         """
-        Callback from LiveLink router to send output to a node.
-
-        This looks up the GPIO pin for the logical output name and sends
-        the control command to the node.
-        """
-        # Get the node's pin config to find the GPIO for this output_name
-        pin_config = self.state_manager.get_node_pin_config(node_id)
-        if not pin_config:
-            return
-
-        # Find the pin with this logical name
-        for pin in pin_config.get('pins', []):
-            if pin.get('logical_name') == output_name:
-                gpio = pin.get('gpio')
-                if gpio is not None:
-                    self.send_control_command(node_id, gpio, value)
-                    return
-
-        # Log if output not found (but don't spam)
-        self.get_logger().debug(f'LiveLink output {output_name} not found on node {node_id}')
+        self.get_logger().debug(
+            f'LiveLink output {output_name} for {node_id} ignored — routing engine pending'
+        )
 
     def get_livelink_status(self) -> Dict[str, Any]:
         """Get LiveLink status for WebSocket API."""

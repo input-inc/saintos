@@ -794,53 +794,112 @@ class WebSocketHandler:
             else:
                 return {"status": "error", "message": "Capabilities request not available"}
 
-        elif action == 'get_pin_config':
+        # ─── Peripheral catalog (types of peripherals known to the system) ──
+        elif action == 'get_peripheral_catalog':
+            return {"status": "ok", "data": {
+                "peripheral_types": self.state_manager.get_peripheral_catalog(),
+                "widget_types": self.state_manager.get_widget_catalog(),
+            }}
+
+        # ─── Per-node peripheral configuration ──────────────────────────────
+        elif action == 'get_node_peripherals':
             node_id = params.get('node_id')
             if not node_id:
                 return {"status": "error", "message": "Missing node_id"}
-
-            config = self.state_manager.get_node_pin_config(node_id)
-            if config is not None:
-                return {"status": "ok", "data": config}
-            else:
+            data = self.state_manager.get_node_peripherals(node_id)
+            if data is None:
                 return {"status": "error", "message": f"Node {node_id} not found"}
+            return {"status": "ok", "data": data}
 
-        elif action == 'save_pin_config':
+        elif action == 'save_node_peripheral':
             node_id = params.get('node_id')
-            pin_configs = params.get('pins', {})
+            peripheral = params.get('peripheral')
+            if not node_id or not peripheral:
+                return {"status": "error", "message": "Missing node_id or peripheral"}
+            result = self.state_manager.upsert_node_peripheral(node_id, peripheral)
+            return {"status": "ok" if result.get('success') else "error", "data": result}
 
-            if not node_id:
-                return {"status": "error", "message": "Missing node_id"}
-
-            result = self.state_manager.save_node_pin_config(node_id, pin_configs)
-            return {"status": "ok" if result['success'] else "error", "data": result}
-
-        elif action == 'validate_pin_config':
+        elif action == 'remove_node_peripheral':
             node_id = params.get('node_id')
-            pin_configs = params.get('pins', {})
-            role = params.get('role')
+            peripheral_id = params.get('peripheral_id')
+            if not node_id or not peripheral_id:
+                return {"status": "error", "message": "Missing node_id or peripheral_id"}
+            result = self.state_manager.remove_node_peripheral(node_id, peripheral_id)
+            return {"status": "ok" if result.get('success') else "error", "data": result}
 
-            if not node_id or not role:
-                return {"status": "error", "message": "Missing node_id or role"}
-
-            result = self.state_manager.validate_pin_config(node_id, pin_configs, role)
-            return {"status": "ok", "data": result}
-
-        elif action == 'sync_pin_config':
+        elif action == 'sync_node_peripherals':
             node_id = params.get('node_id')
             if not node_id:
                 return {"status": "error", "message": "Missing node_id"}
-
             config_json = self.state_manager.get_firmware_config_json(node_id)
             if not config_json:
-                return {"status": "error", "message": "No configuration to sync"}
-
+                return {"status": "error", "message": "No peripheral configuration to sync"}
             if self._sync_config_callback:
                 self._sync_config_callback(node_id, config_json)
-                await self.broadcast_activity(f'Syncing configuration to node {node_id}', 'info')
-                return {"status": "ok", "data": {"message": "Configuration sync initiated", "success": True}}
-            else:
-                return {"status": "error", "message": "Config sync not available"}
+                await self.broadcast_activity(f'Syncing peripherals to node {node_id}', 'info')
+                return {"status": "ok", "data": {"message": "Sync initiated", "success": True}}
+            return {"status": "error", "message": "Config sync not available"}
+
+        # ─── System routing (routes + widgets) ──────────────────────────────
+        elif action == 'get_system_routing':
+            return {"status": "ok", "data": self.state_manager.get_system_routing()}
+
+        elif action == 'add_route':
+            source = params.get('source')
+            sink = params.get('sink')
+            if not source or not sink:
+                return {"status": "error", "message": "Missing source or sink"}
+            result = self.state_manager.add_route(source, sink)
+            await self._broadcast_routing()
+            return {"status": "ok" if result.get('success') else "error", "data": result}
+
+        elif action == 'update_route':
+            route_id = params.get('route_id')
+            source = params.get('source')
+            sink = params.get('sink')
+            if not route_id or not source or not sink:
+                return {"status": "error", "message": "Missing route_id, source, or sink"}
+            result = self.state_manager.update_route(route_id, source, sink)
+            await self._broadcast_routing()
+            return {"status": "ok" if result.get('success') else "error", "data": result}
+
+        elif action == 'remove_route':
+            route_id = params.get('route_id')
+            if not route_id:
+                return {"status": "error", "message": "Missing route_id"}
+            result = self.state_manager.remove_route(route_id)
+            await self._broadcast_routing()
+            return {"status": "ok" if result.get('success') else "error", "data": result}
+
+        elif action == 'add_widget':
+            type_id = params.get('type')
+            if not type_id:
+                return {"status": "error", "message": "Missing type"}
+            result = self.state_manager.add_widget(
+                type_id=type_id,
+                label=params.get('label'),
+                position=params.get('position'),
+                params=params.get('params'),
+            )
+            await self._broadcast_routing()
+            return {"status": "ok" if result.get('success') else "error", "data": result}
+
+        elif action == 'update_widget':
+            widget_id = params.get('widget_id')
+            if not widget_id:
+                return {"status": "error", "message": "Missing widget_id"}
+            changes = {k: v for k, v in params.items() if k in ('label', 'position', 'params')}
+            result = self.state_manager.update_widget(widget_id, **changes)
+            await self._broadcast_routing()
+            return {"status": "ok" if result.get('success') else "error", "data": result}
+
+        elif action == 'remove_widget':
+            widget_id = params.get('widget_id')
+            if not widget_id:
+                return {"status": "error", "message": "Missing widget_id"}
+            result = self.state_manager.remove_widget(widget_id)
+            await self._broadcast_routing()
+            return {"status": "ok" if result.get('success') else "error", "data": result}
 
         elif action == 'get_logs':
             limit = params.get('limit', 100)
@@ -1068,41 +1127,31 @@ class WebSocketHandler:
             except (ValueError, TypeError):
                 return {"status": "error", "message": "Invalid gpio or value type"}
 
-            # Get pin mode and translate value from normalized (0-1) to native range
-            pin_mode = self.state_manager.get_pin_mode(node_id, gpio)
-            if pin_mode:
-                native_value = translate_normalized_value(value, pin_mode)
-            else:
-                native_value = value
+            # Direct pin write — the value is passed through verbatim. The
+            # routing engine handles unit conversion; raw control endpoints
+            # like this are for debug / power-user use, so callers are
+            # responsible for sending native-range values.
+            native_value = value
 
-            # Check throttle (per-gpio to allow controlling multiple pins simultaneously)
-            # IMPORTANT: Neutral/stop values (input near 0) ALWAYS bypass throttle
-            # to ensure motors stop immediately when joystick is released
             throttle_key = (node_id, gpio)
             now = time.time() * 1000  # ms
             last_send = self._control_throttle.get(throttle_key, 0)
             is_neutral = is_neutral_value(value)
 
             if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
-                # Throttled - still update desired state but don't send to node
                 self.state_manager.update_pin_desired(node_id, gpio, native_value)
-                # Broadcast updated state to all subscribers
                 await self._broadcast_pin_state(node_id)
                 self.log('debug', f'[Control] THROTTLED {node_id} GPIO {gpio}: {native_value:.1f}')
                 return {"status": "ok", "message": "Throttled", "data": {"throttled": True}}
 
-            # Update desired state
             self.state_manager.update_pin_desired(node_id, gpio, native_value)
 
-            # Send to node via ROS2
             if self._send_control_callback:
                 self._send_control_callback(node_id, gpio, native_value)
                 self._control_throttle[throttle_key] = now
                 bypass_note = ' [STOP]' if is_neutral else ''
-                self.log('info', f'[Control] SENT{bypass_note} {node_id} GPIO {gpio}: '
-                         f'input={value:.3f} -> native={native_value:.1f} (mode={pin_mode or "none"})')
+                self.log('info', f'[Control] SENT{bypass_note} {node_id} GPIO {gpio}: {native_value:.1f}')
 
-            # Broadcast updated state to all subscribers
             await self._broadcast_pin_state(node_id)
 
             return {"status": "ok", "data": {"throttled": False, "native_value": native_value}}
@@ -1124,13 +1173,8 @@ class WebSocketHandler:
                     gpio = int(pin_data.get('gpio'))
                     value = float(pin_data.get('value'))
 
-                    # Translate value from normalized (0-1) to native range
-                    pin_mode = self.state_manager.get_pin_mode(node_id, gpio)
-                    if pin_mode:
-                        native_value = translate_normalized_value(value, pin_mode)
-                    else:
-                        native_value = value
-
+                    # Raw write — caller is responsible for native ranges.
+                    native_value = value
                     self.state_manager.update_pin_desired(node_id, gpio, native_value)
 
                     # Check per-gpio throttle
@@ -1151,77 +1195,6 @@ class WebSocketHandler:
 
             return {"status": "ok", "data": {"sent": sent_count, "throttled": throttled_count, "count": len(pins)}}
 
-        elif action == 'set_function_value':
-            # High-level control: role + function instead of node_id + gpio
-            role = params.get('role')
-            function = params.get('function')
-            value = params.get('value')
-
-            if not role or not function or value is None:
-                return {"status": "error", "message": "Missing role, function, or value"}
-
-            try:
-                value = float(value)
-            except (ValueError, TypeError):
-                return {"status": "error", "message": "Invalid value type"}
-
-            # Resolve role + function to node_id + gpio
-            result = self.state_manager.resolve_function_to_pin(role, function)
-            if not result:
-                return {
-                    "status": "error",
-                    "message": f"Could not resolve role '{role}' function '{function}' to a pin"
-                }
-
-            node_id, gpio = result
-
-            # Get pin mode and translate value from normalized (0-1) to native range
-            pin_mode = self.state_manager.get_pin_mode(node_id, gpio)
-            if pin_mode:
-                native_value = translate_normalized_value(value, pin_mode)
-            else:
-                native_value = value
-
-            # Check throttle (per-gpio to allow controlling multiple pins simultaneously)
-            # IMPORTANT: Neutral/stop values (input near 0) ALWAYS bypass throttle
-            # to ensure motors stop immediately when joystick is released
-            throttle_key = (node_id, gpio)
-            now = time.time() * 1000  # ms
-            last_send = self._control_throttle.get(throttle_key, 0)
-            is_neutral = is_neutral_value(value)
-
-            if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
-                # Throttled - still update desired state but don't send to node
-                self.state_manager.update_pin_desired(node_id, gpio, native_value)
-                await self._broadcast_pin_state(node_id)
-                # Log throttled commands at debug level only
-                self.log('debug', f'[Control] THROTTLED {role}/{function} GPIO {gpio}: {native_value:.1f}')
-                return {"status": "ok", "message": "Throttled", "data": {"throttled": True}}
-
-            # Update desired state
-            self.state_manager.update_pin_desired(node_id, gpio, native_value)
-
-            # Send to node via ROS2
-            if self._send_control_callback:
-                self._send_control_callback(node_id, gpio, native_value)
-                self._control_throttle[throttle_key] = now
-                # Log at info level only when actually sending to node
-                bypass_note = ' [STOP]' if is_neutral else ''
-                self.log('info', f'[Control] SENT{bypass_note} {role}/{function} -> {node_id} GPIO {gpio}: '
-                         f'input={value:.3f} -> native={native_value:.1f} (mode={pin_mode or "none"})')
-
-            # Broadcast updated state to all subscribers
-            await self._broadcast_pin_state(node_id)
-
-            return {
-                "status": "ok",
-                "data": {
-                    "throttled": False,
-                    "resolved": {"node_id": node_id, "gpio": gpio},
-                    "native_value": native_value
-                }
-            }
-
         elif action == 'get_runtime_state':
             node_id = params.get('node_id')
             if not node_id:
@@ -1232,14 +1205,6 @@ class WebSocketHandler:
                 return {"status": "ok", "data": state}
             else:
                 return {"status": "ok", "data": None, "message": "No runtime state available"}
-
-        elif action == 'get_controllable_pins':
-            node_id = params.get('node_id')
-            if not node_id:
-                return {"status": "error", "message": "Missing node_id"}
-
-            pins = self.state_manager.get_controllable_pins(node_id)
-            return {"status": "ok", "data": {"pins": pins}}
 
         else:
             return {"status": "error", "message": f"Unknown control action: {action}"}
@@ -1741,6 +1706,10 @@ class WebSocketHandler:
         state = self.state_manager.get_runtime_state(node_id)
         if state:
             await self.broadcast_state(f'pin_state/{node_id}', state)
+
+    async def _broadcast_routing(self):
+        """Broadcast the current system routing graph to subscribers."""
+        await self.broadcast_state('system_routing', self.state_manager.get_system_routing())
 
     # ── Web terminal ─────────────────────────────────────────────────
 

@@ -16,6 +16,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable, Tuple
 
+from saint_server.peripheral_model import (
+    DEFAULT_CATALOG,
+    DEFAULT_WIDGET_CATALOG,
+    NodePeripheralConfig,
+    PeripheralInstance,
+    PeripheralType,
+    Route,
+    RouteEndpoint,
+    SystemRouting,
+    WidgetInstance,
+    WidgetType,
+    detect_pin_conflicts,
+)
+
 # Installed-version metadata — populated once by _read_installed_version_info()
 # on first call to get_system_status() so we don't stat files every second.
 _INSTALL_PREFIX = Path(os.environ.get("SAINT_INSTALL_PREFIX", "/opt/saint-os"))
@@ -175,24 +189,6 @@ class PinCapability:
 
 
 @dataclass
-class PinConfiguration:
-    """Configuration for a single pin mapping."""
-    gpio: int
-    mode: str
-    logical_name: str
-    params: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        result = {
-            "mode": self.mode,
-            "logical_name": self.logical_name,
-        }
-        result.update(self.params)
-        return result
-
-
-@dataclass
 class NodeCapabilities:
     """Complete pin capabilities for a node."""
     node_id: str
@@ -228,32 +224,6 @@ class NodeCapabilities:
             ],
             "reserved_pins": self.reserved_pins,
             "uart_pairs": self.uart_pairs,
-        }
-
-
-@dataclass
-class NodePinConfig:
-    """Pin configuration state for a node."""
-    version: int = 0
-    pins: Dict[int, PinConfiguration] = field(default_factory=dict)  # gpio -> config
-    sync_status: str = "unknown"  # unknown, pending, synced, error
-    last_synced: Optional[float] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "version": self.version,
-            "pins": {str(gpio): cfg.to_dict() for gpio, cfg in self.pins.items()},
-            "sync_status": self.sync_status,
-            "last_synced": self.last_synced,
-        }
-
-    def to_firmware_json(self) -> Dict[str, Any]:
-        """Convert to JSON format expected by firmware."""
-        return {
-            "action": "configure",
-            "version": self.version,
-            "pins": {str(gpio): cfg.to_dict() for gpio, cfg in self.pins.items()},
         }
 
 
@@ -366,10 +336,10 @@ class NodeInfo:
     # Adopted node specific
     display_name: str = ""
     role: str = ""
-    # Pin configuration
+    # Peripheral attachments + per-pin capabilities reported by the firmware.
     capabilities: Optional[NodeCapabilities] = None
-    pin_config: Optional[NodePinConfig] = None
-    # Runtime state
+    peripheral_config: Optional[NodePeripheralConfig] = None
+    # Runtime state — per-channel readings (formerly per-GPIO pin state).
     runtime_state: Optional[NodeRuntimeState] = None
     # Tracking
     last_seen: float = field(default_factory=time.time)
@@ -391,6 +361,8 @@ class SystemState:
     livelink_source_count: int = 0
     rc_enabled: bool = False
     rc_connected: bool = False
+    # System-wide routing graph (routes + dashboard widgets)
+    system_routing: SystemRouting = field(default_factory=SystemRouting)
 
 
 class StateManager:
@@ -418,9 +390,18 @@ class StateManager:
                 )
         self.config_dir = os.path.abspath(config_dir)
         self.nodes_config_dir = os.path.join(self.config_dir, 'nodes')
+        self.system_routing_path = os.path.join(self.config_dir, 'system_routing.yaml')
+
+        # In-memory peripheral type catalog. Starts from the built-in
+        # DEFAULT_CATALOG and gets extended when nodes report platform-
+        # specific types in their capabilities.
+        self.peripheral_catalog: Dict[str, PeripheralType] = dict(DEFAULT_CATALOG)
+        self.widget_catalog: Dict[str, WidgetType] = dict(DEFAULT_WIDGET_CATALOG)
 
         # Load adopted nodes from disk on startup
         self.load_all_node_configs()
+        # Load system-wide routes + widgets
+        self._load_system_routing()
 
     def set_activity_callback(self, callback: Callable[[str, str], None]):
         """Set callback for activity logging. Callback takes (message, level)."""
@@ -690,7 +671,10 @@ class StateManager:
                 "state": node.state,
                 "last_seen": node.last_seen,
                 "has_capabilities": node.capabilities is not None,
-                "pin_config_status": node.pin_config.sync_status if node.pin_config else "unconfigured",
+                "peripheral_count": len(node.peripheral_config.peripherals) if node.peripheral_config else 0,
+                "peripheral_sync_status": (
+                    node.peripheral_config.sync_status if node.peripheral_config else "unconfigured"
+                ),
                 "firmware_update_available": fw_update_info["available"],
                 "firmware_update_message": fw_update_info["message"],
                 "server_firmware_version": server_fw.get("version_full") or server_fw.get("version"),
@@ -733,8 +717,12 @@ class StateManager:
 
         self.state.adopted_nodes[node_id] = node
 
-        # Load any existing configuration from disk
+        # Load any existing peripheral configuration from disk
         self._load_node_config(node_id)
+
+        # Ensure an empty peripheral_config exists (so callers don't see None)
+        if not node.peripheral_config:
+            node.peripheral_config = NodePeripheralConfig()
 
         # Save initial config
         self._save_node_config(node_id)
@@ -844,6 +832,41 @@ class StateManager:
             last_updated=time.time(),
         )
 
+        # Seed any built-in peripherals declared by the firmware.
+        # Firmware capability JSON may include:
+        #   "builtin_peripherals": [
+        #     {"id": "onboard_neopixel", "type": "neopixel", "label": "Onboard NeoPixel",
+        #      "pins": {"data": 16}, "params": {}}
+        #   ]
+        # We add them to peripheral_config so they're routable like any other
+        # peripheral. Existing built-ins keep their operator-set label/params.
+        builtins = data.get('builtin_peripherals', [])
+        if builtins:
+            if not node.peripheral_config:
+                node.peripheral_config = NodePeripheralConfig()
+            seeded_any = False
+            for entry in builtins:
+                pid = entry.get('id')
+                tid = entry.get('type')
+                if not pid or tid not in self.peripheral_catalog:
+                    continue
+                existing = node.peripheral_config.get(pid)
+                if existing:
+                    continue
+                node.peripheral_config.peripherals.append(PeripheralInstance(
+                    id=pid,
+                    type=tid,
+                    label=entry.get('label', tid),
+                    pins=dict(entry.get('pins', {})),
+                    params=dict(entry.get('params', {})),
+                    builtin=True,
+                ))
+                seeded_any = True
+            if seeded_any:
+                node.peripheral_config.version += 1
+                if node_id in self.state.adopted_nodes:
+                    self._save_node_config(node_id)
+
         if self.logger:
             self.logger.info(f"Stored {len(pins)} pin capabilities for node {node_id}")
         self._log_activity(f"Updated capabilities for node {node_id} ({len(pins)} pins)", "info")
@@ -872,212 +895,301 @@ class StateManager:
             return None
         return node.capabilities.to_dict()
 
-    def get_node_pin_config(self, node_id: str) -> Optional[Dict[str, Any]]:
-        """Get current pin configuration for a node."""
+    # =========================================================================
+    # Peripheral catalog (types of peripherals known to the system)
+    # =========================================================================
+
+    def get_peripheral_catalog(self) -> List[Dict[str, Any]]:
+        """Return the list of known peripheral types, JSON-serializable."""
+        return [t.to_dict() for t in self.peripheral_catalog.values()]
+
+    def get_widget_catalog(self) -> List[Dict[str, Any]]:
+        """Return the list of known widget types, JSON-serializable."""
+        return [t.to_dict() for t in self.widget_catalog.values()]
+
+    # =========================================================================
+    # Per-node peripherals (the things attached to a node)
+    # =========================================================================
+
+    def get_node_peripherals(self, node_id: str) -> Optional[Dict[str, Any]]:
+        """Return per-node peripheral list for a node, with sync state."""
         node = self.state.adopted_nodes.get(node_id)
         if not node:
             return None
+        if not node.peripheral_config:
+            node.peripheral_config = NodePeripheralConfig()
+        return node.peripheral_config.to_dict()
 
-        # Load from file if not in memory
-        if not node.pin_config:
-            self._load_node_config(node_id)
-
-        if node.pin_config:
-            return node.pin_config.to_dict()
-        return {"version": 0, "pins": {}, "sync_status": "unknown", "last_synced": None}
-
-    def save_node_pin_config(
-        self,
-        node_id: str,
-        pin_configs: Dict[str, Dict[str, Any]]
+    def upsert_node_peripheral(
+        self, node_id: str, peripheral_payload: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Save pin configuration for a node.
+        """Add or replace a peripheral on a node.
 
-        Args:
-            node_id: The node ID
-            pin_configs: Dict mapping GPIO (as string) to config dict
-                         e.g. {"5": {"mode": "pwm", "logical_name": "left_velocity"}}
-
-        Returns:
-            Result dict with success status and message
+        If `id` is missing in the payload, a new id is generated. If
+        `id` matches an existing peripheral, that entry is replaced.
+        Built-in peripherals can be edited (label/params) but their
+        builtin flag and pins are preserved.
         """
         node = self.state.adopted_nodes.get(node_id)
         if not node:
             return {"success": False, "message": f"Node {node_id} not found or not adopted"}
 
-        # Create or update pin config
-        if not node.pin_config:
-            node.pin_config = NodePinConfig()
+        type_id = peripheral_payload.get("type")
+        if type_id not in self.peripheral_catalog:
+            return {"success": False, "message": f"Unknown peripheral type: {type_id}"}
 
-        # Update version
-        node.pin_config.version += 1
+        if not node.peripheral_config:
+            node.peripheral_config = NodePeripheralConfig()
 
-        # Parse configurations
-        node.pin_config.pins.clear()
-        for gpio_str, config in pin_configs.items():
-            try:
-                gpio = int(gpio_str)
-            except ValueError:
-                continue
-
-            node.pin_config.pins[gpio] = PinConfiguration(
-                gpio=gpio,
-                mode=config.get('mode', 'unconfigured'),
-                logical_name=config.get('logical_name', ''),
-                params={k: v for k, v in config.items() if k not in ('mode', 'logical_name')},
+        pid = peripheral_payload.get("id") or self._generate_peripheral_id(node, type_id)
+        existing = node.peripheral_config.get(pid)
+        if existing and existing.builtin:
+            # Preserve hardwired pins + builtin flag for built-in peripherals
+            peripheral = PeripheralInstance(
+                id=pid,
+                type=existing.type,
+                label=peripheral_payload.get("label", existing.label),
+                pins=dict(existing.pins),
+                params=dict(peripheral_payload.get("params", existing.params)),
+                builtin=True,
+            )
+        else:
+            peripheral = PeripheralInstance(
+                id=pid,
+                type=type_id,
+                label=peripheral_payload.get("label", type_id),
+                pins=dict(peripheral_payload.get("pins", {})),
+                params=dict(peripheral_payload.get("params", {})),
+                builtin=False,
             )
 
-        node.pin_config.sync_status = "pending"
+        # Validate pin assignments don't conflict (call out to peripheral_model)
+        node.peripheral_config.upsert(peripheral)
+        conflicts = detect_pin_conflicts(
+            node.peripheral_config,
+            uart_pairs=node.capabilities.uart_pairs if node.capabilities else None,
+        )
+        if conflicts:
+            # Roll back the upsert if conflicts found
+            node.peripheral_config.remove(pid) if not existing else node.peripheral_config.upsert(existing)
+            return {"success": False, "message": "; ".join(conflicts)}
 
-        # Save to YAML file
         self._save_node_config(node_id)
-
-        self._log_activity(f"Saved pin configuration for {node.display_name or node_id}", "info")
+        self._log_activity(
+            f"Saved peripheral '{peripheral.label}' on {node.display_name or node_id}", "info"
+        )
         return {
             "success": True,
-            "message": "Configuration saved",
-            "version": node.pin_config.version,
+            "peripheral": peripheral.to_dict(),
+            "version": node.peripheral_config.version,
         }
 
-    def mark_node_synced(self, node_id: str, success: bool = True):
-        """Mark node pin config as synced (or error)."""
+    def remove_node_peripheral(self, node_id: str, peripheral_id: str) -> Dict[str, Any]:
+        """Remove a peripheral from a node. Cascades: drops routes touching it."""
         node = self.state.adopted_nodes.get(node_id)
-        if node and node.pin_config:
-            node.pin_config.sync_status = "synced" if success else "error"
-            node.pin_config.last_synced = time.time() if success else None
+        if not node or not node.peripheral_config:
+            return {"success": False, "message": "Node has no peripherals"}
+
+        if not node.peripheral_config.remove(peripheral_id):
+            return {"success": False, "message": f"Peripheral {peripheral_id} not found"}
+
+        # Cascade: drop any routes referencing this peripheral
+        touched = self.state.system_routing.routes_touching_peripheral(node_id, peripheral_id)
+        for r in touched:
+            self.state.system_routing.remove_route(r.id)
+        if touched:
+            self._save_system_routing()
+
+        self._save_node_config(node_id)
+        self._log_activity(
+            f"Removed peripheral {peripheral_id} from {node.display_name or node_id}", "info"
+        )
+        return {"success": True}
+
+    def mark_node_synced(self, node_id: str, success: bool = True) -> None:
+        """Mark a node's peripheral config as synced or errored after firmware ack."""
+        node = self.state.adopted_nodes.get(node_id)
+        if node and node.peripheral_config:
+            node.peripheral_config.sync_status = "synced" if success else "error"
+            node.peripheral_config.last_synced = time.time() if success else None
             self._save_node_config(node_id)
 
     def get_firmware_config_json(self, node_id: str) -> Optional[str]:
-        """Get pin configuration in firmware JSON format."""
+        """Build the JSON payload the firmware expects to (re)configure itself.
+
+        Format:
+            {"action": "configure", "version": N,
+             "peripherals": [{"id": ..., "type": ..., "pins": {...}, "params": {...}}, ...]}
+        Built-in peripherals are omitted — firmware already knows about them.
+        """
         node = self.state.adopted_nodes.get(node_id)
-        if not node or not node.pin_config:
+        if not node or not node.peripheral_config:
             return None
-        return json.dumps(node.pin_config.to_firmware_json())
+        payload = {
+            "action": "configure",
+            "version": node.peripheral_config.version,
+            "peripherals": [
+                {
+                    "id": p.id,
+                    "type": p.type,
+                    "pins": p.pins,
+                    "params": p.params,
+                }
+                for p in node.peripheral_config.peripherals
+                if not p.builtin
+            ],
+        }
+        return json.dumps(payload)
 
-    def validate_pin_config(
-        self,
-        node_id: str,
-        pin_configs: Dict[str, Dict[str, Any]],
-        role: str
-    ) -> Dict[str, Any]:
-        """
-        Validate pin configuration against role requirements and node capabilities.
+    def _generate_peripheral_id(self, node: NodeInfo, type_id: str) -> str:
+        config = node.peripheral_config or NodePeripheralConfig()
+        n = sum(1 for p in config.peripherals if p.type == type_id) + 1
+        existing_ids = {p.id for p in config.peripherals}
+        while f"{type_id}-{n}" in existing_ids:
+            n += 1
+        return f"{type_id}-{n}"
 
-        Returns:
-            Dict with 'valid' bool and 'errors' list
-        """
-        errors = []
-        warnings = []
+    # =========================================================================
+    # System-wide routing graph (routes + widgets)
+    # =========================================================================
 
-        node = self.state.adopted_nodes.get(node_id)
-        if not node:
-            return {"valid": False, "errors": ["Node not found"], "warnings": []}
+    def get_system_routing(self) -> Dict[str, Any]:
+        return self.state.system_routing.to_dict()
 
-        capabilities = node.capabilities
-        if not capabilities:
-            warnings.append("Node capabilities not available - cannot validate pin compatibility")
+    def add_route(self, source: Dict[str, Any], sink: Dict[str, Any]) -> Dict[str, Any]:
+        src = RouteEndpoint.from_dict(source)
+        snk = RouteEndpoint.from_dict(sink)
+        err = self._validate_route_endpoints(src, snk)
+        if err:
+            return {"success": False, "message": err}
+        route = self.state.system_routing.add_route(src, snk)
+        self._save_system_routing()
+        self._log_activity(
+            f"Added route {route.id}: {src.describe()} → {snk.describe()}", "info"
+        )
+        return {"success": True, "route": route.to_dict()}
 
-        # Load role definition
+    def update_route(self, route_id: str, source: Dict[str, Any],
+                     sink: Dict[str, Any]) -> Dict[str, Any]:
+        src = RouteEndpoint.from_dict(source)
+        snk = RouteEndpoint.from_dict(sink)
+        err = self._validate_route_endpoints(src, snk)
+        if err:
+            return {"success": False, "message": err}
+        route = self.state.system_routing.update_route(route_id, src, snk)
+        if not route:
+            return {"success": False, "message": f"Route {route_id} not found"}
+        self._save_system_routing()
+        return {"success": True, "route": route.to_dict()}
+
+    def remove_route(self, route_id: str) -> Dict[str, Any]:
+        if self.state.system_routing.remove_route(route_id):
+            self._save_system_routing()
+            return {"success": True}
+        return {"success": False, "message": f"Route {route_id} not found"}
+
+    def _validate_route_endpoints(self, source: RouteEndpoint,
+                                  sink: RouteEndpoint) -> Optional[str]:
+        """Validate that both endpoints reference live targets. Returns
+        an error string if invalid, or None on success."""
+        for ep, role in ((source, "source"), (sink, "sink")):
+            if ep.kind == "peripheral":
+                if len(ep.parts) < 3:
+                    return f"{role}: peripheral endpoint needs [node_id, peripheral_id, channel_id]"
+                node_id, pid, channel_id = ep.parts[0], ep.parts[1], ep.parts[2]
+                node = self.state.adopted_nodes.get(node_id)
+                if not node or not node.peripheral_config:
+                    return f"{role}: unknown node '{node_id}'"
+                peripheral = node.peripheral_config.get(pid)
+                if not peripheral:
+                    return f"{role}: peripheral '{pid}' not on node '{node_id}'"
+                t = self.peripheral_catalog.get(peripheral.type)
+                if t and not any(c.id == channel_id for c in t.channels):
+                    return f"{role}: channel '{channel_id}' not on peripheral type '{peripheral.type}'"
+            elif ep.kind == "widget":
+                if len(ep.parts) < 2:
+                    return f"{role}: widget endpoint needs [widget_id, input_id]"
+                widget_id = ep.parts[0]
+                widget = next((w for w in self.state.system_routing.widgets
+                               if w.id == widget_id), None)
+                if not widget:
+                    return f"{role}: unknown widget '{widget_id}'"
+                t = self.widget_catalog.get(widget.type)
+                if t and not any(i.id == ep.parts[1] for i in t.inputs):
+                    return f"{role}: input '{ep.parts[1]}' not on widget type '{widget.type}'"
+            elif ep.kind == "signal":
+                if not ep.parts or not ep.parts[0]:
+                    return f"{role}: signal endpoint needs a path"
+            else:
+                return f"{role}: unknown endpoint kind '{ep.kind}'"
+        return None
+
+    def add_widget(self, type_id: str, label: Optional[str] = None,
+                   position: Optional[List[int]] = None,
+                   params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if type_id not in self.widget_catalog:
+            return {"success": False, "message": f"Unknown widget type '{type_id}'"}
+        pos: Tuple[int, int] = (int(position[0]), int(position[1])) if position and len(position) >= 2 else (0, 0)
+        widget = self.state.system_routing.add_widget(
+            type_id=type_id,
+            label=label or self.widget_catalog[type_id].label,
+            position=pos,
+            params=params,
+        )
+        self._save_system_routing()
+        self._log_activity(f"Added widget {widget.id} ({widget.type})", "info")
+        return {"success": True, "widget": widget.to_dict()}
+
+    def update_widget(self, widget_id: str, **changes) -> Dict[str, Any]:
+        widget = self.state.system_routing.update_widget(widget_id, **changes)
+        if not widget:
+            return {"success": False, "message": f"Widget {widget_id} not found"}
+        self._save_system_routing()
+        return {"success": True, "widget": widget.to_dict()}
+
+    def remove_widget(self, widget_id: str) -> Dict[str, Any]:
+        if self.state.system_routing.remove_widget(widget_id):
+            self._save_system_routing()
+            return {"success": True}
+        return {"success": False, "message": f"Widget {widget_id} not found"}
+
+    # =========================================================================
+    # Persistence (system_routing.yaml + per-node peripheral configs)
+    # =========================================================================
+
+    def _save_system_routing(self) -> None:
+        os.makedirs(self.config_dir, exist_ok=True)
         try:
-            from saint_server.roles import RoleManager
-            role_mgr = RoleManager(logger=self.logger)
-            role_def = role_mgr.get_role(role)
+            with open(self.system_routing_path, "w") as f:
+                yaml.dump(self.state.system_routing.to_dict(),
+                          f, default_flow_style=False, sort_keys=False)
         except Exception as e:
-            return {"valid": False, "errors": [f"Failed to load role: {e}"], "warnings": []}
+            if self.logger:
+                self.logger.error(f"Failed to save system routing: {e}")
 
-        if not role_def:
-            return {"valid": False, "errors": [f"Unknown role: {role}"], "warnings": []}
-
-        # Check required functions are mapped
-        assigned_functions = {
-            cfg.get('logical_name')
-            for cfg in pin_configs.values()
-            if cfg.get('logical_name')
-        }
-
-        for func in role_def.get_required_functions():
-            if func.name not in assigned_functions:
-                errors.append(f"Required function '{func.display_name}' is not assigned to any pin")
-
-        # Validate pin modes against capabilities
-        if capabilities:
-            for gpio_str, config in pin_configs.items():
-                try:
-                    gpio = int(gpio_str)
-                except ValueError:
-                    continue
-
-                pin_cap = capabilities.get_pin(gpio)
-                if not pin_cap:
-                    errors.append(f"GPIO {gpio} is not available on this node")
-                    continue
-
-                mode = config.get('mode', '')
-                if mode and not pin_cap.supports_mode(mode):
-                    errors.append(
-                        f"GPIO {gpio} ({pin_cap.name}) does not support mode '{mode}'"
-                    )
-
-        # Detect UART conflicts: two UART-using peripherals on the same UART instance.
-        # Each UART peripheral config carries tx_pin/rx_pin; resolve to a UART instance
-        # via the node's advertised uart_pairs table and flag overlaps.
-        uart_modes = {
-            'fas100_sensor', 'syren_motor', 'roboclaw_motor', 'pathfinder_bms_sensor'
-        }
-        if capabilities and capabilities.uart_pairs:
-            pair_to_uart = {
-                (p.get('tx'), p.get('rx')): p.get('uart')
-                for p in capabilities.uart_pairs
-            }
-            # Map: peripheral_kind -> (tx, rx, uart_instance). One entry per kind because
-            # all virtual pins of a peripheral share its UART; pick the first one seen.
-            assignments: Dict[str, tuple] = {}
-            for config in pin_configs.values():
-                mode = config.get('mode', '')
-                if mode not in uart_modes:
-                    continue
-                tx = config.get('tx_pin')
-                rx = config.get('rx_pin')
-                if tx is None or rx is None:
-                    continue
-                key = (int(tx), int(rx))
-                uart_inst = pair_to_uart.get(key)
-                if uart_inst is None:
-                    errors.append(
-                        f"{mode}: TX={tx}/RX={rx} is not a legal UART pair on this node"
-                    )
-                    continue
-                if mode not in assignments:
-                    assignments[mode] = (int(tx), int(rx), uart_inst)
-
-            # Same-UART conflicts (two peripherals on overlapping pins).
-            for mode_a, (tx_a, rx_a, uart_a) in assignments.items():
-                for mode_b, (tx_b, rx_b, uart_b) in assignments.items():
-                    if mode_a >= mode_b:  # only one direction
-                        continue
-                    if uart_a == uart_b:
-                        errors.append(
-                            f"UART conflict: {mode_a} (TX={tx_a}/RX={rx_a}) and "
-                            f"{mode_b} (TX={tx_b}/RX={rx_b}) both claim UART{uart_a}"
-                        )
-
-        return {
-            "valid": len(errors) == 0,
-            "errors": errors,
-            "warnings": warnings,
-        }
+    def _load_system_routing(self) -> None:
+        if not os.path.exists(self.system_routing_path):
+            return
+        try:
+            with open(self.system_routing_path, "r") as f:
+                data = yaml.safe_load(f) or {}
+            self.state.system_routing = SystemRouting.from_dict(data)
+            if self.logger:
+                self.logger.info(
+                    f"Loaded system routing: {len(self.state.system_routing.routes)} routes, "
+                    f"{len(self.state.system_routing.widgets)} widgets"
+                )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to load system routing: {e}")
 
     def _save_node_config(self, node_id: str):
-        """Save node configuration to YAML file."""
+        """Save per-node YAML (peripherals + identity)."""
         node = self.state.adopted_nodes.get(node_id)
         if not node:
             return
 
-        # Ensure directory exists
         os.makedirs(self.nodes_config_dir, exist_ok=True)
-
-        # Build config dict
         config = {
             "node_id": node.node_id,
             "display_name": node.display_name,
@@ -1085,23 +1197,9 @@ class StateManager:
             "hardware_model": node.hardware_model,
             "mac_address": node.mac_address,
         }
+        if node.peripheral_config:
+            config["peripherals"] = node.peripheral_config.to_dict()
 
-        if node.pin_config:
-            config["pin_config"] = {
-                "version": node.pin_config.version,
-                "sync_status": node.pin_config.sync_status,
-                "last_synced": node.pin_config.last_synced,
-                "pins": {
-                    str(gpio): {
-                        "mode": cfg.mode,
-                        "logical_name": cfg.logical_name,
-                        **cfg.params,
-                    }
-                    for gpio, cfg in node.pin_config.pins.items()
-                },
-            }
-
-        # Write YAML file
         filepath = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
         try:
             with open(filepath, 'w') as f:
@@ -1111,7 +1209,7 @@ class StateManager:
                 self.logger.error(f"Failed to save node config: {e}")
 
     def _load_node_config(self, node_id: str) -> bool:
-        """Load node configuration from YAML file."""
+        """Load per-node YAML — for use when re-adopting an existing node."""
         node = self.state.adopted_nodes.get(node_id)
         if not node:
             return False
@@ -1131,31 +1229,9 @@ class StateManager:
         if not config:
             return False
 
-        # Load pin configuration
-        pin_config_data = config.get('pin_config', {})
-        if pin_config_data:
-            node.pin_config = NodePinConfig(
-                version=pin_config_data.get('version', 0),
-                sync_status=pin_config_data.get('sync_status', 'unknown'),
-                last_synced=pin_config_data.get('last_synced'),
-            )
-
-            for gpio_str, cfg_data in pin_config_data.get('pins', {}).items():
-                try:
-                    gpio = int(gpio_str)
-                except ValueError:
-                    continue
-
-                params = {k: v for k, v in cfg_data.items()
-                          if k not in ('mode', 'logical_name')}
-
-                node.pin_config.pins[gpio] = PinConfiguration(
-                    gpio=gpio,
-                    mode=cfg_data.get('mode', 'unconfigured'),
-                    logical_name=cfg_data.get('logical_name', ''),
-                    params=params,
-                )
-
+        peripherals_data = config.get('peripherals', {})
+        if peripherals_data:
+            node.peripheral_config = NodePeripheralConfig.from_dict(peripherals_data)
         return True
 
     def load_all_node_configs(self):
@@ -1167,7 +1243,7 @@ class StateManager:
             if not filename.endswith('.yaml'):
                 continue
 
-            node_id = filename[:-5]  # Remove .yaml extension
+            node_id = filename[:-5]
             filepath = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
 
             try:
@@ -1181,44 +1257,20 @@ class StateManager:
             if not config:
                 continue
 
-            # Create NodeInfo from saved config
             node = NodeInfo(
                 node_id=config.get('node_id', node_id),
                 display_name=config.get('display_name', ''),
                 role=config.get('role', ''),
                 hardware_model=config.get('hardware_model', 'Unknown'),
                 mac_address=config.get('mac_address', ''),
-                online=False,  # Will be updated when node announces
+                online=False,
                 last_seen=0,
             )
-
-            # Add to adopted nodes
             self.state.adopted_nodes[node_id] = node
 
-            # Load pin configuration
-            pin_config_data = config.get('pin_config', {})
-            if pin_config_data:
-                node.pin_config = NodePinConfig(
-                    version=pin_config_data.get('version', 0),
-                    sync_status=pin_config_data.get('sync_status', 'unknown'),
-                    last_synced=pin_config_data.get('last_synced'),
-                )
-
-                for gpio_str, cfg_data in pin_config_data.get('pins', {}).items():
-                    try:
-                        gpio = int(gpio_str)
-                    except ValueError:
-                        continue
-
-                    params = {k: v for k, v in cfg_data.items()
-                              if k not in ('mode', 'logical_name')}
-
-                    node.pin_config.pins[gpio] = PinConfiguration(
-                        gpio=gpio,
-                        mode=cfg_data.get('mode', 'unconfigured'),
-                        logical_name=cfg_data.get('logical_name', ''),
-                        params=params,
-                    )
+            peripherals_data = config.get('peripherals', {})
+            if peripherals_data:
+                node.peripheral_config = NodePeripheralConfig.from_dict(peripherals_data)
 
             if self.logger:
                 self.logger.info(f"Loaded adopted node from config: {node_id} ({node.role})")
@@ -1228,55 +1280,31 @@ class StateManager:
     # =========================================================================
 
     def get_or_create_runtime_state(self, node_id: str) -> Optional[NodeRuntimeState]:
-        """Get or create runtime state for a node."""
+        """Get or create runtime state for a node.
+
+        Runtime state is populated lazily as firmware reports pin readings;
+        we no longer pre-seed entries from a static pin config because
+        peripherals own their pins now.
+        """
         node = self.state.adopted_nodes.get(node_id)
         if not node:
             return None
-
         if not node.runtime_state:
             node.runtime_state = NodeRuntimeState(node_id=node_id)
-
-            # Initialize pins from pin_config if available
-            if node.pin_config:
-                for gpio, config in node.pin_config.pins.items():
-                    if config.mode and config.mode != 'unconfigured':
-                        node.runtime_state.pins[gpio] = PinRuntimeState(
-                            gpio=gpio,
-                            mode=config.mode,
-                            logical_name=config.logical_name,
-                        )
-
         return node.runtime_state
 
     def update_pin_desired(self, node_id: str, gpio: int, value: float) -> bool:
-        """
-        Update desired value for a pin.
+        """Set a desired value for a pin.
 
-        Args:
-            node_id: The node ID
-            gpio: GPIO number
-            value: Desired value (interpretation depends on mode)
-
-        Returns:
-            True if update successful
+        Called by the routing engine when a route resolves to a physical
+        pin write. Creates the runtime-state entry on demand since we
+        don't pre-seed any more.
         """
         runtime_state = self.get_or_create_runtime_state(node_id)
         if not runtime_state:
             return False
-
         if gpio not in runtime_state.pins:
-            # Try to create from pin_config
-            node = self.state.adopted_nodes.get(node_id)
-            if node and node.pin_config and gpio in node.pin_config.pins:
-                config = node.pin_config.pins[gpio]
-                runtime_state.pins[gpio] = PinRuntimeState(
-                    gpio=gpio,
-                    mode=config.mode,
-                    logical_name=config.logical_name,
-                )
-            else:
-                return False
-
+            runtime_state.pins[gpio] = PinRuntimeState(gpio=gpio, mode='unknown')
         runtime_state.pins[gpio].desired_value = value
         return True
 
@@ -1306,143 +1334,15 @@ class StateManager:
 
         return runtime_state.to_dict()
 
-    def get_controllable_pins(self, node_id: str) -> List[Dict[str, Any]]:
-        """
-        Get list of controllable pins for a node (PWM, servo, digital_out).
-
-        Returns list of pin info dicts with gpio, mode, logical_name.
-        """
-        node = self.state.adopted_nodes.get(node_id)
-        if not node or not node.pin_config:
-            return []
-
-        controllable_modes = {'pwm', 'servo', 'digital_out', 'maestro_servo', 'syren_motor'}
-        result = []
-
-        for gpio, config in node.pin_config.pins.items():
-            if config.mode in controllable_modes:
-                result.append({
-                    'gpio': gpio,
-                    'mode': config.mode,
-                    'logical_name': config.logical_name,
-                })
-
-        return result
-
-    def get_readable_pins(self, node_id: str) -> List[Dict[str, Any]]:
-        """
-        Get list of readable pins for a node (digital_in, adc).
-
-        Returns list of pin info dicts with gpio, mode, logical_name.
-        """
-        node = self.state.adopted_nodes.get(node_id)
-        if not node or not node.pin_config:
-            return []
-
-        readable_modes = {'digital_in', 'adc'}
-        result = []
-
-        for gpio, config in node.pin_config.pins.items():
-            if config.mode in readable_modes:
-                result.append({
-                    'gpio': gpio,
-                    'mode': config.mode,
-                    'logical_name': config.logical_name,
-                })
-
-        return result
-
-    # =========================================================================
-    # Role-based Lookup Methods
-    # =========================================================================
-
     def get_node_by_role(self, role: str) -> Optional[NodeInfo]:
-        """
-        Find an adopted node by its role.
-
-        Args:
-            role: The role name (e.g., 'head', 'tracks')
-
-        Returns:
-            NodeInfo if found, None otherwise
-        """
+        """Look up an adopted node by role tag (still used for adoption flow)."""
         for node in self.state.adopted_nodes.values():
             if node.role == role:
                 return node
         return None
 
     def get_nodes_by_role(self, role: str) -> List[NodeInfo]:
-        """
-        Find all adopted nodes with a specific role.
-
-        Args:
-            role: The role name (e.g., 'head', 'tracks')
-
-        Returns:
-            List of NodeInfo objects with the specified role
-        """
         return [node for node in self.state.adopted_nodes.values() if node.role == role]
-
-    def get_gpio_for_function(self, node_id: str, logical_name: str) -> Optional[int]:
-        """
-        Find the GPIO pin number for a logical function on a node.
-
-        Args:
-            node_id: The node identifier
-            logical_name: The logical function name (e.g., 'eye_left_lr', 'left_velocity')
-
-        Returns:
-            GPIO pin number if found, None otherwise
-        """
-        node = self.state.adopted_nodes.get(node_id)
-        if not node or not node.pin_config:
-            return None
-
-        for gpio, config in node.pin_config.pins.items():
-            if config.logical_name == logical_name:
-                return gpio
-        return None
-
-    def get_pin_mode(self, node_id: str, gpio: int) -> Optional[str]:
-        """
-        Get the mode of a specific pin.
-
-        Args:
-            node_id: The node identifier
-            gpio: The GPIO pin number
-
-        Returns:
-            Pin mode string (e.g., 'pwm', 'servo', 'digital_out') or None if not found
-        """
-        node = self.state.adopted_nodes.get(node_id)
-        if not node or not node.pin_config:
-            return None
-
-        config = node.pin_config.pins.get(gpio)
-        if config:
-            return config.mode
-        return None
-
-    def resolve_function_to_pin(self, role: str, function: str) -> Optional[Tuple[str, int]]:
-        """
-        Resolve a role + function to node_id + GPIO.
-
-        Args:
-            role: The role name (e.g., 'head', 'tracks')
-            function: The logical function name (e.g., 'eye_left_lr', 'left_velocity')
-
-        Returns:
-            Tuple of (node_id, gpio) if found, None otherwise
-        """
-        node = self.get_node_by_role(role)
-        if not node:
-            return None
-
-        gpio = self.get_gpio_for_function(node.node_id, function)
-        if gpio is None:
-            return None
-
-        return (node.node_id, gpio)
 
     # =========================================================================
     # Firmware Management Methods
