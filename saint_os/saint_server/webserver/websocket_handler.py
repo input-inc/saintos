@@ -1851,6 +1851,16 @@ class WebSocketHandler:
                 status = self.state_manager.get_system_status()
                 await self.broadcast_state('system', status)
 
+                # Refresh the host controller's runtime channels with
+                # the same metrics and broadcast a pin_state so dashboard
+                # widgets routed off host_controller.system_monitor.*
+                # update with everything else.
+                self.state_manager.update_host_controller_runtime()
+                from saint_server.webserver.state_manager import HOST_CONTROLLER_NODE_ID
+                host_state = self.state_manager.get_runtime_state(HOST_CONTROLLER_NODE_ID)
+                if host_state:
+                    await self.broadcast_state(f'pin_state/{HOST_CONTROLLER_NODE_ID}', host_state)
+
                 # Broadcast node status
                 nodes_data = {
                     "adopted": self.state_manager.get_adopted_nodes(),

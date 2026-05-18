@@ -215,6 +215,20 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralTypeParam("poll_interval_ms", "Poll interval (ms)", "int", 1000, min=100, max=10000),
         ],
     ),
+    "system_monitor": PeripheralType(
+        id="system_monitor", label="System Monitor",
+        description="Host controller telemetry: CPU/memory usage, temperature, throttle status, uptime.",
+        pin_kind="builtin",
+        channels=[
+            PeripheralChannel("cpu_usage", "CPU usage (%)",    "in", "analog"),
+            PeripheralChannel("cpu_temp",  "CPU temp (°C)",    "in", "analog"),
+            PeripheralChannel("mem_usage", "Memory usage (%)", "in", "analog"),
+            PeripheralChannel("throttle",  "Throttled",        "in", "digital_in"),
+            PeripheralChannel("uptime",    "Uptime (s)",       "in", "analog"),
+        ],
+        params=[],
+        builtin_only=True,
+    ),
 }
 
 

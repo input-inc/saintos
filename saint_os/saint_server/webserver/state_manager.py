@@ -155,6 +155,15 @@ NODE_TIMEOUT_SECONDS = 10.0
 NODE_OFFLINE_GRACE_SECONDS = 3.0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Host controller (the Pi server itself) — modeled as a built-in node so its
+# CPU temp / memory / throttle / uptime metrics are routable through the same
+# system the rest of the dashboard uses.
+# ─────────────────────────────────────────────────────────────────────────────
+HOST_CONTROLLER_NODE_ID = "host_controller"
+HOST_CONTROLLER_PERIPHERAL_ID = "system_monitor"
+
+
 # =============================================================================
 # Pin Configuration Dataclasses
 # =============================================================================
@@ -268,15 +277,48 @@ class PinRuntimeState:
 
 
 @dataclass
+class ChannelRuntimeState:
+    """Latest reading for one peripheral channel.
+
+    The peripheral-first equivalent of PinRuntimeState. Indexed by
+    (peripheral_id, channel_id) since that's the routing graph's
+    addressing scheme.
+    """
+    peripheral_id: str
+    channel_id: str
+    value: Optional[float] = None
+    last_updated: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "peripheral_id": self.peripheral_id,
+            "channel_id": self.channel_id,
+            "value": self.value,
+            "last_updated": self.last_updated,
+        }
+
+
+@dataclass
 class NodeRuntimeState:
-    """Runtime state for all pins on a node."""
+    """Runtime state for a node — per-pin and per-channel readings."""
     node_id: str
     pins: Dict[int, PinRuntimeState] = field(default_factory=dict)  # gpio -> state
+    # New peripheral-first channel readings, keyed by (peripheral_id, channel_id).
+    channels: Dict[Tuple[str, str], ChannelRuntimeState] = field(default_factory=dict)
     last_feedback: float = 0.0  # Timestamp of last state feedback from firmware
 
     def get_pin(self, gpio: int) -> Optional[PinRuntimeState]:
         """Get runtime state for a pin."""
         return self.pins.get(gpio)
+
+    def set_channel(self, peripheral_id: str, channel_id: str, value: float) -> None:
+        key = (peripheral_id, channel_id)
+        ch = self.channels.get(key)
+        if not ch:
+            ch = ChannelRuntimeState(peripheral_id=peripheral_id, channel_id=channel_id)
+            self.channels[key] = ch
+        ch.value = value
+        ch.last_updated = time.time()
 
     def set_pin_desired(self, gpio: int, value: float):
         """Set desired value for a pin."""
@@ -313,6 +355,7 @@ class NodeRuntimeState:
         return {
             "node_id": self.node_id,
             "pins": [pin.to_dict() for pin in self.pins.values()],
+            "channels": [ch.to_dict() for ch in self.channels.values()],
             "last_feedback": self.last_feedback,
             "stale": (time.time() - self.last_feedback) > 1.5 if self.last_feedback > 0 else True,
         }
@@ -402,6 +445,8 @@ class StateManager:
         self.load_all_node_configs()
         # Load system-wide routes + widgets
         self._load_system_routing()
+        # Always-present synthetic node for the host controller itself
+        self._ensure_host_controller_node()
 
     def set_activity_callback(self, callback: Callable[[str, str], None]):
         """Set callback for activity logging. Callback takes (message, level)."""
@@ -573,8 +618,11 @@ class StateManager:
                 timed_out.append(node_id)
                 self._log_activity(f"Node offline: {node_id}", "warn")
 
-        # Check adopted nodes
+        # Check adopted nodes — except the host controller, which has
+        # no announcement loop and is always "online" by definition.
         for node_id, node in self.state.adopted_nodes.items():
+            if node_id == HOST_CONTROLLER_NODE_ID:
+                continue
             if check_node(node, is_adopted=True):
                 timed_out.append(node_id)
                 self._log_activity(
@@ -651,8 +699,15 @@ class StateManager:
         server_fw = self.get_server_firmware_info()
 
         for node in self.state.adopted_nodes.values():
-            # Use the proper firmware update check (includes build timestamp comparison)
-            fw_update_info = self.is_firmware_update_available(node.node_id)
+            # Host controller isn't an RP2040/Teensy firmware target —
+            # it has no .uf2/.hex update flow, so skip the comparison.
+            if node.node_id == HOST_CONTROLLER_NODE_ID:
+                fw_update_info = {
+                    "available": False,
+                    "message": "Host controller — runs from the server install",
+                }
+            else:
+                fw_update_info = self.is_firmware_update_available(node.node_id)
 
             node_data = {
                 "node_id": node.node_id,
@@ -750,6 +805,9 @@ class StateManager:
 
     def remove_node(self, node_id: str) -> Dict[str, Any]:
         """Remove a node completely from the server (both adopted and unadopted)."""
+        if node_id == HOST_CONTROLLER_NODE_ID:
+            return {"success": False,
+                    "message": "Host controller is built-in and cannot be removed"}
         removed_from = None
 
         # Check adopted nodes
@@ -1182,6 +1240,101 @@ class StateManager:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Failed to load system routing: {e}")
+
+    # =========================================================================
+    # Host controller — the Pi server modeled as a built-in node
+    # =========================================================================
+
+    def _ensure_host_controller_node(self) -> None:
+        """Create the synthetic host_controller node + system_monitor peripheral.
+
+        Always present in the adopted node list. Cannot be removed. Its
+        peripherals are otherwise normal — the operator can route the
+        system_monitor channels into dashboard widgets like any other
+        peripheral channel.
+        """
+        node = self.state.adopted_nodes.get(HOST_CONTROLLER_NODE_ID)
+        if not node:
+            node = NodeInfo(
+                node_id=HOST_CONTROLLER_NODE_ID,
+                display_name="Host Controller",
+                role="host",
+                hardware_model="Server",
+                mac_address="",
+                ip_address="127.0.0.1",
+                state="ACTIVE",
+                online=True,
+                last_seen=time.time(),
+            )
+            self.state.adopted_nodes[HOST_CONTROLLER_NODE_ID] = node
+
+        # Make sure the system_monitor peripheral is present (built-in,
+        # not operator-removable).
+        if not node.peripheral_config:
+            node.peripheral_config = NodePeripheralConfig()
+        if not node.peripheral_config.get(HOST_CONTROLLER_PERIPHERAL_ID):
+            node.peripheral_config.peripherals.append(PeripheralInstance(
+                id=HOST_CONTROLLER_PERIPHERAL_ID,
+                type="system_monitor",
+                label="System Monitor",
+                pins={},        # builtin pin_kind, no hardware pins
+                params={},
+                builtin=True,
+            ))
+            node.peripheral_config.sync_status = "synced"  # nothing to push to firmware
+            node.peripheral_config.version += 1
+
+        # Synthetic capability stub so the UI's pin-availability sidebar
+        # has something to render when navigating into the host node.
+        if not node.capabilities:
+            node.capabilities = NodeCapabilities(
+                node_id=HOST_CONTROLLER_NODE_ID,
+                pins=[],          # no operator-configurable physical pins yet
+                reserved_pins=[],
+                uart_pairs=[],
+                last_updated=time.time(),
+            )
+
+    def update_host_controller_runtime(self) -> None:
+        """Push current system metrics into the host node's runtime_state.
+
+        Called from the broadcast loop. Values land on channel keys
+        ``(system_monitor, cpu_usage)`` etc. so the dashboard's routing
+        engine resolves them by the same peripheral/channel identifiers
+        the routing graph uses — no virtual GPIO indirection.
+        """
+        node = self.state.adopted_nodes.get(HOST_CONTROLLER_NODE_ID)
+        if not node:
+            return
+        if not node.runtime_state:
+            node.runtime_state = NodeRuntimeState(node_id=HOST_CONTROLLER_NODE_ID)
+
+        node.last_seen = time.time()
+
+        try:
+            cpu_usage = psutil.cpu_percent(interval=None)
+            mem_usage = psutil.virtual_memory().percent
+        except Exception:
+            cpu_usage = 0.0
+            mem_usage = 0.0
+        cpu_temp = _read_cpu_temp()
+        throttle = _read_throttle_status()
+        uptime_s = float(int(time.time() - self.state.start_time))
+
+        readings = {
+            'cpu_usage': float(cpu_usage),
+            'mem_usage': float(mem_usage),
+            'uptime':    uptime_s,
+            # Throttle is a digital signal — 1 when any throttle bit is
+            # current or historical, 0 when clean.
+            'throttle':  1.0 if (throttle and throttle.get('status') != 'ok') else 0.0,
+        }
+        if cpu_temp is not None:
+            readings['cpu_temp'] = float(cpu_temp)
+
+        for channel_id, value in readings.items():
+            node.runtime_state.set_channel(HOST_CONTROLLER_PERIPHERAL_ID, channel_id, value)
+        node.runtime_state.last_feedback = time.time()
 
     def _save_node_config(self, node_id: str):
         """Save per-node YAML (peripherals + identity)."""

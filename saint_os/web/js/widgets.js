@@ -150,45 +150,63 @@ class WidgetsDashboard {
     // ─── Live value ingestion ────────────────────────────────────────
 
     _ingestPinState(nodeId, data) {
-        if (!data || !Array.isArray(data.pins)) return;
+        if (!data) return;
         const node = this.nodesById.get(nodeId);
         if (!node) return;
-
-        // The firmware emits per-channel readings on virtual GPIOs. The
-        // catalog *will* declare the channel→GPIO offset map per type,
-        // but for now we recognise the legacy FAS100 mapping (GPIO
-        // 232..235 = amps/volts/temp1/temp2) so dashboards keep working
-        // while we transition. Any new mappings land with the firmware
-        // capability JSON refresh.
-        const channelByGpio = {};
-        for (const p of node.peripherals) {
-            if (p.type === 'fas100') {
-                channelByGpio[232] = { peripheralId: p.id, channelId: 'amps'  };
-                channelByGpio[233] = { peripheralId: p.id, channelId: 'volts' };
-                channelByGpio[234] = { peripheralId: p.id, channelId: 'temp1' };
-                channelByGpio[235] = { peripheralId: p.id, channelId: 'temp2' };
-            }
-        }
-
         let touched = false;
-        for (const pin of data.pins) {
-            if (pin.actual === undefined || pin.actual === null) continue;
-            const m = channelByGpio[pin.gpio];
-            if (!m) continue;
 
-            // Find every widget input whose route source is (nodeId, peripheralId, channelId)
-            for (const r of (this.routing.routes || [])) {
-                if (r.source?.kind !== 'peripheral') continue;
-                if (r.source.parts[0] !== nodeId) continue;
-                if (r.source.parts[1] !== m.peripheralId) continue;
-                if (r.source.parts[2] !== m.channelId) continue;
-                if (r.sink?.kind !== 'widget') continue;
-                const key = `${r.sink.parts[0]}/${r.sink.parts[1]}`;
-                this._lastValues.set(key, { value: pin.actual, ts: Date.now() });
-                touched = true;
+        // Preferred path: the server emits per-channel readings directly
+        // (peripheral_id + channel_id), so route resolution is a direct
+        // match — no virtual-GPIO indirection.
+        if (Array.isArray(data.channels)) {
+            for (const ch of data.channels) {
+                if (ch.value === undefined || ch.value === null) continue;
+                if (this._dispatchChannelValue(nodeId, ch.peripheral_id, ch.channel_id, ch.value)) {
+                    touched = true;
+                }
             }
         }
+
+        // Legacy path: firmware nodes (RP2040 FAS100) still report on
+        // virtual GPIOs. Translate to (peripheral_id, channel_id) via
+        // a small per-type map and reuse the same dispatch.
+        if (Array.isArray(data.pins)) {
+            const legacyMap = {};
+            for (const p of node.peripherals) {
+                if (p.type === 'fas100') {
+                    legacyMap[232] = { peripheralId: p.id, channelId: 'amps'  };
+                    legacyMap[233] = { peripheralId: p.id, channelId: 'volts' };
+                    legacyMap[234] = { peripheralId: p.id, channelId: 'temp1' };
+                    legacyMap[235] = { peripheralId: p.id, channelId: 'temp2' };
+                }
+            }
+            for (const pin of data.pins) {
+                if (pin.actual === undefined || pin.actual === null) continue;
+                const m = legacyMap[pin.gpio];
+                if (!m) continue;
+                if (this._dispatchChannelValue(nodeId, m.peripheralId, m.channelId, pin.actual)) {
+                    touched = true;
+                }
+            }
+        }
+
         if (touched && this._active) this.renderValues();
+    }
+
+    /** Push a channel reading to every widget input that routes from it. */
+    _dispatchChannelValue(nodeId, peripheralId, channelId, value) {
+        let any = false;
+        for (const r of (this.routing.routes || [])) {
+            if (r.source?.kind !== 'peripheral') continue;
+            if (r.source.parts[0] !== nodeId) continue;
+            if (r.source.parts[1] !== peripheralId) continue;
+            if (r.source.parts[2] !== channelId) continue;
+            if (r.sink?.kind !== 'widget') continue;
+            const key = `${r.sink.parts[0]}/${r.sink.parts[1]}`;
+            this._lastValues.set(key, { value, ts: Date.now() });
+            any = true;
+        }
+        return any;
     }
 
     // ─── Rendering ───────────────────────────────────────────────────
