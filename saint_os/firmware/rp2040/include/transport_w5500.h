@@ -113,4 +113,15 @@ bool transport_w5500_is_connected(void);
  */
 void transport_w5500_set_agent(const uint8_t* ip, uint16_t port);
 
+/**
+ * Pump the DHCP state machine.
+ *
+ * Must be called from the main loop after a successful connect — without
+ * it, DHCP_time_handler() never advances dhcp_tick_1s and the ioLibrary
+ * never sees the lease half-time threshold that triggers REREQUEST. The
+ * function is cheap to call frequently: it only does work once per
+ * second (internal throttle) and falls through quickly otherwise.
+ */
+void transport_w5500_tick(void);
+
 #endif // TRANSPORT_W5500_H

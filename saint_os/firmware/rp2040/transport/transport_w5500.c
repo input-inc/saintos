@@ -322,6 +322,34 @@ bool transport_w5500_is_connected(void)
     return connected && wizchip_port_link_up();
 }
 
+void transport_w5500_tick(void)
+{
+    if (!connected || !g_node.use_dhcp) {
+        return;
+    }
+
+    // Throttle: only do work once per second. dhcp_timer_tick() already
+    // guards on the 1-second boundary, but DHCP_run() also benefits
+    // from not being hammered at main-loop rate (100Hz).
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    static uint32_t last_tick = 0;
+    if (now - last_tick < 1000) return;
+    last_tick = now;
+
+    // Advance the 1-second counter the lease-renewal logic checks.
+    dhcp_timer_tick();
+
+    // Pump the state machine. In STATE_DHCP_LEASED it's nearly free;
+    // when lease half-time passes it transitions to STATE_DHCP_REREQUEST
+    // and sends a unicast renewal. On failure it falls back to DISCOVER.
+    uint8_t status = DHCP_run();
+    if (status == DHCP_IP_CHANGED) {
+        // Our cached IP gets updated via the dhcp_ip_update callback,
+        // but flag it so we know to expect a brief connectivity blip.
+        printf("DHCP: renewed lease (IP changed)\n");
+    }
+}
+
 void transport_w5500_set_agent(const uint8_t* ip, uint16_t port)
 {
     memcpy(agent_ip, ip, 4);

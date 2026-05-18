@@ -121,12 +121,19 @@ static bool capabilities_requested = false;
 #define CONNECTION_CHECK_INTERVAL_MS 5000   // Check every 5 seconds
 #define CONNECTION_TIMEOUT_MS        15000  // Consider disconnected after 15s
 #define MAX_RECONNECT_ATTEMPTS       10     // Max consecutive failures before error state
+#define ERROR_RECOVERY_DELAY_MS      30000  // Stay in ERROR for 30s, then try again
 // Note: RECONNECT_DELAY_MS is defined in saint_node.h
+
+// Hardware watchdog timeout. Picks up wedges in main loop, micro-ROS,
+// or the W5500 SPI path. Anything that blocks the main loop for longer
+// than this will trigger a clean reset.
+#define WATCHDOG_TIMEOUT_MS          8000
 
 static uint32_t last_successful_comm = 0;   // Timestamp of last successful communication
 static uint32_t last_connection_check = 0;  // Timestamp of last connection check
 static uint32_t reconnect_attempts = 0;     // Consecutive reconnect attempts
 static bool agent_connected = false;        // Agent connection state
+static uint32_t error_entered_at = 0;       // When we entered NODE_STATE_ERROR (0 = not in error)
 
 // Forward declarations for connection monitoring
 static void mark_agent_communication(void);
@@ -852,6 +859,26 @@ static bool check_agent_connection(void)
 {
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
+    // Recovery path: if we're in ERROR state, wait ERROR_RECOVERY_DELAY_MS
+    // and then reset the reconnect counter to try again. Without this the
+    // node sits in ERROR forever after any transient agent disruption.
+    if (g_node.state == NODE_STATE_ERROR) {
+        if (error_entered_at == 0) {
+            error_entered_at = now;
+        }
+        if (now - error_entered_at < ERROR_RECOVERY_DELAY_MS) {
+            return false;
+        }
+        printf("Recovering from ERROR state — retrying agent connection\n");
+        reconnect_attempts = 0;
+        error_entered_at = 0;
+        // Drop back to UNADOPTED so announcements resume (they're
+        // gated to UNADOPTED/ACTIVE; the agent will re-confirm
+        // adoption from the server-side config).
+        node_set_state(NODE_STATE_UNADOPTED);
+        led_set_state(NODE_STATE_UNADOPTED);
+    }
+
     // Only check periodically
     if (now - last_connection_check < CONNECTION_CHECK_INTERVAL_MS) {
         return agent_connected;
@@ -878,19 +905,26 @@ static bool check_agent_connection(void)
         reconnect_attempts++;
 
         if (reconnect_attempts > MAX_RECONNECT_ATTEMPTS) {
-            // Too many failures - enter error state
+            // Too many failures - enter error state. Recovery path at
+            // the top of this function will pull us out after the
+            // ERROR_RECOVERY_DELAY_MS cooldown.
             printf("Max reconnect attempts exceeded (%d), entering ERROR state\n",
                    MAX_RECONNECT_ATTEMPTS);
             node_set_state(NODE_STATE_ERROR);
             led_set_state(NODE_STATE_ERROR);
+            error_entered_at = now;
             return false;
         }
 
         printf("Reconnect attempt %lu/%d...\n", reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
         led_set_state(NODE_STATE_CONNECTING);
 
-        // Wait before reconnect
-        sleep_ms(RECONNECT_DELAY_MS);
+        // Wait before reconnect, kicking the watchdog every chunk so
+        // a 5s wait doesn't trip the 8s timer (cleanup + init adds more).
+        for (uint32_t slept = 0; slept < RECONNECT_DELAY_MS; slept += 200) {
+            watchdog_update();
+            sleep_ms(200);
+        }
 
         // Try to reconnect transport
         if (!TRANSPORT_CONNECTED()) {
@@ -903,6 +937,7 @@ static bool check_agent_connection(void)
         // Reinitialize micro-ROS
         printf("Reinitializing micro-ROS...\n");
         cleanup_micro_ros();
+        watchdog_update();
         sleep_ms(500);
 
         if (!init_micro_ros()) {
@@ -1113,10 +1148,21 @@ int main(void)
     last_successful_comm = to_ms_since_boot(get_absolute_time());
     agent_connected = true;
 
+    // Arm the hardware watchdog now that init is complete. The main
+    // loop's watchdog_update() below must run within WATCHDOG_TIMEOUT_MS
+    // or the chip resets. Connect / DHCP / reinit paths that may exceed
+    // that window kick the watchdog explicitly themselves.
+    watchdog_enable(WATCHDOG_TIMEOUT_MS, 1);
+    printf("Watchdog armed (%lu ms timeout)\n", (unsigned long)WATCHDOG_TIMEOUT_MS);
+
     // Main loop
     static uint32_t last_status_print = 0;
     while (1) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
+
+        // Pet the watchdog every iteration. Any wedge longer than
+        // WATCHDOG_TIMEOUT_MS triggers a clean reset.
+        watchdog_update();
 
         // Update node state
         node_state_update();
@@ -1128,13 +1174,20 @@ int main(void)
         // Poll peripheral drivers
         peripheral_update_all();
 
-        // Check agent connection and reconnect if needed
-        if (g_node.state != NODE_STATE_ERROR) {
-            if (!check_agent_connection()) {
-                // Reconnecting - skip normal processing
-                sleep_ms(100);
-                continue;
-            }
+        // Pump DHCP — lease half-time renewal lives here. Without this
+        // the W5500 ioLibrary never advances dhcp_tick_1s and never
+        // notices when the lease is half over. SIMULATION builds use
+        // the UDP bridge transport instead, which doesn't need ticking.
+#ifndef SIMULATION
+        transport_w5500_tick();
+#endif
+
+        // Check agent connection (and ERROR-state recovery).
+        if (!check_agent_connection()) {
+            // Reconnecting or in ERROR-recovery cooldown — skip normal
+            // processing this iteration. Watchdog pet above already.
+            sleep_ms(100);
+            continue;
         }
 
         // Spin micro-ROS executor (process timers and callbacks)
