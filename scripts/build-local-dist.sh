@@ -181,6 +181,15 @@ build_firmware_rp2040() {
     find "${fw_out}" -maxdepth 1 -type f \
         \( -name '*.uf2' -o -name '*.elf' \) \
         -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+    # version.h carries FIRMWARE_VERSION_STRING / FIRMWARE_VERSION_FULL /
+    # FIRMWARE_GIT_HASH / FIRMWARE_BUILD_TIMESTAMP. The server reads it
+    # to display the build version + decide whether an update is needed
+    # — without it everything is "0.0.0" and the operator has to force.
+    if [[ -f "${fw_out}/generated/version.h" ]]; then
+        mkdir -p saint_os/resources/firmware/rp2040/generated
+        cp -v "${fw_out}/generated/version.h" \
+            saint_os/resources/firmware/rp2040/generated/version.h
+    fi
 }
 
 build_firmware_teensy41() {

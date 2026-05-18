@@ -83,6 +83,7 @@ jobs:
           path: |
             saint_os/firmware/rp2040/build/*.uf2
             saint_os/firmware/rp2040/build/*.elf
+            saint_os/firmware/rp2040/build/generated/version.h
           if-no-files-found: error
           retention-days: 30
 
@@ -221,6 +222,13 @@ jobs:
           if [[ -d _fw/firmware-rp2040 ]]; then
             find _fw/firmware-rp2040 -type f \( -name '*.uf2' -o -name '*.elf' \) \
               -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+            # version.h sits alongside the artifacts in the build dir;
+            # the upload artifact preserves its `generated/` subpath.
+            if [[ -f _fw/firmware-rp2040/generated/version.h ]]; then
+              mkdir -p saint_os/resources/firmware/rp2040/generated
+              cp -v _fw/firmware-rp2040/generated/version.h \
+                saint_os/resources/firmware/rp2040/generated/version.h
+            fi
           fi
           if [[ -d _fw/firmware-teensy41 ]]; then
             find _fw/firmware-teensy41 -type f -name '*.hex' \
