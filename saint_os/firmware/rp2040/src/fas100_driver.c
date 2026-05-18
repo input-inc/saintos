@@ -213,6 +213,20 @@ void fas100_init(void)
     gpio_set_outover(fas100_tx_pin, GPIO_OVERRIDE_INVERT);
     gpio_set_inover(fas100_rx_pin, GPIO_OVERRIDE_INVERT);
 
+    // S.Port is a half-duplex bus that idles HIGH (logical 1). Without
+    // someone anchoring the bus high while no one is driving it, the
+    // line floats — neither the MCU's polls nor the sensor's responses
+    // reach the other side reliably. Most production setups put a
+    // ~10 kΩ external pull-up from the shared TX/RX/signal node to
+    // 3.3 V. The RP2040 has internal pull-ups (~50–80 kΩ) which are
+    // weaker but usually strong enough for short wiring — enable one
+    // on the RX side so the operator doesn't have to solder a resistor
+    // for a bench setup. (Pull-up on TX too is harmless; the UART
+    // hardware drives it actively when transmitting and the pull-up
+    // just helps during the brief idle periods.)
+    gpio_pull_up(fas100_tx_pin);
+    gpio_pull_up(fas100_rx_pin);
+
     fas100_active_tx_pin = fas100_tx_pin;
     fas100_active_rx_pin = fas100_rx_pin;
     fas100_active_uart   = fas100_uart_instance;
