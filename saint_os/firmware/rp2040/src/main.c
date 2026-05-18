@@ -37,6 +37,10 @@
 #include "roboclaw_driver.h"
 #include "pathfinder_bms_driver.h"
 
+#ifdef SAINT_OS_OTA_BOOTLOADER
+#include "picowota/reboot.h"
+#endif
+
 // Transport selection based on build mode
 #ifdef SIMULATION
 #include "transport_udp_bridge.h"
@@ -309,28 +313,54 @@ static void handle_firmware_update(const char* json, size_t len)
     }
 
     printf("====================================\n");
-    printf("Rebooting for firmware update...\n\n");
 
-    // Small delay to allow message to print
-    sleep_ms(500);
-
-#ifdef SIMULATION
-    // For simulation: exit cleanly so Renode can restart with new firmware
-    // The node manager should restart the simulation with the updated ELF
-    printf("Simulation mode: exiting for firmware reload\n");
-    // In Renode, we can't really exit, but we can halt the CPU
-    // This signals that update is requested
-    while (1) {
-        // Halt - Renode will need to restart the simulation
-        tight_loop_contents();
+#if defined(SAINT_OS_OTA_BOOTLOADER) && !defined(SIMULATION)
+    // Pull image metadata (size, CRC32, vtor) out of the control JSON
+    // and hand off to the bootloader for an HTTP-over-W5500 download.
+    uint32_t img_size = 0, img_crc = 0, img_vtor = 0x10004000u;
+    const char* p;
+    if ((p = strstr(json, "\"size\"")) != NULL) {
+        p = strchr(p, ':');
+        if (p) { p++; while (*p == ' ') p++; img_size = (uint32_t)strtoul(p, NULL, 10); }
     }
+    if ((p = strstr(json, "\"crc32\"")) != NULL) {
+        p = strchr(p, ':');
+        if (p) {
+            p++;
+            while (*p == ' ' || *p == '"') p++;
+            // Accept "0xNN..." or decimal
+            int base = (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) ? 16 : 10;
+            img_crc = (uint32_t)strtoul(p, NULL, base);
+        }
+    }
+    if ((p = strstr(json, "\"vtor\"")) != NULL) {
+        p = strchr(p, ':');
+        if (p) {
+            p++;
+            while (*p == ' ' || *p == '"') p++;
+            int base = (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) ? 16 : 10;
+            img_vtor = (uint32_t)strtoul(p, NULL, base);
+        }
+    }
+    if (img_size == 0 || img_crc == 0) {
+        printf("Firmware update: missing size or crc32 in control message — aborting\n");
+        return;
+    }
+    printf("Handing off to OTA bootloader (size=%lu crc=0x%08lx vtor=0x%08lx)\n",
+           (unsigned long)img_size, (unsigned long)img_crc, (unsigned long)img_vtor);
+    sleep_ms(200);
+    saint_ota_reboot_with_image(img_size, img_crc, img_vtor);
+    /* not reached */
 #else
-    // For hardware: use watchdog to reset into bootloader
-    // This will cause the RP2040 to reset
-    watchdog_enable(1, 1);  // 1ms timeout, pause on debug
-    while (1) {
-        tight_loop_contents();
-    }
+    printf("Rebooting (no OTA bootloader present — chip will boot the same firmware)\n");
+    sleep_ms(500);
+#  ifdef SIMULATION
+    /* Renode tooling restarts the simulator with a different ELF. */
+    while (1) { tight_loop_contents(); }
+#  else
+    watchdog_enable(1, 1);
+    while (1) { tight_loop_contents(); }
+#  endif
 #endif
 }
 

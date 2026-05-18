@@ -269,6 +269,8 @@ if(SAINT_OS_OTA_BOOTLOADER AND NOT SIMULATION)
     saint_ota_apply_app(saint_node)
     # App links the reboot helper so it can hand off to the bootloader.
     target_link_libraries(saint_node picowota_reboot)
+    # Tell main.c to compile the OTA-handoff code path.
+    target_compile_definitions(saint_node PRIVATE SAINT_OS_OTA_BOOTLOADER=1)
     # Combined .uf2 for first-time BOOTSEL install.
     saint_ota_build_combined(saint_node)
 
