@@ -641,10 +641,15 @@
                                 <div id="adopt-node-id" class="input-field w-full bg-slate-900/50 text-slate-400 font-mono">--</div>
                             </div>
 
-                            <!-- Chip Family (read-only, detected from the announcement) -->
+                            <!-- Chip (defaults to whatever the firmware
+                                 announced; falls back to operator choice
+                                 when the firmware didn't recognize itself). -->
                             <div>
-                                <label class="block text-sm font-medium text-slate-300 mb-2">Detected Chip</label>
-                                <div id="adopt-chip-family" class="input-field w-full bg-slate-900/50 text-slate-400">--</div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Chip</label>
+                                <select id="adopt-chip-select" class="input-field w-full">
+                                    <option value="">-- Loading chips… --</option>
+                                </select>
+                                <p id="adopt-chip-detected" class="text-xs text-slate-500 mt-1"></p>
                             </div>
 
                             <!-- Board Selection -->

@@ -880,13 +880,18 @@ class StateManager:
 
     def adopt_node(self, node_id: str, role: str,
                     display_name: Optional[str] = None,
-                    board_id: Optional[str] = None) -> Dict[str, Any]:
+                    board_id: Optional[str] = None,
+                    chip_family: Optional[str] = None) -> Dict[str, Any]:
         """Adopt an unadopted node, assigning it a role + board.
 
-        The operator picks the board_id from the Adopt dialog; the
-        server uses it to derive the node's pin layout. If board_id
-        is omitted, defaults to the first matching board for the
-        node's chip family (with a warning logged).
+        The operator picks the board_id (and optionally the chip_family)
+        from the Adopt dialog; the server uses board_id to derive the
+        node's pin layout. When the operator picks a board, the
+        operator's choice wins — node.chip_family is overridden by the
+        board's chip_family. That's what lets us still adopt a node
+        whose firmware reported chip_family="unknown" (e.g. a chip ID
+        sanity-check mismatch). If board_id is omitted, defaults to
+        the first matching board for the node's chip family.
         """
         if node_id not in self.state.unadopted_nodes:
             return {"success": False, "message": f"Node {node_id} not found"}
@@ -896,6 +901,13 @@ class StateManager:
         node.display_name = display_name or f"{role.title()} Node"
         node.online = True
 
+        # Operator's explicit chip choice wins over the firmware-announced
+        # value. Useful when the firmware can't recognize its own silicon
+        # (e.g. announced "unknown") but the operator knows what board
+        # they're plugging in.
+        if chip_family:
+            node.chip_family = chip_family
+
         # Resolve board: explicit > default for chip > none (operator can fix later).
         if board_id:
             if not self.board_config.get_board(board_id):
@@ -903,14 +915,11 @@ class StateManager:
                 self.state.unadopted_nodes[node_id] = node
                 return {"success": False, "message": f"Unknown board_id '{board_id}'"}
             board = self.board_config.get_board(board_id)
-            if node.chip_family and board.chip_family != node.chip_family:
-                self.state.unadopted_nodes[node_id] = node
-                return {"success": False,
-                        "message": f"Board '{board_id}' is for chip '{board.chip_family}' "
-                                   f"but node reports '{node.chip_family}'"}
             node.board_id = board_id
-            if not node.chip_family:
-                node.chip_family = board.chip_family
+            # Operator's board pick is authoritative — sync chip_family to
+            # whatever the board declares. This unblocks adoption of nodes
+            # whose firmware announced an unknown / mismatched chip.
+            node.chip_family = board.chip_family
         elif node.chip_family:
             default_board = self.board_config.default_board_for_chip(node.chip_family)
             if default_board:

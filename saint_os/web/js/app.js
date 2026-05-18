@@ -2149,40 +2149,80 @@ class SaintApp {
         document.getElementById('adopt-display-name').value = '';
         document.getElementById('adopt-role-description').textContent = '';
 
-        // Fetch the announced chip family from the unadopted node entry
-        // so we can filter the board picker to matching boards.
+        // The chip + board pickers are populated from the server's
+        // YAML catalog. The chip defaults to whatever the firmware
+        // announced (when that maps to a known chip); otherwise the
+        // operator picks. The board list is filtered by the current
+        // chip selection and refreshes whenever the chip changes.
         const node = this.nodes.unadopted.find(n => n.node_id === nodeId);
-        const chipFamily = node?.chip_family || '';
-        const chipEl = document.getElementById('adopt-chip-family');
-        if (chipEl) {
-            chipEl.textContent = chipFamily
-                ? chipFamily
-                : '(firmware did not report chip family — defaulting to rp2040)';
-        }
+        const announcedChip = node?.chip_family || '';
 
-        // Populate the board dropdown filtered to boards for this chip.
         const ws = window.saintWS;
-        try {
-            const boardResult = await ws.management(
-                'list_boards', chipFamily ? { chip_family: chipFamily } : {}
-            );
-            const boards = boardResult?.boards || [];
-            const boardSelect = document.getElementById('adopt-board-select');
-            boardSelect.innerHTML = '<option value="">-- Select Board --</option>';
-            for (const b of boards) {
-                const opt = document.createElement('option');
-                opt.value = b.board_id;
-                opt.textContent = `${b.display_name}${b.builtin ? '' : '  (custom)'}`;
-                boardSelect.appendChild(opt);
+        const chipSelect = document.getElementById('adopt-chip-select');
+        const chipHint = document.getElementById('adopt-chip-detected');
+        const boardSelect = document.getElementById('adopt-board-select');
+
+        const repopulateBoards = async (chipFamily) => {
+            try {
+                const boardResult = await ws.management(
+                    'list_boards', chipFamily ? { chip_family: chipFamily } : {}
+                );
+                const boards = boardResult?.boards || [];
+                boardSelect.innerHTML = '<option value="">-- Select Board --</option>';
+                for (const b of boards) {
+                    const opt = document.createElement('option');
+                    opt.value = b.board_id;
+                    opt.textContent = `${b.display_name}${b.builtin ? '' : '  (custom)'}`;
+                    boardSelect.appendChild(opt);
+                }
+                // Auto-select the only built-in match if there's exactly one.
+                const builtins = boards.filter(b => b.builtin);
+                if (builtins.length === 1) {
+                    boardSelect.value = builtins[0].board_id;
+                }
+            } catch (e) {
+                console.warn('list_boards failed:', e);
             }
-            // Auto-select the only built-in match if there's exactly one.
-            const builtins = boards.filter(b => b.builtin);
-            if (builtins.length === 1) {
-                boardSelect.value = builtins[0].board_id;
+        };
+
+        try {
+            const chipResult = await ws.management('list_chips', {});
+            const chips = chipResult?.chips || [];
+            chipSelect.innerHTML = '<option value="">-- Select Chip --</option>';
+            for (const c of chips) {
+                const opt = document.createElement('option');
+                opt.value = c.chip_family;
+                opt.textContent = `${c.display_name} (${c.chip_family})`;
+                chipSelect.appendChild(opt);
+            }
+
+            // Default selection: announced chip if it's a recognized family.
+            const announcedIsKnown = chips.some(c => c.chip_family === announcedChip);
+            if (announcedIsKnown) {
+                chipSelect.value = announcedChip;
+                if (chipHint) {
+                    chipHint.textContent = `Detected from firmware: ${announcedChip}`;
+                    chipHint.classList.remove('text-amber-400');
+                    chipHint.classList.add('text-slate-500');
+                }
+            } else {
+                chipSelect.value = '';
+                if (chipHint) {
+                    chipHint.textContent = announcedChip
+                        ? `Firmware reported '${announcedChip}' (not a known chip — please choose).`
+                        : 'Firmware did not report a chip — please choose.';
+                    chipHint.classList.remove('text-slate-500');
+                    chipHint.classList.add('text-amber-400');
+                }
             }
         } catch (e) {
-            console.warn('list_boards failed:', e);
+            console.warn('list_chips failed:', e);
+            chipSelect.innerHTML = '<option value="">-- (failed to load chips) --</option>';
         }
+
+        // Wire up the chip → board cascade and load the initial board list.
+        chipSelect.onchange = () => repopulateBoards(chipSelect.value);
+        await repopulateBoards(chipSelect.value);
 
         const roleSelect = document.getElementById('adopt-role-select');
 
@@ -2243,15 +2283,22 @@ class SaintApp {
 
         const role = document.getElementById('adopt-role-select').value;
         const displayName = document.getElementById('adopt-display-name').value.trim();
+        const chipFamily = document.getElementById('adopt-chip-select').value;
         const boardId = document.getElementById('adopt-board-select').value;
 
         if (!role) { alert('Please select a role'); return; }
+        if (!chipFamily) { alert('Please select a chip'); return; }
         if (!boardId) { alert('Please select a board'); return; }
 
         const ws = window.saintWS;
 
         try {
-            const params = { node_id: nodeId, role, board_id: boardId };
+            const params = {
+                node_id: nodeId,
+                role,
+                chip_family: chipFamily,
+                board_id: boardId,
+            };
             if (displayName) {
                 params.display_name = displayName;
             }

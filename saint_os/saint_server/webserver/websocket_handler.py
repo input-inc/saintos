@@ -681,11 +681,13 @@ class WebSocketHandler:
             role = params.get('role')
             display_name = params.get('display_name')
             board_id = params.get('board_id')   # new: operator picks board on adoption
+            chip_family = params.get('chip_family') or None  # operator override
 
             if not node_id or not role:
                 return {"status": "error", "message": "Missing node_id or role"}
 
-            result = self.state_manager.adopt_node(node_id, role, display_name, board_id)
+            result = self.state_manager.adopt_node(
+                node_id, role, display_name, board_id, chip_family=chip_family)
             if result['success']:
                 board_note = f", board {result.get('board_id')}" if result.get('board_id') else ""
                 await self.broadcast_activity(
