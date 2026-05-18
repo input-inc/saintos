@@ -265,6 +265,18 @@ static void dhcp_assign(void)
 	getGWfromDHCP(gateway_ip);
 	getSNfromDHCP(subnet);
 	getDNSfromDHCP(dns_ip);
+
+	/* CRITICAL: apply the lease to the W5500 chip itself. Without
+	 * these the chip's SIPR stays 0.0.0.0 and TCP SYNs go out with
+	 * no valid source — the HTTP connect to the server then either
+	 * hangs or fails silently inside ioLibrary. The runtime app
+	 * already does this in transport_w5500.c; the bootloader was
+	 * missing it, which is the most likely cause of OTA hanging
+	 * for many minutes per attempt. */
+	setSIPR(local_ip);
+	setGAR(gateway_ip);
+	setSUBR(subnet);
+
 	dhcp_got_ip = true;
 }
 
