@@ -519,22 +519,56 @@ class StateManager:
         self._node_log_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self._log_entries: List[Dict[str, Any]] = []  # Circular buffer for logs
 
-        # Config directory for node YAML persistence
+        # Runtime config (persists across installs) vs. shipped config
+        # (boards/, replaced from the dist on every install).
+        #
+        # The install layout splits them:
+        #   /etc/saint-os/                  ← runtime: nodes/, system_routing.yaml
+        #   /opt/saint-os/install/share/    ← shipped: boards/*.yaml
+        #
+        # Old layout (everything under share/saint_os/config) gets wiped
+        # by install.sh's `rm -rf ${PREFIX}/install`, so any adoptions
+        # made before this change would be lost on update. This is the
+        # bug that prompted the split.
+        #
+        # ``config_dir`` (constructor arg) and the SAINT_RUNTIME_CONFIG_DIR
+        # env var both override the runtime path — used by tests + ops
+        # who want to point at a different location.
         if config_dir is None:
-            try:
-                from ament_index_python.packages import get_package_share_directory
-                config_dir = os.path.join(
-                    get_package_share_directory('saint_os'), 'config'
-                )
-            except Exception:
-                # Fallback for development
-                config_dir = os.path.join(
-                    os.path.dirname(__file__), '..', '..', 'config'
-                )
+            config_dir = os.environ.get("SAINT_RUNTIME_CONFIG_DIR")
+        if config_dir is None:
+            etc_dir = "/etc/saint-os"
+            if os.path.isdir(etc_dir):
+                config_dir = etc_dir
+        if config_dir is None:
+            # Dev fallback — repo's saint_os/config/ tree.
+            config_dir = os.path.join(
+                os.path.dirname(__file__), '..', '..', 'config'
+            )
         self.config_dir = os.path.abspath(config_dir)
         self.nodes_config_dir = os.path.join(self.config_dir, 'nodes')
         self.system_routing_path = os.path.join(self.config_dir, 'system_routing.yaml')
-        self.boards_config_dir = os.path.join(self.config_dir, 'boards')
+
+        # Boards live in the shipped share/saint_os/config tree (or the
+        # repo config/boards in dev). They're read-only from the
+        # server's POV — operator edits flow through save_board_yaml(),
+        # which writes back to wherever this resolves to. On a Pi
+        # install /opt/saint-os/install/share/saint_os/config/boards is
+        # part of the install tree and gets refreshed each update; an
+        # operator-authored custom board has to be re-applied via the
+        # Settings → Boards UI after each install.
+        boards_config_dir = None
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            boards_config_dir = os.path.join(
+                get_package_share_directory('saint_os'), 'config', 'boards'
+            )
+        except Exception:
+            pass
+        if not boards_config_dir or not os.path.isdir(boards_config_dir):
+            # Dev fallback: alongside the runtime config dir.
+            boards_config_dir = os.path.join(self.config_dir, 'boards')
+        self.boards_config_dir = boards_config_dir
 
         # In-memory peripheral type catalog. Starts from the built-in
         # DEFAULT_CATALOG and gets extended when nodes report platform-

@@ -277,7 +277,33 @@ for grp in dialout gpio video; do
 done
 
 run install -d -m 0755 -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
-    "${PREFIX}" "${CONFIG_DIR}" "${STATE_DIR}" "${LOG_DIR}"
+    "${PREFIX}" "${CONFIG_DIR}" "${CONFIG_DIR}/nodes" "${STATE_DIR}" "${LOG_DIR}"
+
+# Migrate runtime state from the previous install location. Earlier
+# versions stored adopted-node YAML + system routing in
+# /opt/saint-os/install/share/saint_os/config/, which is part of the
+# install tree we wipe on every update — so they got nuked. If we find
+# any leftover here and the new ${CONFIG_DIR} doesn't have them yet,
+# move them over before the wipe.
+if [[ -d "${PREFIX}/install/share/saint_os/config" ]]; then
+    old_nodes_dir="${PREFIX}/install/share/saint_os/config/nodes"
+    old_routing="${PREFIX}/install/share/saint_os/config/system_routing.yaml"
+    if [[ -d "$old_nodes_dir" ]]; then
+        for f in "$old_nodes_dir"/*.yaml; do
+            [[ -e "$f" ]] || continue
+            dest="${CONFIG_DIR}/nodes/$(basename "$f")"
+            if [[ ! -e "$dest" ]]; then
+                log "Migrating node config to persistent location: $(basename "$f")"
+                run install -m 0644 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "$f" "$dest"
+            fi
+        done
+    fi
+    if [[ -e "$old_routing" && ! -e "${CONFIG_DIR}/system_routing.yaml" ]]; then
+        log "Migrating system_routing.yaml to persistent location"
+        run install -m 0644 -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+            "$old_routing" "${CONFIG_DIR}/system_routing.yaml"
+    fi
+fi
 
 # Stop the existing service (if running) so we can replace files cleanly.
 # Idempotent: systemctl stop on a non-running unit is a no-op.
