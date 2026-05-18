@@ -1527,8 +1527,11 @@ class StateManager:
                 except Exception:
                     pass
 
-            # Fallback: Try to read version from CMakeLists.txt
-            if result["version"] == "0.0.0":
+            # Fallback: Try to read version from CMakeLists.txt. Only
+            # applies in dev where the firmware source tree is present;
+            # in production firmware_dir is None and we already have a
+            # version from version.h in the artifact dir.
+            if result["version"] == "0.0.0" and firmware_dir:
                 cmake_path = os.path.join(firmware_dir, 'CMakeLists.txt')
                 if os.path.isfile(cmake_path):
                     try:
