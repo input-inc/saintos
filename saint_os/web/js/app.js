@@ -1614,7 +1614,9 @@ class SaintApp {
      * Load routes page data.
      */
     async loadRoutesData() {
-        // TODO: Implement routes loading
+        if (window.routingPage) {
+            await window.routingPage.activate();
+        }
     }
 
     /**

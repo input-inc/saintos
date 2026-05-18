@@ -817,7 +817,7 @@ class WebSocketHandler:
             if not node_id or not peripheral:
                 return {"status": "error", "message": "Missing node_id or peripheral"}
             result = self.state_manager.upsert_node_peripheral(node_id, peripheral)
-            return {"status": "ok" if result.get('success') else "error", "data": result}
+            return {"status": "ok", "data": result}
 
         elif action == 'remove_node_peripheral':
             node_id = params.get('node_id')
@@ -825,7 +825,7 @@ class WebSocketHandler:
             if not node_id or not peripheral_id:
                 return {"status": "error", "message": "Missing node_id or peripheral_id"}
             result = self.state_manager.remove_node_peripheral(node_id, peripheral_id)
-            return {"status": "ok" if result.get('success') else "error", "data": result}
+            return {"status": "ok", "data": result}
 
         elif action == 'sync_node_peripherals':
             node_id = params.get('node_id')
@@ -851,7 +851,7 @@ class WebSocketHandler:
                 return {"status": "error", "message": "Missing source or sink"}
             result = self.state_manager.add_route(source, sink)
             await self._broadcast_routing()
-            return {"status": "ok" if result.get('success') else "error", "data": result}
+            return {"status": "ok", "data": result}
 
         elif action == 'update_route':
             route_id = params.get('route_id')
@@ -861,7 +861,7 @@ class WebSocketHandler:
                 return {"status": "error", "message": "Missing route_id, source, or sink"}
             result = self.state_manager.update_route(route_id, source, sink)
             await self._broadcast_routing()
-            return {"status": "ok" if result.get('success') else "error", "data": result}
+            return {"status": "ok", "data": result}
 
         elif action == 'remove_route':
             route_id = params.get('route_id')
@@ -869,7 +869,7 @@ class WebSocketHandler:
                 return {"status": "error", "message": "Missing route_id"}
             result = self.state_manager.remove_route(route_id)
             await self._broadcast_routing()
-            return {"status": "ok" if result.get('success') else "error", "data": result}
+            return {"status": "ok", "data": result}
 
         elif action == 'add_widget':
             type_id = params.get('type')
@@ -882,7 +882,7 @@ class WebSocketHandler:
                 params=params.get('params'),
             )
             await self._broadcast_routing()
-            return {"status": "ok" if result.get('success') else "error", "data": result}
+            return {"status": "ok", "data": result}
 
         elif action == 'update_widget':
             widget_id = params.get('widget_id')
@@ -891,7 +891,7 @@ class WebSocketHandler:
             changes = {k: v for k, v in params.items() if k in ('label', 'position', 'params')}
             result = self.state_manager.update_widget(widget_id, **changes)
             await self._broadcast_routing()
-            return {"status": "ok" if result.get('success') else "error", "data": result}
+            return {"status": "ok", "data": result}
 
         elif action == 'remove_widget':
             widget_id = params.get('widget_id')
@@ -899,7 +899,7 @@ class WebSocketHandler:
                 return {"status": "error", "message": "Missing widget_id"}
             result = self.state_manager.remove_widget(widget_id)
             await self._broadcast_routing()
-            return {"status": "ok" if result.get('success') else "error", "data": result}
+            return {"status": "ok", "data": result}
 
         elif action == 'get_logs':
             limit = params.get('limit', 100)
