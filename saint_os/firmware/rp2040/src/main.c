@@ -128,10 +128,19 @@ static bool capabilities_requested = false;
 #define ERROR_RECOVERY_DELAY_MS      30000  // Stay in ERROR for 30s, then try again
 // Note: RECONNECT_DELAY_MS is defined in saint_node.h
 
-// Hardware watchdog timeout. Picks up wedges in main loop, micro-ROS,
-// or the W5500 SPI path. Anything that blocks the main loop for longer
-// than this will trigger a clean reset.
-#define WATCHDOG_TIMEOUT_MS          8000
+// Hardware watchdog. The RP2040 watchdog hardware caps at ~8.4 seconds,
+// which turned out to be shorter than legitimate slow operations like
+// W5500 send() blocking through a retransmit (its default timeout is
+// several seconds). With the hardware watchdog armed, hitting Refresh
+// triggered a capability publish that occasionally took >8s and the
+// chip rebooted mid-publish.
+//
+// Set to 0 to disable. A software watchdog with longer reach is the
+// follow-up, but for now the priority is "Refresh doesn't reboot the
+// node." The DHCP keepalive and NODE_STATE_ERROR recovery from the
+// same commit (dce4f29) are still in place and cover the cases the
+// hardware watchdog was meant to catch.
+#define WATCHDOG_TIMEOUT_MS          0
 
 static uint32_t last_successful_comm = 0;   // Timestamp of last successful communication
 static uint32_t last_connection_check = 0;  // Timestamp of last connection check
@@ -482,6 +491,8 @@ static void control_subscription_callback(const void* msgin)
  */
 static void publish_capabilities(void)
 {
+    uint32_t t0 = to_ms_since_boot(get_absolute_time());
+
     int len = pin_config_capabilities_to_json(
         capabilities_buffer, sizeof(capabilities_buffer), g_node.node_id);
 
@@ -490,11 +501,21 @@ static void publish_capabilities(void)
         return;
     }
 
+    uint32_t t1 = to_ms_since_boot(get_absolute_time());
+
     capabilities_msg.data.data = capabilities_buffer;
     capabilities_msg.data.size = (size_t)len;
     capabilities_msg.data.capacity = sizeof(capabilities_buffer);
 
     rcl_ret_t ret = rcl_publish(&capabilities_pub, &capabilities_msg, NULL);
+    uint32_t t2 = to_ms_since_boot(get_absolute_time());
+    /* If either phase takes more than half a second, log it — this is
+     * how we caught the W5500 ARP-resolution stall causing the watchdog
+     * to fire. Build was: %d bytes, build_ms, publish_ms. */
+    if ((t2 - t0) > 500) {
+        printf("publish_capabilities: %d bytes  build=%lums  publish=%lums  ret=%d\n",
+               len, (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (int)ret);
+    }
     if (ret == RCL_RET_OK) {
         printf("Published capabilities (%d bytes)\n", len);
     } else {
@@ -1178,12 +1199,19 @@ int main(void)
     last_successful_comm = to_ms_since_boot(get_absolute_time());
     agent_connected = true;
 
-    // Arm the hardware watchdog now that init is complete. The main
-    // loop's watchdog_update() below must run within WATCHDOG_TIMEOUT_MS
-    // or the chip resets. Connect / DHCP / reinit paths that may exceed
-    // that window kick the watchdog explicitly themselves.
-    watchdog_enable(WATCHDOG_TIMEOUT_MS, 1);
-    printf("Watchdog armed (%lu ms timeout)\n", (unsigned long)WATCHDOG_TIMEOUT_MS);
+    // Arm the hardware watchdog only when WATCHDOG_TIMEOUT_MS > 0. The
+    // RP2040 hardware caps at ~8.4s, which is shorter than legitimate
+    // slow operations (W5500 send retransmit, micro-ROS reinit). With
+    // it disabled, the DHCP-keepalive + NODE_STATE_ERROR recovery in
+    // check_agent_connection still pull the node back from agent
+    // disruptions; only a true main-loop hang would be uncovered, and
+    // those should be diagnosed not papered over.
+    if (WATCHDOG_TIMEOUT_MS > 0) {
+        watchdog_enable(WATCHDOG_TIMEOUT_MS, 1);
+        printf("Watchdog armed (%lu ms timeout)\n", (unsigned long)WATCHDOG_TIMEOUT_MS);
+    } else {
+        printf("Watchdog disabled (WATCHDOG_TIMEOUT_MS=0)\n");
+    }
 
     // Main loop
     static uint32_t last_status_print = 0;

@@ -8,12 +8,29 @@
 
 cmake_minimum_required(VERSION 3.13)
 
-# Set PICO_SDK_PATH if not already set
+# Locate the Pico SDK.
+#
+# Search order:
+#   1. PICO_SDK_PATH env var (developer override)
+#   2. ${CMAKE_SOURCE_DIR}/lib/pico-sdk (in-tree checkout)
+#   3. $HOME/pico-sdk (legacy dev convention)
+#   4. Fetch from GitHub at the pinned tag (PICO_SDK_FETCH_VERSION below)
+#
+# The fourth path is what makes the build self-contained — a clean
+# clone of this repo + cmake → make can produce firmware with no manual
+# SDK install. The clone gets cached under ${CMAKE_BINARY_DIR}/_deps
+# so only the first build pays the download cost.
+set(PICO_SDK_FETCH_VERSION "2.2.0")
+
 if(NOT DEFINED ENV{PICO_SDK_PATH})
     if(EXISTS "${CMAKE_SOURCE_DIR}/lib/pico-sdk")
         set(ENV{PICO_SDK_PATH} "${CMAKE_SOURCE_DIR}/lib/pico-sdk")
     elseif(EXISTS "$ENV{HOME}/pico-sdk")
         set(ENV{PICO_SDK_PATH} "$ENV{HOME}/pico-sdk")
+    else()
+        message(STATUS "Pico SDK not found locally — will fetch ${PICO_SDK_FETCH_VERSION} via FetchContent")
+        set(PICO_SDK_FETCH_FROM_GIT ON)
+        set(PICO_SDK_FETCH_FROM_GIT_TAG ${PICO_SDK_FETCH_VERSION})
     endif()
 endif()
 
@@ -26,8 +43,10 @@ else()
     message(FATAL_ERROR "micro-ROS SDK not found. Place it in lib/micro_ros_raspberrypi_pico_sdk or set MICRO_ROS_PATH")
 endif()
 
-# Initialize Pico SDK (must be before project())
-include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+# Initialize Pico SDK (must be before project()). Use our vendored copy
+# of pico_sdk_import.cmake so the build doesn't depend on the SDK
+# already being present on disk — it'll fetch the SDK itself if needed.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/pico_sdk_import.cmake)
 
 project(saint_node C CXX ASM)
 
