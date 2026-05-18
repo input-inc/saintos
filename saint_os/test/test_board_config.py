@@ -107,6 +107,23 @@ class TestLoader:
         assert "test_board" in ids
         assert "bad_chip" not in ids   # rejected above
 
+    def test_skips_macos_appledouble_shadows(self, boards_root):
+        # Simulate a Finder-touched copy that left ._global.yaml and
+        # ._test_board.yaml next to the real files. The loader must
+        # ignore them; binary AppleDouble would otherwise UTF-8-decode-
+        # fail and the chip dir would look broken.
+        import os
+        rp2040_dir = os.path.join(boards_root, "rp2040")
+        with open(os.path.join(rp2040_dir, "._global.yaml"), "wb") as f:
+            f.write(b"\x00\x05\x16\x07" + b"\x00" * 32 + b"\x90garbage")
+        with open(os.path.join(rp2040_dir, "._test_board.yaml"), "wb") as f:
+            f.write(b"\x00\x05\x16\x07" + b"\x00" * 32 + b"\x90garbage")
+        m = BoardConfigManager(boards_root)
+        assert m.get_chip("rp2040") is not None
+        assert m.get_board("test_board") is not None
+        # And the shadows weren't loaded as boards either.
+        assert m.get_board("._test_board") is None
+
     def test_default_board_picks_built_in_first(self, boards_root):
         # Add an operator-authored board after the built-in; default
         # should still pick the built-in.

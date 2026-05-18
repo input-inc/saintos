@@ -130,9 +130,15 @@ with open(os.path.join(pkg_dir, 'manifest.json'), 'w') as f:
 PY
 
 # Create tarball.
+# COPYFILE_DISABLE=1 keeps macOS' BSD tar from emitting AppleDouble
+# `._foo` entries for files that have extended attributes. Without it,
+# every file with an xattr (Finder colour, quarantine, etc.) ships a
+# shadow alongside it; on a Linux target those shadows then masquerade
+# as real .yaml / .py files and crash the loaders that read them. The
+# env var is a no-op on GNU tar (Linux CI runs), so it's safe everywhere.
 mkdir -p dist
 TARBALL="${REPO_ROOT}/dist/${PKG_NAME}.tar.gz"
-( cd "${STAGING}" && tar czf "${TARBALL}" "${PKG_NAME}" )
+( cd "${STAGING}" && COPYFILE_DISABLE=1 tar czf "${TARBALL}" "${PKG_NAME}" )
 
 SIZE=$(stat -f%z "${TARBALL}" 2>/dev/null || stat -c%s "${TARBALL}")
 SHA=$(shasum -a 256 "${TARBALL}" | cut -d' ' -f1)

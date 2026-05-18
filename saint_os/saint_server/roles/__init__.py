@@ -113,9 +113,17 @@ class RoleManager:
         self._load_roles()
 
     def _log(self, level: str, message: str):
-        """Log a message if logger is available."""
+        """Log a message if logger is available.
+
+        Wrapped in try/except because rclpy's logger occasionally raises
+        "Logger severity cannot be changed between calls" when severity
+        flips across calls. A logger quirk shouldn't sink role loading.
+        """
         if self.logger:
-            getattr(self.logger, level, self.logger.info)(message)
+            try:
+                getattr(self.logger, level, self.logger.info)(message)
+            except Exception:
+                pass
 
     def _load_roles(self):
         """Load all role definitions from YAML files."""
@@ -124,6 +132,13 @@ class RoleManager:
             return
 
         for filename in os.listdir(self.roles_dir):
+            # Skip macOS AppleDouble metadata shadows (._foo.yaml). They
+            # ride along when a tarball is unpacked through Finder or
+            # copied from an HFS+/APFS USB stick to a Linux box, and end
+            # up as binary garbage with a .yaml suffix that the loader
+            # would otherwise try to parse.
+            if filename.startswith('._'):
+                continue
             if not filename.endswith('.yaml') and not filename.endswith('.yml'):
                 continue
 

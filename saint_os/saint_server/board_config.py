@@ -268,6 +268,10 @@ class BoardConfigManager:
             return
 
         for entry in sorted(os.listdir(self.root)):
+            # Skip macOS AppleDouble shadows that occasionally appear
+            # next to real directories after a Finder copy.
+            if entry.startswith("._"):
+                continue
             chip_dir = os.path.join(self.root, entry)
             if not os.path.isdir(chip_dir):
                 continue
@@ -287,6 +291,12 @@ class BoardConfigManager:
         self.chips[chip.chip_family] = chip
 
         for fname in sorted(os.listdir(chip_dir)):
+            # Skip macOS AppleDouble metadata shadows (._foo.yaml). They
+            # appear when a tarball is unpacked through Finder or moved
+            # across HFS+/APFS — binary content with a .yaml extension
+            # that the loader would otherwise try to parse.
+            if fname.startswith("._"):
+                continue
             if fname == GLOBAL_CHIP_FILENAME:
                 continue
             if not fname.endswith((".yaml", ".yml")):
