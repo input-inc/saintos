@@ -464,9 +464,18 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
         written += ret;
     }
 
+    // Built-in peripherals: hardware permanently wired on this board.
+    // Teensy 4.1 has no onboard NeoPixel or analogous addressable LED
+    // exposed to the runtime, so this array is empty — keeping the key
+    // present makes server-side parsing unconditional.
+    ret = snprintf(buffer + written, buffer_size - written,
+        "],\"builtin_peripherals\":[");
+    if ((ret < 0) || ((size_t)ret >= (buffer_size - written))) return -1;
+    written += ret;
+
     // Close JSON
     ret = snprintf(buffer + written, buffer_size - written, "]}");
-    if ((ret < 0) || ((size_t)ret >= (buffer_size - written))) 
+    if ((ret < 0) || ((size_t)ret >= (buffer_size - written)))
     {
         Serial.printf("Pin config: snprintf failed to close JSON, ret=%d\n", ret);
         return -1;
@@ -474,6 +483,114 @@ int pin_config_capabilities_to_json(char* buffer, size_t buffer_size, const char
     written += ret;
 
     return written;
+}
+
+// =============================================================================
+// Type-id → driver-mode lookup
+// =============================================================================
+//
+// The server emits peripheral `type` ids (e.g. "fas100"); each one maps
+// to an existing driver registered by mode_string (e.g. "fas100_sensor").
+// New peripheral types added to the server catalog must also be listed
+// here with the matching firmware driver.
+
+static const struct {
+    const char* type_id;
+    const char* mode_string;
+} k_peripheral_type_map[] = {
+    {"fas100",         "fas100_sensor"},
+    {"syren",          "syren_motor"},
+    {"roboclaw",       "roboclaw_motor"},
+    {"pathfinder_bms", "pathfinder_bms_sensor"},
+    {"maestro",        "maestro_servo"},
+};
+
+static const peripheral_driver_t* driver_for_type_id(const char* type_id)
+{
+    if (!type_id || !*type_id) return nullptr;
+    for (size_t i = 0; i < sizeof(k_peripheral_type_map)/sizeof(k_peripheral_type_map[0]); i++) {
+        if (strcmp(k_peripheral_type_map[i].type_id, type_id) == 0) {
+            return peripheral_find_by_mode_string(k_peripheral_type_map[i].mode_string);
+        }
+    }
+    return nullptr;
+}
+
+static bool extract_string_field(const char* start, const char* end,
+                                 const char* key, char* out, size_t out_size)
+{
+    const char* p = strstr(start, key);
+    if (!p || p >= end) return false;
+    p = strchr(p, ':');
+    if (!p || p >= end) return false;
+    p++;
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '"')) p++;
+    size_t n = 0;
+    while (p < end && *p != '"' && n < out_size - 1) {
+        out[n++] = *p++;
+    }
+    out[n] = '\0';
+    return n > 0;
+}
+
+static bool apply_one_peripheral(const char* obj_start, const char* obj_end)
+{
+    char type_id[32];
+    if (!extract_string_field(obj_start, obj_end, "\"type\"", type_id, sizeof(type_id))) {
+        Serial.printf("Pin config: peripheral missing 'type'\n");
+        return false;
+    }
+
+    const peripheral_driver_t* drv = driver_for_type_id(type_id);
+    if (!drv) {
+        Serial.printf("Pin config: no driver for type '%s' — skipping\n", type_id);
+        return false;
+    }
+
+    char inst_id[32];
+    inst_id[0] = '\0';
+    extract_string_field(obj_start, obj_end, "\"id\"", inst_id, sizeof(inst_id));
+
+    for (uint8_t ch = 0; ch < drv->channel_count; ch++) {
+        uint8_t vgpio = (uint8_t)(drv->virtual_gpio_base + ch);
+        if (!pin_config_set(vgpio, drv->pin_mode, inst_id)) continue;
+        pin_config_t* pcfg = find_or_create_config(vgpio);
+        if (!pcfg) continue;
+        if (drv->set_defaults) drv->set_defaults(ch, pcfg);
+        if (drv->parse_json_params) drv->parse_json_params(obj_start, obj_end, pcfg);
+    }
+    return true;
+}
+
+static bool apply_peripherals_json(const char* arr_start, const char* json_end)
+{
+    if (!arr_start || arr_start >= json_end) return false;
+
+    pin_config_reset();
+
+    const char* p = arr_start;
+    while (p < json_end && *p != ']') {
+        while (p < json_end && (*p == ' ' || *p == ',' || *p == '\n' ||
+                                 *p == '\r' || *p == '\t')) p++;
+        if (p >= json_end || *p == ']' || *p == '\0') break;
+        if (*p != '{') break;
+
+        const char* obj_start = p;
+        int depth = 1;
+        const char* q = obj_start + 1;
+        while (q < json_end && depth > 0) {
+            if (*q == '{') depth++;
+            else if (*q == '}') depth--;
+            q++;
+        }
+        if (depth != 0) break;
+
+        apply_one_peripheral(obj_start, q);
+        p = q;
+    }
+
+    pin_config_apply_hardware();
+    return true;
 }
 
 bool pin_config_apply_json(const char* json, size_t json_len)
@@ -493,16 +610,28 @@ bool pin_config_apply_json(const char* json, size_t json_len)
         return false;
     }
 
-    // Simple JSON parser for pin configuration
-    // Expected format:
-    // {"action":"configure","version":N,"pins":{"GPIO":{"mode":"pwm","logical_name":"xxx",...}}}
-
     // Check for "configure" action
     const char* action = strstr(json, "\"action\"");
     if (!action || !strstr(action, "\"configure\"")) {
         Serial.printf("Pin config: invalid or missing action\n");
         return false;
     }
+
+    // Preferred format (peripheral-first):
+    //   {"action":"configure","version":N,
+    //    "peripherals":[{"id":"...","type":"...","pins":{...},"params":{...}},...]}
+    const char* peripherals_key = strstr(json, "\"peripherals\"");
+    if (peripherals_key) {
+        const char* arr = strchr(peripherals_key, '[');
+        if (!arr) {
+            Serial.printf("Pin config: 'peripherals' is not an array\n");
+            return false;
+        }
+        arr++;
+        return apply_peripherals_json(arr, json + json_len);
+    }
+
+    // Fallback legacy format: {"pins":{"GPIO":{...}}}
 
     // Find pins object
     const char* pins_start = strstr(json, "\"pins\"");
