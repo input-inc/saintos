@@ -871,6 +871,20 @@ class WebSocketHandler:
             result = self.state_manager.remove_node_peripheral(node_id, peripheral_id)
             return {"status": "ok", "data": result}
 
+        elif action == 'get_node_logs':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            entries = self.state_manager.get_node_logs(node_id)
+            return {"status": "ok", "data": {"entries": entries}}
+
+        elif action == 'clear_node_logs':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            self.state_manager.clear_node_logs(node_id)
+            return {"status": "ok", "data": {"success": True}}
+
         elif action == 'sync_node_peripherals':
             node_id = params.get('node_id')
             if not node_id:
@@ -1871,6 +1885,15 @@ class WebSocketHandler:
         async with self._lock:
             for client in self.clients.values():
                 await self._send_to_client(client, message)
+
+    async def broadcast_node_log(self, node_id: str, entry: Dict[str, Any]):
+        """Push a single per-node log entry to subscribers of node_log/<id>.
+
+        Goes through the same ``broadcast_state`` plumbing so existing
+        subscription filtering applies — clients that haven't subscribed
+        to this topic don't get the frame.
+        """
+        await self.broadcast_state(f'node_log/{node_id}', entry)
 
     async def start_broadcast_loop(self):
         """Start periodic state broadcasting."""

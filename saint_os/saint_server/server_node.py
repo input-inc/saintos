@@ -302,6 +302,8 @@ class SaintServerNode(Node):
 
         pub.publish(msg)
         self.get_logger().info(f'Sent config to node {node_id}')
+        self.state_manager.log_node_event(
+            node_id, "Pushed peripheral config (Sync to Node)", "info")
 
         # Mark as syncing (not yet confirmed)
         # The node will publish capabilities after applying config
@@ -317,6 +319,8 @@ class SaintServerNode(Node):
 
         pub.publish(msg)
         self.get_logger().info(f'Requested capabilities from node {node_id}')
+        self.state_manager.log_node_event(
+            node_id, "Requested capabilities refresh", "info")
 
     # =========================================================================
     # Pin Control Communication
@@ -431,6 +435,8 @@ class SaintServerNode(Node):
 
         pub.publish(msg)
         self.get_logger().info(f'Sent factory reset command to {node_id}')
+        self.state_manager.log_node_event(
+            node_id, "Sent factory-reset command", "warn")
 
     def send_restart_command(self, node_id: str):
         """Send restart command to a node via ROS2.
@@ -450,6 +456,7 @@ class SaintServerNode(Node):
 
         pub.publish(msg)
         self.get_logger().info(f'Sent restart command to {node_id}')
+        self.state_manager.log_node_event(node_id, "Sent restart command", "info")
 
     def send_identify_command(self, node_id: str):
         """Send identify command to a node via ROS2.
@@ -469,6 +476,7 @@ class SaintServerNode(Node):
 
         pub.publish(msg)
         self.get_logger().info(f'Sent identify command to {node_id}')
+        self.state_manager.log_node_event(node_id, "Sent identify (blink LED) command", "info")
 
     def send_estop_command(self, node_id: str):
         """Send emergency stop command to a node via ROS2.
@@ -488,6 +496,7 @@ class SaintServerNode(Node):
 
         pub.publish(msg)
         self.get_logger().info(f'Sent emergency stop command to {node_id}')
+        self.state_manager.log_node_event(node_id, "Sent emergency stop", "warn")
 
     def send_firmware_update_command(self, node_id: str, simulation: bool = False, force: bool = False):
         """Send firmware update command to a node via ROS2.
@@ -630,6 +639,12 @@ class SaintServerNode(Node):
             f'(version: {fw_info.get("version_full") or fw_info.get("version")}, '
             f'size: {fw_info.get("bin_size")}, crc32: {control_data.get("crc32")}, '
             f'force: {force})'
+        )
+        self.state_manager.log_node_event(
+            node_id,
+            f"Firmware update triggered → {fw_info.get('version_full') or fw_info.get('version')}"
+            + (" (force)" if force else ""),
+            "info"
         )
 
         # For simulation nodes, also trigger the node manager to install and restart
@@ -909,6 +924,11 @@ class SaintServerNode(Node):
                 lambda msg, level: self._broadcast_activity(msg, level)
             )
 
+            # Per-node log callback — feeds the Logs tab on node-detail.
+            self.state_manager.set_node_log_callback(
+                lambda node_id, entry: self._broadcast_node_log(node_id, entry)
+            )
+
             # Set up pin config sync callback
             if self.web_server.ws_handler:
                 self.web_server.ws_handler.set_sync_config_callback(
@@ -1011,6 +1031,16 @@ class SaintServerNode(Node):
                 self._async_loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(
                         self.web_server.ws_handler.broadcast_activity(message, level)
+                    )
+                )
+
+    def _broadcast_node_log(self, node_id: str, entry: Dict[str, Any]):
+        """Push a per-node log entry to subscribers (thread-safe)."""
+        if self.web_server and self.web_server.ws_handler:
+            if self._async_loop:
+                self._async_loop.call_soon_threadsafe(
+                    lambda nid=node_id, e=entry: asyncio.create_task(
+                        self.web_server.ws_handler.broadcast_node_log(nid, e)
                     )
                 )
 

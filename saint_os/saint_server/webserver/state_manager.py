@@ -397,6 +397,14 @@ class NodeInfo:
     last_seen: float = field(default_factory=time.time)
     # Grace period tracking - when we first detected potential disconnect
     going_offline_at: Optional[float] = None
+    # Per-node log ring buffer. Capped to MAX_NODE_LOG_ENTRIES on the
+    # StateManager that owns this NodeInfo. Surfaced to the UI via the
+    # Logs tab + node_log/<id> subscription stream. In-memory only.
+    log_entries: List[Dict[str, Any]] = field(default_factory=list)
+    # Snapshot of the announcement's `peripherals: {id: connected}` map
+    # from the previous announcement, so we can detect connect/disconnect
+    # transitions and log them once instead of every announcement.
+    peripheral_connected: Dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -420,12 +428,16 @@ class SystemState:
 class StateManager:
     """Manages system state and provides data for clients."""
 
-    MAX_LOG_ENTRIES = 500  # Keep last 500 log entries
+    MAX_LOG_ENTRIES = 500          # Global activity-log ring buffer cap
+    MAX_NODE_LOG_ENTRIES = 200     # Per-node log ring buffer cap
 
     def __init__(self, server_name: str = "SAINT-01", logger=None, config_dir: Optional[str] = None):
         self.state = SystemState(server_name=server_name)
         self.logger = logger
         self._activity_callback: Optional[Callable[[str, str], None]] = None
+        # Optional callback fired when a node-scoped log entry is recorded.
+        # Wired by server_node.py to broadcast on node_log/<id>.
+        self._node_log_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self._log_entries: List[Dict[str, Any]] = []  # Circular buffer for logs
 
         # Config directory for node YAML persistence
@@ -470,8 +482,39 @@ class StateManager:
         """Set callback for activity logging. Callback takes (message, level)."""
         self._activity_callback = callback
 
-    def _log_activity(self, message: str, level: str = "info"):
-        """Log an activity event."""
+    def set_node_log_callback(self, callback: Callable[[str, Dict[str, Any]], None]):
+        """Set callback for per-node log events. Takes (node_id, entry)."""
+        self._node_log_callback = callback
+
+    def get_node_logs(self, node_id: str) -> List[Dict[str, Any]]:
+        """Return the log buffer for a node (oldest first). Empty if unknown."""
+        node = (self.state.adopted_nodes.get(node_id)
+                or self.state.unadopted_nodes.get(node_id))
+        if not node:
+            return []
+        return list(node.log_entries)
+
+    def clear_node_logs(self, node_id: str) -> bool:
+        node = (self.state.adopted_nodes.get(node_id)
+                or self.state.unadopted_nodes.get(node_id))
+        if not node:
+            return False
+        node.log_entries.clear()
+        return True
+
+    def log_node_event(self, node_id: str, message: str, level: str = "info") -> None:
+        """Public entry point for callers outside StateManager (e.g.
+        server_node.py) that want to record a node-scoped event."""
+        self._log_activity(message, level, node_id=node_id)
+
+    def _log_activity(self, message: str, level: str = "info",
+                      node_id: Optional[str] = None):
+        """Log an activity event.
+
+        If ``node_id`` is provided, the entry is also appended to that
+        node's per-node ring buffer and broadcast on ``node_log/<id>``
+        so the node-detail Logs tab sees it.
+        """
         # Store in log buffer
         entry = {
             "time": time.time(),
@@ -487,6 +530,17 @@ class StateManager:
         # Broadcast to clients
         if self._activity_callback:
             self._activity_callback(message, level)
+
+        # Per-node log buffer + targeted broadcast
+        if node_id:
+            node = (self.state.adopted_nodes.get(node_id)
+                    or self.state.unadopted_nodes.get(node_id))
+            if node:
+                node.log_entries.append(entry)
+                if len(node.log_entries) > self.MAX_NODE_LOG_ENTRIES:
+                    node.log_entries = node.log_entries[-self.MAX_NODE_LOG_ENTRIES:]
+            if self._node_log_callback:
+                self._node_log_callback(node_id, entry)
 
         # Also log to ROS2 logger
         if self.logger:
@@ -558,8 +612,13 @@ class StateManager:
             # New unadopted node
             node = NodeInfo(node_id=node_id)
             self.state.unadopted_nodes[node_id] = node
-            self._log_activity(f"New node discovered: {node_id}", "info")
+            self._log_activity(f"New node discovered: {node_id}", "info", node_id=node_id)
             is_new = True
+
+        # Capture pre-update values so we can log transitions below.
+        prev_state = node.state
+        prev_fw = node.firmware_version
+        prev_online = node.online
 
         # Update node info from announcement (for both adopted and unadopted)
         node.mac_address = data.get("mac", node.mac_address)
@@ -578,15 +637,43 @@ class StateManager:
         if "chip_family" in data:
             node.chip_family = str(data["chip_family"])
 
+        # State transition — interesting for the Logs tab. Skip the
+        # initial UNKNOWN → first-reported transition on a brand-new
+        # node so we don't double-log alongside "New node discovered".
+        if (prev_state and prev_state != "UNKNOWN"
+                and prev_state != node.state):
+            self._log_activity(
+                f"State: {prev_state} → {node.state}", "info", node_id=node_id)
+
+        # Firmware version changed — most likely a successful OTA.
+        if (prev_fw and prev_fw != "0.0.0"
+                and prev_fw != node.firmware_version):
+            self._log_activity(
+                f"Firmware updated: {prev_fw} → {node.firmware_version}",
+                "info", node_id=node_id)
+
+        # Per-peripheral connection transitions out of the announcement.
+        # The firmware ships a `peripherals: {id: bool}` map. We log
+        # each connect↔disconnect flip once.
+        peripherals = data.get("peripherals")
+        if isinstance(peripherals, dict):
+            for pid, val in peripherals.items():
+                connected = bool(val)
+                prev = node.peripheral_connected.get(pid)
+                if prev is not None and prev != connected:
+                    self._log_activity(
+                        f"Peripheral {pid}: {'connected' if connected else 'disconnected'}",
+                        "info" if connected else "warn", node_id=node_id)
+                node.peripheral_connected[pid] = connected
+
         # Clear any pending offline state and mark online
-        was_offline = not node.online
         node.online = True
         node.going_offline_at = None
 
         # Log reconnection
-        if was_offline:
+        if not prev_online:
             name = node.display_name or node.node_id
-            self._log_activity(f"Node reconnected: {name}", "info")
+            self._log_activity(f"Node reconnected: {name}", "info", node_id=node_id)
 
         return is_new
 
@@ -640,7 +727,8 @@ class StateManager:
         for node_id, node in list(self.state.unadopted_nodes.items()):
             if check_node(node, is_adopted=False):
                 timed_out.append(node_id)
-                self._log_activity(f"Node offline: {node_id}", "warn")
+                self._log_activity(
+                    f"Node offline: {node_id}", "warn", node_id=node_id)
 
         # Check adopted nodes — except the host controller, which has
         # no announcement loop and is always "online" by definition.
@@ -650,7 +738,8 @@ class StateManager:
             if check_node(node, is_adopted=True):
                 timed_out.append(node_id)
                 self._log_activity(
-                    f"Adopted node offline: {node.display_name or node_id}", "warn"
+                    f"Adopted node offline: {node.display_name or node_id}",
+                    "warn", node_id=node_id
                 )
 
         return timed_out
@@ -847,6 +936,11 @@ class StateManager:
         # Save initial config
         self._save_node_config(node_id)
 
+        self._log_activity(
+            f"Adopted as '{node.display_name or node_id}' "
+            f"(role={role}, board={node.board_id or 'default'})",
+            "info", node_id=node_id)
+
         topic_prefix = f"/saint/{role}"
         return {
             "success": True,
@@ -895,7 +989,8 @@ class StateManager:
         self._seed_builtin_peripherals_from_board(node)
         self._save_node_config(node_id)
         self._log_activity(
-            f"Node {node.display_name or node_id}: board set to '{board_id}'", "info"
+            f"Node {node.display_name or node_id}: board set to '{board_id}'", "info",
+            node_id=node_id
         )
         return {"success": True, "board_id": board_id}
 
@@ -1066,7 +1161,8 @@ class StateManager:
 
         if self.logger:
             self.logger.info(f"Stored {len(pins)} pin capabilities for node {node_id}")
-        self._log_activity(f"Updated capabilities for node {node_id} ({len(pins)} pins)", "info")
+        self._log_activity(
+            f"Updated capabilities ({len(pins)} pins)", "info", node_id=node_id)
         return True
 
     def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
@@ -1197,7 +1293,7 @@ class StateManager:
 
         self._save_node_config(node_id)
         self._log_activity(
-            f"Saved peripheral '{peripheral.label}' on {node.display_name or node_id}", "info"
+            f"Saved peripheral '{peripheral.label}'", "info", node_id=node_id
         )
         return {
             "success": True,
@@ -1223,7 +1319,7 @@ class StateManager:
 
         self._save_node_config(node_id)
         self._log_activity(
-            f"Removed peripheral {peripheral_id} from {node.display_name or node_id}", "info"
+            f"Removed peripheral {peripheral_id}", "info", node_id=node_id
         )
         return {"success": True}
 
