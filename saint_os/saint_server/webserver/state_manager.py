@@ -449,6 +449,17 @@ class NodeInfo:
     mac_address: str = ""
     ip_address: str = ""
     firmware_version: str = "0.0.0"
+    # Bootloader version the node reports in its announcement ("bl_fw"
+    # field). Tracked separately from firmware_version because the
+    # bootloader is NOT OTA-updatable — it's the thing that performs
+    # updates. A board's bootloader is effectively frozen at the
+    # version it was BOOTSEL-flashed with, so we need independent
+    # visibility to know which boards in the field still need a
+    # physical reflash to pick up bootloader-side fixes (DHCP, retry
+    # budget, failure reporting, etc.). "unknown" is reported by
+    # firmware running without an OTA bootloader, by sim builds, or by
+    # older bootloaders that predate the bl_info descriptor.
+    bootloader_version: str = "unknown"
     firmware_build: str = ""  # Build timestamp
     state: str = "UNKNOWN"  # Node state from firmware (UNADOPTED, ACTIVE, ERROR, etc.)
     online: bool = True
@@ -731,6 +742,7 @@ class StateManager:
         # Capture pre-update values so we can log transitions below.
         prev_state = node.state
         prev_fw = node.firmware_version
+        prev_bl_fw = node.bootloader_version
         prev_online = node.online
 
         # Update node info from announcement (for both adopted and unadopted)
@@ -738,6 +750,7 @@ class StateManager:
         node.ip_address = data.get("ip", node.ip_address)
         node.hardware_model = data.get("hw", node.hardware_model)
         node.firmware_version = data.get("fw", node.firmware_version)
+        node.bootloader_version = data.get("bl_fw", node.bootloader_version)
         node.firmware_build = data.get("fw_build", node.firmware_build)
         node.uptime_seconds = data.get("uptime", node.uptime_seconds)
         node.cpu_temp = data.get("cpu_temp", node.cpu_temp)
@@ -763,6 +776,17 @@ class StateManager:
                 and prev_fw != node.firmware_version):
             self._log_activity(
                 f"Firmware updated: {prev_fw} → {node.firmware_version}",
+                "info", node_id=node_id)
+
+        # Bootloader version changed — can only happen via a physical
+        # BOOTSEL reflash since the bootloader isn't OTA-updatable. Worth
+        # logging so the operator has a clear record of which boards got
+        # touched on a reflash sweep.
+        if (prev_bl_fw and prev_bl_fw != "unknown"
+                and prev_bl_fw != node.bootloader_version
+                and node.bootloader_version != "unknown"):
+            self._log_activity(
+                f"Bootloader changed: {prev_bl_fw} → {node.bootloader_version}",
                 "info", node_id=node_id)
 
         # Per-peripheral connection transitions out of the announcement.
@@ -943,6 +967,7 @@ class StateManager:
                 "ip_address": node.ip_address,
                 "mac_address": node.mac_address,
                 "firmware_version": node.firmware_version,
+                "bootloader_version": node.bootloader_version,
                 "firmware_build": node.firmware_build,
                 "online": node.online,
                 "cpu_temp": node.cpu_temp,
@@ -976,6 +1001,7 @@ class StateManager:
                 "mac_address": node.mac_address,
                 "ip_address": node.ip_address,
                 "firmware_version": node.firmware_version,
+                "bootloader_version": node.bootloader_version,
                 "firmware_build": node.firmware_build,
                 "cpu_temp": node.cpu_temp,
                 "cpu_usage": node.cpu_usage,
@@ -1296,6 +1322,7 @@ class StateManager:
             "node_id": node.node_id,
             "hw": node.hardware_model,
             "fw": node.firmware_version,
+            "bl_fw": node.bootloader_version,
             "ip": node.ip_address,
             "mac": node.mac_address,
             "display_name": node.display_name,

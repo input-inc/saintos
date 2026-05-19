@@ -1221,8 +1221,10 @@ class SaintApp {
                         </div>
                         <span class="px-2 py-0.5 text-xs rounded-full bg-cyan-500/20 text-cyan-400">${node.role}</span>
                     </div>
-                    <div class="text-sm text-slate-400 mb-3">
+                    <div class="text-sm text-slate-400 mb-3 space-y-1">
                         <p>${node.hardware_model || 'Unknown hardware'}</p>
+                        <p class="text-xs">FW: ${node.firmware_version || '--'}</p>
+                        <p class="text-xs">BL: ${node.bootloader_version || 'unknown'}</p>
                     </div>
                     <div class="flex items-center gap-2 pt-3 border-t border-slate-700">
                         <button class="btn-sm bg-slate-700 hover:bg-slate-600 text-slate-200" onclick="app.viewNode('${node.node_id}')">
@@ -1270,6 +1272,7 @@ class SaintApp {
                         <p>${node.hardware_model || 'Unknown hardware'}</p>
                         <p class="font-mono text-xs">${node.ip_address || '--'}</p>
                         <p class="text-xs">FW: ${node.firmware_version || '--'}</p>
+                        <p class="text-xs">BL: ${node.bootloader_version || 'unknown'}</p>
                     </div>
                     <div class="flex items-center gap-2 pt-3 border-t border-slate-700">
                         ${adoptButton}
@@ -1408,6 +1411,7 @@ class SaintApp {
         document.getElementById('node-info-hardware').textContent = info.hardware_model || 'Unknown';
         document.getElementById('node-info-firmware').textContent = info.firmware_version || '--';
         document.getElementById('node-info-firmware-build').textContent = info.firmware_build ? `Built: ${info.firmware_build}` : '';
+        document.getElementById('node-info-bootloader').textContent = info.bootloader_version || 'unknown';
         document.getElementById('node-info-ip').textContent = info.ip_address || '--';
         document.getElementById('node-info-uptime').textContent =
             info.uptime_seconds ? this.formatUptime(info.uptime_seconds) : '--';

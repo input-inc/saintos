@@ -40,19 +40,49 @@ target_link_libraries(picowota_reboot PUBLIC
 )
 
 # -----------------------------------------------------------------------------
+# Bootloader version header — regenerated each build via the same
+# GenerateVersion.cmake script the app uses. The bootloader gets its own
+# unix-timestamp build ID so we can tell two bootloader builds apart in
+# the field, and the version numbers (BL_VERSION_*) are independent of
+# the app's (FIRMWARE_VERSION_*) so a bootloader release can move on
+# its own schedule. Output goes to the per-target generated/ dir so the
+# bootloader and app version.h files don't collide.
+# -----------------------------------------------------------------------------
+set(BL_VERSION_MAJOR 1 CACHE STRING "Bootloader major version")
+set(BL_VERSION_MINOR 0 CACHE STRING "Bootloader minor version")
+set(BL_VERSION_PATCH 0 CACHE STRING "Bootloader patch version")
+
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bootloader/generated)
+
+add_custom_target(generate_bl_version ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DVERSION_MAJOR=${BL_VERSION_MAJOR}
+        -DVERSION_MINOR=${BL_VERSION_MINOR}
+        -DVERSION_PATCH=${BL_VERSION_PATCH}
+        -DSIMULATION=OFF
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DOUTPUT_FILE=${CMAKE_BINARY_DIR}/bootloader/generated/bl_version.h
+        -P ${CMAKE_SOURCE_DIR}/cmake/GenerateVersion.cmake
+    COMMENT "Generating bl_version.h (bootloader)"
+)
+
+# -----------------------------------------------------------------------------
 # saint_ota_bootloader — the OTA bootloader itself
 # -----------------------------------------------------------------------------
 add_executable(saint_ota_bootloader
     ${SAINT_OTA_BL_DIR}/main.c
     ${SAINT_OTA_BL_DIR}/bootloader_w5500_init.c
     ${SAINT_OTA_BL_DIR}/http_transport_w5500.c
+    ${SAINT_OTA_BL_DIR}/bl_info.c
     # Shared HTTP client
     ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/src/http_client.c
 )
+add_dependencies(saint_ota_bootloader generate_bl_version)
 target_include_directories(saint_ota_bootloader PRIVATE
     ${BL_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_BINARY_DIR}/bootloader/generated
 )
 target_link_libraries(saint_ota_bootloader
     pico_stdlib

@@ -26,9 +26,24 @@
  * 'sta' mode and debug printf.
  * There must be a better way to determine the size dynamically somehow.
  */
+/*
+ * Bootloader flash layout:
+ *   0x10000000 .. 0x10059EFF  bootloader code/data    (FLASH,         ~360k - 256)
+ *   0x10059F00 .. 0x10059FFF  bootloader info slot    (FLASH_BL_INFO, 256 bytes)
+ *   0x1005A000 .. 0x1005AFFF  app image header        (FLASH_IMGHDR,  4k)
+ *   0x1005B000 .. end of XIP  app binary              (FLASH_APP)
+ *
+ * FLASH_BL_INFO holds the bootloader_info_t descriptor (see
+ * shared/include/bootloader_info.h). The app reads from
+ * BOOTLOADER_INFO_ADDR (0x10059F00) at runtime — the address is part
+ * of the ABI between the bootloader and the app. Bump
+ * BOOTLOADER_INFO_STRUCT_VERSION and update both sides if the layout
+ * here moves.
+ */
 MEMORY
 {
-    FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 360k
+    FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 360k - 256
+    FLASH_BL_INFO(r) : ORIGIN = 0x10000000 + 360k - 256, LENGTH = 256
     FLASH_IMGHDR(rx) : ORIGIN = 0x10000000 + 360k, LENGTH = 4k
     FLASH_APP(rx) : ORIGIN = 0x10000000 + 364k, LENGTH = 2048k - 364k
     RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 256k
@@ -75,6 +90,17 @@ SECTIONS
 	__app_bin = .;
 	LONG(0)
     } > FLASH_APP
+
+    /*
+     * Bootloader info descriptor — populated by bl_info.c. KEEP() so
+     * --gc-sections doesn't drop it (it's read by the app, not by the
+     * bootloader itself). Sized to FLASH_BL_INFO; if the struct ever
+     * outgrows 256 bytes the linker will fail loudly rather than
+     * silently overlap FLASH_IMGHDR.
+     */
+    .bl_info : {
+        KEEP(*(.bl_info))
+    } > FLASH_BL_INFO
 
     /* The second stage will always enter the image at the start of .text.
        The debugger will use the ELF entry point, which is the _entry_point

@@ -73,6 +73,10 @@ static const char* ota_fail_reason_str(uint8_t reason)
 #include "picowota/reboot.h"
 #endif
 
+#if defined(SAINT_OS_OTA_BOOTLOADER) && !defined(SIMULATION)
+#include "bootloader_info.h"
+#endif
+
 // Transport selection based on build mode
 #ifdef SIMULATION
 #include "transport_udp_bridge.h"
@@ -183,6 +187,30 @@ static bool init_micro_ros(void);
 // safe no-op during pre-agent boot. Set to true after the log publisher
 // is registered with the agent.
 static bool ros_log_ready = false;
+
+// Cached bootloader version string. Resolved once at boot from the
+// fixed-address descriptor in bootloader flash (see
+// shared/include/bootloader_info.h) so we don't poke memory-mapped
+// flash on every announcement tick. "unknown" when the descriptor is
+// absent — older bootloader, simulation build, or app running without
+// SAINT_OS_OTA_BOOTLOADER. Used in /announce JSON as the "bl_fw"
+// field; surfaced in the deferred boot log.
+static char g_bl_version[48] = "unknown";
+
+static void resolve_bootloader_version(void)
+{
+#if defined(SAINT_OS_OTA_BOOTLOADER) && !defined(SIMULATION)
+    const bootloader_info_t* info = saint_bootloader_info();
+    if (info && info->struct_version <= BOOTLOADER_INFO_STRUCT_VERSION) {
+        // Copy + force null-termination — flash is read-only but the
+        // string could theoretically be unterminated if the descriptor
+        // is corrupt; defensive bound matters here because everything
+        // downstream prints it as a C string.
+        snprintf(g_bl_version, sizeof(g_bl_version), "%s", info->version_string);
+        g_bl_version[sizeof(g_bl_version) - 1] = '\0';
+    }
+#endif
+}
 
 // =============================================================================
 // Remote logging
@@ -708,6 +736,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"ip\":\"%d.%d.%d.%d\","
         "\"hw\":\"%s\","
         "\"fw\":\"%s\","
+        "\"bl_fw\":\"%s\","
         "\"fw_build\":\"%s\","
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
@@ -723,6 +752,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         g_node.static_ip[2], g_node.static_ip[3],
         HARDWARE_MODEL,
         FIRMWARE_VERSION_FULL,
+        g_bl_version,
         FIRMWARE_BUILD_TIMESTAMP,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
@@ -1155,6 +1185,11 @@ int main(void)
     uint8_t ota_fail_reason = (uint8_t)(ota_fail_word & 0xFF);
     uint16_t ota_fail_http  = (uint16_t)((ota_fail_word >> 16) & 0xFFFF);
 
+    // Resolve the bootloader version from its fixed-address descriptor
+    // (or fall back to "unknown") before anything that might want to
+    // log or announce it.
+    resolve_bootloader_version();
+
     // Brief delay for UART to stabilize
     sleep_ms(100);
 
@@ -1162,9 +1197,10 @@ int main(void)
     printf("\n\n");
     printf("****************************************\n");
     printf("* SAINT.OS Node Firmware\n");
-    printf("* Version: %s\n", FIRMWARE_VERSION_FULL);
-    printf("* Built:   %s\n", FIRMWARE_BUILD_TIMESTAMP);
-    printf("* Hardware: %s\n", HARDWARE_MODEL);
+    printf("* Version:    %s\n", FIRMWARE_VERSION_FULL);
+    printf("* Bootloader: %s\n", g_bl_version);
+    printf("* Built:      %s\n", FIRMWARE_BUILD_TIMESTAMP);
+    printf("* Hardware:   %s\n", HARDWARE_MODEL);
 #ifdef SIMULATION
     printf("* Mode:    SIMULATION (UART/UDP)\n");
 #else
@@ -1334,8 +1370,8 @@ int main(void)
             "Recovered from watchdog reset (previous boot crashed)");
     } else {
         boot_log_queue("info",
-            "Boot OK — fw %s, watchdog armed at %d ms",
-            FIRMWARE_VERSION_FULL, WATCHDOG_TIMEOUT_MS);
+            "Boot OK — fw %s, bl %s, watchdog armed at %d ms",
+            FIRMWARE_VERSION_FULL, g_bl_version, WATCHDOG_TIMEOUT_MS);
     }
     // The bootloader sets the OTA-gave-up sentinel when it exhausts
     // its retry budget and falls back to this app. Tell the operator
