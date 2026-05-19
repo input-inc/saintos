@@ -36,6 +36,7 @@
 #ifndef SIMULATION
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
+#include "pico/time.h"
 #endif
 
 // =============================================================================
@@ -117,15 +118,16 @@ static bool    rx_in_stuff = false;  // S.Port byte-stuffing state
 
 // We share a single wire for TX and RX (TX → 1 kΩ → RX, with the
 // sensor's signal pin tied to RX directly). Every byte we transmit
-// loops right back into our own RX FIFO. If we feed that echo into
-// the parser, rx_buf[0] ends up holding our poll's first byte (0x7E
-// for S.Port, 0x08 for FBUS) instead of the sensor's response header,
-// and the parser silently misaligns frame after frame.
-//
-// Track how many echo bytes to swallow next time we read. send_*_poll
-// adds the poll length here, and the read loop in fas100_update drops
-// that many bytes before handing anything to the parser.
-static uint8_t echo_to_discard = 0;
+// loops right back into our own RX FIFO. We drain that echo
+// synchronously inside send_*_poll() — see drain_echo_bytes() — so
+// fas100_update()'s read loop only ever sees genuine sensor response
+// bytes. An earlier version of this driver tracked an asynchronous
+// "echo to discard" counter, but when the main loop ran slow enough
+// for two polls to fire between reads, the FIFO ended up holding
+// [echo_N, response_N, echo_N+1, response_N+1, ...] and the counter
+// happily skipped past response bytes thinking they were echo. The
+// link would survive ~1 s before a single slow main-loop iteration
+// permanently desynced the parser.
 
 // =============================================================================
 // Internal Helpers
@@ -135,8 +137,7 @@ static uint8_t echo_to_discard = 0;
  * Called when init() runs or when the auto-detect state machine
  * switches between probe phases. Also resets the receive accumulator
  * and drains any stale bytes from the RX FIFO so a half-decoded frame
- * (or in-flight echo) from the old baud rate doesn't poison the
- * parser at the new rate. */
+ * from the old baud rate doesn't poison the parser at the new rate. */
 static void apply_active_baud_rate(void)
 {
 #ifndef SIMULATION
@@ -148,7 +149,38 @@ static void apply_active_baud_rate(void)
 #endif
     rx_pos = 0;
     rx_in_stuff = false;
-    echo_to_discard = 0;
+}
+
+/* Drain exactly `n` echo bytes from the RX FIFO with a per-byte
+ * timeout, so a missing/disconnected echo can't hang us forever.
+ * Called immediately after uart_tx_wait_blocking() in send_*_poll(),
+ * when we know the FIFO will hold our just-transmitted bytes. */
+static void drain_echo_bytes(int n)
+{
+#ifndef SIMULATION
+    if (!fas100_uart) return;
+    uint32_t baud = (active_proto == PROTO_FBUS) ? FBUS_BAUD_RATE
+                                                 : SPORT_BAUD_RATE;
+    // Two byte-times of slack per byte (~350 us at 57600, ~45 us at
+    // 460800). Generous enough to absorb sampling jitter on the
+    // stop bit; tight enough that a genuinely-missing echo doesn't
+    // stall the poll loop for long.
+    uint32_t per_byte_timeout_us = (20 * 1000000UL) / baud + 100;
+    for (int i = 0; i < n; i++) {
+        absolute_time_t deadline = make_timeout_time_us(per_byte_timeout_us);
+        while (!uart_is_readable(fas100_uart) && !time_reached(deadline)) {
+            tight_loop_contents();
+        }
+        if (uart_is_readable(fas100_uart)) {
+            (void)uart_getc(fas100_uart);
+        } else {
+            // Echo byte didn't arrive in time. Stop draining — better
+            // to let the parser hunt for a valid frame than to keep
+            // consuming bytes that might be genuine response data.
+            break;
+        }
+    }
+#endif
 }
 
 /* Move to a new phase. Centralized so logging and rx-reset live in
@@ -186,7 +218,8 @@ static void send_sport_poll(void)
         SPORT_FAS100_PHYSICAL_ID
     };
     uart_write_blocking(fas100_uart, frame, FAS100_POLL_FRAME_SIZE);
-    echo_to_discard += FAS100_POLL_FRAME_SIZE;
+    uart_tx_wait_blocking(fas100_uart);
+    drain_echo_bytes(FAS100_POLL_FRAME_SIZE);
 #endif
 }
 
@@ -200,7 +233,8 @@ static void send_fbus_poll(void)
         FBUS_FRAME_ID_DATA,
     };
     uart_write_blocking(fas100_uart, frame, FBUS_POLL_FRAME_SIZE);
-    echo_to_discard += FBUS_POLL_FRAME_SIZE;
+    uart_tx_wait_blocking(fas100_uart);
+    drain_echo_bytes(FBUS_POLL_FRAME_SIZE);
 #endif
 }
 
@@ -455,29 +489,16 @@ void fas100_update(void)
 
     // --- 1) Pump received bytes through the active protocol parser. ---
     //
-    // Drop echo bytes (our own outgoing polls looped back via the
-    // shared TX/RX wire) before they reach the parser. echo_to_discard
-    // is bumped by send_*_poll. Cap it defensively so a single weird
-    // event (sensor not echoing back, RX wire loose) can't make us
-    // permanently swallow incoming data.
+    // Echo is already drained synchronously inside send_*_poll(), so
+    // anything in the FIFO here is genuine sensor response data.
 #ifndef SIMULATION
     while (fas100_uart && uart_is_readable(fas100_uart)) {
         uint8_t raw = uart_getc(fas100_uart);
-        if (echo_to_discard > 0) {
-            echo_to_discard--;
-            continue;
-        }
         if (active_proto == PROTO_FBUS) {
             fbus_feed_byte(raw);
         } else {
             sport_feed_byte(raw);
         }
-    }
-    if (echo_to_discard > FBUS_POLL_FRAME_SIZE * 4) {
-        // Almost certainly we're not seeing our own echo anymore (RX
-        // wire problem?). Clear the counter so genuine incoming bytes
-        // can flow again — the parser will just hunt for valid frames.
-        echo_to_discard = 0;
     }
 #endif
 
