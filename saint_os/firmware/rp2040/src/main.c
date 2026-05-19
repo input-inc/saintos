@@ -236,6 +236,66 @@ void saint_log_publish(const char* level, const char* fmt, ...)
     (void)rcl_publish(&log_pub, &log_msg, NULL);
 }
 
+// -----------------------------------------------------------------------------
+// Deferred boot-status logging
+// -----------------------------------------------------------------------------
+//
+// Why: the server creates the per-node /saint/nodes/<id>/log subscriber
+// LAZILY, on first receipt of an announcement (server_node.py
+// _on_node_announcement → _ensure_node_log_subscriber). If we
+// saint_log_publish() immediately after init_micro_ros(), it goes out
+// before any announcement has been published, so the server has no
+// subscriber yet and the message is silently dropped. Boot context
+// ("Boot OK", "Recovered from watchdog reset", "OTA failed after
+// retries: ...") is exactly the information you most need in the
+// Logs tab — so we can't lose it.
+//
+// Fix: queue those first lines in RAM and replay them from the
+// announce-timer callback once at least two announcements have gone
+// out. That window (≥1 s) is enough for the server to create its
+// subscription on receipt of the first announce.
+#define BOOT_LOG_MAX        5
+#define BOOT_LOG_LEVEL_LEN  8
+#define BOOT_LOG_TEXT_LEN   200
+typedef struct {
+    char level[BOOT_LOG_LEVEL_LEN];
+    char text[BOOT_LOG_TEXT_LEN];
+} boot_log_entry_t;
+static boot_log_entry_t g_boot_log[BOOT_LOG_MAX];
+static size_t           g_boot_log_count   = 0;
+static bool             g_boot_log_flushed = false;
+static unsigned         g_announce_count   = 0;
+
+static void boot_log_queue(const char* level, const char* fmt, ...)
+{
+    // Always echo to UART so a serial dev console still sees it
+    // immediately, even before the ROS-side replay happens.
+    char text[BOOT_LOG_TEXT_LEN];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    printf("[%s] (pending) %s\n", level, text);
+
+    if (g_boot_log_count >= BOOT_LOG_MAX) return;
+    boot_log_entry_t* e = &g_boot_log[g_boot_log_count++];
+    snprintf(e->level, sizeof(e->level), "%s", level);
+    snprintf(e->text,  sizeof(e->text),  "%s", text);
+}
+
+static void boot_log_flush_if_due(void)
+{
+    if (g_boot_log_flushed) return;
+    // Need ≥2 announcements: the first one triggers server-side
+    // subscription creation; from the second onward we know the
+    // subscriber is up.
+    if (g_announce_count < 2) return;
+    for (size_t i = 0; i < g_boot_log_count; i++) {
+        saint_log_publish(g_boot_log[i].level, "%s", g_boot_log[i].text);
+    }
+    g_boot_log_flushed = true;
+}
+
 // =============================================================================
 // Subscription Callbacks
 // =============================================================================
@@ -691,6 +751,10 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     rcl_ret_t ret = rcl_publish(&announcement_pub, &announcement_msg, NULL);
     if (ret == RCL_RET_OK) {
         mark_agent_communication();
+        // First announcement triggers server-side log subscription;
+        // once we're past it, deferred boot-status lines can be sent.
+        if (g_announce_count < 1000) g_announce_count++;
+        boot_log_flush_if_due();
     } else {
         printf("Announce publish failed: %d\n", ret);
     }
@@ -1251,16 +1315,17 @@ int main(void)
         }
     }
 
-    // Now that the log publisher is alive, surface the boot context.
-    // Critical: if the previous boot crashed and triggered the
-    // watchdog, the line below pairs with the per-node Logs tab's
-    // history so the operator can see what the node was doing
-    // immediately before the reset.
+    // Now that the log publisher is alive, queue the boot context.
+    // These lines fire BEFORE the first announcement goes out, so the
+    // server hasn't yet created its per-node log subscriber and a
+    // direct saint_log_publish() would be dropped. Stage them via
+    // boot_log_queue(); the announce-timer callback replays them once
+    // the subscription is established (see boot_log_flush_if_due).
     if (boot_after_watchdog_timeout) {
-        saint_log_publish("error",
+        boot_log_queue("error",
             "Recovered from watchdog reset (previous boot crashed)");
     } else {
-        saint_log_publish("info",
+        boot_log_queue("info",
             "Boot OK — fw %s, watchdog armed at %d ms",
             FIRMWARE_VERSION_FULL, WATCHDOG_TIMEOUT_MS);
     }
@@ -1273,12 +1338,12 @@ int main(void)
     if (boot_after_ota_giveup) {
         const char* reason = ota_fail_reason_str(ota_fail_reason);
         if (ota_fail_reason == 5 /* HTTP_STATUS */ && ota_fail_http) {
-            saint_log_publish("error",
+            boot_log_queue("error",
                 "OTA failed after retries: %s (HTTP %u). "
                 "Running previous firmware.",
                 reason, (unsigned)ota_fail_http);
         } else {
-            saint_log_publish("error",
+            boot_log_queue("error",
                 "OTA failed after retries: %s. Running previous firmware.",
                 reason);
         }
@@ -1289,12 +1354,12 @@ int main(void)
         // Node was previously adopted and has saved config
         node_set_state(NODE_STATE_ACTIVE);
         led_set_state(NODE_STATE_ACTIVE);
-        saint_log_publish("info", "Restored from saved config (ACTIVE)");
+        boot_log_queue("info", "Restored from saved config (ACTIVE)");
     } else {
         // No saved config - enter unadopted state
         node_set_state(NODE_STATE_UNADOPTED);
         led_set_state(NODE_STATE_UNADOPTED);
-        saint_log_publish("info", "Waiting for adoption (UNADOPTED)");
+        boot_log_queue("info", "Waiting for adoption (UNADOPTED)");
     }
     printf("========================================\n");
 
