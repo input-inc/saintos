@@ -5,7 +5,8 @@
  * card per peripheral, with a widget for every `dir: "out"` channel.
  * Slider for analog, toggle for digital, color picker for rgb. Values
  * round-trip via `control / set_channel_value`, keyed on
- * (peripheral_id, channel_id) — the server translates to firmware GPIO.
+ * (peripheral_id, channel_id). The server forwards the channel-addressed
+ * write to the firmware verbatim — no GPIO translation in the server.
  *
  * The card list is built from the configured catalog, not from runtime
  * hardware probes, so controls are present even before the peripheral
@@ -18,7 +19,9 @@ class StateControlManager {
         this.catalog = null;            // { peripheral_types: [...] }
         this.peripherals = [];          // PeripheralInstance[]
         this.peripheralConnected = {};  // peripheral_id -> bool
+        this.syncStatus = 'unknown';    // unknown | pending | synced | error
         this.values = new Map();        // "peripheral_id/channel_id" -> {value, ts}
+        this._touchedPeripherals = new Set();  // peripherals that have reported >=1 value
         this._activeControl = null;     // suppress live updates while dragging
         this._subscribed = null;
         this._throttleTimers = {};
@@ -39,10 +42,20 @@ class StateControlManager {
     }
 
     async setNode(nodeId, nodeInfo) {
+        // Same node? Just refresh peripheralConnected + re-render header
+        // badges, but don't tear down subscriptions or wipe state.
+        if (nodeId && nodeId === this.nodeId) {
+            this.peripheralConnected = (nodeInfo && nodeInfo.peripheral_connected) || this.peripheralConnected;
+            this._render();
+            return;
+        }
+
         await this._unsubscribe();
         this.nodeId = nodeId || null;
         this.values.clear();
+        this._touchedPeripherals.clear();
         this.peripheralConnected = (nodeInfo && nodeInfo.peripheral_connected) || {};
+        this.syncStatus = 'unknown';
 
         const container = document.getElementById('peripheral-controls-container');
         if (container) {
@@ -52,7 +65,7 @@ class StateControlManager {
 
         const ws = window.saintWS;
         try {
-            await ws.subscribe([`pin_state/${nodeId}`], 5);
+            await ws.subscribe([`pin_state/${nodeId}`, `sync_status/${nodeId}`], 5);
             this._subscribed = `pin_state/${nodeId}`;
             const [catalog, periph] = await Promise.all([
                 this._ensureCatalog(),
@@ -60,6 +73,7 @@ class StateControlManager {
             ]);
             this.catalog = catalog;
             this.peripherals = (periph && periph.peripherals) || [];
+            this.syncStatus = (periph && periph.sync_status) || 'unknown';
             this._render();
         } catch (err) {
             console.error('StateControlManager: failed to load:', err);

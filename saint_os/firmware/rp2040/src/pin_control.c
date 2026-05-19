@@ -407,6 +407,129 @@ void pin_control_estop(void)
     printf("ESTOP: Complete\n");
 }
 
+// Pull a quoted-string field value out of a JSON buffer. Returns true on
+// success; `out` is null-terminated. Mirrors extract_string_field() in
+// pin_config.c — duplicated rather than exposed because it's a small
+// helper and giving it a public home would mean reshuffling headers.
+static bool extract_str_field(const char* json, const char* key,
+                              char* out, size_t out_size)
+{
+    const char* p = strstr(json, key);
+    if (!p) return false;
+    p = strchr(p, ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '"') p++;
+    size_t n = 0;
+    while (*p && *p != '"' && n < out_size - 1) {
+        out[n++] = *p++;
+    }
+    out[n] = '\0';
+    return n > 0;
+}
+
+// Resolve a (mode, channel_name) into the firmware channel offset within
+// the peripheral's virtual-GPIO slot. For mode-handled peripherals
+// (PWM, servo, digital_out) there's only one channel — return 0
+// regardless of name. For peripheral_driver_t-backed peripherals, the
+// offset must match the driver's internal layout.
+static int channel_offset_for(pin_mode_t mode, const char* channel)
+{
+    switch (mode) {
+        case PIN_MODE_ROBOCLAW_MOTOR:
+            if (strcmp(channel, "motor")   == 0) return 0;
+            if (strcmp(channel, "encoder") == 0) return 1;
+            if (strcmp(channel, "voltage") == 0) return 2;
+            if (strcmp(channel, "current") == 0) return 3;
+            if (strcmp(channel, "temp")    == 0) return 4;
+            return -1;
+        case PIN_MODE_SYREN_MOTOR:
+            if (strcmp(channel, "motor") == 0) return 0;
+            return -1;
+        case PIN_MODE_FAS100_SENSOR:
+            if (strcmp(channel, "amps")  == 0) return 0;
+            if (strcmp(channel, "volts") == 0) return 1;
+            if (strcmp(channel, "temp1") == 0) return 2;
+            if (strcmp(channel, "temp2") == 0) return 3;
+            return -1;
+        case PIN_MODE_PATHFINDER_BMS:
+            if (strcmp(channel, "pack_voltage") == 0) return 0;
+            if (strcmp(channel, "current")      == 0) return 1;
+            if (strcmp(channel, "soc")          == 0) return 2;
+            if (strcmp(channel, "temp_1")       == 0) return 4;
+            if (strcmp(channel, "temp_2")       == 0) return 5;
+            return -1;
+        case PIN_MODE_PWM:
+        case PIN_MODE_SERVO:
+        case PIN_MODE_DIGITAL_OUT:
+        case PIN_MODE_DIGITAL_IN:
+        case PIN_MODE_ADC:
+            // Single-channel peripherals — channel name is informational.
+            return 0;
+        default:
+            return -1;
+    }
+}
+
+// Dispatch a `set_channel` write by walking pin_config to find the
+// peripheral's slot, then computing the target GPIO from its mode +
+// channel offset. The wire format is operator-visible names; the
+// (peripheral_id, channel) → GPIO translation lives here in the firmware.
+static bool apply_set_channel(const char* json)
+{
+    char peripheral_id[PIN_CONFIG_MAX_NAME_LEN];
+    char channel_id[PIN_CONFIG_MAX_NAME_LEN];
+
+    if (!extract_str_field(json, "\"peripheral\"", peripheral_id, sizeof(peripheral_id))) {
+        printf("Pin control: set_channel missing 'peripheral'\n");
+        return false;
+    }
+    if (!extract_str_field(json, "\"channel\"", channel_id, sizeof(channel_id))) {
+        printf("Pin control: set_channel missing 'channel'\n");
+        return false;
+    }
+
+    const char* value_str = strstr(json, "\"value\"");
+    if (!value_str) return false;
+    value_str = strchr(value_str, ':');
+    if (!value_str) return false;
+    value_str++;
+    while (*value_str == ' ') value_str++;
+    float value = (float)atof(value_str);
+
+    // Find the smallest GPIO whose logical_name matches the peripheral.
+    // For multi-channel peripherals that's the base slot — offsets are
+    // applied on top of it.
+    uint8_t count = 0;
+    const pin_config_t* configs = pin_config_get_all(&count);
+    int base_gpio = -1;
+    pin_mode_t mode = PIN_MODE_UNCONFIGURED;
+    for (uint8_t i = 0; i < count; i++) {
+        if (configs[i].mode == PIN_MODE_UNCONFIGURED) continue;
+        if (strcmp(configs[i].logical_name, peripheral_id) != 0) continue;
+        if (base_gpio < 0 || configs[i].gpio < base_gpio) {
+            base_gpio = configs[i].gpio;
+            mode = configs[i].mode;
+        }
+    }
+    if (base_gpio < 0) {
+        printf("Pin control: peripheral '%s' not configured\n", peripheral_id);
+        return false;
+    }
+
+    int offset = channel_offset_for(mode, channel_id);
+    if (offset < 0) {
+        printf("Pin control: peripheral '%s' has no channel '%s'\n",
+               peripheral_id, channel_id);
+        return false;
+    }
+
+    uint8_t target_gpio = (uint8_t)(base_gpio + offset);
+    printf("Pin control: set_channel %s/%s = %.3f (GPIO %d)\n",
+           peripheral_id, channel_id, value, target_gpio);
+    return pin_control_set_value(target_gpio, value);
+}
+
 bool pin_control_apply_json(const char* json, size_t json_len)
 {
     if (!json || json_len == 0) return false;
@@ -425,7 +548,15 @@ bool pin_control_apply_json(const char* json, size_t json_len)
         return false;
     }
 
-    // Check for set_pin action
+    // Channel-addressed write: operator names go through verbatim from
+    // the server; firmware handles the (peripheral, channel) lookup.
+    if (strstr(json, "\"action\":\"set_channel\"") ||
+        strstr(json, "\"action\": \"set_channel\"")) {
+        return apply_set_channel(json);
+    }
+
+    // Legacy GPIO-addressed write. Kept while existing call sites (eg.
+    // the GPIO-keyed `set_pin_value` WS action) still use it.
     if (!strstr(json, "\"action\":\"set_pin\"") &&
         !strstr(json, "\"action\": \"set_pin\"")) {
         return false;

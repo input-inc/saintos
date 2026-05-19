@@ -499,6 +499,33 @@ class SaintServerNode(Node):
         pub.publish(msg)
         self.get_logger().debug(f'Sent control to {node_id}: GPIO {gpio} = {value}')
 
+    def send_channel_command(self, node_id: str, peripheral_id: str,
+                             channel_id: str, value: float):
+        """Send channel-addressed control to a node via ROS2.
+
+        Operator-visible names go on the wire — the firmware does its
+        own (peripheral_id, channel_id) → driver dispatch. The server
+        does no GPIO translation; that indirection is being deleted.
+        """
+        import json
+
+        pub = self._ensure_node_control_publisher(node_id)
+        self._ensure_node_state_subscriber(node_id)
+
+        control_data = {
+            "action": "set_channel",
+            "peripheral": peripheral_id,
+            "channel": channel_id,
+            "value": value,
+        }
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+
+        pub.publish(msg)
+        self.get_logger().debug(
+            f'Sent channel control to {node_id}: {peripheral_id}/{channel_id} = {value}')
+
     def send_factory_reset_command(self, node_id: str):
         """Send factory reset command to a node via ROS2.
 
@@ -1023,6 +1050,10 @@ class SaintServerNode(Node):
                 )
                 self.web_server.ws_handler.set_send_control_callback(
                     lambda node_id, gpio, value: self.send_control_command(node_id, gpio, value)
+                )
+                self.web_server.ws_handler.set_send_channel_callback(
+                    lambda node_id, peripheral_id, channel_id, value:
+                        self.send_channel_command(node_id, peripheral_id, channel_id, value)
                 )
                 self.web_server.ws_handler.set_firmware_update_callback(
                     lambda node_id, simulation, force: self.send_firmware_update_command(node_id, simulation, force)

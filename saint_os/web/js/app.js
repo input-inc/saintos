@@ -1333,14 +1333,26 @@ class SaintApp {
                 await peripheralManager.loadNodeData(this.currentNodeId, this.currentNodeInfo);
             }
 
-            // Point the Logs + Live tabs at this node so they're ready
-            // when the operator clicks over. Each setNode() call also
+            // Point the Logs + Live + State tabs at this node so they're
+            // ready when the operator clicks over. Each setNode() call also
             // (re)subscribes to its server topic.
             if (typeof window.nodeLogsManager !== 'undefined') {
                 window.nodeLogsManager.setNode(this.currentNodeId);
             }
             if (typeof window.nodeLiveManager !== 'undefined') {
                 window.nodeLiveManager.setNode(this.currentNodeId);
+            }
+            if (typeof window.stateControlManager !== 'undefined') {
+                window.stateControlManager.setNode(this.currentNodeId, this.currentNodeInfo);
+            }
+
+            // If the State tab happens to be the currently-active tab,
+            // refresh its sidebar (status, count) — setNode() above
+            // handles the controls grid.
+            const stateTab = document.getElementById('node-tab-state');
+            if (stateTab && !stateTab.classList.contains('hidden')) {
+                const statusEl = document.getElementById('state-node-status');
+                if (statusEl) statusEl.textContent = this.currentNodeInfo.online ? 'Online' : 'Offline';
             }
 
             // Start periodic refresh for live data

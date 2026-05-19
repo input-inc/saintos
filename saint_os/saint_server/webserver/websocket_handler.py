@@ -147,6 +147,11 @@ class WebSocketHandler:
         # Callback for sending control commands to nodes (set by server_node)
         self._send_control_callback: Optional[Callable[[str, int, float], None]] = None
 
+        # Callback for sending channel-addressed control to nodes (set by server_node).
+        # Signature: (node_id, peripheral_id, channel_id, value) -> None.
+        self._send_channel_callback: Optional[
+            Callable[[str, str, str, float], None]] = None
+
         # Callback for triggering firmware update (set by server_node)
         # Signature: (node_id: str, simulation: bool) -> None
         self._firmware_update_callback: Optional[Callable[[str, bool, bool], None]] = None
@@ -208,6 +213,10 @@ class WebSocketHandler:
     def set_send_control_callback(self, callback: Callable[[str, int, float], None]):
         """Set callback for sending control commands to nodes. Callback takes (node_id, gpio, value)."""
         self._send_control_callback = callback
+
+    def set_send_channel_callback(self, callback: Callable[[str, str, str, float], None]):
+        """Set callback for channel-addressed control. Takes (node_id, peripheral_id, channel_id, value)."""
+        self._send_channel_callback = callback
 
     def set_firmware_update_callback(self, callback: Callable[[str, bool, bool], None]):
         """Set callback for triggering firmware update. Callback takes (node_id, simulation, force)."""
@@ -1270,39 +1279,37 @@ class WebSocketHandler:
             except (ValueError, TypeError):
                 return {"status": "error", "message": "Invalid value type"}
 
-            target = self.state_manager.resolve_channel_target(
+            target = self.state_manager.lookup_channel(
                 node_id, peripheral_id, channel_id)
             if not target:
                 return {"status": "error",
-                        "message": f"Channel {peripheral_id}/{channel_id} not addressable"}
+                        "message": f"Channel {peripheral_id}/{channel_id} not found on node"}
             if target["direction"] != "out":
                 return {"status": "error",
                         "message": f"Channel {peripheral_id}/{channel_id} is not writable"}
 
-            gpio = target["gpio"]
-            throttle_key = (node_id, gpio)
+            throttle_key = (node_id, peripheral_id, channel_id)
             now = time.time() * 1000
             last_send = self._control_throttle.get(throttle_key, 0)
             is_neutral = is_neutral_value(value)
 
-            self.state_manager.update_pin_desired(node_id, gpio, value)
-
             if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
-                await self._broadcast_pin_state(node_id)
                 self.log('debug', f'[Control] THROTTLED {node_id} '
                                   f'{peripheral_id}/{channel_id}: {value:.3f}')
-                return {"status": "ok", "data": {"throttled": True, "gpio": gpio}}
+                return {"status": "ok", "data": {"throttled": True}}
 
-            if self._send_control_callback:
-                self._send_control_callback(node_id, gpio, value)
+            if self._send_channel_callback:
+                self._send_channel_callback(node_id, peripheral_id, channel_id, value)
                 self._control_throttle[throttle_key] = now
                 bypass_note = ' [STOP]' if is_neutral else ''
                 self.log('info', f'[Control] SENT{bypass_note} {node_id} '
-                                 f'{peripheral_id}/{channel_id} (GPIO {gpio}): {value:.3f}')
+                                 f'{peripheral_id}/{channel_id}: {value:.3f}')
+            else:
+                return {"status": "error",
+                        "message": "Channel-addressed control not wired to firmware"}
 
-            await self._broadcast_pin_state(node_id)
             return {"status": "ok",
-                    "data": {"throttled": False, "gpio": gpio, "value": value}}
+                    "data": {"throttled": False, "value": value}}
 
         elif action == 'get_runtime_state':
             node_id = params.get('node_id')
