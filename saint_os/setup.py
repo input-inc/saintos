@@ -33,17 +33,28 @@ def get_data_files():
     # Add web files
     web_dir = os.path.join(os.path.dirname(__file__), 'web')
     if os.path.isdir(web_dir):
-        # HTML files
+        # Legacy vanilla UI (kept reachable as /legacy.html during the Vue
+        # migration). Drop these globs once the legacy/ dir is deleted.
         html_files = glob(os.path.join(web_dir, '*.html'))
         if html_files:
             data_files.append((f'share/{package_name}/web', html_files))
-
-        # JavaScript files
         js_dir = os.path.join(web_dir, 'js')
         if os.path.isdir(js_dir):
             js_files = glob(os.path.join(js_dir, '*.js'))
             if js_files:
                 data_files.append((f'share/{package_name}/web/js', js_files))
+
+        # Vite build output — the production UI. Walk recursively to
+        # preserve the assets/ subdir Vite emits. Built on the host (or
+        # CI) before colcon runs, see web/MIGRATION.md.
+        dist_dir = os.path.join(web_dir, 'dist')
+        if os.path.isdir(dist_dir):
+            for root, _dirs, files in os.walk(dist_dir):
+                if not files:
+                    continue
+                rel = os.path.relpath(root, web_dir)        # "dist" or "dist/assets"
+                bucket = f'share/{package_name}/web/{rel}'
+                data_files.append((bucket, [os.path.join(root, f) for f in files]))
 
     return data_files
 

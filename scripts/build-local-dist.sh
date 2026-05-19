@@ -25,6 +25,9 @@
 #   --skip-firmware-build Use whatever firmware is already staged under
 #                         saint_os/resources/firmware/ — fastest server-only iteration
 #   --skip-firmware       Don't stage any firmware (smallest tarball, server-only)
+#   --skip-web-build      Skip `npm run build` — reuse whatever's already in
+#                         saint_os/web/dist/. Speeds up iteration when only
+#                         Python or firmware changed.
 #   --clean               Remove the local build dirs (_ros2/, _debs/, install/) first
 #   -h, --help            Show this help
 #
@@ -32,6 +35,7 @@
 #   - docker (with linux/arm64 platform support — buildx + qemu on Intel)
 #   - curl, tar, sha256sum / shasum
 #   - python3
+#   - node + npm (skipped only with --skip-web-build)
 #   - gh (only with --fetch-firmware)
 
 set -euo pipefail
@@ -56,6 +60,7 @@ REFETCH_ROS2=0
 FETCH_FIRMWARE=0
 SKIP_FIRMWARE=0
 SKIP_FIRMWARE_BUILD=0
+SKIP_WEB_BUILD=0
 CLEAN=0
 
 while (( "$#" )); do
@@ -66,8 +71,9 @@ while (( "$#" )); do
         --fetch-firmware) FETCH_FIRMWARE=1; shift ;;
         --skip-firmware) SKIP_FIRMWARE=1; shift ;;
         --skip-firmware-build) SKIP_FIRMWARE_BUILD=1; shift ;;
+        --skip-web-build) SKIP_WEB_BUILD=1; shift ;;
         --clean) CLEAN=1; shift ;;
-        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -366,6 +372,39 @@ fi
 rm -rf _debs
 mkdir -p _debs
 cp -a "$DEB_CACHE_DIR"/. _debs/
+
+# --- web frontend (Vite build) ---------------------------------------------
+#
+# Runs on the host. The output is platform-independent static assets, so
+# there's no reason to do this inside the arm64 Debian container. setup.py
+# globs saint_os/web/dist/ into the colcon install tree, so this step has
+# to complete before the colcon container runs below.
+
+if (( SKIP_WEB_BUILD )); then
+    if [[ -d saint_os/web/dist && -f saint_os/web/dist/index.html ]]; then
+        log "Reusing existing saint_os/web/dist/ (--skip-web-build)"
+    else
+        warn "--skip-web-build set but saint_os/web/dist/ is empty —"
+        warn "the tarball will ship without the Vue UI (legacy.html only)."
+    fi
+else
+    command -v node >/dev/null || die "node is required (or pass --skip-web-build)"
+    command -v npm  >/dev/null || die "npm is required (or pass --skip-web-build)"
+    log "Building web/dist via Vite"
+    ( cd saint_os/web
+      # Use `npm ci` when a lockfile exists for reproducible installs;
+      # fall back to `npm install` on first build so the tree can be set up.
+      if [[ -f package-lock.json ]]; then
+          npm ci --no-audit --no-fund
+      else
+          npm install --no-audit --no-fund
+      fi
+      npm run build
+    )
+    [[ -f saint_os/web/dist/index.html ]] \
+        || die "Vite build did not produce saint_os/web/dist/index.html"
+    log "Web build size: $(du -sh saint_os/web/dist | cut -f1)"
+fi
 
 # --- build saint_os against bundled ROS2 -----------------------------------
 

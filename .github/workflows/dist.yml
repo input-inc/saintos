@@ -283,6 +283,30 @@ jobs:
           CONTAINER_EOF
 
       # ------------------------------------------------------------------------
+      # Build the Vue web UI on the runner. Output is platform-independent
+      # static assets — no reason to drag npm/node into the arm64 colcon
+      # container. setup.py globs saint_os/web/dist/ into the install tree,
+      # so this has to land before the colcon step below.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: saint_os/web/package-lock.json
+
+      - name: Build web UI (Vite)
+        working-directory: saint_os/web
+        run: |
+          set -eo pipefail
+          if [[ -f package-lock.json ]]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          npm run build
+          test -f dist/index.html
+          echo "Web build size: $(du -sh dist | cut -f1)"
+
+      # ------------------------------------------------------------------------
       # Build saint_os inside the same Debian Bookworm environment the bundled
       # ROS2 was built against — this guarantees libstdc++, libpython, and
       # rosidl typesupport ABIs all match.
