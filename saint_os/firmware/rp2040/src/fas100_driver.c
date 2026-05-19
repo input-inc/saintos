@@ -1,9 +1,24 @@
 /**
  * SAINT.OS Node Firmware - FrSky FAS100 ADV Sensor Driver (RP2040)
  *
- * Uses Pico SDK UART with GPIO inversion for S.Port half-duplex communication.
- * Polls the FAS100 at a configurable interval and parses current, voltage,
- * and temperature telemetry responses.
+ * The FAS100 ADV speaks two protocols and auto-selects one at power-on
+ * based on what it sees on the bus: S.Port (57600 baud, slow LED blink)
+ * or FBUS (460800 baud, fast LED blink). Operators can't pick a mode —
+ * the sensor decides. So this driver supports BOTH and probes for the
+ * active one at startup, alternating ~2 s between each baud rate until
+ * one of them responds, then locking to that protocol.
+ *
+ * If responses stop for a while after locking we drop back to probing,
+ * so a hot-unplug/replug of the sensor (which may come back in the
+ * other mode) recovers without a reboot.
+ *
+ * Both protocols are inverted half-duplex UART. Frame parsing differs:
+ *   - S.Port uses 0x7E as start-of-poll and 0x7D byte-stuffing on the
+ *     response payload.
+ *   - FBUS has an explicit length byte and no stuffing; frames are a
+ *     fixed 10 bytes [0x08, sensor_id, 0x10, data_id(2), value(4), crc].
+ * The sensor_id, data IDs, units, and CRC algorithm are the same in
+ * both protocols, so the channel-value storage is shared.
  */
 
 #include "fas100_driver.h"
@@ -12,6 +27,7 @@
 #include "platform.h"
 #include "saint_log.h"
 #include "uart_pin_pairs.h"
+#include "fbus_protocol.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -44,8 +60,35 @@ static uint8_t fas100_active_tx_pin = 0xFF;     // 0xFF = "no UART bound yet"
 static uint8_t fas100_active_rx_pin = 0xFF;
 static uint8_t fas100_active_uart   = 0xFF;
 
-// Response buffer (enough for one de-stuffed frame)
+// Response buffer: must hold the larger of an FBUS frame (10 bytes) or
+// a de-stuffed S.Port frame (8 bytes). Round up.
 #define FAS100_RX_BUF_SIZE   16
+
+// =============================================================================
+// Protocol state
+// =============================================================================
+
+typedef enum {
+    PROTO_SPORT = 0,
+    PROTO_FBUS  = 1,
+} fas100_protocol_t;
+
+typedef enum {
+    PHASE_PROBE_SPORT,  // listening at 57600, sending S.Port polls
+    PHASE_PROBE_FBUS,   // listening at 460800, sending FBUS polls
+    PHASE_LOCKED,       // a protocol responded, stay with it
+} fas100_phase_t;
+
+// Time spent on each baud rate during probing before switching. The
+// FAS100's response latency to a poll is well under 10 ms; 1500 ms is
+// generous enough that intermittent wiring still gets at least a
+// couple of poll attempts per probe cycle.
+#define FAS100_PROBE_MS         1500
+
+// If we lose responses for this long while locked, drop back to
+// probing. Lets a hot-replug come up cleanly even if the new sensor
+// powers up in the other protocol mode.
+#define FAS100_LOST_LINK_MS     4000
 
 // =============================================================================
 // State
@@ -56,7 +99,12 @@ static uint8_t poll_interval_ms = FAS100_DEFAULT_POLL_INTERVAL_MS;
 static uint32_t last_poll_time = 0;
 static bool sensor_responded = false;
 
-// Latest sensor values
+static fas100_protocol_t active_proto = PROTO_SPORT;
+static fas100_phase_t    phase            = PHASE_PROBE_SPORT;
+static uint32_t          phase_started_ms = 0;
+static uint32_t          last_response_ms = 0;
+
+// Latest sensor values (shared between protocols — same data IDs/units)
 static float current_amps = 0.0f;
 static float voltage_volts = 0.0f;
 static float temp1_celsius = 0.0f;
@@ -65,15 +113,56 @@ static float temp2_celsius = 0.0f;
 // Receive buffer for accumulating response bytes
 static uint8_t rx_buf[FAS100_RX_BUF_SIZE];
 static uint8_t rx_pos = 0;
+static bool    rx_in_stuff = false;  // S.Port byte-stuffing state
 
 // =============================================================================
 // Internal Helpers
 // =============================================================================
 
-/**
- * Send a poll frame: [0x7E, physical_id]
- */
-static void send_poll(void)
+/* Apply the baud rate that matches active_proto to the bound UART.
+ * Called when init() runs or when the auto-detect state machine
+ * switches between probe phases. Also resets the receive accumulator
+ * so a half-decoded frame from the old baud rate doesn't poison the
+ * parser at the new rate. */
+static void apply_active_baud_rate(void)
+{
+#ifndef SIMULATION
+    if (!fas100_uart) return;
+    uint32_t baud = (active_proto == PROTO_FBUS) ? FBUS_BAUD_RATE
+                                                 : SPORT_BAUD_RATE;
+    uart_set_baudrate(fas100_uart, baud);
+#endif
+    rx_pos = 0;
+    rx_in_stuff = false;
+}
+
+/* Move to a new phase. Centralized so logging and rx-reset live in
+ * one place — the state machine in fas100_update() just calls this. */
+static void enter_phase(fas100_phase_t new_phase, fas100_protocol_t new_proto)
+{
+    if (new_phase != PHASE_LOCKED) {
+        sensor_responded = false;
+    }
+    if (new_proto != active_proto) {
+        active_proto = new_proto;
+        apply_active_baud_rate();
+    } else {
+        rx_pos = 0;
+        rx_in_stuff = false;
+    }
+    phase = new_phase;
+    phase_started_ms = PLATFORM_MILLIS();
+
+    if (new_phase == PHASE_PROBE_SPORT) {
+        saint_log_publish("info",
+            "FAS100: probing S.Port @ %d baud", SPORT_BAUD_RATE);
+    } else if (new_phase == PHASE_PROBE_FBUS) {
+        saint_log_publish("info",
+            "FAS100: probing FBUS @ %d baud", FBUS_BAUD_RATE);
+    }
+}
+
+static void send_sport_poll(void)
 {
 #ifndef SIMULATION
     if (!fas100_uart) return;
@@ -85,54 +174,41 @@ static void send_poll(void)
 #endif
 }
 
-/**
- * De-stuff a byte from the S.Port response stream.
- * Returns true if a valid byte was produced, false if waiting for more data.
- */
-static bool destuff_byte(uint8_t raw, uint8_t* out, bool* in_stuff)
+static void send_fbus_poll(void)
 {
-    if (*in_stuff) {
-        *out = raw ^ SPORT_STUFF_MASK;
-        *in_stuff = false;
-        return true;
-    }
-    if (raw == SPORT_STUFF_MARKER) {
-        *in_stuff = true;
-        return false;
-    }
-    *out = raw;
-    return true;
+#ifndef SIMULATION
+    if (!fas100_uart) return;
+    uint8_t frame[FBUS_POLL_FRAME_SIZE] = {
+        FBUS_LEN_BYTE,
+        FBUS_FAS100_SENSOR_ID,
+        FBUS_FRAME_ID_DATA,
+    };
+    uart_write_blocking(fas100_uart, frame, FBUS_POLL_FRAME_SIZE);
+#endif
 }
 
-/**
- * Parse a complete de-stuffed response frame.
- * Frame format: [header(1)] [data_id_lo(1)] [data_id_hi(1)] [val0..val3(4)] [crc(1)]
- */
-static void parse_response(const uint8_t* frame, uint8_t len)
+static void send_poll_for_active_proto(void)
 {
-    if (len < FAS100_RESPONSE_FRAME_SIZE) return;
+    if (active_proto == PROTO_FBUS) {
+        send_fbus_poll();
+    } else {
+        send_sport_poll();
+    }
+}
 
-    // Verify header byte
-    if (frame[0] != SPORT_DATA_HEADER) return;
-
-    // Verify CRC over bytes 0..6 (header + data_id + value)
-    uint8_t expected_crc = sport_crc_calculate(frame, 7);
-    if (frame[7] != expected_crc) return;
-
-    // Extract data ID (16-bit little-endian)
-    uint16_t data_id = (uint16_t)frame[1] | ((uint16_t)frame[2] << 8);
-
-    // Extract value (32-bit little-endian)
-    uint32_t value = (uint32_t)frame[3]
-                   | ((uint32_t)frame[4] << 8)
-                   | ((uint32_t)frame[5] << 16)
-                   | ((uint32_t)frame[6] << 24);
-
+/* Update channel storage from a (data_id, raw value) pair. Both
+ * S.Port and FBUS use the same IDs and scaling — only the framing
+ * differs — so the dispatch table here is shared. */
+static void store_telemetry(uint16_t data_id, uint32_t value)
+{
     bool was_disconnected = !sensor_responded;
     sensor_responded = true;
+    last_response_ms = PLATFORM_MILLIS();
     if (was_disconnected) {
         saint_log_publish("info",
-            "FAS100: first response received (data_id=0x%04x)", data_id);
+            "FAS100: first %s response (data_id=0x%04x)",
+            active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
+            data_id);
     }
 
     switch (data_id) {
@@ -151,6 +227,108 @@ static void parse_response(const uint8_t* frame, uint8_t len)
         default:
             break;
     }
+}
+
+/* S.Port byte-stuffing de-escape. Returns true if `raw` produced a
+ * decoded byte in *out, false if it consumed an escape marker and
+ * is waiting for the next raw byte. */
+static bool destuff_byte(uint8_t raw, uint8_t* out, bool* in_stuff)
+{
+    if (*in_stuff) {
+        *out = raw ^ SPORT_STUFF_MASK;
+        *in_stuff = false;
+        return true;
+    }
+    if (raw == SPORT_STUFF_MARKER) {
+        *in_stuff = true;
+        return false;
+    }
+    *out = raw;
+    return true;
+}
+
+/* Feed one raw UART byte through the S.Port parser. Accumulates a
+ * de-stuffed response frame and dispatches it once complete. */
+static void sport_feed_byte(uint8_t raw)
+{
+    uint8_t byte;
+    if (!destuff_byte(raw, &byte, &rx_in_stuff)) return;
+
+    if (rx_pos < FAS100_RX_BUF_SIZE) {
+        rx_buf[rx_pos++] = byte;
+    }
+    if (rx_pos < FAS100_RESPONSE_FRAME_SIZE) return;
+
+    // Have a full frame's worth of de-stuffed bytes.
+    if (rx_buf[0] == SPORT_DATA_HEADER) {
+        uint8_t crc = sport_crc_calculate(rx_buf, 7);
+        if (rx_buf[7] == crc) {
+            uint16_t data_id = (uint16_t)rx_buf[1] | ((uint16_t)rx_buf[2] << 8);
+            uint32_t value   = (uint32_t)rx_buf[3]
+                             | ((uint32_t)rx_buf[4] << 8)
+                             | ((uint32_t)rx_buf[5] << 16)
+                             | ((uint32_t)rx_buf[6] << 24);
+            store_telemetry(data_id, value);
+        }
+    }
+    rx_pos = 0;
+    rx_in_stuff = false;
+}
+
+/* FBUS parser. FBUS frames have no byte stuffing but DO have a fixed
+ * 3-byte signature [0x08, sensor_id, 0x10] at the start. Walk through
+ * the byte stream with a per-byte state machine: rx_pos tracks how
+ * many of the expected bytes we've accumulated. If a header byte
+ * doesn't match, drop back — but if the mismatched byte itself looks
+ * like the start of a new frame (0x08), restart from there rather
+ * than dropping it. */
+static void fbus_feed_byte(uint8_t raw)
+{
+    if (rx_pos == 0) {
+        if (raw == FBUS_LEN_BYTE) rx_buf[rx_pos++] = raw;
+        return;
+    }
+    if (rx_pos == 1) {
+        if (raw == FBUS_FAS100_SENSOR_ID) {
+            rx_buf[rx_pos++] = raw;
+        } else if (raw == FBUS_LEN_BYTE) {
+            // mis-aligned: treat the mismatched byte as a new start
+            rx_buf[0] = raw;
+            rx_pos = 1;
+        } else {
+            rx_pos = 0;
+        }
+        return;
+    }
+    if (rx_pos == 2) {
+        if (raw == FBUS_FRAME_ID_DATA) {
+            rx_buf[rx_pos++] = raw;
+        } else if (raw == FBUS_LEN_BYTE) {
+            rx_buf[0] = raw;
+            rx_pos = 1;
+        } else {
+            rx_pos = 0;
+        }
+        return;
+    }
+    // rx_pos in [3..9]: body bytes (data_id, value, crc)
+    if (rx_pos < FAS100_RX_BUF_SIZE) {
+        rx_buf[rx_pos++] = raw;
+    }
+    if (rx_pos < FBUS_RESPONSE_FRAME_SIZE) return;
+
+    // Complete 10-byte FBUS frame. CRC covers the first 9 bytes
+    // (len, sensor_id, frame_id, data_id, value).
+    uint8_t crc = sport_crc_calculate(rx_buf, 9);
+    if (rx_buf[9] == crc) {
+        uint16_t data_id = (uint16_t)rx_buf[3] | ((uint16_t)rx_buf[4] << 8);
+        uint32_t value   = (uint32_t)rx_buf[5]
+                         | ((uint32_t)rx_buf[6] << 8)
+                         | ((uint32_t)rx_buf[7] << 16)
+                         | ((uint32_t)rx_buf[8] << 24);
+        store_telemetry(data_id, value);
+    }
+    rx_pos = 0;
 }
 
 // =============================================================================
@@ -204,6 +382,10 @@ void fas100_init(void)
 
     fas100_uart = (fas100_uart_instance == 0) ? uart0 : uart1;
 
+    // Start by probing S.Port (the user-reported "slow blink" mode);
+    // if the sensor came up in FBUS the state machine will switch us
+    // over after the probe window expires.
+    active_proto = PROTO_SPORT;
     uart_init(fas100_uart, SPORT_BAUD_RATE);
 
     gpio_set_function(fas100_tx_pin, GPIO_FUNC_UART);
@@ -213,19 +395,18 @@ void fas100_init(void)
     gpio_set_outover(fas100_tx_pin, GPIO_OVERRIDE_INVERT);
     gpio_set_inover(fas100_rx_pin, GPIO_OVERRIDE_INVERT);
 
-    // S.Port is a half-duplex bus that idles HIGH (logical 1). Without
-    // someone anchoring the bus high while no one is driving it, the
-    // line floats — neither the MCU's polls nor the sensor's responses
-    // reach the other side reliably. Most production setups put a
-    // ~10 kΩ external pull-up from the shared TX/RX/signal node to
-    // 3.3 V. The RP2040 has internal pull-ups (~50–80 kΩ) which are
-    // weaker but usually strong enough for short wiring — enable one
-    // on the RX side so the operator doesn't have to solder a resistor
-    // for a bench setup. (Pull-up on TX too is harmless; the UART
-    // hardware drives it actively when transmitting and the pull-up
-    // just helps during the brief idle periods.)
-    gpio_pull_up(fas100_tx_pin);
-    gpio_pull_up(fas100_rx_pin);
+    // No internal pull-up. With inversion enabled, the UART block's
+    // high-idle becomes a physical LOW on the wire — i.e. the bus
+    // idles low. An internal pull-up to 3.3 V would fight that idle
+    // state, and worse, it appears to be enough to make the FAS100
+    // ADV decide at power-on that an FBUS master is talking to it
+    // (sensor LED switches from slow blink = S.Port to fast blink =
+    // FBUS). Leaving the pad floating from the SDK's perspective and
+    // relying on the MCU's active drive (via the 1 kΩ from TX to RX,
+    // plus the sensor's own driver) keeps the idle state correct for
+    // inverted S.Port.
+    gpio_disable_pulls(fas100_tx_pin);
+    gpio_disable_pulls(fas100_rx_pin);
 
     fas100_active_tx_pin = fas100_tx_pin;
     fas100_active_rx_pin = fas100_rx_pin;
@@ -233,13 +414,20 @@ void fas100_init(void)
 #endif
 
     rx_pos = 0;
+    rx_in_stuff = false;
     sensor_responded = false;
     port_initialized = true;
 
+    // Boot the state machine into the S.Port probe phase. enter_phase()
+    // logs the transition so the operator can see probing on the bus.
+    phase = PHASE_PROBE_SPORT;
+    phase_started_ms = PLATFORM_MILLIS();
+    last_response_ms = 0;
     saint_log_publish("info",
-        "FAS100: UART%d on TX=%d RX=%d at %d baud (poll %d ms)",
+        "FAS100: UART%d on TX=%d RX=%d, auto-detecting protocol "
+        "(S.Port %d / FBUS %d, %d ms probe)",
         fas100_uart_instance, fas100_tx_pin, fas100_rx_pin,
-        SPORT_BAUD_RATE, poll_interval_ms);
+        SPORT_BAUD_RATE, FBUS_BAUD_RATE, FAS100_PROBE_MS);
 }
 
 void fas100_update(void)
@@ -248,33 +436,64 @@ void fas100_update(void)
 
     uint32_t now = PLATFORM_MILLIS();
 
-    // Non-blocking read of any available bytes
+    // --- 1) Pump received bytes through the active protocol parser. ---
 #ifndef SIMULATION
     while (fas100_uart && uart_is_readable(fas100_uart)) {
         uint8_t raw = uart_getc(fas100_uart);
-        static bool in_stuff = false;
-        uint8_t byte;
-
-        if (destuff_byte(raw, &byte, &in_stuff)) {
-            if (rx_pos < FAS100_RX_BUF_SIZE) {
-                rx_buf[rx_pos++] = byte;
-            }
-        }
-
-        // Check for complete frame
-        if (rx_pos >= FAS100_RESPONSE_FRAME_SIZE) {
-            parse_response(rx_buf, rx_pos);
-            rx_pos = 0;
-            in_stuff = false;
+        if (active_proto == PROTO_FBUS) {
+            fbus_feed_byte(raw);
+        } else {
+            sport_feed_byte(raw);
         }
     }
 #endif
 
-    // Send next poll if interval has elapsed
+    // --- 2) Drive the auto-detect state machine. ---
+    //
+    // Probe phases hold for FAS100_PROBE_MS. If a valid frame arrives
+    // during a probe (sensor_responded flips true via store_telemetry)
+    // we jump straight to PHASE_LOCKED on whichever protocol just
+    // answered. If the probe window expires without a response, we
+    // alternate to the other protocol and probe again.
+    //
+    // Once locked, we monitor for lost responses; FAS100_LOST_LINK_MS
+    // of silence drops us back into probing. The probe starts on the
+    // OTHER protocol on the theory that the sensor likely rebooted
+    // into a different mode (which is the failure case that motivated
+    // the auto-detect in the first place).
+    if (phase == PHASE_PROBE_SPORT && sensor_responded) {
+        phase = PHASE_LOCKED;
+        saint_log_publish("info",
+            "FAS100: locked to S.Port @ %d baud", SPORT_BAUD_RATE);
+    } else if (phase == PHASE_PROBE_FBUS && sensor_responded) {
+        phase = PHASE_LOCKED;
+        saint_log_publish("info",
+            "FAS100: locked to FBUS @ %d baud", FBUS_BAUD_RATE);
+    } else if (phase == PHASE_PROBE_SPORT
+               && (now - phase_started_ms) >= FAS100_PROBE_MS) {
+        enter_phase(PHASE_PROBE_FBUS, PROTO_FBUS);
+    } else if (phase == PHASE_PROBE_FBUS
+               && (now - phase_started_ms) >= FAS100_PROBE_MS) {
+        enter_phase(PHASE_PROBE_SPORT, PROTO_SPORT);
+    } else if (phase == PHASE_LOCKED
+               && last_response_ms != 0
+               && (now - last_response_ms) >= FAS100_LOST_LINK_MS) {
+        // Switch to the OTHER protocol — most common cause of a lost
+        // link is the sensor rebooted into a different mode.
+        fas100_protocol_t other = (active_proto == PROTO_SPORT) ? PROTO_FBUS
+                                                                : PROTO_SPORT;
+        fas100_phase_t target = (other == PROTO_SPORT) ? PHASE_PROBE_SPORT
+                                                       : PHASE_PROBE_FBUS;
+        saint_log_publish("warn",
+            "FAS100: no responses for %d ms — re-probing",
+            FAS100_LOST_LINK_MS);
+        enter_phase(target, other);
+    }
+
+    // --- 3) Send next poll if interval has elapsed. ---
     if (now - last_poll_time >= poll_interval_ms) {
         last_poll_time = now;
-        rx_pos = 0;  // Reset receive buffer for new response
-        send_poll();
+        send_poll_for_active_proto();
     }
 }
 

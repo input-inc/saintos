@@ -329,7 +329,8 @@ static void handle_firmware_update(const char* json, size_t len)
 {
     // SAFETY: Basic validation
     if (!json || len == 0 || len > 512) {
-        printf("Firmware update: invalid command\n");
+        saint_log_publish("error",
+            "Firmware update: invalid command (len=%zu)", len);
         return;
     }
 
@@ -359,44 +360,36 @@ static void handle_firmware_update(const char* json, size_t len)
         }
     }
 
-    printf("\n");
-    printf("====================================\n");
-    printf("FIRMWARE UPDATE REQUESTED\n");
-    printf("====================================\n");
-    printf("  Current version: %s\n", FIRMWARE_VERSION_FULL);
-    printf("  Server version:  %s\n", new_version);
-    printf("  Force update:    %s\n", force_update ? "YES" : "NO");
+    saint_log_publish("info",
+        "OTA: firmware_update received (current=%s server=%s force=%s)",
+        FIRMWARE_VERSION_FULL, new_version, force_update ? "YES" : "NO");
 
     // If not forced, compare version timestamps
     if (!force_update) {
         uint32_t current_ts = FIRMWARE_BUILD_UNIX;
         uint32_t server_ts = extract_version_timestamp(new_version);
 
-        printf("  Current build:   %lu\n", (unsigned long)current_ts);
-        printf("  Server build:    %lu\n", (unsigned long)server_ts);
-
         if (server_ts == 0) {
-            printf("====================================\n");
-            printf("Cannot parse server version timestamp.\n");
-            printf("Use force update to override.\n");
-            printf("====================================\n\n");
+            saint_log_publish("warn",
+                "OTA: cannot parse server version timestamp '%s' — "
+                "aborting (use force to override)", new_version);
             return;
         }
 
         if (server_ts <= current_ts) {
-            printf("====================================\n");
-            printf("Firmware is already up to date.\n");
-            printf("Use force update to override.\n");
-            printf("====================================\n\n");
+            saint_log_publish("info",
+                "OTA: already up to date (current=%lu server=%lu) — "
+                "aborting (use force to override)",
+                (unsigned long)current_ts, (unsigned long)server_ts);
             return;
         }
 
-        printf("  -> Server has newer build, proceeding with update\n");
+        saint_log_publish("info",
+            "OTA: server has newer build (current=%lu server=%lu), proceeding",
+            (unsigned long)current_ts, (unsigned long)server_ts);
     } else {
-        printf("  -> Force update enabled, skipping version check\n");
+        saint_log_publish("info", "OTA: force update — skipping version check");
     }
-
-    printf("====================================\n");
 
 #if defined(SAINT_OS_OTA_BOOTLOADER) && !defined(SIMULATION)
     // Pull image size + CRC32 out of the control JSON and hand off to
@@ -419,16 +412,24 @@ static void handle_firmware_update(const char* json, size_t len)
         }
     }
     if (img_size == 0 || img_crc == 0) {
-        printf("Firmware update: missing size or crc32 in control message — aborting\n");
+        saint_log_publish("error",
+            "OTA: missing size or crc32 in control message "
+            "(size=%lu crc=0x%08lx) — aborting. Rebuild the server "
+            "firmware package so it includes the raw .bin.",
+            (unsigned long)img_size, (unsigned long)img_crc);
         return;
     }
-    printf("Handing off to OTA bootloader (size=%lu crc=0x%08lx)\n",
-           (unsigned long)img_size, (unsigned long)img_crc);
+    saint_log_publish("info",
+        "OTA: handing off to bootloader (size=%lu crc=0x%08lx) — "
+        "rebooting now; further status will appear after next boot.",
+        (unsigned long)img_size, (unsigned long)img_crc);
     sleep_ms(200);
     saint_ota_reboot_with_image(img_size, img_crc);
     /* not reached */
 #else
-    printf("Rebooting (no OTA bootloader present — chip will boot the same firmware)\n");
+    saint_log_publish("warn",
+        "OTA: no bootloader compiled in (SAINT_OS_OTA_BOOTLOADER unset) — "
+        "rebooting into same firmware");
     sleep_ms(500);
 #  ifdef SIMULATION
     /* Renode tooling restarts the simulator with a different ELF. */
@@ -454,8 +455,9 @@ static void control_subscription_callback(const void* msgin)
 
     // SAFETY: Validate message size before processing
     if (msg->data.size >= sizeof(control_buffer)) {
-        printf("Control message too large: %zu >= %zu, rejecting\n",
-               msg->data.size, sizeof(control_buffer));
+        saint_log_publish("error",
+            "Control message too large: %zu >= %zu, rejecting",
+            msg->data.size, sizeof(control_buffer));
         return;
     }
 
