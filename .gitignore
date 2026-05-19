@@ -42,6 +42,8 @@ lib64/
 # binaries are build outputs — let CI / local builds regenerate them.
 /saint_os/resources/firmware/rp2040/*.uf2
 /saint_os/resources/firmware/rp2040/*.elf
+/saint_os/resources/firmware/rp2040/*.bin
+/saint_os/resources/firmware/rp2040/generated/
 /saint_os/resources/firmware/teensy41/*.hex
 /saint_os/resources/firmware/rpi5/saint_firmware_rpi5_*-local.*.zip
 parts/
