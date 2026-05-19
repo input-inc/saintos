@@ -116,6 +116,31 @@ static uint8_t rx_buf[FAS100_RX_BUF_SIZE];
 static uint8_t rx_pos = 0;
 static bool    rx_in_stuff = false;  // S.Port byte-stuffing state
 
+// S.Port hard-sync: when sport_feed_byte sees 0x7E (the unstuffed poll
+// header — sensors byte-stuff any 0x7E values in their payload, so it
+// never appears unescaped in a response), the parser resets and the
+// NEXT byte is the physical-ID of the poll (which we discard). After
+// that one byte, normal response accumulation resumes. Belt-and-
+// suspenders alongside drain_echo_bytes: even if a tail byte from a
+// late-arriving previous response leaks past the drain and desyncs the
+// frame accumulator, the next poll cycle's 0x7E pulls us back in.
+static bool    sport_skip_addr = false;
+
+// Diagnostic counters. Dumped every FAS100_STATS_DUMP_MS while locked
+// so we can see, in the dashboard Logs tab, what's actually happening
+// on the bus — polls fired, valid frames, CRC failures, mid-frame
+// resyncs. Reset on each phase transition so the numbers are scoped
+// to the current lock attempt.
+static uint32_t stat_polls_sent     = 0;
+static uint32_t stat_echo_bytes     = 0;  // bytes drain_echo_bytes consumed
+static uint32_t stat_echo_missed    = 0;  // bytes drain wanted but timed out on
+static uint32_t stat_frames_ok      = 0;
+static uint32_t stat_frames_crc_bad = 0;
+static uint32_t stat_resyncs        = 0;  // 0x7E mid-frame
+static uint32_t stat_unknown_id     = 0;  // CRC-valid but data_id not ours
+static uint32_t stats_last_dump_ms  = 0;
+#define FAS100_STATS_DUMP_MS  5000
+
 // We share a single wire for TX and RX (TX → 1 kΩ → RX, with the
 // sensor's signal pin tied to RX directly). Every byte we transmit
 // loops right back into our own RX FIFO. We drain that echo
@@ -149,6 +174,19 @@ static void apply_active_baud_rate(void)
 #endif
     rx_pos = 0;
     rx_in_stuff = false;
+    sport_skip_addr = false;
+}
+
+static void reset_stats(void)
+{
+    stat_polls_sent = 0;
+    stat_echo_bytes = 0;
+    stat_echo_missed = 0;
+    stat_frames_ok = 0;
+    stat_frames_crc_bad = 0;
+    stat_resyncs = 0;
+    stat_unknown_id = 0;
+    stats_last_dump_ms = PLATFORM_MILLIS();
 }
 
 /* Drain exactly `n` echo bytes from the RX FIFO with a per-byte
@@ -173,10 +211,12 @@ static void drain_echo_bytes(int n)
         }
         if (uart_is_readable(fas100_uart)) {
             (void)uart_getc(fas100_uart);
+            stat_echo_bytes++;
         } else {
             // Echo byte didn't arrive in time. Stop draining — better
             // to let the parser hunt for a valid frame than to keep
             // consuming bytes that might be genuine response data.
+            stat_echo_missed += (uint32_t)(n - i);
             break;
         }
     }
@@ -199,6 +239,7 @@ static void enter_phase(fas100_phase_t new_phase, fas100_protocol_t new_proto)
     }
     phase = new_phase;
     phase_started_ms = PLATFORM_MILLIS();
+    reset_stats();
 
     if (new_phase == PHASE_PROBE_SPORT) {
         saint_log_publish("info",
@@ -220,6 +261,7 @@ static void send_sport_poll(void)
     uart_write_blocking(fas100_uart, frame, FAS100_POLL_FRAME_SIZE);
     uart_tx_wait_blocking(fas100_uart);
     drain_echo_bytes(FAS100_POLL_FRAME_SIZE);
+    stat_polls_sent++;
 #endif
 }
 
@@ -235,6 +277,7 @@ static void send_fbus_poll(void)
     uart_write_blocking(fas100_uart, frame, FBUS_POLL_FRAME_SIZE);
     uart_tx_wait_blocking(fas100_uart);
     drain_echo_bytes(FBUS_POLL_FRAME_SIZE);
+    stat_polls_sent++;
 #endif
 }
 
@@ -302,6 +345,24 @@ static bool destuff_byte(uint8_t raw, uint8_t* out, bool* in_stuff)
  * de-stuffed response frame and dispatches it once complete. */
 static void sport_feed_byte(uint8_t raw)
 {
+    // Hard-sync on the poll header. 0x7E only appears unescaped at the
+    // start of a poll (sensors stuff 0x7E values in their payload), so
+    // when we see one we know the parser is at a known position. The
+    // BYTE immediately after 0x7E is the addressed sensor's physical
+    // ID — we discard it and start collecting the response on the
+    // byte after that.
+    if (raw == SPORT_POLL_HEADER) {
+        if (rx_pos > 0 || rx_in_stuff) stat_resyncs++;
+        rx_pos = 0;
+        rx_in_stuff = false;
+        sport_skip_addr = true;
+        return;
+    }
+    if (sport_skip_addr) {
+        sport_skip_addr = false;
+        return;
+    }
+
     uint8_t byte;
     if (!destuff_byte(raw, &byte, &rx_in_stuff)) return;
 
@@ -319,8 +380,19 @@ static void sport_feed_byte(uint8_t raw)
                              | ((uint32_t)rx_buf[4] << 8)
                              | ((uint32_t)rx_buf[5] << 16)
                              | ((uint32_t)rx_buf[6] << 24);
+            stat_frames_ok++;
+            if (data_id != SPORT_DATA_ID_CURRENT
+                && data_id != SPORT_DATA_ID_VOLTAGE
+                && data_id != SPORT_DATA_ID_TEMP1
+                && data_id != SPORT_DATA_ID_TEMP2) {
+                stat_unknown_id++;
+            }
             store_telemetry(data_id, value);
+        } else {
+            stat_frames_crc_bad++;
         }
+    } else {
+        stat_frames_crc_bad++;
     }
     rx_pos = 0;
     rx_in_stuff = false;
@@ -377,7 +449,16 @@ static void fbus_feed_byte(uint8_t raw)
                          | ((uint32_t)rx_buf[6] << 8)
                          | ((uint32_t)rx_buf[7] << 16)
                          | ((uint32_t)rx_buf[8] << 24);
+        stat_frames_ok++;
+        if (data_id != SPORT_DATA_ID_CURRENT
+            && data_id != SPORT_DATA_ID_VOLTAGE
+            && data_id != SPORT_DATA_ID_TEMP1
+            && data_id != SPORT_DATA_ID_TEMP2) {
+            stat_unknown_id++;
+        }
         store_telemetry(data_id, value);
+    } else {
+        stat_frames_crc_bad++;
     }
     rx_pos = 0;
 }
@@ -548,6 +629,36 @@ void fas100_update(void)
     if (now - last_poll_time >= poll_interval_ms) {
         last_poll_time = now;
         send_poll_for_active_proto();
+    }
+
+    // --- 4) Periodic diagnostic stats dump while locked. ---
+    //
+    // Surfaces what's actually happening on the bus: polls fired,
+    // echo bytes drained vs missed, frames OK vs CRC-bad, mid-frame
+    // resyncs (a healthy locked link should show roughly polls_sent
+    // frames_ok per dump and near-zero crc_bad / resyncs / missed).
+    if (phase == PHASE_LOCKED
+        && (now - stats_last_dump_ms) >= FAS100_STATS_DUMP_MS) {
+        saint_log_publish("info",
+            "FAS100 stats (%s, %lu ms): polls=%lu echo_ok=%lu echo_miss=%lu "
+            "frames_ok=%lu crc_bad=%lu resync=%lu unknown_id=%lu",
+            active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
+            (unsigned long)(now - stats_last_dump_ms),
+            (unsigned long)stat_polls_sent,
+            (unsigned long)stat_echo_bytes,
+            (unsigned long)stat_echo_missed,
+            (unsigned long)stat_frames_ok,
+            (unsigned long)stat_frames_crc_bad,
+            (unsigned long)stat_resyncs,
+            (unsigned long)stat_unknown_id);
+        stat_polls_sent = 0;
+        stat_echo_bytes = 0;
+        stat_echo_missed = 0;
+        stat_frames_ok = 0;
+        stat_frames_crc_bad = 0;
+        stat_resyncs = 0;
+        stat_unknown_id = 0;
+        stats_last_dump_ms = now;
     }
 }
 
