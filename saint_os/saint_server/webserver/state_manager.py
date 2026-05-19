@@ -223,6 +223,68 @@ def _firmware_channel_id(mode: str, gpio: int) -> Optional[str]:
         return None
     base, channel_map = entry
     return channel_map.get(gpio - base)
+
+
+# Forward map: peripheral type -> (firmware mode, channels-per-unit). Used by
+# resolve_channel_gpio() to compute the virtual GPIO slot for a write. Only
+# multi-drop UART peripherals appear here — single-pin peripherals (LED,
+# servo, analog_in) write to a real GPIO carried in PeripheralInstance.pins.
+_PERIPHERAL_VIRTUAL_GPIO: Dict[str, Tuple[int, int]] = {
+    # type_id: (base, channels_per_unit). unit = address - 128.
+    "syren":    (224, 1),
+    "roboclaw": (236, 5),
+}
+
+# Channel offset within a unit for each (type_id, channel_id) pair. Mirrors
+# the sub-channel indices the firmware exposes in roboclaw_protocol.h /
+# syren_protocol.h.
+_PERIPHERAL_CHANNEL_OFFSET: Dict[Tuple[str, str], int] = {
+    ("syren",    "motor"):   0,
+    ("roboclaw", "motor"):   0,
+    ("roboclaw", "encoder"): 1,
+    ("roboclaw", "voltage"): 2,
+    ("roboclaw", "current"): 3,
+    ("roboclaw", "temp"):    4,
+}
+
+
+def resolve_channel_gpio(peripheral: 'PeripheralInstance',
+                         channel_id: str) -> Optional[int]:
+    """Resolve a (peripheral, channel) into the GPIO the firmware accepts
+    for a `set_pin` write.
+
+    Multi-drop UART peripherals (Roboclaw, SyRen) map to a virtual GPIO
+    slot computed from their address + channel offset. Single-pin
+    peripherals (LED, servo) write to the physical pin carried in the
+    instance's `pins` dict. Returns None when the channel can't be
+    addressed today (e.g. builtin NeoPixel has no pin_control hook).
+    """
+    type_id = peripheral.type
+
+    virt = _PERIPHERAL_VIRTUAL_GPIO.get(type_id)
+    if virt:
+        base, channels_per_unit = virt
+        offset = _PERIPHERAL_CHANNEL_OFFSET.get((type_id, channel_id))
+        if offset is None:
+            return None
+        address = int(peripheral.params.get("address", 128))
+        unit = address - 128
+        if unit < 0 or unit > 7:
+            return None
+        return base + unit * channels_per_unit + offset
+
+    # Single-pin peripherals — write to whichever physical pin the
+    # peripheral claimed. `pins` is keyed by role ("gpio", "pwm", "data"),
+    # but a single-pin peripheral only ever has one entry.
+    if peripheral.pins:
+        # Prefer explicit "gpio" key; fall back to the only entry.
+        if "gpio" in peripheral.pins:
+            return int(peripheral.pins["gpio"])
+        if len(peripheral.pins) == 1:
+            return int(next(iter(peripheral.pins.values())))
+    return None
+
+
 HOST_CONTROLLER_PERIPHERAL_ID = "system_monitor"
 
 
@@ -1385,6 +1447,38 @@ class StateManager:
         if not node.peripheral_config:
             node.peripheral_config = NodePeripheralConfig()
         return node.peripheral_config.to_dict()
+
+    def resolve_channel_target(self, node_id: str, peripheral_id: str,
+                               channel_id: str) -> Optional[Dict[str, Any]]:
+        """Resolve a (node, peripheral, channel) into the firmware target.
+
+        Returns a dict with the GPIO the firmware accepts, the channel
+        direction, and the peripheral type — enough for the WS handler
+        to validate the write and dispatch it via _send_control_callback.
+        Returns None when the node, peripheral, channel, or routable
+        GPIO is missing.
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.peripheral_config:
+            return None
+        peripheral = node.peripheral_config.get(peripheral_id)
+        if not peripheral:
+            return None
+        ptype = self.peripheral_catalog.get(peripheral.type)
+        if not ptype:
+            return None
+        channel = next((c for c in ptype.channels if c.id == channel_id), None)
+        if not channel:
+            return None
+        gpio = resolve_channel_gpio(peripheral, channel_id)
+        if gpio is None:
+            return None
+        return {
+            "gpio": gpio,
+            "direction": channel.dir,
+            "capability": channel.cap,
+            "peripheral_type": peripheral.type,
+        }
 
     def upsert_node_peripheral(
         self, node_id: str, peripheral_payload: Dict[str, Any]

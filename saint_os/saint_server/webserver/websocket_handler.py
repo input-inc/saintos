@@ -1255,6 +1255,55 @@ class WebSocketHandler:
 
             return {"status": "ok", "data": {"sent": sent_count, "throttled": throttled_count, "count": len(pins)}}
 
+        elif action == 'set_channel_value':
+            node_id = params.get('node_id')
+            peripheral_id = params.get('peripheral_id')
+            channel_id = params.get('channel_id')
+            value = params.get('value')
+
+            if not node_id or not peripheral_id or not channel_id or value is None:
+                return {"status": "error",
+                        "message": "Missing node_id, peripheral_id, channel_id, or value"}
+
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                return {"status": "error", "message": "Invalid value type"}
+
+            target = self.state_manager.resolve_channel_target(
+                node_id, peripheral_id, channel_id)
+            if not target:
+                return {"status": "error",
+                        "message": f"Channel {peripheral_id}/{channel_id} not addressable"}
+            if target["direction"] != "out":
+                return {"status": "error",
+                        "message": f"Channel {peripheral_id}/{channel_id} is not writable"}
+
+            gpio = target["gpio"]
+            throttle_key = (node_id, gpio)
+            now = time.time() * 1000
+            last_send = self._control_throttle.get(throttle_key, 0)
+            is_neutral = is_neutral_value(value)
+
+            self.state_manager.update_pin_desired(node_id, gpio, value)
+
+            if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
+                await self._broadcast_pin_state(node_id)
+                self.log('debug', f'[Control] THROTTLED {node_id} '
+                                  f'{peripheral_id}/{channel_id}: {value:.3f}')
+                return {"status": "ok", "data": {"throttled": True, "gpio": gpio}}
+
+            if self._send_control_callback:
+                self._send_control_callback(node_id, gpio, value)
+                self._control_throttle[throttle_key] = now
+                bypass_note = ' [STOP]' if is_neutral else ''
+                self.log('info', f'[Control] SENT{bypass_note} {node_id} '
+                                 f'{peripheral_id}/{channel_id} (GPIO {gpio}): {value:.3f}')
+
+            await self._broadcast_pin_state(node_id)
+            return {"status": "ok",
+                    "data": {"throttled": False, "gpio": gpio, "value": value}}
+
         elif action == 'get_runtime_state':
             node_id = params.get('node_id')
             if not node_id:

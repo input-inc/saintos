@@ -348,6 +348,11 @@ class SaintApp {
         document.getElementById('node-firmware-update-badge')?.addEventListener('click', () => {
             this.switchNodeTab('control');
         });
+
+        // Update All button on Nodes page
+        document.getElementById('btn-update-all-nodes')?.addEventListener('click', () => {
+            this.updateAllNodes();
+        });
     }
 
     /**
@@ -1212,7 +1217,12 @@ class SaintApp {
         if (this.nodes.adopted.length === 0) {
             adoptedContainer.innerHTML = '<p class="text-slate-400 col-span-full">No adopted nodes</p>';
         } else {
-            adoptedContainer.innerHTML = this.nodes.adopted.map(node => `
+            adoptedContainer.innerHTML = this.nodes.adopted.map(node => {
+                const fwUpdate = node.firmware_update_available === true && node.server_firmware_version;
+                const fwBadge = fwUpdate
+                    ? `<span class="ml-2 px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30" title="Update available: ${node.server_firmware_version}">↑ ${node.server_firmware_version}</span>`
+                    : '';
+                return `
                 <div class="node-card">
                     <div class="flex items-start justify-between mb-3">
                         <div class="flex items-center gap-2">
@@ -1223,7 +1233,7 @@ class SaintApp {
                     </div>
                     <div class="text-sm text-slate-400 mb-3 space-y-1">
                         <p>${node.hardware_model || 'Unknown hardware'}</p>
-                        <p class="text-xs">FW: ${node.firmware_version || '--'}</p>
+                        <p class="text-xs">FW: ${node.firmware_version || '--'}${fwBadge}</p>
                         <p class="text-xs">BL: ${node.bootloader_version || 'unknown'}</p>
                     </div>
                     <div class="flex items-center gap-2 pt-3 border-t border-slate-700">
@@ -1238,8 +1248,11 @@ class SaintApp {
                         </button>
                     </div>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         }
+
+        this.updateAllNodesButtonVisibility();
 
         // Unadopted nodes
         const unadoptedContainer = document.getElementById('unadopted-nodes');
@@ -1528,69 +1541,47 @@ class SaintApp {
     }
 
     /**
-     * Load pin controls for the State tab.
+     * Load peripheral controls for the State tab.
      *
-     * NOTE: this tab used to render per-GPIO sliders driven by the old
-     * pin_config. With the peripheral-first model, controls belong on
-     * per-channel widgets dispatched through the routing engine. Until
-     * that ships, the State tab shows a placeholder and a runtime-state
-     * dump so the operator can still see what the firmware is reporting.
+     * Delegates rendering to StateControlManager, which enumerates the
+     * node's peripherals from the catalog and renders one widget per
+     * writable channel. Controls are present even before hardware is
+     * wired up, so the operator can exercise the full command path
+     * (UI → server → firmware) before connecting the physical device.
      */
     async loadStateTabControls() {
         if (!this.currentNodeId || !this.currentNodeInfo) return;
 
-        const container = document.getElementById('pin-controls-container');
-        if (container) {
-            container.innerHTML = `
-                <div class="p-4 bg-slate-900/40 border border-slate-700 rounded-lg text-sm text-slate-300">
-                    Per-pin controls are being rewritten to operate on peripheral channels
-                    via the routing engine. Use the Peripherals tab to configure attachments
-                    and the Routing page (coming soon) to wire them up.
-                </div>`;
-        }
-
         document.getElementById('state-node-status').textContent =
             this.currentNodeInfo.online ? 'Online' : 'Offline';
-        document.getElementById('state-pin-count').textContent = '—';
+
+        if (window.stateControlManager) {
+            await window.stateControlManager.setNode(this.currentNodeId, this.currentNodeInfo);
+            const count = stateControlManager.peripherals.length;
+            document.getElementById('state-pin-count').textContent = String(count);
+        }
+
+        this._wireStateQuickActions();
     }
 
-    /**
-     * Setup quick action buttons for State tab.
-     */
-    setupQuickActionButtons(pins) {
-        const pwmPins = pins.filter(p => p.mode === 'pwm');
-        const servoPins = pins.filter(p => p.mode === 'servo');
-        const digitalOutPins = pins.filter(p => p.mode === 'digital_out');
-
-        // All PWM to 0%
-        const pwmZeroBtn = document.getElementById('btn-all-pwm-zero');
-        if (pwmZeroBtn) {
-            pwmZeroBtn.onclick = async () => {
-                for (const pin of pwmPins) {
-                    await pinControlManager.sendControlValue(pin.gpio, 0);
+    _wireStateQuickActions() {
+        const btn = document.getElementById('btn-all-outputs-neutral');
+        if (!btn || !window.stateControlManager) return;
+        btn.onclick = async () => {
+            const mgr = window.stateControlManager;
+            for (const p of mgr.peripherals) {
+                const type = mgr._typeFor(p.type);
+                if (!type) continue;
+                for (const ch of (type.channels || [])) {
+                    if (ch.dir !== 'out') continue;
+                    const spec = mgr._channelSpec(p.type, ch);
+                    if (spec.unsupported) continue;
+                    const neutral = spec.neutral !== undefined ? spec.neutral : 0;
+                    await mgr._sendChannelValue(p.id, ch.id, neutral);
                 }
-            };
-        }
-
-        // All Servos to 90 degrees
-        const servoCenterBtn = document.getElementById('btn-all-servo-center');
-        if (servoCenterBtn) {
-            servoCenterBtn.onclick = async () => {
-                for (const pin of servoPins) {
-                    await pinControlManager.sendControlValue(pin.gpio, 90);
-                }
-            };
-        }
-
-        // All Digital OFF
-        const digitalOffBtn = document.getElementById('btn-all-digital-off');
-        if (digitalOffBtn) {
-            digitalOffBtn.onclick = async () => {
-                for (const pin of digitalOutPins) {
-                    await pinControlManager.sendControlValue(pin.gpio, 0);
-                }
-            };
-        }
+            }
+            this.addActivityLogEntry({ text: 'Reset all outputs to neutral', level: 'info' });
+        };
     }
 
     /**
@@ -1948,6 +1939,106 @@ class SaintApp {
         } catch (error) {
             console.error('Unadopt failed:', error);
             this.addActivityLogEntry({ text: `Failed to unadopt node`, level: 'error' });
+        }
+    }
+
+    /**
+     * Show/hide the "Update All" button on the Nodes page based on how many
+     * adopted nodes have a newer firmware version available.
+     */
+    updateAllNodesButtonVisibility() {
+        const button = document.getElementById('btn-update-all-nodes');
+        const countEl = document.getElementById('update-all-count');
+        if (!button) return;
+
+        const updatable = (this.nodes?.adopted || []).filter(
+            n => n.firmware_update_available === true && n.server_firmware_version
+        );
+
+        if (updatable.length === 0) {
+            button.classList.add('hidden');
+            return;
+        }
+        button.classList.remove('hidden');
+        if (countEl) countEl.textContent = String(updatable.length);
+    }
+
+    /**
+     * Update firmware on every adopted node that has a newer version
+     * available. Skips nodes that are already up to date.
+     */
+    async updateAllNodes() {
+        const updatable = (this.nodes?.adopted || []).filter(
+            n => n.firmware_update_available === true && n.server_firmware_version
+        );
+
+        if (updatable.length === 0) {
+            alert('All adopted nodes are already up to date.');
+            return;
+        }
+
+        const lines = updatable.map(n =>
+            `  • ${n.display_name || n.node_id}: ${n.firmware_version || '--'} → ${n.server_firmware_version}`
+        ).join('\n');
+        if (!confirm(
+            `Update firmware on ${updatable.length} node${updatable.length === 1 ? '' : 's'}?\n\n` +
+            `${lines}\n\n` +
+            `Each node will restart during the update.`
+        )) {
+            return;
+        }
+
+        const ws = window.saintWS;
+        const button = document.getElementById('btn-update-all-nodes');
+        const textSpan = button?.querySelector('.update-all-text');
+        const originalText = textSpan?.textContent;
+
+        if (button) {
+            button.disabled = true;
+            button.classList.add('opacity-50', 'cursor-not-allowed');
+        }
+
+        let succeeded = 0;
+        const failures = [];
+
+        try {
+            for (let i = 0; i < updatable.length; i++) {
+                const node = updatable[i];
+                if (textSpan) {
+                    textSpan.textContent = `Updating ${i + 1}/${updatable.length}…`;
+                }
+                try {
+                    await ws.management('update_firmware', { node_id: node.node_id });
+                    succeeded++;
+                    this.addActivityLogEntry({
+                        text: `Firmware update initiated for ${node.display_name || node.node_id}: ${node.firmware_version} → ${node.server_firmware_version}`,
+                        level: 'info',
+                    });
+                } catch (error) {
+                    console.error(`Firmware update failed for ${node.node_id}:`, error);
+                    failures.push({ node, error: error.message || String(error) });
+                    this.addActivityLogEntry({
+                        text: `Firmware update failed for ${node.display_name || node.node_id}: ${error.message || error}`,
+                        level: 'error',
+                    });
+                }
+            }
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+            if (textSpan && originalText) textSpan.textContent = originalText;
+        }
+
+        if (failures.length === 0) {
+            alert(`Firmware update initiated on ${succeeded} node${succeeded === 1 ? '' : 's'}.\nEach node will restart and load the new firmware.`);
+        } else {
+            const failLines = failures.map(f => `  • ${f.node.display_name || f.node.node_id}: ${f.error}`).join('\n');
+            alert(
+                `Firmware update initiated on ${succeeded} of ${updatable.length} node${updatable.length === 1 ? '' : 's'}.\n\n` +
+                `Failed:\n${failLines}`
+            );
         }
     }
 
