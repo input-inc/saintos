@@ -40,6 +40,8 @@ lib64/
 # Locally-built firmware artifacts staged into the dist tarball.
 # The committed info.json files (manifests) ARE tracked, but the actual
 # binaries are build outputs — let CI / local builds regenerate them.
+# Host-runnable test binaries (built by saint_os/firmware/rp2040/tests/run_tests.sh)
+/saint_os/firmware/rp2040/tests/test_fas100_parser
 /saint_os/resources/firmware/rp2040/*.uf2
 /saint_os/resources/firmware/rp2040/*.elf
 /saint_os/resources/firmware/rp2040/*.bin
