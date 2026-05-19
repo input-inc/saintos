@@ -115,6 +115,18 @@ static uint8_t rx_buf[FAS100_RX_BUF_SIZE];
 static uint8_t rx_pos = 0;
 static bool    rx_in_stuff = false;  // S.Port byte-stuffing state
 
+// We share a single wire for TX and RX (TX → 1 kΩ → RX, with the
+// sensor's signal pin tied to RX directly). Every byte we transmit
+// loops right back into our own RX FIFO. If we feed that echo into
+// the parser, rx_buf[0] ends up holding our poll's first byte (0x7E
+// for S.Port, 0x08 for FBUS) instead of the sensor's response header,
+// and the parser silently misaligns frame after frame.
+//
+// Track how many echo bytes to swallow next time we read. send_*_poll
+// adds the poll length here, and the read loop in fas100_update drops
+// that many bytes before handing anything to the parser.
+static uint8_t echo_to_discard = 0;
+
 // =============================================================================
 // Internal Helpers
 // =============================================================================
@@ -122,7 +134,8 @@ static bool    rx_in_stuff = false;  // S.Port byte-stuffing state
 /* Apply the baud rate that matches active_proto to the bound UART.
  * Called when init() runs or when the auto-detect state machine
  * switches between probe phases. Also resets the receive accumulator
- * so a half-decoded frame from the old baud rate doesn't poison the
+ * and drains any stale bytes from the RX FIFO so a half-decoded frame
+ * (or in-flight echo) from the old baud rate doesn't poison the
  * parser at the new rate. */
 static void apply_active_baud_rate(void)
 {
@@ -131,9 +144,11 @@ static void apply_active_baud_rate(void)
     uint32_t baud = (active_proto == PROTO_FBUS) ? FBUS_BAUD_RATE
                                                  : SPORT_BAUD_RATE;
     uart_set_baudrate(fas100_uart, baud);
+    while (uart_is_readable(fas100_uart)) (void)uart_getc(fas100_uart);
 #endif
     rx_pos = 0;
     rx_in_stuff = false;
+    echo_to_discard = 0;
 }
 
 /* Move to a new phase. Centralized so logging and rx-reset live in
@@ -171,6 +186,7 @@ static void send_sport_poll(void)
         SPORT_FAS100_PHYSICAL_ID
     };
     uart_write_blocking(fas100_uart, frame, FAS100_POLL_FRAME_SIZE);
+    echo_to_discard += FAS100_POLL_FRAME_SIZE;
 #endif
 }
 
@@ -184,6 +200,7 @@ static void send_fbus_poll(void)
         FBUS_FRAME_ID_DATA,
     };
     uart_write_blocking(fas100_uart, frame, FBUS_POLL_FRAME_SIZE);
+    echo_to_discard += FBUS_POLL_FRAME_SIZE;
 #endif
 }
 
@@ -437,14 +454,30 @@ void fas100_update(void)
     uint32_t now = PLATFORM_MILLIS();
 
     // --- 1) Pump received bytes through the active protocol parser. ---
+    //
+    // Drop echo bytes (our own outgoing polls looped back via the
+    // shared TX/RX wire) before they reach the parser. echo_to_discard
+    // is bumped by send_*_poll. Cap it defensively so a single weird
+    // event (sensor not echoing back, RX wire loose) can't make us
+    // permanently swallow incoming data.
 #ifndef SIMULATION
     while (fas100_uart && uart_is_readable(fas100_uart)) {
         uint8_t raw = uart_getc(fas100_uart);
+        if (echo_to_discard > 0) {
+            echo_to_discard--;
+            continue;
+        }
         if (active_proto == PROTO_FBUS) {
             fbus_feed_byte(raw);
         } else {
             sport_feed_byte(raw);
         }
+    }
+    if (echo_to_discard > FBUS_POLL_FRAME_SIZE * 4) {
+        // Almost certainly we're not seeing our own echo anymore (RX
+        // wire problem?). Clear the counter so genuine incoming bytes
+        // can flow again — the parser will just hunt for valid frames.
+        echo_to_discard = 0;
     }
 #endif
 
@@ -513,7 +546,17 @@ float fas100_get_temp2(void)    { return temp2_celsius; }
 
 static bool fas100_drv_init(void)
 {
-    fas100_init();
+    // Intentionally a no-op: the peripheral driver registry calls this
+    // for every driver at boot, but the FAS100 has no meaningful
+    // default configuration — it doesn't know which UART pins to use
+    // or whether the node is even adopted yet. Starting the state
+    // machine here would dump auto-detect probe polls onto pins 0/1
+    // before the operator has wired anything up.
+    //
+    // Polling is started by drv_load() (when a previously-saved
+    // enabled config is restored from flash) or by drv_apply_config()
+    // (when a fresh config arrives from the server). Until one of
+    // those runs, fas100_update() bails on !port_initialized.
     return true;
 }
 
@@ -660,6 +703,11 @@ static bool fas100_drv_load(const void* storage_ptr)
 
     PLATFORM_PRINTF("FAS100: restored config from flash (UART%d TX=%d RX=%d, poll %dms)\n",
                     fas100_uart_instance, fas100_tx_pin, fas100_rx_pin, poll_interval_ms);
+
+    // The peripheral was enabled in the prior session and we have
+    // valid stored pins. Auto-start polling so the operator doesn't
+    // have to re-sync from the dashboard after every reboot.
+    fas100_init();
     return true;
 }
 
