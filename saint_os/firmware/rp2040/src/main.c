@@ -1184,19 +1184,27 @@ int main(void)
     // Initialize pin configuration
     pin_config_init();
 
-    // Load saved pin configuration
-    if (pin_config_load()) {
-        printf("Loaded pin configuration from flash\n");
-    }
-
     // Initialize pin control (after pin_config)
     pin_control_init();
 
-    // Register and initialize peripheral drivers
+    // Register peripheral drivers BEFORE loading config from flash.
+    // pin_config_load() walks the registered-drivers list and calls
+    // each driver's load_config(&storage) so it can read its stored
+    // pins/enabled flag. If we load first and register after, that
+    // loop runs over zero drivers and the per-driver flash data is
+    // silently discarded — leaving drivers in their default state
+    // even after a reboot of a previously-configured node.
     peripheral_register(syren_get_peripheral_driver());
     peripheral_register(fas100_get_peripheral_driver());
     peripheral_register(roboclaw_get_peripheral_driver());
     peripheral_register(pathfinder_bms_get_peripheral_driver());
+
+    // Load saved pin configuration (also fans out to each driver's
+    // load_config callback).
+    if (pin_config_load()) {
+        printf("Loaded pin configuration from flash\n");
+    }
+
     peripheral_init_all();
 
     // Initialize hardware
