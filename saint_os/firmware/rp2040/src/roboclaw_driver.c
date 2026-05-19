@@ -12,6 +12,7 @@
 #include "peripheral_driver.h"
 #include "flash_types.h"
 #include "platform.h"
+#include "saint_log.h"
 #include "uart_pin_pairs.h"
 
 #include <string.h>
@@ -31,23 +32,58 @@
 #define ROBOCLAW_DEFAULT_RX_PIN     1
 #define ROBOCLAW_DEFAULT_SERIAL_PORT 0
 
+// How many consecutive missed polls before we flip a unit's connected
+// flag back to false. One miss can happen for any number of harmless
+// reasons (bus contention, a single dropped byte) — we don't want a
+// transient blip to drop the unit from the dashboard. Three in a row
+// is a controller that genuinely went away.
+#define ROBOCLAW_DROP_AFTER_MISSES  3
+
+// Re-probe a disconnected unit at most this often. The probe is a
+// GETVERSION packet (4 bytes out, 50 ms timeout in) — cheap, but if
+// every disconnected unit re-probed on every update() tick we'd spend
+// most of the bus on probes nobody asked for. Per-unit pacing keeps
+// the bus quiet while still letting a freshly-plugged controller
+// recover within a couple of seconds.
+#define ROBOCLAW_REPROBE_INTERVAL_MS 2000
+
+// Pins requested by the operator (set via parse_json_params from the
+// peripheral config sync). Don't read these as "the UART is bound
+// here" — see active_tx_pin/active_rx_pin/active_uart below for that.
 static uint8_t roboclaw_tx_pin = ROBOCLAW_DEFAULT_TX_PIN;
 static uint8_t roboclaw_rx_pin = ROBOCLAW_DEFAULT_RX_PIN;
+
+// What the UART hardware is currently bound to. 0xFF means "no UART
+// bound yet". If a fresh config comes in with different pins, we
+// deinit the old pair before re-binding — otherwise the previous
+// pins keep driving traffic onto whatever's wired there.
+static uint8_t active_tx_pin = 0xFF;
+static uint8_t active_rx_pin = 0xFF;
+static uint8_t active_uart   = 0xFF;
 
 // =============================================================================
 // Per-Unit State
 // =============================================================================
 
 typedef struct {
-    uint8_t address;
-    uint8_t deadband;
+    uint8_t  address;
+    uint8_t  deadband;
     uint16_t max_current_ma;
-    int16_t duty;
-    int32_t encoder;
+    int16_t  duty;
+    int32_t  encoder;
     uint16_t voltage_mv;
-    int16_t current_ma;
-    int16_t temp_tenths;
-    bool connected;
+    int16_t  current_ma;
+    int16_t  temp_tenths;
+    bool     connected;
+    // Connection-state tracking. last_response_ms is the timestamp of
+    // the most recent successful read; consecutive_misses counts
+    // failed polls since the last good response (resets on success).
+    // last_reprobe_ms paces re-probing of disconnected units so the
+    // bus doesn't fill with retries when nothing's there. Set to 0
+    // at boot and after a re-bind so the first probe fires immediately.
+    uint32_t last_response_ms;
+    uint8_t  consecutive_misses;
+    uint32_t last_reprobe_ms;
 } roboclaw_unit_t;
 
 // =============================================================================
@@ -141,93 +177,241 @@ static bool read_ack(void)
 #endif
 
 // =============================================================================
+// Probe / connection tracking
+// =============================================================================
+
+#ifndef SIMULATION
+/* Issue GETVERSION on `unit_idx` and read the null-terminated version
+ * string + 2 CRC bytes. Returns true on a valid response. Used both
+ * from the initial probe pass (after a UART re-bind) and from
+ * roboclaw_update() to opportunistically re-probe disconnected units.
+ * Doesn't itself touch connected/last_response_ms — callers do that
+ * so the same logic applies whether the success came from probe or
+ * telemetry. */
+static bool probe_unit(uint8_t unit_idx, char* version_out, size_t version_out_size)
+{
+    if (!hw_uart || unit_idx >= ROBOCLAW_MAX_UNITS) return false;
+
+    // Drain any stale bytes from a previous failed exchange so the
+    // version parser doesn't latch onto leftover garbage.
+    while (uart_is_readable(hw_uart)) (void)uart_getc(hw_uart);
+
+    send_command(units[unit_idx].address, ROBOCLAW_CMD_GETVERSION, NULL, 0);
+
+    uint8_t resp[ROBOCLAW_VERSION_MAX_LEN + 2];
+    uint32_t start = PLATFORM_MILLIS();
+    uint8_t len = 0;
+    bool got_null = false;
+    while (len < ROBOCLAW_VERSION_MAX_LEN) {
+        while (!uart_is_readable(hw_uart)) {
+            if (PLATFORM_MILLIS() - start > ROBOCLAW_RESPONSE_TIMEOUT_MS) {
+                return false;
+            }
+        }
+        resp[len] = uart_getc(hw_uart);
+        if (resp[len] == 0) {
+            got_null = true;
+            len++;
+            break;
+        }
+        len++;
+        start = PLATFORM_MILLIS();
+    }
+    if (!got_null) return false;
+
+    // Slurp the 2 CRC bytes that follow the null terminator.
+    for (uint8_t j = 0; j < 2; j++) {
+        while (!uart_is_readable(hw_uart)) {
+            if (PLATFORM_MILLIS() - start > ROBOCLAW_BYTE_TIMEOUT_MS) {
+                return false;
+            }
+        }
+        resp[len++] = uart_getc(hw_uart);
+        start = PLATFORM_MILLIS();
+    }
+
+    // Copy the version string out for the log line. resp[0..len-3] is
+    // the null-terminated version; truncate safely into the caller's
+    // buffer regardless of its size.
+    if (version_out && version_out_size > 0) {
+        size_t copy_len = (len >= 2) ? (size_t)(len - 2) : 0;
+        if (copy_len >= version_out_size) copy_len = version_out_size - 1;
+        memcpy(version_out, resp, copy_len);
+        version_out[copy_len] = '\0';
+    }
+    return true;
+}
+#endif
+
+/* Update a unit's connected state after a poll attempt, logging
+ * connection transitions exactly once. Called from probe paths and
+ * from the telemetry round-robin so all link-state transitions show
+ * up in the Logs tab. */
+static void mark_unit_response(uint8_t unit_idx, bool success)
+{
+    if (unit_idx >= ROBOCLAW_MAX_UNITS) return;
+    roboclaw_unit_t* u = &units[unit_idx];
+
+    if (success) {
+        u->last_response_ms = PLATFORM_MILLIS();
+        u->consecutive_misses = 0;
+        if (!u->connected) {
+            u->connected = true;
+            saint_log_publish("info",
+                "RoboClaw: unit %u (0x%02X) connected",
+                (unsigned)unit_idx, (unsigned)u->address);
+        }
+    } else {
+        if (u->consecutive_misses < 255) u->consecutive_misses++;
+        if (u->connected
+            && u->consecutive_misses >= ROBOCLAW_DROP_AFTER_MISSES) {
+            u->connected = false;
+            saint_log_publish("warn",
+                "RoboClaw: unit %u (0x%02X) dropped — %u consecutive missed polls",
+                (unsigned)unit_idx, (unsigned)u->address,
+                (unsigned)u->consecutive_misses);
+        }
+    }
+}
+
+// =============================================================================
 // Public API
 // =============================================================================
 
+/*
+ * Bind the UART hardware to the configured pin pair and run an
+ * initial GETVERSION probe against every populated unit. Idempotent:
+ * if the active pins/UART already match the configured ones, this
+ * returns immediately without disturbing the bus. Called both at
+ * config load (drv_load) and on every config sync (drv_apply_config).
+ *
+ * Why this is split out from drv_init: drv_init runs at peripheral
+ * registration during boot, before any config has arrived. Probing
+ * with default pins at that point is worse than useless — if the
+ * operator wired RoboClaw to GPIO 4/5 we'd be banging bytes onto
+ * 0/1 and never learn anything. Roboclaw_init() instead runs *after*
+ * either a stored config restored from flash or a fresh config sync
+ * has set roboclaw_tx_pin/roboclaw_rx_pin to where the wires
+ * actually are.
+ */
 void roboclaw_init(void)
 {
-    // Set default unit configs
+    // Seed the default address for any unit slot the operator hasn't
+    // explicitly touched. Don't touch deadband/max_current_ma/etc —
+    // those are operator config that drv_apply_config and drv_load
+    // populate BEFORE calling us, and the previous version of this
+    // block clobbered them on the first init() right after the
+    // populate, leaving the dashboard's deadband setting silently
+    // ignored. A "never touched" slot is identified by address==0
+    // (the static zero-init value); a real RoboClaw address is
+    // 0x80..0x87, so this is unambiguous.
     for (uint8_t i = 0; i < ROBOCLAW_MAX_UNITS; i++) {
-        units[i].address = ROBOCLAW_ADDRESS_MIN + i;
-        units[i].deadband = 0;
-        units[i].max_current_ma = 0;
-        units[i].duty = 0;
-        units[i].encoder = 0;
-        units[i].voltage_mv = 0;
-        units[i].current_ma = 0;
-        units[i].temp_tenths = 0;
-        units[i].connected = false;
+        if (units[i].address == 0) {
+            units[i].address = ROBOCLAW_ADDRESS_MIN + i;
+        }
     }
 
-#ifndef SIMULATION
-    // Resolve UART instance from configured pin pair (falls back to defaults).
+    // Resolve the operator-picked TX/RX into a UART instance. The
+    // table lives in board YAML and is loaded into the firmware via
+    // uart_pin_pairs.c — see board configs under saint_os/config/boards.
+    // If the pair the operator picked isn't valid we log AND fall back,
+    // because a silent fallback is exactly how this driver gets into
+    // the "configured pair was 4/5 but I'm running on 0/1" state where
+    // the bus looks dead from the dashboard's point of view.
+    //
+    // This block is outside #ifndef SIMULATION on purpose: it's pure C
+    // and the host-side test runner relies on the warn log firing so
+    // the silent-fallback regression has a non-hardware test gate.
     uint8_t resolved_inst;
+    uint8_t req_tx = roboclaw_tx_pin;
+    uint8_t req_rx = roboclaw_rx_pin;
     if (uart_pin_pair_lookup(roboclaw_tx_pin, roboclaw_rx_pin, &resolved_inst)) {
         configured_serial_port = resolved_inst;
     } else {
+        saint_log_publish("warn",
+            "RoboClaw: requested pair TX=%u RX=%u isn't a valid RP2040 UART pair "
+            "— falling back to TX=%u RX=%u (UART0). Check board YAML uart_pairs.",
+            (unsigned)req_tx, (unsigned)req_rx,
+            (unsigned)ROBOCLAW_DEFAULT_TX_PIN, (unsigned)ROBOCLAW_DEFAULT_RX_PIN);
         roboclaw_tx_pin = ROBOCLAW_DEFAULT_TX_PIN;
         roboclaw_rx_pin = ROBOCLAW_DEFAULT_RX_PIN;
         configured_serial_port = ROBOCLAW_DEFAULT_SERIAL_PORT;
     }
-    hw_uart = (configured_serial_port == 0) ? uart0 : uart1;
 
+#ifndef SIMULATION
+    // Idempotent fast-path: same pair already bound, nothing to do.
+    // Without this, every drv_apply_config call (which fires per
+    // channel — up to ROBOCLAW_MAX_CHANNELS times per sync) would
+    // tear down and reinit the UART, dropping any bytes in flight.
+    if (active_tx_pin == roboclaw_tx_pin
+        && active_rx_pin == roboclaw_rx_pin
+        && active_uart   == configured_serial_port
+        && port_initialized) {
+        return;
+    }
+
+    // Detach the previously-bound pins so they stop driving traffic
+    // onto stale wires when the operator moves the cable to a new pair.
+    if (active_tx_pin != 0xFF) {
+        gpio_set_function(active_tx_pin, GPIO_FUNC_SIO);
+        gpio_set_dir(active_tx_pin, GPIO_IN);
+    }
+    if (active_rx_pin != 0xFF) {
+        gpio_set_function(active_rx_pin, GPIO_FUNC_SIO);
+        gpio_set_dir(active_rx_pin, GPIO_IN);
+    }
+    if (active_uart != 0xFF && active_uart != configured_serial_port) {
+        uart_deinit(active_uart == 0 ? uart0 : uart1);
+    }
+
+    hw_uart = (configured_serial_port == 0) ? uart0 : uart1;
     uart_init(hw_uart, configured_baud);
     gpio_set_function(roboclaw_tx_pin, GPIO_FUNC_UART);
     gpio_set_function(roboclaw_rx_pin, GPIO_FUNC_UART);
 
+    active_tx_pin = roboclaw_tx_pin;
+    active_rx_pin = roboclaw_rx_pin;
+    active_uart   = configured_serial_port;
+
     PLATFORM_SLEEP_MS(100);
 
-    // Probe each unit with GETVERSION
+    // Probe every unit slot. Unit_count grows in apply_config based on
+    // configured channels — but at first probe we don't know which
+    // addresses the operator has wired, so we sweep the full address
+    // range. Any unit that responds gets flipped connected (with a log
+    // line) via mark_unit_response. Reset miss counters first so a
+    // re-bind doesn't carry stale state into the new probe.
+    saint_log_publish("info",
+        "RoboClaw: bound UART%u TX=%u RX=%u @ %u baud — probing 0x%02X..0x%02X",
+        (unsigned)configured_serial_port,
+        (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin,
+        (unsigned)configured_baud,
+        (unsigned)ROBOCLAW_ADDRESS_MIN,
+        (unsigned)(ROBOCLAW_ADDRESS_MIN + ROBOCLAW_MAX_UNITS - 1));
+
+    uint8_t connected_count = 0;
     for (uint8_t i = 0; i < ROBOCLAW_MAX_UNITS; i++) {
-        uint8_t dummy_cmd = ROBOCLAW_CMD_GETVERSION;
-        send_command(units[i].address, dummy_cmd, NULL, 0);
-
-        uint8_t resp[ROBOCLAW_VERSION_MAX_LEN + 2];
-        // Read until null terminator or timeout
-        uint32_t start = PLATFORM_MILLIS();
-        uint8_t len = 0;
-        bool got_null = false;
-        while (len < ROBOCLAW_VERSION_MAX_LEN) {
-            while (!uart_is_readable(hw_uart)) {
-                if (PLATFORM_MILLIS() - start > ROBOCLAW_RESPONSE_TIMEOUT_MS) {
-                    goto version_done;
-                }
-            }
-            resp[len] = uart_getc(hw_uart);
-            if (resp[len] == 0) {
-                got_null = true;
-                len++;
-                break;
-            }
-            len++;
-            start = PLATFORM_MILLIS();
-        }
-
-        // Read 2 CRC bytes if we got the null terminator
-        if (got_null) {
-            for (uint8_t j = 0; j < 2; j++) {
-                while (!uart_is_readable(hw_uart)) {
-                    if (PLATFORM_MILLIS() - start > ROBOCLAW_BYTE_TIMEOUT_MS) {
-                        goto version_done;
-                    }
-                }
-                resp[len++] = uart_getc(hw_uart);
-                start = PLATFORM_MILLIS();
-            }
-            units[i].connected = true;
+        units[i].consecutive_misses = 0;
+        units[i].last_reprobe_ms    = PLATFORM_MILLIS();
+        char version[ROBOCLAW_VERSION_MAX_LEN] = {0};
+        if (probe_unit(i, version, sizeof(version))) {
+            // mark_unit_response handles the "first connected" log;
+            // emit a more detailed line here with the version string
+            // since we only get it on a successful GETVERSION.
+            mark_unit_response(i, true);
+            saint_log_publish("info",
+                "RoboClaw: unit %u (0x%02X) version: %s",
+                (unsigned)i, (unsigned)units[i].address, version);
             if (i >= unit_count) unit_count = i + 1;
-            PLATFORM_PRINTF("RoboClaw: unit %d (0x%02X) connected\n",
-                            i, units[i].address);
+            connected_count++;
         }
-version_done:
-        ;
     }
+    saint_log_publish(connected_count > 0 ? "info" : "warn",
+        "RoboClaw: probe complete — %u of %u addresses responded",
+        (unsigned)connected_count, (unsigned)ROBOCLAW_MAX_UNITS);
 #endif
 
     port_initialized = true;
-    PLATFORM_PRINTF("RoboClaw: initialized on UART%d TX=%d RX=%d at %d baud, %d units\n",
-                    configured_serial_port, roboclaw_tx_pin, roboclaw_rx_pin,
-                    configured_baud, unit_count);
 }
 
 void roboclaw_update(void)
@@ -235,13 +419,36 @@ void roboclaw_update(void)
     if (!port_initialized || unit_count == 0) return;
 
 #ifndef SIMULATION
-    // Round-robin: poll one telemetry register from one unit per call
     uint8_t u = poll_unit;
-    if (!units[u].connected) goto next_poll;
-
     uint8_t addr = units[u].address;
     uint8_t resp[8];
+    bool success = false;
 
+    if (!units[u].connected) {
+        // Unit isn't currently connected — try to re-probe rather
+        // than spinning on telemetry that's guaranteed to fail. Pace
+        // these probes so a chassis with three offline units doesn't
+        // fill the bus with GETVERSION traffic.
+        uint32_t now = PLATFORM_MILLIS();
+        if (now - units[u].last_reprobe_ms >= ROBOCLAW_REPROBE_INTERVAL_MS) {
+            units[u].last_reprobe_ms = now;
+            char version[ROBOCLAW_VERSION_MAX_LEN] = {0};
+            if (probe_unit(u, version, sizeof(version))) {
+                mark_unit_response(u, true);
+                saint_log_publish("info",
+                    "RoboClaw: unit %u (0x%02X) recovered — version: %s",
+                    (unsigned)u, (unsigned)addr, version);
+            }
+            // Don't bump consecutive_misses on a re-probe miss; the
+            // unit is already marked disconnected, no state change.
+        }
+        goto next_poll;
+    }
+
+    // Connected unit: poll one telemetry register, advance the cursor.
+    // read_response returns false on timeout or CRC mismatch — either
+    // way it's a missed poll, which feeds mark_unit_response so we
+    // notice when a previously-good controller goes quiet.
     switch (poll_register) {
     case 0: // Encoder
         send_command(addr, ROBOCLAW_CMD_GETM1ENC, NULL, 0);
@@ -250,6 +457,7 @@ void roboclaw_update(void)
                                ((int32_t)resp[1] << 16) |
                                ((int32_t)resp[2] << 8) |
                                resp[3];
+            success = true;
         }
         break;
 
@@ -258,6 +466,7 @@ void roboclaw_update(void)
         if (read_response(resp, 2, addr, ROBOCLAW_CMD_GETMBATT)) {
             uint16_t raw = ((uint16_t)resp[0] << 8) | resp[1];
             units[u].voltage_mv = raw * 100;  // raw/10 = volts -> raw*100 = mV
+            success = true;
         }
         break;
 
@@ -267,6 +476,7 @@ void roboclaw_update(void)
             // M1 current is first 2 bytes (value/100 = amps)
             int16_t raw = (int16_t)(((uint16_t)resp[0] << 8) | resp[1]);
             units[u].current_ma = raw * 10;  // raw/100 amps = raw*10 mA
+            success = true;
         }
         break;
 
@@ -274,12 +484,17 @@ void roboclaw_update(void)
         send_command(addr, ROBOCLAW_CMD_GETTEMP, NULL, 0);
         if (read_response(resp, 2, addr, ROBOCLAW_CMD_GETTEMP)) {
             units[u].temp_tenths = (int16_t)(((uint16_t)resp[0] << 8) | resp[1]);
+            success = true;
         }
         break;
     }
+    mark_unit_response(u, success);
 
 next_poll:
-    // Advance to next register, wrapping to next unit
+    // Advance to next register, wrapping to next unit. Iterate over
+    // every populated unit (not just connected ones) so the re-probe
+    // path above gets a turn — that's how a freshly-plugged controller
+    // comes back online without operator intervention.
     poll_register++;
     if (poll_register > 3) {
         poll_register = 0;
@@ -338,7 +553,15 @@ void roboclaw_stop_all(void)
 
 static bool roboclaw_drv_init(void)
 {
-    roboclaw_init();
+    // Intentional no-op. peripheral_init_all() fires this during boot,
+    // BEFORE either the saved-flash config has loaded or a fresh sync
+    // has arrived — so we don't yet know which UART pins the operator
+    // wired the RoboClaw to. Probing on defaults here would either
+    // succeed by accident (driving traffic on the right wires) or
+    // silently fail and leave the dashboard reporting no units even
+    // when there are some. Either way the operator can't tell which
+    // happened. Real init now runs from drv_load (restored from flash)
+    // or drv_apply_config (fresh sync), once we know the pins.
     return true;
 }
 
@@ -405,6 +628,17 @@ static bool roboclaw_drv_apply_config(uint8_t channel, const pin_config_t* confi
         unit_count = unit + 1;
     }
 
+    // The operator may have picked a different UART pin pair via the
+    // sync. parse_json_params already updated roboclaw_tx_pin /
+    // roboclaw_rx_pin from the JSON. roboclaw_init() is idempotent —
+    // it no-ops when the active pins already match — so calling it
+    // here is the cheapest way to (a) actually bind the new hardware
+    // when the pins changed and (b) trigger a probe pass so the
+    // operator sees their unit come online in the Logs tab. Without
+    // this, the driver would keep talking on whatever pins drv_init
+    // bound (which is nothing now, since drv_init is a no-op), and the
+    // dashboard would show "no units" forever.
+    roboclaw_init();
     return true;
 }
 
@@ -412,6 +646,7 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
                                      pin_config_t* config)
 {
     const char* p;
+    bool got_pins = false;
 
     p = strstr(json_start, "\"address\"");
     if (p && p < json_end) {
@@ -436,6 +671,29 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
         roboclaw_tx_pin = tx;
         roboclaw_rx_pin = rx;
         configured_serial_port = inst;
+        got_pins = true;
+    }
+
+    // Per-channel parse_json fires up to ROBOCLAW_MAX_CHANNELS times
+    // (5 channels × up to 8 units) on a sync, all with the same pin
+    // payload. Only log once — on the first channel of the first unit
+    // — so the Logs tab doesn't drown in 40 identical lines.
+    if (config->gpio == ROBOCLAW_VIRTUAL_GPIO_BASE) {
+        if (got_pins) {
+            saint_log_publish("info",
+                "RoboClaw sync: pins TX=%u RX=%u (UART%u), unit 0 addr=0x%02X "
+                "deadband=%u max_current=%u mA",
+                (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin,
+                (unsigned)configured_serial_port,
+                (unsigned)config->params.roboclaw.address,
+                (unsigned)config->params.roboclaw.deadband,
+                (unsigned)config->params.roboclaw.max_current_ma);
+        } else {
+            saint_log_publish("warn",
+                "RoboClaw sync: didn't find uart_tx/uart_rx in JSON — "
+                "driver will keep using TX=%u RX=%u",
+                (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin);
+        }
     }
 
     return true;
@@ -444,7 +702,7 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
 static void roboclaw_drv_estop(void)
 {
     roboclaw_stop_all();
-    PLATFORM_PRINTF("RoboClaw: ESTOP - all units stopped\n");
+    saint_log_publish("warn", "RoboClaw: ESTOP — all units commanded to duty=0");
 }
 
 static bool roboclaw_drv_save(void* storage_ptr)
@@ -481,8 +739,10 @@ static bool roboclaw_drv_load(const void* storage_ptr)
             roboclaw_rx_pin = stored_rx;
             configured_serial_port = inst;
         } else {
-            PLATFORM_PRINTF("RoboClaw: invalid stored pin pair tx=%d rx=%d, using defaults\n",
-                            stored_tx, stored_rx);
+            saint_log_publish("warn",
+                "RoboClaw: stored pin pair TX=%u RX=%u isn't a valid RP2040 "
+                "UART pair — using defaults. Re-sync from the dashboard.",
+                (unsigned)stored_tx, (unsigned)stored_rx);
         }
     }
 
@@ -503,7 +763,16 @@ static bool roboclaw_drv_load(const void* storage_ptr)
         units[i].max_current_ma = storage->roboclaw_config.units[i].max_current_ma;
     }
 
-    PLATFORM_PRINTF("RoboClaw: restored %d unit configs from flash\n", count);
+    saint_log_publish("info",
+        "RoboClaw: restored %u unit configs from flash (UART%u TX=%u RX=%u @ %u baud)",
+        (unsigned)count, (unsigned)configured_serial_port,
+        (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin,
+        (unsigned)configured_baud);
+
+    // Restored config means the operator had this peripheral configured
+    // before the last reboot — start probing right away so the dashboard
+    // doesn't show units as offline until the next sync.
+    roboclaw_init();
     return true;
 }
 
