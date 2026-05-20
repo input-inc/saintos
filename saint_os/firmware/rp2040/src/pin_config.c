@@ -175,6 +175,14 @@ static bool extract_string_field(const char* start, const char* end,
 // Apply a single peripheral entry: instantiate the firmware driver's
 // virtual GPIO channels and let the driver pull its pins + params out
 // of `obj_start..obj_end`.
+//
+// Each peripheral instance gets exactly `drv->channels_per_instance`
+// channels — not the driver's full slab. Multiple instances of the
+// same driver stack consecutively within the slab; the instance slot
+// is derived from how many entries with this mode already exist in
+// pin_config (which `apply_peripherals_json` resets before calling us).
+// This way the firmware no longer pre-claims a fixed grid of "up to N
+// units" — each node carries exactly what it has.
 static bool apply_one_peripheral(const char* obj_start, const char* obj_end)
 {
     char type_id[32];
@@ -188,15 +196,54 @@ static bool apply_one_peripheral(const char* obj_start, const char* obj_end)
         saint_log_publish("warn", "No driver for type '%s' — skipping", type_id);
         return false;
     }
+    if (drv->channels_per_instance == 0) {
+        saint_log_publish("error", "Driver '%s' has channels_per_instance=0", type_id);
+        return false;
+    }
 
     // Optional friendly id used as logical_name on every channel.
     char inst_id[32];
     inst_id[0] = '\0';
     extract_string_field(obj_start, obj_end, "\"id\"", inst_id, sizeof(inst_id));
 
-    // Build one pin_config_t entry per channel (matching the driver's
-    // virtual-GPIO layout) and let the driver parse its own params.
-    for (uint8_t ch = 0; ch < drv->channel_count; ch++) {
+    // Count existing pin_config entries with this driver's mode to
+    // determine which instance slot we're filling. Stateless across
+    // apply runs because apply_peripherals_json calls pin_config_reset
+    // first.
+    uint8_t existing = 0;
+    const pin_config_t* existing_configs = pin_config_get_all(&existing);
+    uint8_t used_channels = 0;
+    for (uint8_t i = 0; i < existing; i++) {
+        if (existing_configs[i].mode == drv->pin_mode) used_channels++;
+    }
+    uint8_t inst_idx = used_channels / drv->channels_per_instance;
+    uint8_t base_channel = (uint8_t)(inst_idx * drv->channels_per_instance);
+
+    if ((uint16_t)base_channel + drv->channels_per_instance > drv->channel_count) {
+        saint_log_publish("warn",
+            "Driver '%s' instance %u exceeds slab (%u channels) — skipping",
+            type_id, (unsigned)inst_idx, (unsigned)drv->channel_count);
+        return false;
+    }
+    // pin_config_t.gpio is uint8_t. When virtual_gpio_base + ch
+    // exceeds 255, vgpio wraps into the low-numbered range and can
+    // alias a real-GPIO config entry. We don't refuse the allocation
+    // (Pathfinder BMS at base 276 has always wrapped — relocating its
+    // base needs a coordinated server-side change and is tracked
+    // separately) but we surface the danger.
+    if ((uint16_t)drv->virtual_gpio_base + base_channel
+            + drv->channels_per_instance > 256) {
+        saint_log_publish("warn",
+            "Driver '%s' instance %u wraps GPIO range "
+            "(base=%u + ch=%u + %u > 256) — may alias real GPIOs",
+            type_id, (unsigned)inst_idx,
+            (unsigned)drv->virtual_gpio_base,
+            (unsigned)base_channel,
+            (unsigned)drv->channels_per_instance);
+    }
+
+    for (uint8_t sub = 0; sub < drv->channels_per_instance; sub++) {
+        uint8_t ch = (uint8_t)(base_channel + sub);
         uint8_t vgpio = (uint8_t)(drv->virtual_gpio_base + ch);
         if (!pin_config_set(vgpio, drv->pin_mode, inst_id)) {
             // pin_config_set already logged the reason

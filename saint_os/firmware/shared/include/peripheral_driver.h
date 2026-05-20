@@ -28,7 +28,19 @@ typedef struct peripheral_driver {
     pin_mode_t pin_mode;            // PIN_MODE_MAESTRO_SERVO, etc.
     uint32_t capability_flag;       // PIN_CAP_MAESTRO_SERVO, etc.
     uint16_t virtual_gpio_base;     // 200, 224, 276, etc.
-    uint8_t channel_count;          // 24, 8, etc.
+    uint8_t channel_count;          // Slab size: max channels the driver
+                                    // can host (e.g. 40 = 8 units * 5
+                                    // sub-channels for RoboClaw). Sets
+                                    // the upper bound for how many
+                                    // peripheral instances can stack.
+    uint8_t channels_per_instance;  // Channels claimed by one peripheral
+                                    // instance from the configure JSON
+                                    // (e.g. 5 for one RoboClaw, 1 for
+                                    // one SyRen, 4 for a FAS100). The
+                                    // peripheral-first sync allocates
+                                    // exactly this many channels per
+                                    // entry — drivers no longer pre-
+                                    // claim every channel in the slab.
 
     // Lifecycle
     bool (*init)(void);
