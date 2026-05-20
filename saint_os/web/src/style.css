@@ -1,19 +1,190 @@
+/* Fonts — served from web/public/fonts/, available at /fonts/* in both
+   dev (Vite) and prod (Vite build copies public/ into dist/). */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/inter/inter-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono/jetbrains-mono-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Material Icons';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/fonts/material-icons/material-icons.woff2') format('woff2');
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@layer components {
-  .card {
-    @apply bg-slate-900/70 border border-slate-800 rounded-xl p-4;
-  }
-  .btn {
-    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium
-           border border-slate-700 bg-slate-800 hover:bg-slate-700
-           transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-  .btn-primary {
-    @apply btn bg-cyan-600 hover:bg-cyan-500 border-cyan-500 text-white;
-  }
-  .stat-label { @apply text-xs uppercase tracking-wide text-slate-500; }
-  .stat-value { @apply text-slate-100; }
+/* ── Material Icons utility class (mirrors legacy css/fonts.css) ──────── */
+.material-icons {
+  font-family: 'Material Icons';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
 }
+.material-icons.md-18 { font-size: 18px; }
+.material-icons.md-20 { font-size: 20px; }
+.material-icons.md-24 { font-size: 24px; }
+.material-icons.md-36 { font-size: 36px; }
+.material-icons.md-48 { font-size: 48px; }
+.material-icons.icon-sm { font-size: 16px; }
+.material-icons.icon-md { font-size: 24px; }
+.material-icons.icon-lg { font-size: 64px; }
+
+/* ── Custom scrollbar ─────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #1e293b; }
+::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* ── Animations ───────────────────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+.animate-pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.page-fade { animation: fadeIn 0.2s ease-out; }
+
+/* ── Components — ported verbatim from legacy.html's component styles ── */
+
+/* Navigation */
+.nav-link {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500;
+  color: #94a3b8;
+  border-radius: 0.5rem;
+  transition: all 0.2s;
+  border-bottom: 2px solid transparent;
+}
+.nav-link:hover { color: white; background-color: rgba(51, 65, 85, 0.5); }
+.nav-link.router-link-active,
+.nav-link.active {
+  color: #22d3ee;
+  background-color: rgba(30, 41, 59, 0.5);
+  border-bottom-color: #22d3ee;
+}
+
+/* Cards */
+.card {
+  background-color: rgba(30, 41, 59, 0.5);
+  border-radius: 0.75rem;
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  padding: 1.5rem;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(4px);
+}
+
+/* Buttons */
+.btn-primary {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500;
+  background-color: #0891b2; color: white;
+  border-radius: 0.5rem; transition: all 0.2s;
+  box-shadow: 0 10px 15px -3px rgba(6, 182, 212, 0.2);
+}
+.btn-primary:hover { background-color: #06b6d4; }
+
+.btn-secondary {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500;
+  background-color: #334155; color: #e2e8f0;
+  border-radius: 0.5rem; transition: all 0.2s;
+  border: 1px solid #475569;
+}
+.btn-secondary:hover { background-color: #475569; }
+
+.btn-danger {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500;
+  background-color: #dc2626; color: white;
+  border-radius: 0.5rem; transition: all 0.2s;
+  box-shadow: 0 10px 15px -3px rgba(239, 68, 68, 0.2);
+}
+.btn-danger:hover { background-color: #ef4444; }
+
+.btn-sm {
+  display: inline-flex; align-items: center; gap: 0.375rem;
+  padding: 0.375rem 0.75rem; font-size: 0.75rem; font-weight: 500;
+  border-radius: 0.375rem; transition: all 0.2s;
+}
+
+/* Stats */
+.stat-item { display: flex; flex-direction: column; gap: 0.25rem; }
+.stat-label {
+  font-size: 0.75rem; font-weight: 500; color: #94a3b8;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.stat-value { font-size: 1.125rem; font-weight: 600; color: white; }
+
+/* Form elements */
+.input-field {
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  padding: 0.5rem 1rem;
+  color: #e2e8f0; font-size: 0.875rem;
+  transition: all 0.2s;
+}
+.input-field:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.5);
+  border-color: #06b6d4;
+}
+
+/* Node cards */
+.node-card {
+  background-color: #1e293b;
+  border-radius: 0.5rem;
+  border: 1px solid #334155;
+  padding: 1rem;
+  transition: border-color 0.2s;
+}
+.node-card:hover { border-color: #475569; }
+.node-card button { position: relative; z-index: 1; }
+
+/* Node Detail Tabs */
+.node-tab {
+  padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500;
+  color: #94a3b8;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+  background: none;
+  border-top: none; border-left: none; border-right: none;
+  cursor: pointer;
+}
+.node-tab:hover { color: white; }
+.node-tab.router-link-active,
+.node-tab.active {
+  color: #22d3ee;
+  border-bottom-color: #22d3ee;
+}
+
+/* Log entries (used by node Logs + system Logs views) */
+.log-entry { padding: 0.375rem 0.75rem; border-radius: 0.25rem; color: #cbd5e1; }
+.log-entry.info  { background-color: rgba(30, 41, 59, 0.5); border-left: 2px solid #06b6d4; }
+.log-entry.warn  { background-color: rgba(120, 53, 15, 0.2); border-left: 2px solid #f59e0b; color: #fcd34d; }
+.log-entry.error { background-color: rgba(127, 29, 29, 0.2); border-left: 2px solid #ef4444; color: #fca5a5; }
+.log-entry.debug { background-color: rgba(30, 41, 59, 0.3);  border-left: 2px solid #475569; color: #94a3b8; }

@@ -33,6 +33,10 @@ export const useWsStore = defineStore('ws', () => {
   const maxReconnect = 10
   const reconnectBase = 1000
   let reconnectTimer = null
+  // Auto-reload: once we've had a successful session, a *second* `ready`
+  // means the server restarted — reload so the client picks up new code.
+  // The hash route survives the reload, so no explicit state save needed.
+  let hadSession = false
 
   // ── Lifecycle ────────────────────────────────────────────────────
 
@@ -79,6 +83,16 @@ export const useWsStore = defineStore('ws', () => {
     emit('error', err)
   }
 
+  function handleReady () {
+    if (hadSession) {
+      console.log('Reconnected after session — reloading for fresh server code.')
+      setTimeout(() => location.reload(), 100)
+      return
+    }
+    hadSession = true
+    emit('ready')
+  }
+
   function scheduleReconnect () {
     if (reconnectAttempts.value >= maxReconnect) {
       emit('reconnect_failed')
@@ -113,7 +127,7 @@ export const useWsStore = defineStore('ws', () => {
       authRequired.value = !!msg.auth_required
       if (!authRequired.value) {
         authenticated.value = true
-        emit('ready')
+        handleReady()
       } else {
         emit('auth_required', msg)
       }
@@ -125,7 +139,7 @@ export const useWsStore = defineStore('ws', () => {
     if (msg.type === 'auth_result') {
       if (msg.status === 'ok') {
         authenticated.value = true
-        emit('ready')
+        handleReady()
       }
       emit('auth_result', msg)
       return
@@ -172,6 +186,23 @@ export const useWsStore = defineStore('ws', () => {
     })
   }
 
+  function authenticate (password) {
+    if (!ws) return Promise.reject(new Error('Not connected'))
+    return new Promise((resolve, reject) => {
+      const handler = (msg) => {
+        off('auth_result', handler)
+        if (msg.status === 'ok') resolve(msg)
+        else reject(new Error(msg.message || 'Auth failed'))
+      }
+      on('auth_result', handler)
+      ws.send(JSON.stringify({ type: 'auth', action: 'login', password }))
+      setTimeout(() => {
+        off('auth_result', handler)
+        reject(new Error('Auth timeout'))
+      }, 10000)
+    })
+  }
+
   const management = (action, params = {}) => send('management', action, params)
   const command    = (target, action, params = {}) => send('command', action, { target, ...params })
   const control    = (action, params = {}) => send('control', action, params)
@@ -200,7 +231,7 @@ export const useWsStore = defineStore('ws', () => {
     // lifecycle
     connect, disconnect,
     // command surface
-    send, management, command, control, router: routerCmd, subscribe, unsubscribe,
+    send, management, command, control, router: routerCmd, subscribe, unsubscribe, authenticate,
     // events
     on, off,
   }

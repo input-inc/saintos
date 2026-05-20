@@ -96,34 +96,54 @@ The first `npm install` produces `package-lock.json`. Commit it — every
 build after that uses `npm ci` (deterministic, fails on drift) instead
 of `npm install`.
 
-## Porting picklist (priority order)
+## Porting status
 
-Each entry lists the new Vue file and the legacy source(s) it should match.
-Pick one slice at a time, port end-to-end (data fetch + render + interactions),
-verify it in the dev server, commit. Repeat.
+**All legacy functionality is now ported.** Below is what each Vue view
+does. Where a view is intentionally simpler than the legacy it's
+called out explicitly.
 
-### Tier 1 — operator-critical
-- **Node detail / Live tab** → `src/views/node/Live.vue` ← `js/nodelive.js`
-- **Nodes list (adoption flow)** → `src/views/Nodes.vue` ← parts of `js/app.js`
-- **Node detail / Peripherals** → `src/views/node/Peripherals.vue` ← `js/peripherals.js`
-- **Node detail / Logs** → `src/views/node/Logs.vue` ← `js/nodelogs.js`
+| Vue view | Legacy source | Notes |
+| --- | --- | --- |
+| `views/Dashboard.vue` | `js/app.js` (dashboard panel) | System status (CPU/mem/temp/uptime from `system_status` broadcast), node summary, recent activity log. |
+| `views/Nodes.vue` | `js/app.js` (nodes list) | Adopted + unadopted sections; adoption modal with chip/board/role pickers; scan button. |
+| `views/NodeDetail.vue` + `views/node/*.vue` | `js/app.js` + per-tab files | Six tabs with `NodeActions` sidebar (identify, restart, e-stop, firmware update, factory reset, unadopt, remove). |
+| `views/node/Overview.vue` | inline in legacy.html | Identity + connection stat grids. |
+| `views/node/Peripherals.vue` | `js/peripherals.js` | Add/edit/remove with shared `AppModal`, pin pickers from node capabilities, params per type. |
+| `views/node/Live.vue` | `js/nodelive.js` | Per-peripheral channel readings. |
+| `views/node/State.vue` | `js/statecontrols.js` | Channel-addressed sliders/toggles/color via `set_channel_value`. |
+| `views/node/Logs.vue` | `js/nodelogs.js` | History + live tail, scroll-to-bottom, clear. |
+| `views/node/Boards.vue` | `js/boards.js` | Lists registered boards and highlights the node's current one. The editor lives on Settings. |
+| `views/Routes.vue` | `js/routing.js` | SVG graph editor with draggable peripheral/signal/widget nodes and bezier wires. Click a channel handle to start a wire, click another compatible handle to complete it. Position persisted to localStorage. Buttons to add signals/widgets and auto-layout. Route list below the canvas for raw view + delete. |
+| `views/Widgets.vue` | `js/widgets.js` | Read-only widget cards with input → route summary. |
+| `views/Inputs.vue` | `js/livelink.js` (summary) | LiveLink summary card. |
+| `views/LiveLink.vue` | `js/livelink.js` | Detail with paused-able blend-shape bars. |
+| `views/Control.vue` | `js/controlpage.js` + `js/pincontrol.js` | Cross-node jump-off (links to each node's State tab) + global E-Stop. |
+| `views/Moods.vue` | `js/moods.js` | List moods, parse to show props, apply to head node. |
+| `views/Updates.vue` | `js/updates.js` | Check / download / install / scan-USB. Installing overlay matches legacy. |
+| `views/Logs.vue` | `js/app.js` (activity log) | System log buffer with text filter + per-level (info/warn/error/debug) checkboxes. |
+| `views/Terminal.vue` | `js/terminal.js` | xterm.js + FitAddon, binary frame forwarding, resize/restart. |
+| `views/Settings.vue` | `js/app.js` Settings + `js/boards.js` + `js/websocket.js` | Five sub-tabs: Server (this-browser connection + identity + WebSocket/Network/ROS + connected clients list with disconnect), Interface (temperature unit + theme), LiveLink (receiver settings + live status), Firmware (bundled builds list), Boards (full CRUD via `BoardEditorModal`). Dirty tracking + save/reset. |
+| `components/LoginScreen.vue` | `legacy.html` login section | Shown when `ws.authRequired && !ws.authenticated`. Saves host/password to localStorage, calls `ws.authenticate()`. |
 
-### Tier 2 — system configuration
-- **Routes** → `src/views/Routes.vue` ← `js/routing.js`
-- **Widgets / dashboard editor** → `src/views/Widgets.vue` ← `js/widgets.js`
-- **Boards (per-node board picker)** → `src/views/node/Boards.vue` ← `js/boards.js`
+## Shared components, composables, stores
 
-### Tier 3 — inputs / behaviors
-- **Inputs (LiveLink status)** → `src/views/Inputs.vue` ← `js/livelink.js` (top-level)
-- **LiveLink detail** → `src/views/LiveLink.vue` ← `js/livelink.js`
-- **Moods** → `src/views/Moods.vue` ← `js/moods.js`
-
-### Tier 4 — chrome / dev tools
-- **Control page (global control)** → `src/views/Control.vue` ← `js/controlpage.js` + `js/pincontrol.js`
-- **Terminal** → `src/views/Terminal.vue` ← `js/terminal.js` (xterm.js)
-- **Firmware updates** → `src/views/Updates.vue` ← `js/updates.js`
-- **System logs** → `src/views/Logs.vue` ← parts of `js/app.js`
-- **Settings** → `src/views/Settings.vue` ← `js/websocket.js` connection settings
+- `components/AppHeader.vue` — sticky header with gradient logo + connection pill + E-Stop
+- `components/NavBar.vue` — horizontal `.nav-link` strip
+- `components/AppModal.vue` — generic modal w/ slot for actions, ESC-to-close
+- `components/LoginScreen.vue` — full-page auth gate when WS requires it
+- `components/PeripheralCard.vue` + `components/channel/{ChannelSlider,Toggle,Color,Spec.js}.vue`
+- `components/AdoptModal.vue` — chip/board/role pickers for unadopted nodes
+- `components/NodeActions.vue` — sidebar on node detail with all the operator actions
+- `components/FirmwareUpdateModal.vue` — per-node firmware update + force-build override
+- `components/BoardEditorModal.vue` — YAML editor for operator-authored boards
+- `composables/useWsTopic.js` — subscribe-on-mount, unsub-on-unmount, re-sub on reconnect
+- `composables/useThrottledSend.js` — slider commit throttling
+- `stores/ws.js` — full WS port, reactive connection state, send/management/control/router/subscribe/authenticate
+- `stores/nodes.js` — adopted + unadopted nodes registry; scan(), fetchAll()
+- `stores/peripheralCatalog.js` — cached peripheral type catalog
+- `stores/settings.js` — server settings with dirty tracking + save/reset
+- `stores/display.js` — operator display preferences (temperature unit) in localStorage
+- `stores/activity.js` — capped activity log buffer fed by `activity` topic + manual `add()`
 
 ## Conventions to follow
 
@@ -140,14 +160,18 @@ verify it in the dev server, commit. Repeat.
 
 ## Known design questions still open
 
-- **Authentication UI**: legacy `js/websocket.js` had auth-required handling.
-  The store carries the state; we don't have a login screen yet.
-- **xterm.js for Terminal**: needs to be added to dependencies (`xterm`,
-  `@xterm/addon-fit`) and wrapped in a component that handles binary frames
-  via `ws.on('binary', ...)`.
-- **Live reload on reconnect**: legacy code force-reloads the page after a
-  reconnect to pick up new server code. Vue's HMR makes this less necessary
-  during dev; we may still want it in production.
-- **Routes endpoint shape**: `js/routing.js` is the most complex legacy
-  file. Worth a closer look before porting — the canvas/wire-drawing logic
-  may want to stay as a single component rather than getting decomposed.
+None — see resolved list below.
+
+Resolved:
+
+- **Authentication UI** — `components/LoginScreen.vue` gates the app via
+  `ws.authRequired && !ws.authenticated` in `App.vue`.
+- **xterm.js for Terminal** — `@xterm/xterm` + `@xterm/addon-fit` are in
+  `package.json`; `views/Terminal.vue` wires binary frames through
+  `ws.on('binary', …)`, with `ResizeObserver`-driven `FitAddon`.
+- **Routes endpoint shape** — `views/Routes.vue` ports `js/routing.js` as
+  a single component; the SVG canvas, wire-drawing, and route list all
+  live there.
+- **Live reload on reconnect** — `stores/ws.js` tracks a `hadSession` flag;
+  the *second* `ready` (i.e. after a reconnect) triggers `location.reload()`.
+  The hash route survives the reload, so no explicit state save is needed.

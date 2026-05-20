@@ -17,7 +17,6 @@ const peripherals = ref([])
 const syncStatus  = ref('unknown')
 const pinState = useWsTopic(() => `pin_state/${props.nodeId}`)
 
-// Latest value per (peripheral_id, channel_id).
 const values = computed(() => {
   const out = {}
   const channels = pinState.value?.channels || []
@@ -50,10 +49,7 @@ const connectedMap = computed(() => props.node?.peripheral_connected || {})
 async function onCommit (peripheralId, { channelId, value }) {
   try {
     await ws.control('set_channel_value', {
-      node_id: props.nodeId,
-      peripheral_id: peripheralId,
-      channel_id: channelId,
-      value,
+      node_id: props.nodeId, peripheral_id: peripheralId, channel_id: channelId, value,
     })
   } catch (e) {
     console.warn('set_channel_value failed:', e)
@@ -68,36 +64,31 @@ async function resetAll () {
       if (ch.dir !== 'out') continue
       const spec = specFor(p.type, ch)
       if (spec.unsupported) continue
-      const neutral = spec.neutral ?? 0
-      await onCommit(p.id, { channelId: ch.id, value: neutral })
+      await onCommit(p.id, { channelId: ch.id, value: spec.neutral ?? 0 })
     }
   }
 }
 
-const syncBadge = computed(() => {
-  const map = {
-    synced:       { label: 'Synced',       cls: 'bg-emerald-900/40 text-emerald-300' },
-    pending:      { label: 'Pending',      cls: 'bg-amber-900/40 text-amber-300' },
-    error:        { label: 'Error',        cls: 'bg-rose-900/40 text-rose-300' },
-    unknown:      { label: 'Unknown',      cls: 'bg-slate-800 text-slate-400' },
-    unconfigured: { label: 'Unconfigured', cls: 'bg-slate-800 text-slate-400' },
-  }
-  return map[syncStatus.value] || map.unknown
-})
+const syncBadge = computed(() => ({
+  synced:       { label: 'Synced',       cls: 'bg-emerald-500/20 text-emerald-400' },
+  pending:      { label: 'Pending',      cls: 'bg-amber-500/20 text-amber-300' },
+  error:        { label: 'Error',        cls: 'bg-red-500/20 text-red-400' },
+  unknown:      { label: 'Unknown',      cls: 'bg-slate-700 text-slate-400' },
+  unconfigured: { label: 'Unconfigured', cls: 'bg-slate-700 text-slate-400' },
+}[syncStatus.value] || { label: 'Unknown', cls: 'bg-slate-700 text-slate-400' }))
 </script>
 
 <template>
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-    <section class="lg:col-span-2 space-y-4">
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="lg:col-span-2 space-y-4">
       <div class="flex items-center justify-between">
-        <h3 class="text-lg font-semibold">Peripheral Controls</h3>
-        <span :class="['px-2 py-0.5 rounded-full text-xs', syncBadge.cls]">
-          {{ syncBadge.label }}
-        </span>
+        <h3 class="text-lg font-semibold text-white">Peripheral Controls</h3>
+        <span :class="['px-2 py-1 text-xs font-medium rounded-full', syncBadge.cls]">{{ syncBadge.label }}</span>
       </div>
 
-      <div v-if="!peripherals.length" class="card text-sm text-slate-400">
-        No peripherals configured on this node yet.
+      <div v-if="!peripherals.length" class="card text-center py-10">
+        <span class="material-icons icon-lg text-slate-600">tune</span>
+        <p class="text-slate-400 text-sm mt-3">No peripherals configured on this node yet.</p>
       </div>
 
       <PeripheralCard
@@ -108,21 +99,34 @@ const syncBadge = computed(() => {
         :channel-values="values[p.id] || {}"
         @commit="evt => onCommit(p.id, evt)"
       />
-    </section>
+    </div>
 
-    <aside class="space-y-4">
+    <div class="space-y-4">
       <div class="card">
-        <h3 class="text-sm font-semibold mb-3 text-slate-200">Summary</h3>
-        <dl class="space-y-2 text-sm">
-          <div class="flex justify-between"><dt class="stat-label">Node</dt><dd>{{ node?.online ? 'Online' : 'Offline' }}</dd></div>
-          <div class="flex justify-between"><dt class="stat-label">Peripherals</dt><dd>{{ peripherals.length }}</dd></div>
-          <div class="flex justify-between"><dt class="stat-label">Last frame</dt><dd>{{ pinState ? 'live' : '—' }}</dd></div>
-        </dl>
+        <h3 class="text-lg font-semibold text-white mb-4">State Summary</h3>
+        <div class="space-y-3">
+          <div class="stat-item">
+            <span class="stat-label">Node Status</span>
+            <span class="stat-value text-sm">{{ node?.online ? 'Online' : 'Offline' }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Peripherals</span>
+            <span class="stat-value text-sm">{{ peripherals.length }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Last Frame</span>
+            <span class="stat-value text-sm">{{ pinState ? 'live' : '—' }}</span>
+          </div>
+        </div>
       </div>
+
       <div class="card">
-        <h3 class="text-sm font-semibold mb-3 text-slate-200">Quick actions</h3>
-        <button class="btn w-full justify-center" @click="resetAll">Reset all outputs</button>
+        <h3 class="text-lg font-semibold text-white mb-4">Quick Actions</h3>
+        <button class="btn-secondary w-full justify-center text-sm" @click="resetAll">
+          <span class="material-icons icon-sm">center_focus_strong</span>
+          Reset all outputs
+        </button>
       </div>
-    </aside>
+    </div>
   </div>
 </template>

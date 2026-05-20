@@ -2,12 +2,13 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useWsStore } from './ws'
 
-// Peripheral type catalog — fetched once from the server, then cached
-// reactively. Components read `byType.value[id]` to get a type spec
-// (channels, params, label).
+// Peripheral + widget type catalog — fetched once from the server,
+// then cached reactively. The server returns both lists in the same
+// `get_peripheral_catalog` response, mirroring legacy behavior.
 export const usePeripheralCatalog = defineStore('peripheralCatalog', () => {
   const ws = useWsStore()
   const types = ref([])
+  const widgetTypes = ref([])
   const loaded = ref(false)
   let inflight = null
 
@@ -16,6 +17,7 @@ export const usePeripheralCatalog = defineStore('peripheralCatalog', () => {
     if (inflight) return inflight
     inflight = ws.management('get_peripheral_catalog', {}).then(r => {
       types.value = r?.peripheral_types || []
+      widgetTypes.value = r?.widget_types || []
       loaded.value = true
       inflight = null
     }).catch(e => {
@@ -28,6 +30,9 @@ export const usePeripheralCatalog = defineStore('peripheralCatalog', () => {
   function byType (id) {
     return types.value.find(t => t.id === id) || null
   }
+  function widgetType (id) {
+    return widgetTypes.value.find(t => t.id === id) || null
+  }
 
-  return { types, loaded, ensureLoaded, byType }
+  return { types, widgetTypes, loaded, ensureLoaded, byType, widgetType }
 })

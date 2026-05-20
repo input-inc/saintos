@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted } from 'vue'
 import { useNodesStore } from '@/stores/nodes'
+import NodeActions from '@/components/NodeActions.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 const nodes = useNodesStore()
@@ -11,44 +12,51 @@ onMounted(() => nodes.fetchAll().catch(() => {}))
 const tabs = [
   { name: 'node-overview',    label: 'Overview' },
   { name: 'node-peripherals', label: 'Peripherals' },
+  { name: 'node-live',        label: 'Live readings' },
   { name: 'node-state',       label: 'State' },
-  { name: 'node-live',        label: 'Live' },
   { name: 'node-logs',        label: 'Logs' },
   { name: 'node-boards',      label: 'Boards' },
 ]
 
 const title = computed(() => node.value?.display_name || props.id)
-const subtitle = computed(() => node.value
-  ? `${node.value.role || '—'} · ${node.value.node_id}`
-  : props.id)
+const role  = computed(() => node.value?.role || 'unassigned')
 const online = computed(() => node.value?.online !== false)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex items-center justify-between">
-      <div>
-        <h2 class="text-2xl font-semibold tracking-tight flex items-center gap-2">
-          <span :class="['w-2.5 h-2.5 rounded-full', online ? 'bg-emerald-500' : 'bg-slate-500']" />
-          {{ title }}
-        </h2>
-        <p class="text-xs text-slate-500 font-mono">{{ subtitle }}</p>
+  <section>
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-3">
+        <span :class="['w-3 h-3 rounded-full', online ? 'bg-emerald-500 animate-pulse-dot' : 'bg-slate-500']" />
+        <div>
+          <h2 class="text-2xl font-bold text-white leading-tight">{{ title }}</h2>
+          <p class="text-xs text-slate-400 font-mono">{{ role }} · {{ id }}</p>
+        </div>
       </div>
-      <RouterLink :to="{ name: 'nodes' }" class="btn">← Nodes</RouterLink>
+      <RouterLink :to="{ name: 'nodes' }" class="btn-secondary">
+        <span class="material-icons icon-sm">arrow_back</span>
+        Nodes
+      </RouterLink>
     </div>
 
-    <div class="flex gap-1 border-b border-slate-800">
+    <div class="flex gap-1 border-b border-slate-700/50 mb-6 overflow-x-auto">
       <RouterLink
         v-for="t in tabs"
         :key="t.name"
         :to="{ name: t.name, params: { id } }"
-        active-class="text-cyan-300 border-cyan-400"
-        class="px-3 py-2 text-sm text-slate-400 hover:text-white border-b-2 border-transparent"
+        class="node-tab"
       >
         {{ t.label }}
       </RouterLink>
     </div>
 
-    <RouterView :node-id="id" :node="node" />
-  </div>
+    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <div class="lg:col-span-3">
+        <RouterView :node-id="id" :node="node" />
+      </div>
+      <div class="lg:col-span-1">
+        <NodeActions :node="node" @changed="nodes.fetchAll()" />
+      </div>
+    </div>
+  </section>
 </template>

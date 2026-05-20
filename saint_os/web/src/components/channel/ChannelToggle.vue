@@ -2,8 +2,8 @@
 import { computed } from 'vue'
 
 const props = defineProps({
-  label:      { type: String,  required: true },
-  modelValue: { type: Number,  default: 0 },
+  label:      { type: String, required: true },
+  modelValue: { type: Number, default: 0 },
 })
 const emit = defineEmits(['update:modelValue', 'commit'])
 
@@ -18,18 +18,14 @@ function toggle () {
 
 <template>
   <div class="flex items-center justify-between">
-    <span class="text-sm font-medium">{{ label }}</span>
+    <span class="text-sm font-medium text-white">{{ label }}</span>
     <button
-      :class="[
-        'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
-        isOn ? 'bg-emerald-500' : 'bg-slate-700'
-      ]"
+      :class="['relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
+               isOn ? 'bg-cyan-500' : 'bg-slate-700']"
       @click="toggle"
     >
-      <span :class="[
-        'inline-block h-4 w-4 transform rounded-full transition-transform',
-        isOn ? 'translate-x-6 bg-white' : 'translate-x-1 bg-slate-400'
-      ]" />
+      <span :class="['inline-block h-4 w-4 rounded-full transition-transform',
+                     isOn ? 'translate-x-6 bg-white' : 'translate-x-1 bg-slate-400']" />
     </button>
   </div>
 </template>

@@ -25,7 +25,7 @@ function onChange (e) {
 <template>
   <div>
     <div class="flex items-center justify-between">
-      <span class="text-sm font-medium">{{ label }}</span>
+      <span class="text-sm font-medium text-white">{{ label }}</span>
       <input
         type="color"
         :value="hex"
@@ -33,8 +33,8 @@ function onChange (e) {
         @change="onChange"
       />
     </div>
-    <div v-if="spec.unsupported" class="text-xs text-amber-400/80 mt-1">
-      {{ spec.note || 'Not yet supported.' }}
+    <div v-if="spec.unsupported" class="text-xs text-amber-400/80 mt-1 flex items-center gap-1">
+      <span class="material-icons icon-sm">construction</span>{{ spec.note || 'Not yet supported.' }}
     </div>
   </div>
 </template>
