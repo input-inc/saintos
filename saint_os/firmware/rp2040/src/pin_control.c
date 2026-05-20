@@ -16,6 +16,8 @@
 #include "pin_control.h"
 #include "pin_config.h"
 #include "peripheral_driver.h"
+#include "saint_types.h"   // led_set_override_color / led_clear_override
+#include "saint_log.h"     // saint_log_publish (dashboard Logs tab)
 
 // =============================================================================
 // Constants
@@ -471,6 +473,47 @@ static int channel_offset_for(pin_mode_t mode, const char* channel)
     }
 }
 
+// The status NeoPixel isn't a pin_config entry — it's owned by
+// led_status.c. Route set_channel writes for peripheral="neopixel"
+// directly to the LED override API instead of trying to look it up
+// via pin_config (which would fail and silently drop the write).
+//
+// JSON value semantics:
+//   channel="color"      → packed uint24 RGB (0xRRGGBB), from the
+//                          State tab color picker
+//   channel="brightness" → 0..1 float; scaled to 0..255 and the
+//                          current override color is kept
+static bool apply_neopixel_channel(const char* channel_id, float value)
+{
+    if (strcmp(channel_id, "color") == 0) {
+        // The State tab packs #RRGGBB into a uint24 carried in a float.
+        // atof() round-trips integers up to 2^24 exactly, so no loss.
+        uint32_t packed = (uint32_t)value;
+        uint8_t r = (uint8_t)((packed >> 16) & 0xFF);
+        uint8_t g = (uint8_t)((packed >>  8) & 0xFF);
+        uint8_t b = (uint8_t)( packed        & 0xFF);
+        led_set_override_color(r, g, b, 255);
+        saint_log_publish("info",
+            "NeoPixel: override RGB=(%u,%u,%u) via set_channel (server UI)",
+            (unsigned)r, (unsigned)g, (unsigned)b);
+        return true;
+    }
+    if (strcmp(channel_id, "brightness") == 0) {
+        // Without a known active color, drawing a "brightness 0.5"
+        // override would just paint dim-black. Refuse rather than
+        // silently look wrong; the operator should set color first.
+        // (When we later track override color alongside brightness
+        // separately we can do better here.)
+        saint_log_publish("warn",
+            "NeoPixel: brightness-only override not implemented yet "
+            "(value=%.3f). Set color first via the color picker.", value);
+        return false;
+    }
+    saint_log_publish("warn",
+        "NeoPixel: unknown channel '%s' on set_channel", channel_id);
+    return false;
+}
+
 // Dispatch a `set_channel` write by walking pin_config to find the
 // peripheral's slot, then computing the target GPIO from its mode +
 // channel offset. The wire format is operator-visible names; the
@@ -481,11 +524,11 @@ static bool apply_set_channel(const char* json)
     char channel_id[PIN_CONFIG_MAX_NAME_LEN];
 
     if (!extract_str_field(json, "\"peripheral\"", peripheral_id, sizeof(peripheral_id))) {
-        printf("Pin control: set_channel missing 'peripheral'\n");
+        saint_log_publish("warn", "set_channel: missing 'peripheral' field");
         return false;
     }
     if (!extract_str_field(json, "\"channel\"", channel_id, sizeof(channel_id))) {
-        printf("Pin control: set_channel missing 'channel'\n");
+        saint_log_publish("warn", "set_channel: missing 'channel' field");
         return false;
     }
 
@@ -496,6 +539,12 @@ static bool apply_set_channel(const char* json)
     value_str++;
     while (*value_str == ' ') value_str++;
     float value = (float)atof(value_str);
+
+    // NeoPixel isn't a pin_config entry — special-case before the
+    // logical_name walk below would unconditionally fail for it.
+    if (strcmp(peripheral_id, "neopixel") == 0) {
+        return apply_neopixel_channel(channel_id, value);
+    }
 
     // Find the smallest GPIO whose logical_name matches the peripheral.
     // For multi-channel peripherals that's the base slot — offsets are
@@ -513,20 +562,29 @@ static bool apply_set_channel(const char* json)
         }
     }
     if (base_gpio < 0) {
-        printf("Pin control: peripheral '%s' not configured\n", peripheral_id);
+        // Surface the miss in the Logs tab — previously a printf-only
+        // diagnostic, which only operators with serial console access
+        // ever saw. This was the silent failure mode behind "I'm
+        // moving the slider and nothing happens."
+        saint_log_publish("warn",
+            "set_channel: peripheral '%s' is not in pin_config — "
+            "has it been synced from the Peripherals tab?",
+            peripheral_id);
         return false;
     }
 
     int offset = channel_offset_for(mode, channel_id);
     if (offset < 0) {
-        printf("Pin control: peripheral '%s' has no channel '%s'\n",
-               peripheral_id, channel_id);
+        saint_log_publish("warn",
+            "set_channel: peripheral '%s' has no channel '%s' for mode %s",
+            peripheral_id, channel_id, pin_mode_to_string(mode));
         return false;
     }
 
     uint8_t target_gpio = (uint8_t)(base_gpio + offset);
-    printf("Pin control: set_channel %s/%s = %.3f (GPIO %d)\n",
-           peripheral_id, channel_id, value, target_gpio);
+    saint_log_publish("info",
+        "set_channel %s/%s = %.3f → GPIO %u",
+        peripheral_id, channel_id, value, (unsigned)target_gpio);
     return pin_control_set_value(target_gpio, value);
 }
 

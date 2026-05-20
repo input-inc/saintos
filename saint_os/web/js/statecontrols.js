@@ -189,8 +189,16 @@ class StateControlManager {
             'syren/motor':    { kind: 'slider', min: -1,  max: 1,   step: 0.01, neutral: 0, fmt: v => `${(v * 100).toFixed(0)}%`, hint: '-100% reverse · 0 stop · +100% forward' },
             'servo/angle':    { kind: 'slider', min: 0,   max: 180, step: 1,    neutral: 90, fmt: v => `${v.toFixed(0)}°` },
             'led/on':         { kind: 'toggle' },
-            'neopixel/color':      { kind: 'color',  unsupported: true, note: 'Not yet routable through firmware control path.' },
-            'neopixel/brightness': { kind: 'slider', min: 0, max: 1, step: 0.01, neutral: 0.5, fmt: v => `${(v * 100).toFixed(0)}%`, unsupported: true, note: 'Not yet routable through firmware control path.' },
+            // Firmware routes neopixel/color through pin_control.c's
+            // apply_set_channel → led_set_override_color. The value
+            // wire format is the packed uint24 from the color picker
+            // (0xRRGGBB) carried as a float — atof() round-trips
+            // integers up to 2^24 exactly.
+            'neopixel/color':      { kind: 'color',  hint: 'Sticks until the node\'s connection state changes.' },
+            // Brightness-only override isn't wired yet — the firmware
+            // refuses with a warn so the operator sees feedback in
+            // the Logs tab rather than a silent drop.
+            'neopixel/brightness': { kind: 'slider', min: 0, max: 1, step: 0.01, neutral: 0.5, fmt: v => `${(v * 100).toFixed(0)}%`, unsupported: true, note: 'Set color first via the picker — brightness-only override not yet implemented.' },
         };
         if (overrides[key]) return overrides[key];
         // Fallbacks by capability tag

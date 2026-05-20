@@ -517,7 +517,19 @@ bool roboclaw_is_connected(void)
 
 bool roboclaw_set_duty(uint8_t unit, int16_t duty)
 {
-    if (unit >= ROBOCLAW_MAX_UNITS || !port_initialized) return false;
+    if (unit >= ROBOCLAW_MAX_UNITS) return false;
+    if (!port_initialized) {
+        // The slider arrived but the UART has never been bound. This
+        // is the silent-failure mode users hit when no RoboClaw
+        // peripheral was synced — duty value never reaches the wire.
+        // Surface it in the dashboard Logs tab so it's diagnosable
+        // without a serial console.
+        saint_log_publish("warn",
+            "RoboClaw: set_duty(unit=%u, duty=%d) ignored — driver not "
+            "initialized (no peripheral synced; UART not bound).",
+            (unsigned)unit, (int)duty);
+        return false;
+    }
 
     if (duty > ROBOCLAW_DUTY_MAX) duty = ROBOCLAW_DUTY_MAX;
     if (duty < ROBOCLAW_DUTY_MIN) duty = ROBOCLAW_DUTY_MIN;
@@ -525,6 +537,13 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
     units[unit].duty = duty;
 
 #ifndef SIMULATION
+    if (!hw_uart) {
+        saint_log_publish("warn",
+            "RoboClaw: set_duty(unit=%u, duty=%d) — UART handle null "
+            "(internal bind state inconsistent).",
+            (unsigned)unit, (int)duty);
+        return false;
+    }
     uint8_t data[2];
     data[0] = (uint8_t)((uint16_t)duty >> 8);
     data[1] = (uint8_t)((uint16_t)duty & 0xFF);
