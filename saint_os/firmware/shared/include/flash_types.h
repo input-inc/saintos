@@ -111,6 +111,9 @@ typedef struct __attribute__((packed)) {
         // (skip the boot-time deassert). See pin_types.h's roboclaw
         // struct for full rationale.
         uint8_t estop_pin;
+        // 1 = use PIO UART (TX/RX swappable to any GPIO); 0 = use
+        // hardware UART with silicon-fixed pin map. See pin_types.h.
+        uint8_t uart_swap;
     } units[FLASH_ROBOCLAW_MAX_UNITS];
 } flash_roboclaw_config_t;
 

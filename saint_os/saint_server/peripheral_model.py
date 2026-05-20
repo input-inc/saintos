@@ -61,7 +61,12 @@ class PeripheralTypeParam:
     """A configurable parameter on a peripheral type."""
     id: str
     label: str
-    type: str          # "bool" | "int" | "float" | "string"
+    type: str          # "bool" | "int" | "float" | "string" | "gpio"
+                       # "gpio" tells the UI to render this param as a
+                       # dropdown of the controller's GPIO pins, filtered
+                       # to those not already claimed by another
+                       # peripheral. Stored as an integer on the wire,
+                       # so the firmware-side parser stays unchanged.
     default: Any
     min: Optional[float] = None
     max: Optional[float] = None
@@ -209,7 +214,16 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             # non-latching mode on the RoboClaw side or the
             # controller will silently lock out motor commands the
             # first time the MCU resets.
-            PeripheralTypeParam("estop_pin", "E-stop pin (GPIO)", "int", 0, min=0, max=29),
+            PeripheralTypeParam("estop_pin", "E-stop pin", "gpio", 0, min=0, max=29),
+            # When True, firmware uses a PIO-based UART so the TX/RX
+            # GPIOs can be any pin (not the silicon-fixed UART0
+            # GP0/GP1 pair). Set this on custom PCBs where the wires
+            # to the controller's S1/S2 are routed such that the
+            # MCU's expected TX pin is physically wired to the
+            # controller's TX (and vice versa) — the hardware UART
+            # can't swap directions; PIO can. Default False: use the
+            # hardware UART exactly as before.
+            PeripheralTypeParam("uart_swap", "Use PIO UART (swap TX/RX)", "bool", False),
         ],
     ),
     "pathfinder_bms": PeripheralType(

@@ -146,6 +146,16 @@ typedef struct {
             // the PCB inverts the signal, add an `estop_active_high`
             // bool here alongside this field.
             uint8_t estop_pin;
+            // When 1, the driver uses the PIO UART (any GPIO can be
+            // TX or RX) instead of the hardware UART (silicon-fixed
+            // TX/RX pin map). Set this on custom PCBs whose wiring
+            // doesn't match the hardware UART's GP0=TX / GP1=RX
+            // assignment — e.g. when GP0 is wired to the controller's
+            // S2 (TX-from-controller) and GP1 is wired to S1
+            // (RX-into-controller). The driver then runs TX on GP1
+            // and RX on GP0 via two PIO state machines on PIO1.
+            // 0 (default) = use hardware UART exactly as before.
+            uint8_t uart_swap;
         } roboclaw;
         struct {
             uint16_t poll_interval_ms;

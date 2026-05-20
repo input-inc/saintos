@@ -488,6 +488,12 @@ class PeripheralManager {
 
     renderParamsFor(type, existing) {
         if (!type.params || type.params.length === 0) return '';
+        // Compute "what pins are already claimed by other peripherals"
+        // once, so every gpio-typed param on this peripheral shares
+        // the same exclusion set. excludeId = the peripheral being
+        // edited, so its own currently-selected pins/params don't
+        // show up disabled in its own dropdowns.
+        const claimed = this.buildClaimedExcluding(existing ? existing.id : null);
         const rows = type.params.map(p => {
             const value = (existing && existing.params && existing.params[p.id] !== undefined)
                 ? existing.params[p.id]
@@ -500,6 +506,28 @@ class PeripheralManager {
                                ${value ? 'checked' : ''} class="rounded bg-slate-700 border-slate-600">
                         ${escapeHtml(p.label)}
                     </label>`;
+            }
+            if (p.type === 'gpio') {
+                // Dropdown of the controller's GPIO pins, excluding
+                // those already claimed by another peripheral. A 0
+                // "— None —" option lets the operator clear it; the
+                // firmware treats estop_pin=0 as "no E-stop wired".
+                const pinList = (this.capabilities && this.capabilities.pins) || [];
+                const currentValue = (typeof value === 'number') ? value : 0;
+                const options = pinList.map(pin => {
+                    const isSelf = pin.gpio === currentValue;
+                    const conflict = !isSelf && claimed[pin.gpio];
+                    const note = conflict ? ` — in use by ${conflict.label}` : '';
+                    return `<option value="${pin.gpio}" ${conflict ? 'disabled' : ''} ${isSelf ? 'selected' : ''}>GP${pin.gpio} (${escapeHtml(pin.name)})${note}</option>`;
+                }).join('');
+                return `
+                    <div>
+                        <label class="block text-xs text-slate-400 mb-1">${escapeHtml(p.label)}</label>
+                        <select id="${escapeAttr(id)}" data-param="${escapeAttr(p.id)}" data-ptype="gpio" class="input-field w-full">
+                            <option value="0" ${currentValue === 0 ? 'selected' : ''}>— None —</option>
+                            ${options}
+                        </select>
+                    </div>`;
             }
             if (p.type === 'int' || p.type === 'float') {
                 const step = p.type === 'int' ? '1' : '0.01';
@@ -524,10 +552,29 @@ class PeripheralManager {
     }
 
     buildClaimedExcluding(excludeId) {
+        // Index of "GPIO number → peripheral that owns it." Covers
+        // both the pin_kind selection (uart_tx, uart_rx, gpio) AND
+        // params declared with type="gpio" (E-stop pin and any
+        // future side-channel pins), so the modal's pin and gpio-
+        // param dropdowns mark the same pin as in-use no matter
+        // which slot it was assigned through.
         const claimed = {};
         for (const p of this.peripherals) {
             if (p.id === excludeId) continue;
-            for (const v of Object.values(p.pins || {})) claimed[v] = p;
+            for (const v of Object.values(p.pins || {})) {
+                if (typeof v === 'number') claimed[v] = p;
+            }
+            const type = this.typeFor(p.type);
+            if (type && type.params) {
+                for (const param of type.params) {
+                    if (param.type !== 'gpio') continue;
+                    const v = p.params ? p.params[param.id] : undefined;
+                    // 0 is the "unset" sentinel — a real GPIO pick
+                    // is 1..29 on RP2040, so 0 never collides with
+                    // a legitimate selection.
+                    if (typeof v === 'number' && v > 0) claimed[v] = p;
+                }
+            }
         }
         return claimed;
     }
@@ -566,7 +613,8 @@ class PeripheralManager {
                 const id = el.getAttribute('data-param');
                 const ptype = el.getAttribute('data-ptype');
                 if (ptype === 'bool') params[id] = el.checked;
-                else if (ptype === 'int') params[id] = parseInt(el.value, 10) || 0;
+                else if (ptype === 'int' || ptype === 'gpio')
+                    params[id] = parseInt(el.value, 10) || 0;
                 else if (ptype === 'float') params[id] = parseFloat(el.value) || 0;
                 else params[id] = el.value;
             });

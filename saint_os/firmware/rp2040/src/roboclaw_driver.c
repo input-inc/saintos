@@ -14,6 +14,7 @@
 #include "platform.h"
 #include "saint_log.h"
 #include "uart_pin_pairs.h"
+#include "pio_uart.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@
 #ifndef SIMULATION
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
+#include "hardware/pio.h"
 #endif
 
 // =============================================================================
@@ -75,6 +77,11 @@ typedef struct {
     int16_t  current_ma;
     int16_t  temp_tenths;
     bool     connected;
+    // Latched flag, set when the first set_duty for this unit hits
+    // send_command. Used to emit a one-shot "first duty packet
+    // dispatched" log line that makes the firmware→wire path
+    // visible without spamming the Logs tab on every slider tick.
+    bool     first_duty_logged;
     // Connection-state tracking. last_response_ms is the timestamp of
     // the most recent successful read; consecutive_misses counts
     // failed polls since the last good response (resets on success).
@@ -100,6 +107,13 @@ typedef struct {
     // input before any motor command goes out. Polarity is fixed
     // (LOW = deasserted, HIGH = tripped) — see pin_types.h for why.
     uint8_t  estop_pin;
+    // 1 = this unit's serial path goes through the PIO UART (any
+    // GPIO can be TX or RX). 0 = hardware UART on silicon-fixed
+    // pins. uart_swap is a per-unit setting because the routing
+    // depends on which physical RoboClaw the unit talks to;
+    // typically all units on a node share the same value, but the
+    // schema doesn't force it.
+    uint8_t  uart_swap;
 } roboclaw_unit_t;
 
 // =============================================================================
@@ -120,15 +134,58 @@ static uint8_t poll_register = 0;  // 0=encoder, 1=voltage, 2=current, 3=temp
 static uart_inst_t* hw_uart = NULL;
 #endif
 
+// True when this driver instance is using the PIO UART path; false
+// when it's using the hardware UART. Set by roboclaw_init() at bind
+// time based on the unit configs (first unit's uart_swap wins — we
+// document in the schema that multi-unit setups must agree, since
+// all units share one UART pin pair).
+static bool use_pio_uart = false;
+
 // =============================================================================
-// Internal Helpers
+// Internal Helpers — wire I/O abstraction over HW UART vs PIO UART
 // =============================================================================
+//
+// The three primitives below (wire_write_blocking, wire_is_readable,
+// wire_getc) dispatch on use_pio_uart so the protocol-level helpers
+// (send_command, read_response, read_ack) stay identical between the
+// two transports. Both transports are 8N1 at the same baud — the
+// only difference is which silicon block is shifting bits.
 
 #ifndef SIMULATION
+static inline void wire_write_blocking(const uint8_t* buf, size_t len)
+{
+    if (use_pio_uart) {
+        pio_uart_write_blocking(buf, len);
+    } else if (hw_uart) {
+        uart_write_blocking(hw_uart, buf, len);
+    }
+}
+
+static inline bool wire_is_readable(void)
+{
+    if (use_pio_uart) {
+        return pio_uart_is_readable();
+    }
+    return hw_uart && uart_is_readable(hw_uart);
+}
+
+static inline uint8_t wire_getc(void)
+{
+    if (use_pio_uart) {
+        return pio_uart_getc();
+    }
+    return hw_uart ? uart_getc(hw_uart) : 0;
+}
+
+static inline bool wire_ready(void)
+{
+    return use_pio_uart ? pio_uart_is_active() : (hw_uart != NULL);
+}
+
 static void send_command(uint8_t address, uint8_t command,
                          const uint8_t* data, uint8_t data_len)
 {
-    if (!hw_uart) return;
+    if (!wire_ready()) return;
 
     uint8_t packet[64];
     uint8_t idx = 0;
@@ -143,25 +200,25 @@ static void send_command(uint8_t address, uint8_t command,
     packet[idx++] = (uint8_t)(crc >> 8);
     packet[idx++] = (uint8_t)(crc & 0xFF);
 
-    uart_write_blocking(hw_uart, packet, idx);
+    wire_write_blocking(packet, idx);
 }
 
 static bool read_response(uint8_t* buffer, uint8_t expected_len,
                            uint8_t address, uint8_t command)
 {
-    if (!hw_uart) return false;
+    if (!wire_ready()) return false;
 
     // Total bytes: expected_len data + 2 CRC bytes
     uint8_t total = expected_len + 2;
     uint32_t start = PLATFORM_MILLIS();
 
     for (uint8_t i = 0; i < total; i++) {
-        while (!uart_is_readable(hw_uart)) {
+        while (!wire_is_readable()) {
             if (PLATFORM_MILLIS() - start > ROBOCLAW_RESPONSE_TIMEOUT_MS) {
                 return false;
             }
         }
-        buffer[i] = uart_getc(hw_uart);
+        buffer[i] = wire_getc();
         start = PLATFORM_MILLIS();  // Reset per-byte timeout
     }
 
@@ -180,15 +237,15 @@ static bool read_response(uint8_t* buffer, uint8_t expected_len,
 
 static bool read_ack(void)
 {
-    if (!hw_uart) return false;
+    if (!wire_ready()) return false;
 
     uint32_t start = PLATFORM_MILLIS();
-    while (!uart_is_readable(hw_uart)) {
+    while (!wire_is_readable()) {
         if (PLATFORM_MILLIS() - start > ROBOCLAW_RESPONSE_TIMEOUT_MS) {
             return false;
         }
     }
-    return uart_getc(hw_uart) == ROBOCLAW_ACK_BYTE;
+    return wire_getc() == ROBOCLAW_ACK_BYTE;
 }
 #endif
 
@@ -299,7 +356,16 @@ static void apply_estop_pin(uint8_t unit_idx)
 /* Update a unit's connected state after a poll attempt, logging
  * connection transitions exactly once. Called from probe paths and
  * from the telemetry round-robin so all link-state transitions show
- * up in the Logs tab. */
+ * up in the Logs tab.
+ *
+ * When the unit has NEVER been connected (e.g. boot probe failed
+ * with its log dropped because ros_log_ready was false during
+ * drv_load), the original "log only on connected→dropped" path
+ * stayed permanently silent — every miss counted but nothing
+ * surfaced. We now also fire one warn at the
+ * ROBOCLAW_DROP_AFTER_MISSES threshold for never-connected units,
+ * so the operator gets "X tried 3 times, no ACK" visibility on the
+ * very first burst of slider movements. */
 static void mark_unit_response(uint8_t unit_idx, bool success)
 {
     if (unit_idx >= ROBOCLAW_MAX_UNITS) return;
@@ -307,6 +373,16 @@ static void mark_unit_response(uint8_t unit_idx, bool success)
 
     if (success) {
         u->last_response_ms = PLATFORM_MILLIS();
+        // If we were silently missing before this success arrived,
+        // surface the recovery so it pairs visually with the prior
+        // "no ACK" warn. Skip when consecutive_misses is 0 (clean
+        // run) to keep the log quiet during normal operation.
+        if (u->consecutive_misses >= ROBOCLAW_DROP_AFTER_MISSES) {
+            saint_log_publish("info",
+                "RoboClaw: unit %u (0x%02X) ACK received — recovered after %u misses",
+                (unsigned)unit_idx, (unsigned)u->address,
+                (unsigned)u->consecutive_misses);
+        }
         u->consecutive_misses = 0;
         if (!u->connected) {
             u->connected = true;
@@ -316,13 +392,27 @@ static void mark_unit_response(uint8_t unit_idx, bool success)
         }
     } else {
         if (u->consecutive_misses < 255) u->consecutive_misses++;
-        if (u->connected
-            && u->consecutive_misses >= ROBOCLAW_DROP_AFTER_MISSES) {
-            u->connected = false;
-            saint_log_publish("warn",
-                "RoboClaw: unit %u (0x%02X) dropped — %u consecutive missed polls",
-                (unsigned)unit_idx, (unsigned)u->address,
-                (unsigned)u->consecutive_misses);
+        if (u->consecutive_misses == ROBOCLAW_DROP_AFTER_MISSES) {
+            // Fires exactly once per miss-streak — whether the unit
+            // was previously connected or has never been seen. The
+            // previously-connected case logs the original "dropped"
+            // phrasing; the never-connected case logs a different
+            // line so the operator can tell "the link broke" from
+            // "the link never worked."
+            if (u->connected) {
+                u->connected = false;
+                saint_log_publish("warn",
+                    "RoboClaw: unit %u (0x%02X) dropped — %u consecutive missed polls",
+                    (unsigned)unit_idx, (unsigned)u->address,
+                    (unsigned)u->consecutive_misses);
+            } else {
+                saint_log_publish("warn",
+                    "RoboClaw: unit %u (0x%02X) — no ACK after %u attempts "
+                    "(controller hasn't responded once since boot; check wiring, "
+                    "baud, address, S3 latch)",
+                    (unsigned)unit_idx, (unsigned)u->address,
+                    (unsigned)u->consecutive_misses);
+            }
         }
     }
 }
@@ -391,20 +481,40 @@ void roboclaw_init(void)
         configured_serial_port = ROBOCLAW_DEFAULT_SERIAL_PORT;
     }
 
+    // Decide HW UART vs PIO UART. All units share the same UART pair
+    // (only one TX/RX wire pair on the bus), so unit 0's uart_swap is
+    // authoritative — the catalog schema documents that multi-unit
+    // setups must agree. If unit 0 isn't populated, fall through to
+    // hardware UART (the historical default).
+    //
+    // This decision lives OUTSIDE the #ifndef SIMULATION block so the
+    // host test runner can verify the right transport gets chosen
+    // without actually exercising the PIO peripheral. The actual
+    // pin/PIO binding happens further down inside #ifndef SIMULATION;
+    // we snapshot the previous state here so the bind path knows
+    // whether it's switching transports and needs to release the old
+    // one.
+    bool want_pio = (unit_count > 0) && (units[0].uart_swap != 0);
+    bool was_pio  = use_pio_uart;
+    use_pio_uart  = want_pio;
+
 #ifndef SIMULATION
-    // Idempotent fast-path: same pair already bound, nothing to do.
-    // Without this, every drv_apply_config call (which fires per
-    // channel — up to ROBOCLAW_MAX_CHANNELS times per sync) would
-    // tear down and reinit the UART, dropping any bytes in flight.
+
+    // Idempotent fast-path: same configuration already bound. Without
+    // this, every drv_apply_config call (which fires per channel — up
+    // to ROBOCLAW_MAX_CHANNELS times per sync) would tear down and
+    // reinit the UART, dropping any bytes in flight.
     if (active_tx_pin == roboclaw_tx_pin
         && active_rx_pin == roboclaw_rx_pin
         && active_uart   == configured_serial_port
-        && port_initialized) {
+        && port_initialized
+        && was_pio == want_pio) {
         return;
     }
 
-    // Detach the previously-bound pins so they stop driving traffic
-    // onto stale wires when the operator moves the cable to a new pair.
+    // Detach the previously-bound pins. Two transport paths to tear
+    // down here: hardware UART (de-mux GPIO from UART function) and
+    // PIO UART (pio_uart_deinit also returns the pins to SIO).
     if (active_tx_pin != 0xFF) {
         gpio_set_function(active_tx_pin, GPIO_FUNC_SIO);
         gpio_set_dir(active_tx_pin, GPIO_IN);
@@ -416,11 +526,52 @@ void roboclaw_init(void)
     if (active_uart != 0xFF && active_uart != configured_serial_port) {
         uart_deinit(active_uart == 0 ? uart0 : uart1);
     }
+    if (was_pio && !want_pio) {
+        // Switching from PIO → HW: release the PIO state machines so
+        // pio_uart_init in the next sync re-runs cleanly.
+        pio_uart_deinit();
+    }
 
-    hw_uart = (configured_serial_port == 0) ? uart0 : uart1;
-    uart_init(hw_uart, configured_baud);
-    gpio_set_function(roboclaw_tx_pin, GPIO_FUNC_UART);
-    gpio_set_function(roboclaw_rx_pin, GPIO_FUNC_UART);
+    if (use_pio_uart) {
+        // PIO UART path: pins are SWAPPED relative to the hardware
+        // UART map. The operator's roboclaw_tx_pin / roboclaw_rx_pin
+        // describe what the firmware *thinks* is TX/RX based on the
+        // hardware UART pair table — but on a PCB that needs the
+        // swap, the *physical* wire wired to "tx_pin" is actually
+        // the controller's TX (so we need to RECEIVE on it) and
+        // vice versa. So: PIO TX = roboclaw_rx_pin (the "RX"-labeled
+        // GPIO physically wired to controller S1 = controller RX),
+        // PIO RX = roboclaw_tx_pin (the "TX"-labeled GPIO wired to
+        // controller S2 = controller TX). We host both state
+        // machines on PIO1 (PIO0 sm0 is taken by the NeoPixel).
+        if (!pio_uart_init(pio1,
+                           /*tx=*/ roboclaw_rx_pin,
+                           /*rx=*/ roboclaw_tx_pin,
+                           configured_baud)) {
+            saint_log_publish("error",
+                "RoboClaw: PIO UART init failed (no free SMs/instructions?) — "
+                "falling back to hardware UART. Wires likely still swapped.");
+            use_pio_uart = false;
+        }
+        // Don't clear hw_uart — if the fallback fires below we'll
+        // bind it. Otherwise leave it stale; wire_* helpers gate on
+        // use_pio_uart so they won't touch it.
+    }
+
+    if (!use_pio_uart) {
+        hw_uart = (configured_serial_port == 0) ? uart0 : uart1;
+        uart_init(hw_uart, configured_baud);
+        gpio_set_function(roboclaw_tx_pin, GPIO_FUNC_UART);
+        gpio_set_function(roboclaw_rx_pin, GPIO_FUNC_UART);
+
+        // Enable the RP2040's internal pull-up on the RX line. The
+        // RoboClaw manual recommends a 1 kΩ–4.7 kΩ physical pull-up on
+        // the MCU RX pin; the RP2040 internal pull-up is ~50 kΩ which
+        // is enough for short PCB traces. See the long comment in the
+        // previous revision for full rationale and the FAS100 inverted-
+        // UART contrast.
+        gpio_pull_up(roboclaw_rx_pin);
+    }
 
     active_tx_pin = roboclaw_tx_pin;
     active_rx_pin = roboclaw_rx_pin;
@@ -434,13 +585,24 @@ void roboclaw_init(void)
     // range. Any unit that responds gets flipped connected (with a log
     // line) via mark_unit_response. Reset miss counters first so a
     // re-bind doesn't carry stale state into the new probe.
-    saint_log_publish("info",
-        "RoboClaw: bound UART%u TX=%u RX=%u @ %u baud — probing 0x%02X..0x%02X",
-        (unsigned)configured_serial_port,
-        (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin,
-        (unsigned)configured_baud,
-        (unsigned)ROBOCLAW_ADDRESS_MIN,
-        (unsigned)(ROBOCLAW_ADDRESS_MIN + ROBOCLAW_MAX_UNITS - 1));
+    if (use_pio_uart) {
+        saint_log_publish("info",
+            "RoboClaw: bound PIO UART (TX=GP%u, RX=GP%u, swapped from hw map) "
+            "@ %u baud — probing 0x%02X..0x%02X",
+            (unsigned)roboclaw_rx_pin, (unsigned)roboclaw_tx_pin,
+            (unsigned)configured_baud,
+            (unsigned)ROBOCLAW_ADDRESS_MIN,
+            (unsigned)(ROBOCLAW_ADDRESS_MIN + ROBOCLAW_MAX_UNITS - 1));
+    } else {
+        saint_log_publish("info",
+            "RoboClaw: bound UART%u TX=%u RX=%u @ %u baud "
+            "(RX internal pull-up enabled, ~50 kΩ) — probing 0x%02X..0x%02X",
+            (unsigned)configured_serial_port,
+            (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin,
+            (unsigned)configured_baud,
+            (unsigned)ROBOCLAW_ADDRESS_MIN,
+            (unsigned)(ROBOCLAW_ADDRESS_MIN + ROBOCLAW_MAX_UNITS - 1));
+    }
 
     uint8_t connected_count = 0;
     for (uint8_t i = 0; i < ROBOCLAW_MAX_UNITS; i++) {
@@ -590,16 +752,37 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
     units[unit].duty = duty;
 
 #ifndef SIMULATION
-    if (!hw_uart) {
+    if (!wire_ready()) {
         saint_log_publish("warn",
-            "RoboClaw: set_duty(unit=%u, duty=%d) — UART handle null "
-            "(internal bind state inconsistent).",
-            (unsigned)unit, (int)duty);
+            "RoboClaw: set_duty(unit=%u, duty=%d) — transport not bound "
+            "(use_pio_uart=%d, hw_uart=%p).",
+            (unsigned)unit, (int)duty,
+            (int)use_pio_uart, (void*)hw_uart);
         return false;
     }
     uint8_t data[2];
     data[0] = (uint8_t)((uint16_t)duty >> 8);
     data[1] = (uint8_t)((uint16_t)duty & 0xFF);
+
+    // One-shot per unit: log the very first duty packet dispatched
+    // so the operator gets confirmation that bytes are leaving the
+    // firmware on a real UART path. After this, mark_unit_response
+    // covers state transitions (connected / no-ACK / dropped /
+    // recovered) without spamming on every slider tick.
+    if (!units[unit].first_duty_logged) {
+        units[unit].first_duty_logged = true;
+        saint_log_publish("info",
+            "RoboClaw: unit %u (0x%02X) — dispatching first M1DUTY "
+            "packet [0x%02X, 32, 0x%02X, 0x%02X, crc16] via %s @ %u baud, "
+            "duty=%d (%.1f%%). Watch for ACK / connected log next.",
+            (unsigned)unit, (unsigned)units[unit].address,
+            (unsigned)units[unit].address,
+            (unsigned)data[0], (unsigned)data[1],
+            use_pio_uart ? "PIO UART (TX/RX swapped)" : "HW UART",
+            (unsigned)configured_baud,
+            (int)duty, (double)duty * 100.0 / (double)ROBOCLAW_DUTY_MAX);
+    }
+
     send_command(units[unit].address, ROBOCLAW_CMD_M1DUTY, data, 2);
     // Capture the ACK result. Previously thrown away, which made
     // "I'm sliding the control and the motor isn't moving" undetectable
@@ -707,6 +890,7 @@ static bool roboclaw_drv_apply_config(uint8_t channel, const pin_config_t* confi
     units[unit].deadband = config->params.roboclaw.deadband;
     units[unit].max_current_ma = config->params.roboclaw.max_current_ma;
     units[unit].estop_pin = config->params.roboclaw.estop_pin;
+    units[unit].uart_swap = config->params.roboclaw.uart_swap;
 
     if (unit >= unit_count) {
         unit_count = unit + 1;
@@ -780,6 +964,20 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
         }
     }
 
+    // Optional: PIO-UART mode flag. true → drive TX/RX via PIO so
+    // the wires can be on any GPIO (PCBs with swapped routing).
+    // Accept "true"/"false" because the server emits a JSON bool.
+    p = strstr(json_start, "\"uart_swap\"");
+    if (p && p < json_end) {
+        p = strchr(p, ':');
+        if (p) {
+            p++;
+            while (*p == ' ') p++;
+            config->params.roboclaw.uart_swap =
+                (strncmp(p, "true", 4) == 0) ? 1 : 0;
+        }
+    }
+
     uint8_t tx, rx, inst;
     if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
         roboclaw_tx_pin = tx;
@@ -846,6 +1044,7 @@ static bool roboclaw_drv_save(void* storage_ptr)
         storage->roboclaw_config.units[i].deadband = units[i].deadband;
         storage->roboclaw_config.units[i].max_current_ma = units[i].max_current_ma;
         storage->roboclaw_config.units[i].estop_pin = units[i].estop_pin;
+        storage->roboclaw_config.units[i].uart_swap = units[i].uart_swap;
     }
 
     return true;
@@ -898,6 +1097,7 @@ static bool roboclaw_drv_load(const void* storage_ptr)
         units[i].deadband = storage->roboclaw_config.units[i].deadband;
         units[i].max_current_ma = storage->roboclaw_config.units[i].max_current_ma;
         units[i].estop_pin = storage->roboclaw_config.units[i].estop_pin;
+        units[i].uart_swap = storage->roboclaw_config.units[i].uart_swap;
         // Drive the E-stop pin LOW now — BEFORE roboclaw_init() runs
         // the probe sweep at the end of drv_load. If the saved config
         // assigned an E-stop pin, the controller may have latched

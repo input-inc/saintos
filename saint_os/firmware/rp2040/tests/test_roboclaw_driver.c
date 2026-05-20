@@ -101,6 +101,19 @@ static bool uart_pin_pair_parse_json(const char* a, const char* b,
 }
 
 /* ============================================================================
+ * PIO UART stubs — the driver #includes pio_uart.h which provides
+ * SIMULATION-mode void*-based stubs. We compile pio_uart.c too so the
+ * linker has definitions; under SIMULATION the .c file is a thin set
+ * of no-op stubs that return false / 0.
+ *
+ * The point of including the real stubs (vs. defining our own) is to
+ * keep the SIMULATION code path under test: if pio_uart.c later grows
+ * SIMULATION behavior that the driver depends on, the test runner
+ * automatically picks it up without manual sync.
+ * ============================================================================ */
+#include "../src/pio_uart.c"
+
+/* ============================================================================
  * Pull in the real driver. The hardware paths under #ifndef SIMULATION
  * drop out; everything else (state machine, config plumbing, JSON
  * parsing, save/load) compiles unchanged.
@@ -165,6 +178,8 @@ static void reset_state(void)
     active_uart   = 0xFF;
     poll_unit = 0;
     poll_register = 0;
+
+    use_pio_uart = false;
 
     log_count = 0;
     test_now_ms = 1000;
@@ -271,19 +286,40 @@ static int test_mark_response_drops_after_threshold(void)
     return 1;
 }
 
-/* Already-disconnected units shouldn't keep logging "dropped" on every
- * subsequent missed poll — only the connect→disconnect transition. */
-static int test_mark_response_disconnected_misses_silent(void)
+/* A unit that has NEVER been connected (e.g. boot-time probe results
+ * were dropped because ros_log_ready was false during drv_load) used
+ * to be silent forever on subsequent miss-streaks. The dashboard
+ * Logs tab gave no signal that the firmware was even trying. We now
+ * fire ONE warn at the ROBOCLAW_DROP_AFTER_MISSES threshold with
+ * different phrasing ("no ACK after N attempts...") so the operator
+ * sees "we're trying, nothing's coming back" — then go silent again
+ * to avoid spamming. */
+static int test_mark_response_never_connected_logs_once_at_threshold(void)
 {
     reset_state();
-    /* No initial connect — unit starts disconnected. */
-    for (int i = 0; i < 10; i++) {
-        mark_unit_response(0, false);
-    }
-    CHECK(!units[0].connected);
-    /* mark_unit_response shouldn't log anything for a unit that was
-     * never connected, since there's no transition to report. */
+    /* No initial connect — unit starts disconnected (factory state). */
+
+    /* Two misses still silent (below threshold). */
+    mark_unit_response(0, false);
+    CHECK_EQ(units[0].consecutive_misses, 1);
     CHECK_EQ(log_count, 0);
+    mark_unit_response(0, false);
+    CHECK_EQ(units[0].consecutive_misses, 2);
+    CHECK_EQ(log_count, 0);
+
+    /* Third miss → one warn (new behavior). Different phrasing than
+     * the connected→dropped case so the operator can distinguish
+     * "link broke" from "link never worked." */
+    mark_unit_response(0, false);
+    CHECK_EQ(units[0].consecutive_misses, 3);
+    CHECK(!units[0].connected);  /* still disconnected; no state transition */
+    CHECK_LOG("no ACK after");
+
+    /* Subsequent misses stay silent — no spam. */
+    int log_count_before = log_count;
+    for (int i = 0; i < 10; i++) mark_unit_response(0, false);
+    CHECK(!units[0].connected);
+    CHECK_EQ(log_count, log_count_before);
     return 1;
 }
 
@@ -637,6 +673,146 @@ static int test_load_invalid_pin_pair_warns(void)
 }
 
 /* ============================================================================
+ * uart_swap (PIO UART) config plumbing
+ *
+ * These tests cover the firmware-side glue for the PCB-swapped TX/RX
+ * workaround. We can't actually drive the PIO peripheral from host code,
+ * but we CAN verify the decision logic: that uart_swap=true in the sync
+ * JSON or flash survives apply_config and flips use_pio_uart at init.
+ * The actual PIO state-machine binding is gated behind #ifndef SIMULATION
+ * and tested only on hardware.
+ * ============================================================================ */
+
+/* parse_json with "uart_swap":true extracts the flag. */
+static int test_parse_json_extracts_uart_swap_true(void)
+{
+    reset_state();
+    const char* json = "{\"address\":128,\"deadband\":0,\"max_current_ma\":0,"
+                       "\"uart_swap\":true}";
+    pin_config_t cfg = {0};
+    cfg.gpio = ROBOCLAW_VIRTUAL_GPIO_BASE;
+    bool ok = roboclaw_drv_parse_json(json, json + strlen(json), &cfg);
+    CHECK(ok);
+    CHECK_EQ(cfg.params.roboclaw.uart_swap, 1);
+    return 1;
+}
+
+/* parse_json with "uart_swap":false leaves the flag at 0. */
+static int test_parse_json_uart_swap_false_default(void)
+{
+    reset_state();
+    const char* json = "{\"address\":128,\"uart_swap\":false}";
+    pin_config_t cfg = {0};
+    cfg.gpio = ROBOCLAW_VIRTUAL_GPIO_BASE;
+    bool ok = roboclaw_drv_parse_json(json, json + strlen(json), &cfg);
+    CHECK(ok);
+    CHECK_EQ(cfg.params.roboclaw.uart_swap, 0);
+    return 1;
+}
+
+/* parse_json with no uart_swap field at all → field stays at whatever
+ * the caller initialized it to. This matters because the schema marks
+ * uart_swap as optional; absent field must not clobber existing state. */
+static int test_parse_json_uart_swap_absent_unchanged(void)
+{
+    reset_state();
+    const char* json = "{\"address\":128,\"deadband\":0,\"max_current_ma\":0}";
+    pin_config_t cfg = {0};
+    cfg.gpio = ROBOCLAW_VIRTUAL_GPIO_BASE;
+    cfg.params.roboclaw.uart_swap = 1;  // pretend a prior sync set this
+    bool ok = roboclaw_drv_parse_json(json, json + strlen(json), &cfg);
+    CHECK(ok);
+    CHECK_EQ(cfg.params.roboclaw.uart_swap, 1);  // preserved
+    return 1;
+}
+
+/* apply_config with uart_swap=1 stores the flag on the unit AND flips
+ * use_pio_uart via the roboclaw_init() call at the end. */
+static int test_apply_config_propagates_uart_swap(void)
+{
+    reset_state();
+    pin_config_t cfg = {0};
+    cfg.gpio = ROBOCLAW_VIRTUAL_GPIO_BASE;
+    cfg.params.roboclaw.address = 0x80;
+    cfg.params.roboclaw.uart_swap = 1;
+    bool ok = roboclaw_drv_apply_config(0, &cfg);
+    CHECK(ok);
+    CHECK_EQ(units[0].uart_swap, 1);
+    /* use_pio_uart is decided outside the #ifndef SIMULATION block, so
+     * tests can verify the decision even though the actual PIO binding
+     * is HW-only. */
+    CHECK(use_pio_uart);
+    return 1;
+}
+
+/* apply_config with uart_swap=0 leaves use_pio_uart false (HW path). */
+static int test_apply_config_uart_swap_false_keeps_hw_path(void)
+{
+    reset_state();
+    pin_config_t cfg = {0};
+    cfg.gpio = ROBOCLAW_VIRTUAL_GPIO_BASE;
+    cfg.params.roboclaw.address = 0x80;
+    cfg.params.roboclaw.uart_swap = 0;
+    bool ok = roboclaw_drv_apply_config(0, &cfg);
+    CHECK(ok);
+    CHECK_EQ(units[0].uart_swap, 0);
+    CHECK(!use_pio_uart);
+    return 1;
+}
+
+/* Flipping uart_swap via re-sync transitions use_pio_uart back. The
+ * driver in production hits this when the operator unchecks the
+ * "Use PIO UART" param and re-syncs. */
+static int test_uart_swap_can_toggle_back(void)
+{
+    reset_state();
+    pin_config_t cfg = {0};
+    cfg.gpio = ROBOCLAW_VIRTUAL_GPIO_BASE;
+    cfg.params.roboclaw.address = 0x80;
+
+    cfg.params.roboclaw.uart_swap = 1;
+    CHECK(roboclaw_drv_apply_config(0, &cfg));
+    CHECK(use_pio_uart);
+
+    cfg.params.roboclaw.uart_swap = 0;
+    CHECK(roboclaw_drv_apply_config(0, &cfg));
+    CHECK(!use_pio_uart);
+    return 1;
+}
+
+/* save → reset → load round-trips uart_swap through flash. Prevents
+ * a regression where the bit is parsed and applied at sync time but
+ * lost on reboot — which would mean the operator has to re-sync every
+ * power cycle. */
+static int test_save_load_roundtrip_with_uart_swap(void)
+{
+    reset_state();
+    pin_config_t cfg = {0};
+    cfg.gpio = ROBOCLAW_VIRTUAL_GPIO_BASE;
+    cfg.params.roboclaw.address = 0x80;
+    cfg.params.roboclaw.uart_swap = 1;
+    cfg.params.roboclaw.estop_pin = 26;
+    CHECK(roboclaw_drv_apply_config(0, &cfg));
+    CHECK_EQ(units[0].uart_swap, 1);
+    CHECK_EQ(units[0].estop_pin, 26);
+
+    /* Save to a fresh storage buffer. */
+    flash_storage_data_t storage;
+    memset(&storage, 0, sizeof(storage));
+    storage.uart_pins.roboclaw_tx_pin = 0;
+    storage.uart_pins.roboclaw_rx_pin = 1;
+    CHECK(roboclaw_drv_save(&storage));
+
+    /* Wipe driver state, then load. */
+    reset_state();
+    CHECK(roboclaw_drv_load(&storage));
+    CHECK_EQ(units[0].uart_swap, 1);
+    CHECK_EQ(units[0].estop_pin, 26);
+    CHECK(use_pio_uart);
+    return 1;
+}
+
+/* ============================================================================
  * Test runner
  * ============================================================================ */
 
@@ -651,7 +827,7 @@ static const test_entry_t TESTS[] = {
     { "mark_response_first_success_connects",    test_mark_response_first_success_connects },
     { "mark_response_repeated_success_no_extra_log", test_mark_response_repeated_success_no_extra_log },
     { "mark_response_drops_after_threshold",     test_mark_response_drops_after_threshold },
-    { "mark_response_disconnected_misses_silent", test_mark_response_disconnected_misses_silent },
+    { "mark_response_never_connected_logs_once_at_threshold", test_mark_response_never_connected_logs_once_at_threshold },
     { "mark_response_recovers_after_drop",       test_mark_response_recovers_after_drop },
     { "mark_response_transient_miss_recovers",   test_mark_response_transient_miss_recovers },
     { "mark_response_out_of_range_ignored",      test_mark_response_out_of_range_ignored },
@@ -677,6 +853,15 @@ static const test_entry_t TESTS[] = {
     /* Persistence */
     { "save_load_roundtrip",                     test_save_load_roundtrip },
     { "load_invalid_pin_pair_warns",             test_load_invalid_pin_pair_warns },
+
+    /* PIO UART (uart_swap) plumbing */
+    { "parse_json_extracts_uart_swap_true",      test_parse_json_extracts_uart_swap_true },
+    { "parse_json_uart_swap_false_default",      test_parse_json_uart_swap_false_default },
+    { "parse_json_uart_swap_absent_unchanged",   test_parse_json_uart_swap_absent_unchanged },
+    { "apply_config_propagates_uart_swap",       test_apply_config_propagates_uart_swap },
+    { "apply_config_uart_swap_false_keeps_hw_path", test_apply_config_uart_swap_false_keeps_hw_path },
+    { "uart_swap_can_toggle_back",               test_uart_swap_can_toggle_back },
+    { "save_load_roundtrip_with_uart_swap",      test_save_load_roundtrip_with_uart_swap },
 };
 
 int main(void)

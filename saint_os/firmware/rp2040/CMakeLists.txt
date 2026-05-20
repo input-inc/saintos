@@ -151,6 +151,7 @@ set(SAINT_NODE_SOURCES
     src/fas100_driver.c
     src/roboclaw_driver.c
     src/pathfinder_bms_driver.c
+    src/pio_uart.c
 )
 
 # Add transport based on build mode
@@ -162,6 +163,14 @@ else()
 endif()
 
 add_executable(saint_node ${SAINT_NODE_SOURCES})
+
+# Generate the PIO UART header (pio_uart.pio.h) from the .pio file via
+# pioasm. The header lands in the build tree and is auto-added to the
+# include path for saint_node. Hardware-only — SIMULATION builds skip
+# the PIO peripheral entirely (pio_uart.c stubs out everything).
+if(NOT SIMULATION)
+    pico_generate_pio_header(saint_node ${CMAKE_CURRENT_LIST_DIR}/src/pio_uart.pio)
+endif()
 
 # Ensure version.h is generated before compiling
 add_dependencies(saint_node generate_version)
