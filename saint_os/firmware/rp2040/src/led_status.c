@@ -21,6 +21,21 @@
 
 static node_state_t current_state = NODE_STATE_BOOT;
 
+// Server-controlled color override. While `override_active` is true,
+// led_update() draws override_{r,g,b} at override_brightness every
+// frame and skips the state-driven color/pulse logic. The state
+// machine still tracks node_state_t in current_state — it just
+// doesn't get to drive the pixel until the override is cleared.
+// Identify (the white flash pattern) is special-cased: it blocks and
+// restores AFTER itself, ignoring the override. That's deliberate
+// since identify is the operator pressing "flash this node so I can
+// find it" — we want it to be unmistakable regardless of override.
+static bool    override_active     = false;
+static uint8_t override_r          = 0;
+static uint8_t override_g          = 0;
+static uint8_t override_b          = 0;
+static uint8_t override_brightness = 0;
+
 #ifndef SIMULATION
 // Hardware-only: PIO for NeoPixel
 
@@ -163,10 +178,53 @@ void led_init(void)
 
 /**
  * Set LED state.
+ *
+ * A real state TRANSITION (state != current_state) auto-clears any
+ * server-controlled NeoPixel override and resumes state-driven LED
+ * behavior. This is the requested semantic: the operator can paint
+ * the pixel a chosen color while the node sits in a given state, but
+ * the moment the node moves to a new state — re-adopting, dropping to
+ * ERROR, etc. — that transition is important enough to override the
+ * override. Idempotent set_state() calls (same state in, same state
+ * out) leave the override alone; otherwise things like the
+ * led_identify() flash-then-restore path would clear it spuriously.
  */
 void led_set_state(node_state_t state)
 {
+    if (state != current_state && override_active) {
+        override_active = false;
+    }
     current_state = state;
+}
+
+/**
+ * Engage server-controlled NeoPixel color override. While active,
+ * led_update() draws this color every frame and the state-indicator
+ * logic is suspended (current_state still tracks but doesn't paint).
+ */
+void led_set_override_color(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness)
+{
+    override_r          = r;
+    override_g          = g;
+    override_b          = b;
+    override_brightness = brightness;
+    override_active     = true;
+}
+
+/**
+ * Clear the override and resume state-driven LED behavior.
+ */
+void led_clear_override(void)
+{
+    override_active = false;
+}
+
+/**
+ * Whether a server-controlled color override is currently engaged.
+ */
+bool led_override_active(void)
+{
+    return override_active;
 }
 
 /**
@@ -225,8 +283,27 @@ void led_update(void)
 #ifdef SIMULATION
     // No LED updates in simulation (PIO not emulated)
     (void)current_state;
+    (void)override_active;
 #else
     uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    // Server-controlled override takes precedence over the state-
+    // driven color. led_update() is called from the main loop at
+    // ~10-100 Hz and unconditionally re-pushes a color to the WS2812
+    // every iteration, so without this branch any externally set
+    // color would be overwritten within milliseconds.
+    if (override_active) {
+        rgb_color_t c = { .r = override_r, .g = override_g, .b = override_b };
+        set_neopixel(c, override_brightness);
+        // Leave the D13 LED following node state — it's a separate
+        // indicator and the user controls have asked for NeoPixel
+        // override, not full LED hijack. If we wanted to override
+        // D13 too we'd add it here.
+        gpio_put(GPIO_D13, 1);
+        last_update_ms = now;
+        return;
+    }
+
     rgb_color_t color = get_state_color(current_state);
 
     switch (current_state) {

@@ -110,6 +110,17 @@ void led_set_state(node_state_t state);
 void led_update(void);
 void led_identify(uint8_t flash_count);
 
+// Server-controlled NeoPixel color override. While an override is
+// active, led_update() honors the supplied color/brightness instead
+// of the state-driven color. Clearing the override resumes the normal
+// state-indicator behavior (BOOT=blue, CONNECTING=yellow pulse, etc).
+// Brightness is 0-255; pass 0 to effectively turn the pixel off without
+// clearing the override. r/g/b is the logical color the operator wants
+// to see (the driver handles GRB ordering and brightness scaling).
+void led_set_override_color(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness);
+void led_clear_override(void);
+bool led_override_active(void);
+
 #ifdef __cplusplus
 }
 #endif

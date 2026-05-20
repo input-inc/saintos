@@ -637,6 +637,58 @@ static void control_subscription_callback(const void* msgin)
         return;
     }
 
+    // Server-controlled NeoPixel color override. Without this handler
+    // every byte we send from the server to drive the status LED gets
+    // overwritten by the next led_update() tick (~10-100 Hz). With it,
+    // led_update() honors the supplied color until a clear command
+    // arrives. JSON forms:
+    //   {"action":"set_neopixel","r":255,"g":0,"b":0,"brightness":128}
+    //   {"action":"set_neopixel","clear":true}    // resume state LED
+    if (strstr(msg->data.data, "\"action\":\"set_neopixel\"") ||
+        strstr(msg->data.data, "\"action\": \"set_neopixel\"")) {
+        if (strstr(msg->data.data, "\"clear\":true") ||
+            strstr(msg->data.data, "\"clear\": true")) {
+            led_clear_override();
+            saint_log_publish("info",
+                "NeoPixel: override cleared — resuming state-driven LED");
+            return;
+        }
+
+        // Tiny inline parser — matches the style used by the other
+        // action handlers in this file. Defaults make a partial JSON
+        // do something predictable (all-off + full brightness would
+        // leave the pixel dark, which is at least non-misleading).
+        int r = 0, g = 0, b = 0, brightness = 255;
+        const char* p;
+        if ((p = strstr(msg->data.data, "\"r\""))) {
+            p = strchr(p, ':');
+            if (p) { p++; while (*p == ' ') p++; r = atoi(p); }
+        }
+        if ((p = strstr(msg->data.data, "\"g\""))) {
+            p = strchr(p, ':');
+            if (p) { p++; while (*p == ' ') p++; g = atoi(p); }
+        }
+        if ((p = strstr(msg->data.data, "\"b\""))) {
+            p = strchr(p, ':');
+            if (p) { p++; while (*p == ' ') p++; b = atoi(p); }
+        }
+        if ((p = strstr(msg->data.data, "\"brightness\""))) {
+            p = strchr(p, ':');
+            if (p) { p++; while (*p == ' ') p++; brightness = atoi(p); }
+        }
+        if (r < 0) r = 0; if (r > 255) r = 255;
+        if (g < 0) g = 0; if (g > 255) g = 255;
+        if (b < 0) b = 0; if (b > 255) b = 255;
+        if (brightness < 0) brightness = 0; if (brightness > 255) brightness = 255;
+
+        led_set_override_color((uint8_t)r, (uint8_t)g, (uint8_t)b,
+                                (uint8_t)brightness);
+        saint_log_publish("info",
+            "NeoPixel: override set RGB=(%d,%d,%d) brightness=%d",
+            r, g, b, brightness);
+        return;
+    }
+
     // Apply pin control command
     if (pin_control_apply_json(msg->data.data, msg->data.size)) {
         printf("Control command applied\n");
