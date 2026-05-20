@@ -148,9 +148,13 @@ class WebSocketHandler:
         self._send_control_callback: Optional[Callable[[str, int, float], None]] = None
 
         # Callback for sending channel-addressed control to nodes (set by server_node).
-        # Signature: (node_id, peripheral_id, channel_id, value) -> None.
+        # Signature: (node_id, peripheral_id, channel_id, value, peripheral_type) -> None.
+        # peripheral_type is the catalog type (e.g. "neopixel", "roboclaw")
+        # — empty string if unknown. Firmware uses it to route writes for
+        # peripherals that don't live in pin_config (the built-in status
+        # NeoPixel is the canonical case).
         self._send_channel_callback: Optional[
-            Callable[[str, str, str, float], None]] = None
+            Callable[[str, str, str, float, str], None]] = None
 
         # Callback for triggering firmware update (set by server_node)
         # Signature: (node_id: str, simulation: bool) -> None
@@ -214,8 +218,10 @@ class WebSocketHandler:
         """Set callback for sending control commands to nodes. Callback takes (node_id, gpio, value)."""
         self._send_control_callback = callback
 
-    def set_send_channel_callback(self, callback: Callable[[str, str, str, float], None]):
-        """Set callback for channel-addressed control. Takes (node_id, peripheral_id, channel_id, value)."""
+    def set_send_channel_callback(
+            self, callback: Callable[[str, str, str, float, str], None]):
+        """Set callback for channel-addressed control.
+        Takes (node_id, peripheral_id, channel_id, value, peripheral_type)."""
         self._send_channel_callback = callback
 
     def set_firmware_update_callback(self, callback: Callable[[str, bool, bool], None]):
@@ -1299,7 +1305,13 @@ class WebSocketHandler:
                 return {"status": "ok", "data": {"throttled": True}}
 
             if self._send_channel_callback:
-                self._send_channel_callback(node_id, peripheral_id, channel_id, value)
+                # Pass the catalog type along so the firmware can route
+                # type-specific writes (e.g. peripheral_type="neopixel"
+                # for the status LED) without needing to know the
+                # operator-chosen instance id.
+                peripheral_type = target.get("peripheral_type", "")
+                self._send_channel_callback(node_id, peripheral_id, channel_id,
+                                            value, peripheral_type)
                 self._control_throttle[throttle_key] = now
                 bypass_note = ' [STOP]' if is_neutral else ''
                 self.log('info', f'[Control] SENT{bypass_note} {node_id} '

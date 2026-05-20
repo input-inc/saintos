@@ -500,12 +500,20 @@ class SaintServerNode(Node):
         self.get_logger().debug(f'Sent control to {node_id}: GPIO {gpio} = {value}')
 
     def send_channel_command(self, node_id: str, peripheral_id: str,
-                             channel_id: str, value: float):
+                             channel_id: str, value: float,
+                             peripheral_type: str = ""):
         """Send channel-addressed control to a node via ROS2.
 
         Operator-visible names go on the wire — the firmware does its
         own (peripheral_id, channel_id) → driver dispatch. The server
         does no GPIO translation; that indirection is being deleted.
+
+        `peripheral_type` is the catalog type (e.g. "neopixel",
+        "roboclaw") — empty string if unknown. Firmware uses it to
+        route writes for peripherals that don't live in pin_config (the
+        built-in status NeoPixel is the canonical case — its instance
+        id is "onboard_neopixel" but the firmware only knows it as
+        type="neopixel").
         """
         import json
 
@@ -518,13 +526,16 @@ class SaintServerNode(Node):
             "channel": channel_id,
             "value": value,
         }
+        if peripheral_type:
+            control_data["type"] = peripheral_type
 
         msg = String()
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
         self.get_logger().debug(
-            f'Sent channel control to {node_id}: {peripheral_id}/{channel_id} = {value}')
+            f'Sent channel control to {node_id}: '
+            f'{peripheral_type}/{peripheral_id}/{channel_id} = {value}')
 
     def send_factory_reset_command(self, node_id: str):
         """Send factory reset command to a node via ROS2.
@@ -1052,8 +1063,10 @@ class SaintServerNode(Node):
                     lambda node_id, gpio, value: self.send_control_command(node_id, gpio, value)
                 )
                 self.web_server.ws_handler.set_send_channel_callback(
-                    lambda node_id, peripheral_id, channel_id, value:
-                        self.send_channel_command(node_id, peripheral_id, channel_id, value)
+                    lambda node_id, peripheral_id, channel_id, value, peripheral_type:
+                        self.send_channel_command(node_id, peripheral_id,
+                                                  channel_id, value,
+                                                  peripheral_type)
                 )
                 self.web_server.ws_handler.set_firmware_update_callback(
                     lambda node_id, simulation, force: self.send_firmware_update_command(node_id, simulation, force)

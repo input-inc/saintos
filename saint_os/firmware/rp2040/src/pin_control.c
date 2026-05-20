@@ -540,9 +540,23 @@ static bool apply_set_channel(const char* json)
     while (*value_str == ' ') value_str++;
     float value = (float)atof(value_str);
 
+    // Optional peripheral type from server. Used to route writes for
+    // peripherals that don't live in pin_config — the built-in status
+    // NeoPixel is the canonical case (operator-chosen instance id
+    // like "onboard_neopixel" but firmware only knows it as
+    // type="neopixel"). Older servers don't send "type" — we fall
+    // back to id-substring matching below.
+    char peripheral_type[PIN_CONFIG_MAX_NAME_LEN];
+    peripheral_type[0] = '\0';
+    extract_str_field(json, "\"type\"", peripheral_type, sizeof(peripheral_type));
+
     // NeoPixel isn't a pin_config entry — special-case before the
     // logical_name walk below would unconditionally fail for it.
-    if (strcmp(peripheral_id, "neopixel") == 0) {
+    // Prefer explicit type when present; otherwise match by id
+    // substring so "neopixel", "onboard_neopixel", "neopixel_strip_1",
+    // etc. route to the same status-LED override path.
+    if (strcmp(peripheral_type, "neopixel") == 0
+        || strstr(peripheral_id, "neopixel") != NULL) {
         return apply_neopixel_channel(channel_id, value);
     }
 
@@ -581,10 +595,25 @@ static bool apply_set_channel(const char* json)
         return false;
     }
 
+    // INTERNAL: The wire format from the server is already
+    // (peripheral_id, channel_id) end-to-end. The remaining
+    // virtual-GPIO arithmetic below (base_gpio + offset →
+    // pin_control_set_value) is purely an internal dispatch detail —
+    // pin_control_set_value also serves PWM/servo/digital_out modes
+    // which have real GPIOs, so unifying the dispatch saves a parallel
+    // path. The log line stays peripheral-first; no virtual GPIO
+    // number leaks to the operator.
+    //
+    // TODO(peripheral-first): the per-driver set_value() still takes
+    // a channel index computed from `gpio - drv->virtual_gpio_base`,
+    // which is the last vestige of virtual-GPIO addressing inside the
+    // firmware. Eliminating it requires drivers to expose a per-
+    // instance lookup keyed by peripheral_id (instance name) instead
+    // of by GPIO offset — bigger refactor, separate change.
     uint8_t target_gpio = (uint8_t)(base_gpio + offset);
     saint_log_publish("info",
-        "set_channel %s/%s = %.3f → GPIO %u",
-        peripheral_id, channel_id, value, (unsigned)target_gpio);
+        "set_channel %s/%s = %.3f",
+        peripheral_id, channel_id, value);
     return pin_control_set_value(target_gpio, value);
 }
 
