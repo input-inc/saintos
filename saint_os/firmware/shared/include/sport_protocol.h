@@ -27,6 +27,14 @@ extern "C" {
 // Frame bytes
 #define SPORT_POLL_HEADER           0x7E    // Poll frame start byte
 #define SPORT_DATA_HEADER           0x10    // Data frame type byte (sensor response)
+#define SPORT_EMPTY_HEADER          0x00    // "Frame head empty" — sensor must answer
+                                            // every poll, sends this CRC-valid frame
+                                            // (typically with a stable payload like
+                                            // current=0) when it has no new reading
+                                            // for this poll's cycle slot. Wire-
+                                            // observed on the FAS100 ADV; counts as
+                                            // a valid response for liveness tracking
+                                            // but carries no fresh telemetry.
 
 // Byte stuffing
 #define SPORT_STUFF_MARKER          0x7D

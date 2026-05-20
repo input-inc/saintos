@@ -127,6 +127,7 @@ static void reset_state(void)
     stat_resyncs = 0;
     stat_soft_resyncs = 0;
     stat_unknown_id = 0;
+    stat_heartbeats = 0;
     log_count = 0;
     test_now_ms = 1000;
     port_initialized = true;
@@ -321,6 +322,50 @@ static int test_sport_unknown_data_id(void)
     CHECK(sensor_responded);
     /* No known channel should have been updated. */
     CHECK_FLOAT(current_amps, 0.0f);
+    return 1;
+}
+
+/* The FAS100 ADV must answer every poll, so when it has no fresh
+ * reading for this slot in its data-cycle it sends an "empty header"
+ * frame: same 8-byte layout, but rx_buf[0] == 0x00 instead of 0x10.
+ * Wire-observed pattern: `00 00 02 00 00 00 00 FD` (CRC valid for that
+ * payload). The parser must accept these as a liveness signal (so
+ * sensor_responded stays true and the LOCKED-phase soft-resync doesn't
+ * trip) without writing telemetry. */
+static int test_sport_empty_header_counted_as_heartbeat(void)
+{
+    reset_state();
+    /* The exact bytes the FAS100 sends. CRC-verify the test data so a
+     * future change to sport_crc_calculate fails the test loudly
+     * instead of silently masking the heartbeat. */
+    uint8_t hb[8] = { 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0xFD };
+    CHECK_EQ(hb[7], sport_crc_calculate(hb, 7));
+
+    feed_sport(hb, 8);
+
+    CHECK_EQ(stat_heartbeats, 1);
+    CHECK_EQ(stat_frames_ok, 0);
+    CHECK_EQ(stat_frames_crc_bad, 0);
+    CHECK(sensor_responded);
+    /* Telemetry must NOT be set from the heartbeat payload. */
+    CHECK_FLOAT(current_amps, 0.0f);
+    CHECK_FLOAT(voltage_volts, 0.0f);
+    return 1;
+}
+
+/* A 0x00-header frame with a wrong CRC byte is still rejected — the
+ * heartbeat accept must run through the same CRC check as a data
+ * frame, not just unconditionally trust any 0x00-prefixed payload. */
+static int test_sport_empty_header_bad_crc_rejected(void)
+{
+    reset_state();
+    uint8_t hb[8] = { 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0xFD };
+    hb[7] ^= 0xFF;  /* corrupt CRC */
+    feed_sport(hb, 8);
+
+    CHECK_EQ(stat_heartbeats, 0);
+    CHECK_EQ(stat_frames_crc_bad, 1);
+    CHECK(!sensor_responded);
     return 1;
 }
 
@@ -578,6 +623,10 @@ static const test_entry_t TESTS[] = {
     { "sport_resync_after_garbage",     test_sport_resync_after_garbage },
     { "sport_byte_stuffing_payload",    test_sport_byte_stuffing_payload },
     { "sport_unknown_data_id",          test_sport_unknown_data_id },
+    { "sport_empty_header_counted_as_heartbeat",
+                                        test_sport_empty_header_counted_as_heartbeat },
+    { "sport_empty_header_bad_crc_rejected",
+                                        test_sport_empty_header_bad_crc_rejected },
     { "sport_two_responses_back_to_back", test_sport_two_responses_back_to_back },
     { "sport_leaked_addr_byte_rejected", test_sport_leaked_addr_byte_rejected },
     { "sport_mid_frame_sync",           test_sport_mid_frame_sync },

@@ -194,6 +194,7 @@ static uint32_t stat_frames_ok      = 0;
 static uint32_t stat_frames_crc_bad = 0;
 static uint32_t stat_resyncs        = 0;  // 0x7E mid-frame
 static uint32_t stat_unknown_id     = 0;  // CRC-valid but data_id not ours
+static uint32_t stat_heartbeats     = 0;  // CRC-valid 0x00-header (no-data) frames
 static uint32_t stats_last_dump_ms  = 0;
 #define FAS100_STATS_DUMP_MS  5000
 
@@ -256,6 +257,7 @@ static void reset_stats(void)
     stat_frames_crc_bad = 0;
     stat_resyncs = 0;
     stat_unknown_id = 0;
+    stat_heartbeats = 0;
     stat_soft_resyncs = 0;
     stats_last_dump_ms = PLATFORM_MILLIS();
     raw_dump_armed = false;
@@ -460,22 +462,32 @@ static void sport_feed_byte(uint8_t raw)
     if (rx_pos < FAS100_RESPONSE_FRAME_SIZE) return;
 
     // Have a full frame's worth of de-stuffed bytes.
-    if (rx_buf[0] == SPORT_DATA_HEADER) {
+    if (rx_buf[0] == SPORT_DATA_HEADER || rx_buf[0] == SPORT_EMPTY_HEADER) {
         uint8_t crc = sport_crc_calculate(rx_buf, 7);
         if (rx_buf[7] == crc) {
-            uint16_t data_id = (uint16_t)rx_buf[1] | ((uint16_t)rx_buf[2] << 8);
-            uint32_t value   = (uint32_t)rx_buf[3]
-                             | ((uint32_t)rx_buf[4] << 8)
-                             | ((uint32_t)rx_buf[5] << 16)
-                             | ((uint32_t)rx_buf[6] << 24);
-            stat_frames_ok++;
-            if (data_id != SPORT_DATA_ID_CURRENT
-                && data_id != SPORT_DATA_ID_VOLTAGE
-                && data_id != SPORT_DATA_ID_TEMP1
-                && data_id != SPORT_DATA_ID_TEMP2) {
-                stat_unknown_id++;
+            if (rx_buf[0] == SPORT_DATA_HEADER) {
+                uint16_t data_id = (uint16_t)rx_buf[1] | ((uint16_t)rx_buf[2] << 8);
+                uint32_t value   = (uint32_t)rx_buf[3]
+                                 | ((uint32_t)rx_buf[4] << 8)
+                                 | ((uint32_t)rx_buf[5] << 16)
+                                 | ((uint32_t)rx_buf[6] << 24);
+                stat_frames_ok++;
+                if (data_id != SPORT_DATA_ID_CURRENT
+                    && data_id != SPORT_DATA_ID_VOLTAGE
+                    && data_id != SPORT_DATA_ID_TEMP1
+                    && data_id != SPORT_DATA_ID_TEMP2) {
+                    stat_unknown_id++;
+                }
+                store_telemetry(data_id, value);
+            } else {
+                // Empty-header frame: sensor is alive but had nothing
+                // new for this poll. Don't update telemetry, but DO
+                // refresh sensor_responded / last_response_ms so the
+                // LOCKED-phase liveness check doesn't trip soft-resync.
+                stat_heartbeats++;
+                sensor_responded = true;
+                last_response_ms = PLATFORM_MILLIS();
             }
-            store_telemetry(data_id, value);
         } else {
             stat_frames_crc_bad++;
         }
@@ -786,13 +798,15 @@ void fas100_update(void)
         && (now - stats_last_dump_ms) >= FAS100_STATS_DUMP_MS) {
         saint_log_publish("info",
             "FAS100 stats (%s, %lu ms): polls=%lu echo_ok=%lu echo_miss=%lu "
-            "frames_ok=%lu crc_bad=%lu resync=%lu soft_resync=%lu unknown_id=%lu",
+            "frames_ok=%lu heartbeat=%lu crc_bad=%lu resync=%lu "
+            "soft_resync=%lu unknown_id=%lu",
             active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
             (unsigned long)(now - stats_last_dump_ms),
             (unsigned long)stat_polls_sent,
             (unsigned long)stat_echo_bytes,
             (unsigned long)stat_echo_missed,
             (unsigned long)stat_frames_ok,
+            (unsigned long)stat_heartbeats,
             (unsigned long)stat_frames_crc_bad,
             (unsigned long)stat_resyncs,
             (unsigned long)stat_soft_resyncs,
@@ -801,6 +815,7 @@ void fas100_update(void)
         stat_echo_bytes = 0;
         stat_echo_missed = 0;
         stat_frames_ok = 0;
+        stat_heartbeats = 0;
         stat_frames_crc_bad = 0;
         stat_resyncs = 0;
         stat_soft_resyncs = 0;
