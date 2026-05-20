@@ -121,6 +121,31 @@ typedef struct {
             uint8_t address;
             uint8_t deadband;
             uint16_t max_current_ma;
+            // Optional GPIO wired to this RoboClaw's S3 input (or
+            // whatever pin the PCB routes to the controller's E-stop
+            // input). 0xFF = "no E-stop pin assigned for this unit"
+            // (the firmware then doesn't touch any GPIO for E-stop;
+            // the controller's S3 mode must be set to something other
+            // than 'Default → E-Stop (Latching)' on this PCB or the
+            // floating-pin latch bug will recur).
+            //
+            // When set to a valid GPIO (0..29 on RP2040), the firmware:
+            //   1. Configures that GPIO as a digital output the moment
+            //      the RoboClaw peripheral is initialized (drv_load
+            //      from flash OR drv_apply_config from a fresh sync).
+            //   2. Drives it LOW (deasserted) so the RoboClaw doesn't
+            //      see a glitch on S3 and latch into E-stop.
+            //   3. (Future) routes the per-channel "tripped" toggle
+            //      from the State tab here, and honors a dashboard
+            //      E-stop broadcast by driving HIGH to assert.
+            //
+            // Polarity is fixed at "LOW = deasserted, HIGH = tripped"
+            // because that matches the only documented behavior of
+            // S3 in RC/Serial modes (RC-flip-switch convention: pulse
+            // or HIGH on the pin = active). If a future revision of
+            // the PCB inverts the signal, add an `estop_active_high`
+            // bool here alongside this field.
+            uint8_t estop_pin;
         } roboclaw;
         struct {
             uint16_t poll_interval_ms;

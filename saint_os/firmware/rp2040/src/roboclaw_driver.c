@@ -84,6 +84,22 @@ typedef struct {
     uint32_t last_response_ms;
     uint8_t  consecutive_misses;
     uint32_t last_reprobe_ms;
+    // Per-unit E-stop output pin. 0 (or any value outside 1..29) = no
+    // pin assigned — the PCB doesn't route an E-stop wire from this
+    // MCU to this controller, OR the operator hasn't filled in the
+    // param yet. We use 0 as the unset sentinel (rather than 0xFF) so
+    // a zero-initialized struct and a never-written flash slot both
+    // map to "no E-stop wiring" without a separate validity flag.
+    // GPIO 0 is the default UART0 TX on this platform and is never
+    // a valid choice for an E-stop output, so this overload is safe.
+    //
+    // When set to a valid GPIO (1..29), the driver configures that
+    // pin as a digital output and drives it LOW (deasserted) the
+    // moment the unit's config is applied or loaded from flash, so
+    // a floating-pin glitch can't trip the RoboClaw's latching S3
+    // input before any motor command goes out. Polarity is fixed
+    // (LOW = deasserted, HIGH = tripped) — see pin_types.h for why.
+    uint8_t  estop_pin;
 } roboclaw_unit_t;
 
 // =============================================================================
@@ -242,6 +258,43 @@ static bool probe_unit(uint8_t unit_idx, char* version_out, size_t version_out_s
     return true;
 }
 #endif
+
+/* Configure the unit's E-stop output pin (if assigned) as a digital
+ * output driven LOW. Called from drv_apply_config and drv_load so
+ * the deassert happens as soon as we know which pin the PCB wired
+ * to this controller's S3 input. Without this, the GPIO floats at
+ * reset (RP2040 datasheet § 2.19.6.1: no pull, input mode) and a
+ * single glitch high is enough to latch the RoboClaw's S3 ("Default
+ * → E-Stop (Latching)" in Packet Serial mode) into emergency-stop
+ * — at which point the controller still validates packets and ACKs
+ * 0xFF but silently drops every motor command, with no path back
+ * except a power-cycle.
+ *
+ * Safe to call any number of times — gpio_init/gpio_set_dir/gpio_put
+ * are idempotent. If the operator changes which pin is assigned in
+ * a fresh sync, the OLD pin remains driven LOW (no observable
+ * effect) and the NEW pin starts being driven LOW too. */
+static void apply_estop_pin(uint8_t unit_idx)
+{
+#ifndef SIMULATION
+    if (unit_idx >= ROBOCLAW_MAX_UNITS) return;
+    uint8_t pin = units[unit_idx].estop_pin;
+    // 0 = unset sentinel (GPIO 0 is UART0 TX and never a valid
+    // E-stop wire on this platform). Anything outside 1..29 also
+    // skipped — RP2040 has 30 GPIOs (0..29).
+    if (pin == 0 || pin > 29) return;
+
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_OUT);
+    gpio_put(pin, 0);   // LOW = deasserted = motor enabled
+    saint_log_publish("info",
+        "RoboClaw: unit %u E-stop pin GPIO %u driven LOW (deasserted) "
+        "— S3 should now be releasable on the controller",
+        (unsigned)unit_idx, (unsigned)pin);
+#else
+    (void)unit_idx;
+#endif
+}
 
 /* Update a unit's connected state after a poll attempt, logging
  * connection transitions exactly once. Called from probe paths and
@@ -653,10 +706,20 @@ static bool roboclaw_drv_apply_config(uint8_t channel, const pin_config_t* confi
     units[unit].address = config->params.roboclaw.address;
     units[unit].deadband = config->params.roboclaw.deadband;
     units[unit].max_current_ma = config->params.roboclaw.max_current_ma;
+    units[unit].estop_pin = config->params.roboclaw.estop_pin;
 
     if (unit >= unit_count) {
         unit_count = unit + 1;
     }
+
+    // Drive the E-stop pin LOW (deasserted) IMMEDIATELY on config
+    // apply — before roboclaw_init() runs the probe sweep below. The
+    // probe sends GETVERSION packets that the controller will only
+    // respond to if its S3 latch isn't engaged; if we did the probe
+    // before the deassert, a freshly-booted controller could still
+    // be latched from boot-time floating S3 and the probe would show
+    // zero units responding.
+    apply_estop_pin(unit);
 
     // The operator may have picked a different UART pin pair via the
     // sync. parse_json_params already updated roboclaw_tx_pin /
@@ -696,6 +759,27 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
         if (p) { p++; while (*p == ' ') p++; config->params.roboclaw.max_current_ma = (uint16_t)atoi(p); }
     }
 
+    // Optional: GPIO this unit's S3 (E-stop input) is wired to. Absent
+    // from the JSON → field stays at whatever the caller initialized
+    // it to (typically 0 = no E-stop wire), which apply_estop_pin
+    // treats as a no-op. The server's Peripherals tab modal exposes
+    // this as "E-stop pin" on the RoboClaw type; operators on PCBs
+    // that don't route an E-stop wire just leave it blank.
+    p = strstr(json_start, "\"estop_pin\"");
+    if (p && p < json_end) {
+        p = strchr(p, ':');
+        if (p) {
+            p++;
+            while (*p == ' ') p++;
+            int v = atoi(p);
+            if (v >= 1 && v <= 29) {
+                config->params.roboclaw.estop_pin = (uint8_t)v;
+            } else {
+                config->params.roboclaw.estop_pin = 0;  // unset sentinel
+            }
+        }
+    }
+
     uint8_t tx, rx, inst;
     if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
         roboclaw_tx_pin = tx;
@@ -709,20 +793,30 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
     // payload. Only log once — on the first channel of the first unit
     // — so the Logs tab doesn't drown in 40 identical lines.
     if (config->gpio == ROBOCLAW_VIRTUAL_GPIO_BASE) {
+        char estop_buf[16];
+        if (config->params.roboclaw.estop_pin >= 1
+            && config->params.roboclaw.estop_pin <= 29) {
+            snprintf(estop_buf, sizeof(estop_buf), "GPIO %u",
+                     (unsigned)config->params.roboclaw.estop_pin);
+        } else {
+            snprintf(estop_buf, sizeof(estop_buf), "none");
+        }
         if (got_pins) {
             saint_log_publish("info",
                 "RoboClaw sync: pins TX=%u RX=%u (UART%u), unit 0 addr=0x%02X "
-                "deadband=%u max_current=%u mA",
+                "deadband=%u max_current=%u mA, E-stop pin=%s",
                 (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin,
                 (unsigned)configured_serial_port,
                 (unsigned)config->params.roboclaw.address,
                 (unsigned)config->params.roboclaw.deadband,
-                (unsigned)config->params.roboclaw.max_current_ma);
+                (unsigned)config->params.roboclaw.max_current_ma,
+                estop_buf);
         } else {
             saint_log_publish("warn",
                 "RoboClaw sync: didn't find uart_tx/uart_rx in JSON — "
-                "driver will keep using TX=%u RX=%u",
-                (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin);
+                "driver will keep using TX=%u RX=%u (E-stop pin=%s)",
+                (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin,
+                estop_buf);
         }
     }
 
@@ -751,6 +845,7 @@ static bool roboclaw_drv_save(void* storage_ptr)
         storage->roboclaw_config.units[i].address = units[i].address;
         storage->roboclaw_config.units[i].deadband = units[i].deadband;
         storage->roboclaw_config.units[i].max_current_ma = units[i].max_current_ma;
+        storage->roboclaw_config.units[i].estop_pin = units[i].estop_pin;
     }
 
     return true;
@@ -802,6 +897,14 @@ static bool roboclaw_drv_load(const void* storage_ptr)
         units[i].address = storage->roboclaw_config.units[i].address;
         units[i].deadband = storage->roboclaw_config.units[i].deadband;
         units[i].max_current_ma = storage->roboclaw_config.units[i].max_current_ma;
+        units[i].estop_pin = storage->roboclaw_config.units[i].estop_pin;
+        // Drive the E-stop pin LOW now — BEFORE roboclaw_init() runs
+        // the probe sweep at the end of drv_load. If the saved config
+        // assigned an E-stop pin, the controller may have latched
+        // E-stop from a floating boot-time signal; deasserting first
+        // means the probe and any pending duty commands see a
+        // clean S3.
+        apply_estop_pin(i);
     }
 
     saint_log_publish("info",

@@ -198,6 +198,18 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralTypeParam("address",        "Address",         "int", 128, min=128, max=135),
             PeripheralTypeParam("deadband",       "Deadband",        "int",   0, min=0,   max=127),
             PeripheralTypeParam("max_current_ma", "Max current (mA)","int",   0, min=0,   max=60000),
+            # Optional GPIO the PCB wires from this MCU to the
+            # RoboClaw's S3 (E-stop) input. When set (1..29), the
+            # firmware drives the pin LOW (deasserted) the moment
+            # the peripheral config is applied or restored from
+            # flash, so a floating boot-time signal can't trip the
+            # controller's latching S3 E-stop input. Leave at 0
+            # (the default) on PCBs that don't route an E-stop wire
+            # — in that case the operator must configure S3 to a
+            # non-latching mode on the RoboClaw side or the
+            # controller will silently lock out motor commands the
+            # first time the MCU resets.
+            PeripheralTypeParam("estop_pin", "E-stop pin (GPIO)", "int", 0, min=0, max=29),
         ],
     ),
     "pathfinder_bms": PeripheralType(

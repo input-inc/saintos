@@ -107,6 +107,10 @@ typedef struct __attribute__((packed)) {
         uint8_t address;       // 0x80-0x87
         uint8_t deadband;
         uint16_t max_current_ma;
+        // GPIO wired to this unit's S3 (E-stop) input. 0xFF = none
+        // (skip the boot-time deassert). See pin_types.h's roboclaw
+        // struct for full rationale.
+        uint8_t estop_pin;
     } units[FLASH_ROBOCLAW_MAX_UNITS];
 } flash_roboclaw_config_t;
 
