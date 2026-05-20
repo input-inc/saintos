@@ -548,7 +548,18 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
     data[0] = (uint8_t)((uint16_t)duty >> 8);
     data[1] = (uint8_t)((uint16_t)duty & 0xFF);
     send_command(units[unit].address, ROBOCLAW_CMD_M1DUTY, data, 2);
-    read_ack();
+    // Capture the ACK result. Previously thrown away, which made
+    // "I'm sliding the control and the motor isn't moving" undetectable
+    // from the logs — bytes go out, no signal back. Feeding mark_unit_
+    // response gives the same transition-only logging the telemetry
+    // poller produces: first ACK success → "unit N (0xNN) connected",
+    // ROBOCLAW_DROP_AFTER_MISSES consecutive ACK failures → "dropped —
+    // N consecutive missed polls". On a wired RoboClaw in Packet Serial
+    // mode, the first duty write will ACK (0xFF) within ~5 ms; if the
+    // operator slides and never sees a "connected" line, the issue is
+    // wiring/baud/address, not the firmware send path.
+    bool ack_ok = read_ack();
+    mark_unit_response(unit, ack_ok);
 #endif
 
     return true;
