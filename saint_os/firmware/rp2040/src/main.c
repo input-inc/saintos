@@ -1317,16 +1317,26 @@ int main(void)
            g_node.static_ip[2], g_node.static_ip[3]);
 
 #ifndef SIMULATION
-    // Discover the SAINT server via UDP broadcast
+    // Discover the SAINT server via UDP broadcast. The server's
+    // discovery responder is the Python saint_server process — separate
+    // from dnsmasq — and at cold boot it can come up tens of seconds
+    // after DHCP is already handing out leases. Retry forever with
+    // backoff instead of stranding the node in ERROR; this mirrors the
+    // DHCP retry-forever pattern in transport_w5500_connect(). LED was
+    // last set to NODE_STATE_CONNECTING (yellow) by transport_connect,
+    // and we keep led_update() ticking inside the backoff so the
+    // operator sees the node is still trying.
     printf("Discovering SAINT server...\n");
-    if (!discover_server(g_node.server_ip, &g_node.server_port, 2000, 10)) {
-        printf("ERROR: Could not discover SAINT server!\n");
-        printf("Make sure the server is running on the same network.\n");
-        node_set_state(NODE_STATE_ERROR);
-        led_set_state(NODE_STATE_ERROR);
-        while (1) {
-            led_update();
+    uint32_t disc_batch = 0;
+    while (!discover_server(g_node.server_ip, &g_node.server_port, 2000, 10)) {
+        disc_batch++;
+        uint32_t backoff_ms = (disc_batch < 3) ? 2000 : 5000;
+        printf("Discovery batch %lu failed; retrying in %lu ms "
+               "(server not up yet?)\n",
+               (unsigned long)disc_batch, (unsigned long)backoff_ms);
+        for (uint32_t slept = 0; slept < backoff_ms; slept += 100) {
             sleep_ms(100);
+            led_update();
         }
     }
 #endif

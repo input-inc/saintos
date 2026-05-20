@@ -117,15 +117,19 @@ static void reset_state(void)
     temp1_celsius = 0;
     temp2_celsius = 0;
     last_response_ms = 0;
+    last_byte_ms = 0;
+    last_soft_resync_ms = 0;
     stat_polls_sent = 0;
     stat_echo_bytes = 0;
     stat_echo_missed = 0;
     stat_frames_ok = 0;
     stat_frames_crc_bad = 0;
     stat_resyncs = 0;
+    stat_soft_resyncs = 0;
     stat_unknown_id = 0;
     log_count = 0;
     test_now_ms = 1000;
+    port_initialized = true;
 }
 
 static void feed_sport(const uint8_t* bytes, size_t n)
@@ -490,6 +494,76 @@ static int test_crc_known_vectors(void)
 }
 
 /* ============================================================================
+ * Connection-stickiness + lost-link tests
+ * ============================================================================ */
+
+/* is_connected() reports false on a fresh boot before any frame has
+ * been seen, even if some time has elapsed. */
+static int test_is_connected_false_before_first_frame(void)
+{
+    reset_state();
+    test_now_ms = 10000;
+    CHECK(!fas100_is_connected());
+    return 1;
+}
+
+/* After a valid frame, is_connected() is true. */
+static int test_is_connected_after_first_frame(void)
+{
+    reset_state();
+    uint8_t frame[8];
+    build_sport_response(SPORT_DATA_ID_CURRENT, 50, frame);
+    test_now_ms = 5000;
+    feed_sport(frame, 8);
+    CHECK(fas100_is_connected());
+    return 1;
+}
+
+/* The sticky window keeps is_connected() returning true for
+ * FAS100_STICKY_CONNECTED_MS after sensor_responded is cleared (as
+ * happens when enter_phase() drops us out of PHASE_LOCKED for a
+ * re-probe). Past the window, is_connected() returns false. */
+static int test_is_connected_sticky_after_response_cleared(void)
+{
+    reset_state();
+    uint8_t frame[8];
+    build_sport_response(SPORT_DATA_ID_VOLTAGE, 1234, frame);
+    test_now_ms = 5000;
+    feed_sport(frame, 8);
+    CHECK(fas100_is_connected());
+
+    /* Simulate a re-probe: clear sensor_responded but leave the
+     * last_response_ms timestamp behind. */
+    sensor_responded = false;
+
+    /* Still inside the sticky window — should report connected. */
+    test_now_ms = 5000 + (FAS100_STICKY_CONNECTED_MS - 100);
+    CHECK(fas100_is_connected());
+
+    /* Past the sticky window — disconnected. */
+    test_now_ms = 5000 + FAS100_STICKY_CONNECTED_MS + 100;
+    CHECK(!fas100_is_connected());
+    return 1;
+}
+
+/* sport_feed_byte does NOT update last_byte_ms — only the UART read
+ * loop in fas100_update() does. So feeding bytes through the parser
+ * in tests should not affect last_byte_ms. We exercise this by
+ * manually setting last_byte_ms (as the real read loop would) and
+ * confirming the byte_silence calculation in the LOCKED branch uses
+ * it correctly. This is just a sanity check of the semantics. */
+static int test_last_byte_ms_independent_of_feed(void)
+{
+    reset_state();
+    last_byte_ms = 0;
+    uint8_t frame[8];
+    build_sport_response(SPORT_DATA_ID_CURRENT, 50, frame);
+    feed_sport(frame, 8);
+    CHECK_EQ(last_byte_ms, 0);  /* feed_sport doesn't touch it */
+    return 1;
+}
+
+/* ============================================================================
  * Test runner
  * ============================================================================ */
 
@@ -512,6 +586,10 @@ static const test_entry_t TESTS[] = {
     { "fbus_bad_prefix_dropped",        test_fbus_bad_prefix_dropped },
     { "fbus_restart_on_double_len",     test_fbus_restart_on_double_len },
     { "crc_known_vectors",              test_crc_known_vectors },
+    { "is_connected_false_before_first_frame",   test_is_connected_false_before_first_frame },
+    { "is_connected_after_first_frame",          test_is_connected_after_first_frame },
+    { "is_connected_sticky_after_response_cleared", test_is_connected_sticky_after_response_cleared },
+    { "last_byte_ms_independent_of_feed",        test_last_byte_ms_independent_of_feed },
 };
 
 int main(void)

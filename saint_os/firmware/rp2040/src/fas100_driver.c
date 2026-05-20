@@ -8,9 +8,18 @@
  * active one at startup, alternating ~2 s between each baud rate until
  * one of them responds, then locking to that protocol.
  *
- * If responses stop for a while after locking we drop back to probing,
+ * If the wire goes truly silent after locking we drop back to probing,
  * so a hot-unplug/replug of the sensor (which may come back in the
- * other mode) recovers without a reboot.
+ * other mode) recovers without a reboot. The probe is deliberately
+ * conservative — only switch protocols when no bytes have arrived at
+ * all for FAS100_RX_QUIET_MS. A stream of CRC-failing bytes means the
+ * sensor is alive and the parser just got out of sync; that case is
+ * handled with a soft-resync (FIFO flush + parser reset) WITHOUT
+ * leaving the locked protocol or flapping is_connected. Reason: in
+ * the field we saw the old "no valid frame in 4 s → switch protocol"
+ * rule cycle once every ~7 s — re-probing burns ~1.5 s of FBUS-baud
+ * garbage on the wire which, on a shared half-duplex line, "could
+ * cause false responses" from a sensor that's actually in S.Port mode.
  *
  * Both protocols are inverted half-duplex UART. Frame parsing differs:
  *   - S.Port uses 0x7E as start-of-poll and 0x7D byte-stuffing on the
@@ -19,6 +28,24 @@
  *     fixed 10 bytes [0x08, sensor_id, 0x10, data_id(2), value(4), crc].
  * The sensor_id, data IDs, units, and CRC algorithm are the same in
  * both protocols, so the channel-value storage is shared.
+ *
+ * Wiring (single bidirectional wire to the sensor):
+ *
+ *       MCU TX ──[ 1 kΩ ]──┬──── MCU RX
+ *                          │
+ *                          └──── FAS100 signal pin (S.Port / FBUS)
+ *
+ * Both protocols are half-duplex on one wire, so MCU TX is tied to MCU
+ * RX through a 1 kΩ series resistor — that lets the sensor's
+ * low-impedance driver win the bus during its response slot while still
+ * letting our active-drive idle hold the line low (inverted-UART idle =
+ * physical LOW). Every byte we transmit echoes straight back into our
+ * own RX FIFO; drain_echo_bytes() below removes those echo bytes
+ * synchronously after each TX so the parser only ever sees genuine
+ * sensor response data. Do NOT enable the RP2040's internal pull-up on
+ * the RX pin — it fights the inverted idle level AND is enough bias to
+ * make the FAS100 decide at power-on that it's talking FBUS instead of
+ * S.Port (see gpio_disable_pulls() in fas100_init()).
  */
 
 #include "fas100_driver.h"
@@ -86,10 +113,27 @@ typedef enum {
 // couple of poll attempts per probe cycle.
 #define FAS100_PROBE_MS         1500
 
-// If we lose responses for this long while locked, drop back to
-// probing. Lets a hot-replug come up cleanly even if the new sensor
-// powers up in the other protocol mode.
+// If we lose VALID frames for this long while locked, soft-resync the
+// parser (flush UART FIFO + reset frame accumulator). Doesn't change
+// protocol or flip is_connected — the sensor is presumed alive because
+// bytes are still flowing, we just got desynced from some earlier
+// corruption.
 #define FAS100_LOST_LINK_MS     4000
+
+// If we get NO BYTES AT ALL for this long while locked, the wire is
+// truly dead — sensor unplugged, rebooted, or switched protocol modes.
+// Drop back to probing the OTHER protocol. Set longer than
+// FAS100_LOST_LINK_MS so a soft-resync gets a few cycles to try before
+// we burn the bus on a protocol switch.
+#define FAS100_RX_QUIET_MS      8000
+
+// is_connected() keeps reporting `true` this long after the last valid
+// frame even when sensor_responded has been cleared (e.g. during a
+// transient re-probe). Prevents the dashboard from flapping
+// connect/disconnect every time we lose then re-acquire the sensor.
+// Must be ≥ FAS100_RX_QUIET_MS + FAS100_PROBE_MS so a worst-case
+// silent-then-probe cycle is covered.
+#define FAS100_STICKY_CONNECTED_MS  12000
 
 // =============================================================================
 // State
@@ -104,6 +148,18 @@ static fas100_protocol_t active_proto = PROTO_SPORT;
 static fas100_phase_t    phase            = PHASE_PROBE_SPORT;
 static uint32_t          phase_started_ms = 0;
 static uint32_t          last_response_ms = 0;
+// Updated on every byte the parser pumps from the UART FIFO (echo
+// bytes are drained separately by drain_echo_bytes() and don't touch
+// this). Used by the LOCKED-phase health check to distinguish "wire
+// went silent" (→ switch protocols) from "bytes are flowing but
+// CRC-failing" (→ soft-resync only).
+static uint32_t          last_byte_ms       = 0;
+// Last time we performed a soft-resync. Throttles repeated flushes so
+// we don't churn the parser every iteration when CRC errors are
+// persistent — one resync per FAS100_LOST_LINK_MS window is enough.
+static uint32_t          last_soft_resync_ms = 0;
+// Diagnostic count of soft-resyncs since the last stats dump.
+static uint32_t          stat_soft_resyncs   = 0;
 
 // Latest sensor values (shared between protocols — same data IDs/units)
 static float current_amps = 0.0f;
@@ -186,6 +242,7 @@ static void reset_stats(void)
     stat_frames_crc_bad = 0;
     stat_resyncs = 0;
     stat_unknown_id = 0;
+    stat_soft_resyncs = 0;
     stats_last_dump_ms = PLATFORM_MILLIS();
 }
 
@@ -575,6 +632,11 @@ void fas100_update(void)
 #ifndef SIMULATION
     while (fas100_uart && uart_is_readable(fas100_uart)) {
         uint8_t raw = uart_getc(fas100_uart);
+        // Any byte the parser sees here is genuine sensor data — echo
+        // was drained synchronously in send_*_poll(). Tracking the
+        // timestamp lets the LOCKED-phase health check distinguish a
+        // dead bus from a busy-but-CRC-failing one.
+        last_byte_ms = now;
         if (active_proto == PROTO_FBUS) {
             fbus_feed_byte(raw);
         } else {
@@ -610,19 +672,50 @@ void fas100_update(void)
     } else if (phase == PHASE_PROBE_FBUS
                && (now - phase_started_ms) >= FAS100_PROBE_MS) {
         enter_phase(PHASE_PROBE_SPORT, PROTO_SPORT);
-    } else if (phase == PHASE_LOCKED
-               && last_response_ms != 0
-               && (now - last_response_ms) >= FAS100_LOST_LINK_MS) {
-        // Switch to the OTHER protocol — most common cause of a lost
-        // link is the sensor rebooted into a different mode.
-        fas100_protocol_t other = (active_proto == PROTO_SPORT) ? PROTO_FBUS
-                                                                : PROTO_SPORT;
-        fas100_phase_t target = (other == PROTO_SPORT) ? PHASE_PROBE_SPORT
-                                                       : PHASE_PROBE_FBUS;
-        saint_log_publish("warn",
-            "FAS100: no responses for %d ms — re-probing",
-            FAS100_LOST_LINK_MS);
-        enter_phase(target, other);
+    } else if (phase == PHASE_LOCKED && last_response_ms != 0) {
+        uint32_t valid_silence = now - last_response_ms;
+        // last_byte_ms==0 means we've literally never seen a byte since
+        // entering this phase — treat that as worst-case silence so
+        // the RX_QUIET_MS check fires correctly.
+        uint32_t byte_silence  = (last_byte_ms != 0) ? (now - last_byte_ms)
+                                                     : valid_silence;
+        if (byte_silence >= FAS100_RX_QUIET_MS) {
+            // Bus is truly dead: no bytes at all for RX_QUIET_MS. Most
+            // common cause is the sensor rebooted into the OTHER mode
+            // (FBUS↔S.Port). Switch protocols and resume probing.
+            fas100_protocol_t other = (active_proto == PROTO_SPORT) ? PROTO_FBUS
+                                                                    : PROTO_SPORT;
+            fas100_phase_t target = (other == PROTO_SPORT) ? PHASE_PROBE_SPORT
+                                                           : PHASE_PROBE_FBUS;
+            saint_log_publish("warn",
+                "FAS100: bus silent for %lu ms — re-probing %s",
+                (unsigned long)byte_silence,
+                other == PROTO_FBUS ? "FBUS" : "S.Port");
+            enter_phase(target, other);
+        } else if (valid_silence >= FAS100_LOST_LINK_MS
+                   && (now - last_soft_resync_ms) >= FAS100_LOST_LINK_MS) {
+            // Bytes are arriving (link is alive) but none have CRC-
+            // validated in a while — parser is desynced or the wire is
+            // briefly noisy. Flush the UART FIFO and reset the frame
+            // accumulator so we start fresh on the next 0x7E poll
+            // echo (S.Port) or 0x08 header (FBUS). Stay in PHASE_LOCKED;
+            // sensor_responded stays true so is_connected doesn't flap.
+#ifndef SIMULATION
+            if (fas100_uart) {
+                while (uart_is_readable(fas100_uart)) (void)uart_getc(fas100_uart);
+            }
+#endif
+            rx_pos = 0;
+            rx_in_stuff = false;
+            sport_skip_addr = false;
+            last_soft_resync_ms = now;
+            stat_soft_resyncs++;
+            saint_log_publish("info",
+                "FAS100: soft-resync (%s, no valid frame for %lu ms, "
+                "bus still active)",
+                active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
+                (unsigned long)valid_silence);
+        }
     }
 
     // --- 3) Send next poll if interval has elapsed. ---
@@ -641,7 +734,7 @@ void fas100_update(void)
         && (now - stats_last_dump_ms) >= FAS100_STATS_DUMP_MS) {
         saint_log_publish("info",
             "FAS100 stats (%s, %lu ms): polls=%lu echo_ok=%lu echo_miss=%lu "
-            "frames_ok=%lu crc_bad=%lu resync=%lu unknown_id=%lu",
+            "frames_ok=%lu crc_bad=%lu resync=%lu soft_resync=%lu unknown_id=%lu",
             active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
             (unsigned long)(now - stats_last_dump_ms),
             (unsigned long)stat_polls_sent,
@@ -650,6 +743,7 @@ void fas100_update(void)
             (unsigned long)stat_frames_ok,
             (unsigned long)stat_frames_crc_bad,
             (unsigned long)stat_resyncs,
+            (unsigned long)stat_soft_resyncs,
             (unsigned long)stat_unknown_id);
         stat_polls_sent = 0;
         stat_echo_bytes = 0;
@@ -657,6 +751,7 @@ void fas100_update(void)
         stat_frames_ok = 0;
         stat_frames_crc_bad = 0;
         stat_resyncs = 0;
+        stat_soft_resyncs = 0;
         stat_unknown_id = 0;
         stats_last_dump_ms = now;
     }
@@ -664,7 +759,17 @@ void fas100_update(void)
 
 bool fas100_is_connected(void)
 {
-    return port_initialized && sensor_responded;
+    if (!port_initialized) return false;
+    if (sensor_responded)  return true;
+    // Sticky: if we got a valid frame recently, keep reporting connected
+    // through a brief re-probe so the dashboard doesn't flap. After
+    // FAS100_STICKY_CONNECTED_MS of no valid frames we give up and
+    // report disconnected — covers the actual sensor-unplugged case.
+    if (last_response_ms != 0) {
+        uint32_t age = PLATFORM_MILLIS() - last_response_ms;
+        if (age < FAS100_STICKY_CONNECTED_MS) return true;
+    }
+    return false;
 }
 
 float fas100_get_current(void)  { return current_amps; }
@@ -850,7 +955,8 @@ static const peripheral_driver_t fas100_peripheral = {
     .pin_mode          = PIN_MODE_FAS100_SENSOR,
     .capability_flag   = PIN_CAP_FAS100_SENSOR,
     .virtual_gpio_base = FAS100_VIRTUAL_GPIO_BASE,
-    .channel_count     = FAS100_CHANNEL_COUNT,
+    .channel_count          = FAS100_CHANNEL_COUNT,
+    .channels_per_instance  = FAS100_CHANNEL_COUNT,  /* One FAS100 owns all 4 channels */
     .init              = fas100_drv_init,
     .update            = fas100_update,
     .is_connected      = fas100_is_connected,
