@@ -868,15 +868,20 @@ static int test_keepalive_skips_idle_unit(void)
     return 1;
 }
 
-/* Disconnected unit shouldn't get keepalives either — the wire is
- * dead, no point spamming it. */
-static int test_keepalive_skips_disconnected_unit(void)
+/* A unit marked "disconnected" (because ACKs aren't coming back) SHOULD
+ * still get keepalives as long as duty != 0. The controller's serial-
+ * timeout watchdog feeds on incoming bytes at ITS RX, not on our ACK
+ * receive — so even when our RX path is flaky and the connection state
+ * is flapping, we keep sending so the motor keeps running. This is the
+ * safety-critical "motor stays alive" behavior. */
+static int test_keepalive_fires_even_when_disconnected(void)
 {
     reset_state();
     setup_running_unit(0, 5000);
-    units[0].connected = false;
-    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS * 5;
-    CHECK(!maybe_send_duty_keepalive());
+    units[0].connected = false;      // ACK reliability is poor; flag flapped
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS + 1;
+    CHECK(maybe_send_duty_keepalive());
+    CHECK_EQ(units[0].last_duty_send_ms, test_now_ms);
     return 1;
 }
 
@@ -1045,7 +1050,7 @@ static const test_entry_t TESTS[] = {
     /* Duty keepalive */
     { "keepalive_skips_when_not_initialized",    test_keepalive_skips_when_not_initialized },
     { "keepalive_skips_idle_unit",               test_keepalive_skips_idle_unit },
-    { "keepalive_skips_disconnected_unit",       test_keepalive_skips_disconnected_unit },
+    { "keepalive_fires_even_when_disconnected",  test_keepalive_fires_even_when_disconnected },
     { "keepalive_skips_within_window",           test_keepalive_skips_within_window },
     { "keepalive_fires_after_window",            test_keepalive_fires_after_window },
     { "keepalive_fires_each_window_while_running", test_keepalive_fires_each_window_while_running },

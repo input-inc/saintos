@@ -167,6 +167,76 @@ static uart_inst_t* hw_uart = NULL;
 // all units share one UART pin pair).
 static bool use_pio_uart = false;
 
+// Wire-level diagnostic counters. Dumped periodically (every
+// WIRE_STATS_DUMP_MS) so the operator can see end-to-end throughput
+// without instrumenting the wire with a logic analyzer. The dump
+// publishes via saint_log_publish so it shows up in the dashboard
+// Logs tab — the same place the operator already watches connect/
+// drop transitions.
+//
+// What each counter means:
+//   tx_packets   — full M1DUTY / GETxxx packets we asked send_command
+//                  to put on the wire
+//   tx_bytes     — total byte count actually pushed into the TX FIFO
+//   ack_ok       — read_ack returned true (got 0xFF)
+//   ack_timeout  — read_ack timed out without seeing ANY byte (RX is
+//                  silent or our pull-up is winning over the
+//                  controller's TX driver)
+//   ack_wrong    — read_ack got a byte but it wasn't 0xFF (line is
+//                  alive but bits are getting corrupted — bit
+//                  timing, framing error, level mismatch)
+//   resp_ok      — read_response got the expected bytes AND the CRC
+//                  matched (a genuinely healthy read)
+//   resp_short   — read_response timed out before all bytes arrived
+//   resp_crc_bad — all bytes arrived but the CRC didn't match
+//   ack_last     — most recent wrong-ACK byte (lets us see the
+//                  corruption pattern in the stats dump)
+static uint32_t wire_tx_packets   = 0;
+static uint32_t wire_tx_bytes     = 0;
+static uint32_t wire_ack_ok       = 0;
+static uint32_t wire_ack_timeout  = 0;
+static uint32_t wire_ack_wrong    = 0;
+static uint32_t wire_resp_ok      = 0;
+static uint32_t wire_resp_short   = 0;
+static uint32_t wire_resp_crc_bad = 0;
+static uint8_t  wire_ack_last     = 0;
+static uint32_t wire_stats_last_dump_ms = 0;
+#define WIRE_STATS_DUMP_MS  5000
+
+static void wire_stats_maybe_dump(uint32_t now)
+{
+    // Only dump while there's been bus activity; an idle driver
+    // doesn't need to clutter the log.
+    if (wire_tx_packets == 0) return;
+    if (wire_stats_last_dump_ms == 0) {
+        wire_stats_last_dump_ms = now;
+        return;
+    }
+    if (now - wire_stats_last_dump_ms < WIRE_STATS_DUMP_MS) return;
+
+    uint32_t window_ms = now - wire_stats_last_dump_ms;
+    saint_log_publish("info",
+        "RoboClaw wire (%lu ms): tx=%lu pkts/%lu bytes, ack=%lu ok/"
+        "%lu timeout/%lu wrong (last=0x%02X), resp=%lu ok/%lu short/"
+        "%lu crc_bad",
+        (unsigned long)window_ms,
+        (unsigned long)wire_tx_packets, (unsigned long)wire_tx_bytes,
+        (unsigned long)wire_ack_ok, (unsigned long)wire_ack_timeout,
+        (unsigned long)wire_ack_wrong, (unsigned)wire_ack_last,
+        (unsigned long)wire_resp_ok, (unsigned long)wire_resp_short,
+        (unsigned long)wire_resp_crc_bad);
+
+    wire_tx_packets = 0;
+    wire_tx_bytes = 0;
+    wire_ack_ok = 0;
+    wire_ack_timeout = 0;
+    wire_ack_wrong = 0;
+    wire_resp_ok = 0;
+    wire_resp_short = 0;
+    wire_resp_crc_bad = 0;
+    wire_stats_last_dump_ms = now;
+}
+
 // =============================================================================
 // Internal Helpers — wire I/O abstraction over HW UART vs PIO UART
 // =============================================================================
@@ -227,6 +297,8 @@ static void send_command(uint8_t address, uint8_t command,
     packet[idx++] = (uint8_t)(crc & 0xFF);
 
     wire_write_blocking(packet, idx);
+    wire_tx_packets++;
+    wire_tx_bytes += idx;
 }
 
 static bool read_response(uint8_t* buffer, uint8_t expected_len,
@@ -241,6 +313,7 @@ static bool read_response(uint8_t* buffer, uint8_t expected_len,
     for (uint8_t i = 0; i < total; i++) {
         while (!wire_is_readable()) {
             if (PLATFORM_MILLIS() - start > ROBOCLAW_RESPONSE_TIMEOUT_MS) {
+                wire_resp_short++;
                 return false;
             }
         }
@@ -258,7 +331,12 @@ static bool read_response(uint8_t* buffer, uint8_t expected_len,
 
     uint16_t received_crc = ((uint16_t)buffer[expected_len] << 8) |
                              buffer[expected_len + 1];
-    return crc == received_crc;
+    if (crc == received_crc) {
+        wire_resp_ok++;
+        return true;
+    }
+    wire_resp_crc_bad++;
+    return false;
 }
 
 static bool read_ack(void)
@@ -268,10 +346,18 @@ static bool read_ack(void)
     uint32_t start = PLATFORM_MILLIS();
     while (!wire_is_readable()) {
         if (PLATFORM_MILLIS() - start > ROBOCLAW_RESPONSE_TIMEOUT_MS) {
+            wire_ack_timeout++;
             return false;
         }
     }
-    return wire_getc() == ROBOCLAW_ACK_BYTE;
+    uint8_t got = wire_getc();
+    if (got == ROBOCLAW_ACK_BYTE) {
+        wire_ack_ok++;
+        return true;
+    }
+    wire_ack_wrong++;
+    wire_ack_last = got;
+    return false;
 }
 #endif
 
@@ -664,8 +750,13 @@ void roboclaw_update(void)
 {
     if (!port_initialized || unit_count == 0) return;
 
+    // Periodic wire-level stats dump — see wire_stats_maybe_dump for
+    // semantics. Cheap to call every tick; the function early-exits
+    // when no activity has been recorded.
+    wire_stats_maybe_dump(PLATFORM_MILLIS());
+
     // Duty keepalive — fires at most once per update() tick. If any
-    // connected unit has duty != 0 and hasn't been refreshed in
+    // unit has duty != 0 and hasn't been refreshed in
     // ROBOCLAW_DUTY_KEEPALIVE_MS, this re-sends the current duty so
     // the RoboClaw's serial-timeout safety doesn't kill the motor.
     // Skips the rest of this tick when it sends so we don't double
@@ -847,15 +938,28 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
     return true;
 }
 
-// Called from roboclaw_update() once per tick. Walks the connected
-// units and re-sends M1DUTY for any whose stored duty is non-zero
-// AND whose last_duty_send_ms is older than ROBOCLAW_DUTY_KEEPALIVE_MS.
-// Sends at most one packet per call so the round-robin telemetry
-// poller below still gets bus time.
+// Called from roboclaw_update() once per tick. Walks every unit and
+// re-sends M1DUTY for any whose stored duty is non-zero AND whose
+// last_duty_send_ms is older than ROBOCLAW_DUTY_KEEPALIVE_MS. Sends
+// at most one packet per call so the round-robin telemetry poller
+// below still gets bus time.
 //
 // Returns true if a keepalive packet was sent this call — caller
 // uses this to skip the telemetry poll for the tick (one packet per
 // update() max keeps bus utilization bounded).
+//
+// CRITICALLY: this does NOT gate on the unit's connected flag. That
+// flag tracks ACK reliability and is useful for diagnostics, but the
+// controller's serial-timeout watchdog only cares about INBOUND bytes
+// at ITS RX pin — it doesn't care whether we receive its ACK back.
+// On a flaky link (e.g. an underpowered RX pull-up causing most ACKs
+// to be missed), the unit will frequently appear "disconnected" from
+// our point of view even though the controller is happily receiving
+// every duty packet we send. The old "gate keepalive on connected"
+// version stopped firing the moment ACKs went silent → outbound
+// stream dried up → controller's 1 s timer expired → motor cut. The
+// MOTOR IS THE SAFETY-CRITICAL THING; the connection state is just
+// an observation about whether we hear back. So we keep sending.
 //
 // NOTE: this function is intentionally OUTSIDE #ifndef SIMULATION
 // so the host test runner can verify the timing decision. The actual
@@ -867,7 +971,6 @@ static bool maybe_send_duty_keepalive(void)
     uint32_t now = PLATFORM_MILLIS();
     for (uint8_t i = 0; i < unit_count; i++) {
         roboclaw_unit_t* u = &units[i];
-        if (!u->connected) continue;
         if (u->duty == 0) continue;      // stopped — nothing to keep alive
         uint32_t since_last = now - u->last_duty_send_ms;
         if (since_last < ROBOCLAW_DUTY_KEEPALIVE_MS) continue;

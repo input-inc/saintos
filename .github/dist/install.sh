@@ -151,6 +151,11 @@ COMMON_DEPS=(
     # nodes get IPs handed out from the configured range and can resolve
     # the server's hostname even without mDNS.
     dnsmasq
+    # rsync is used by this script to deploy ROS2 + saint_os payloads.
+    # Pi OS Bookworm and Ubuntu Noble both ship it, but listing it here
+    # makes the dependency explicit and ensures it's present on minimal
+    # base images.
+    rsync
 )
 
 # Python 3.11 specifically: the bundled ROS2 was built against libpython3.11.
@@ -247,12 +252,25 @@ ROS_PREFIX="${ROS_PARENT}/install"
 if [[ ! -d "${PAYLOAD_DIR}/ros2_install" ]]; then
     die "Bundled ROS2 not found at ${PAYLOAD_DIR}/ros2_install"
 fi
-log "Extracting bundled ROS2 to ${ROS_PREFIX}"
-# Wipe any prior install (including older layouts that put ROS2 directly
-# under /opt/ros/<distro> without the install/ subdir).
-run rm -rf "${ROS_PARENT:?}"
+# One-time migration: older layouts dropped ROS2 directly under
+# /opt/ros/<distro> (no install/ subdir). If we see that — a setup.bash
+# at ROS_PARENT but no install/ subdir — wipe ROS_PARENT first so the
+# rsync below starts clean. Once everyone's on the install/ layout the
+# wipe never fires.
+if [[ -f "${ROS_PARENT}/setup.bash" && ! -d "${ROS_PREFIX}" ]]; then
+    log "Older ROS2 layout under ${ROS_PARENT} — wiping before sync"
+    run rm -rf "${ROS_PARENT:?}"
+fi
 run install -d "${ROS_PREFIX}"
-run cp -a "${PAYLOAD_DIR}/ros2_install/." "${ROS_PREFIX}/"
+
+# rsync skips files whose size + mtime match what we'd copy (tar/cp -a
+# preserve mtime, so an unchanged tree statting-clean is the common
+# case on upgrade). --delete removes files in the destination that
+# aren't in the payload, matching the old "wipe and re-extract"
+# semantics for version churn. Result: a no-op upgrade walks the tree
+# without writing, instead of copying hundreds of MB.
+log "Syncing bundled ROS2 to ${ROS_PREFIX}"
+run rsync -a --delete "${PAYLOAD_DIR}/ros2_install/" "${ROS_PREFIX}/"
 
 if [[ ! -f "${ROS_PREFIX}/setup.bash" ]]; then
     die "ROS2 setup.bash not found at ${ROS_PREFIX}/setup.bash after extract"
@@ -316,13 +334,14 @@ fi
 
 # --- Copy payload ------------------------------------------------------------
 
-log "Copying saint_os payload to ${PREFIX}"
-run rm -rf "${PREFIX}/install"
-run cp -a "${PAYLOAD_DIR}/saint_install" "${PREFIX}/install"
+log "Syncing saint_os payload to ${PREFIX}/install"
+run install -d "${PREFIX}/install"
+run rsync -a --delete "${PAYLOAD_DIR}/saint_install/" "${PREFIX}/install/"
 
 if [[ -d "${PAYLOAD_DIR}/firmware" ]]; then
-    run rm -rf "${PREFIX}/firmware"
-    run cp -a "${PAYLOAD_DIR}/firmware" "${PREFIX}/firmware"
+    log "Syncing firmware bundle to ${PREFIX}/firmware"
+    run install -d "${PREFIX}/firmware"
+    run rsync -a --delete "${PAYLOAD_DIR}/firmware/" "${PREFIX}/firmware/"
 
     # http_server.py resolves firmware_root from the package's site-packages
     # parent. Link the bundled firmware into that location so the default
