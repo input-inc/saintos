@@ -737,12 +737,30 @@ void fas100_update(void)
                && (now - phase_started_ms) >= FAS100_PROBE_MS) {
         enter_phase(PHASE_PROBE_SPORT, PROTO_SPORT);
     } else if (phase == PHASE_LOCKED && last_response_ms != 0) {
-        uint32_t valid_silence = now - last_response_ms;
+        // Refresh `now` here. The read loop above runs the parser,
+        // which on a valid frame sets last_response_ms =
+        // PLATFORM_MILLIS() — that PLATFORM_MILLIS() call can return a
+        // tick AFTER the `now` we captured at the top of the function,
+        // so `now - last_response_ms` would underflow (uint32 wraps to
+        // UINT32_MAX) and trivially trip the >= LOST_LINK_MS check
+        // every iteration. Re-reading now closes the window.
+        now = PLATFORM_MILLIS();
+        // Both silences are still clamped below to guard against any
+        // remaining ordering surprise (e.g. last_byte_ms set in the
+        // read loop using the stale now).
+        uint32_t valid_silence = (now >= last_response_ms)
+            ? (now - last_response_ms) : 0;
         // last_byte_ms==0 means we've literally never seen a byte since
         // entering this phase — treat that as worst-case silence so
         // the RX_QUIET_MS check fires correctly.
-        uint32_t byte_silence  = (last_byte_ms != 0) ? (now - last_byte_ms)
-                                                     : valid_silence;
+        uint32_t byte_silence;
+        if (last_byte_ms == 0) {
+            byte_silence = valid_silence;
+        } else if (now >= last_byte_ms) {
+            byte_silence = now - last_byte_ms;
+        } else {
+            byte_silence = 0;
+        }
         if (byte_silence >= FAS100_RX_QUIET_MS) {
             // Bus is truly dead: no bytes at all for RX_QUIET_MS. Most
             // common cause is the sensor rebooted into the OTHER mode
