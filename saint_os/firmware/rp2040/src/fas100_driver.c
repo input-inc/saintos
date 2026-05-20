@@ -197,6 +197,20 @@ static uint32_t stat_unknown_id     = 0;  // CRC-valid but data_id not ours
 static uint32_t stats_last_dump_ms  = 0;
 #define FAS100_STATS_DUMP_MS  5000
 
+// Diagnostic raw-byte capture. The parser only reports pass/fail
+// counts; this dumps the actual bytes between two consecutive polls
+// so we can see (a) whether the sensor's first byte is 0x10 like the
+// spec says or something else (e.g. a sensor-id echo), and (b)
+// whether byte-stuffing is present in real frames. Armed by the next
+// poll once every FAS100_RAW_DUMP_MS while locked; emits one log
+// line and disarms.
+#define FAS100_RAW_DUMP_MS    10000
+#define FAS100_RAW_DUMP_SIZE  24
+static uint8_t  raw_dump_buf[FAS100_RAW_DUMP_SIZE];
+static uint8_t  raw_dump_pos        = 0;
+static bool     raw_dump_armed      = false;
+static uint32_t raw_dump_last_ms    = 0;
+
 // We share a single wire for TX and RX (TX → 1 kΩ → RX, with the
 // sensor's signal pin tied to RX directly). Every byte we transmit
 // loops right back into our own RX FIFO. We drain that echo
@@ -244,6 +258,9 @@ static void reset_stats(void)
     stat_unknown_id = 0;
     stat_soft_resyncs = 0;
     stats_last_dump_ms = PLATFORM_MILLIS();
+    raw_dump_armed = false;
+    raw_dump_pos = 0;
+    raw_dump_last_ms = 0;
 }
 
 /* Drain exactly `n` echo bytes from the RX FIFO with a per-byte
@@ -319,6 +336,20 @@ static void send_sport_poll(void)
     uart_tx_wait_blocking(fas100_uart);
     drain_echo_bytes(FAS100_POLL_FRAME_SIZE);
     stat_polls_sent++;
+
+    // Arm raw-byte capture once every FAS100_RAW_DUMP_MS so the Logs
+    // tab gets a hex view of what's actually coming back between two
+    // polls. Useful when the parser is reporting CRC failures and we
+    // need to see whether the sensor's first byte is 0x10 (the spec)
+    // or something else (e.g. a sensor-ID echo), and whether 0x7D
+    // stuffing is present in the payload.
+    uint32_t now = PLATFORM_MILLIS();
+    if (phase == PHASE_LOCKED
+        && (raw_dump_last_ms == 0 || (now - raw_dump_last_ms) >= FAS100_RAW_DUMP_MS)
+        && !raw_dump_armed) {
+        raw_dump_pos = 0;
+        raw_dump_armed = true;
+    }
 #endif
 }
 
@@ -637,6 +668,27 @@ void fas100_update(void)
         // timestamp lets the LOCKED-phase health check distinguish a
         // dead bus from a busy-but-CRC-failing one.
         last_byte_ms = now;
+        // Tee into the raw-byte capture buffer if armed. The next
+        // poll's send_*_poll arm cycle resets dump_pos; we just emit
+        // once the buffer fills.
+        if (raw_dump_armed && raw_dump_pos < FAS100_RAW_DUMP_SIZE) {
+            raw_dump_buf[raw_dump_pos++] = raw;
+            if (raw_dump_pos >= FAS100_RAW_DUMP_SIZE) {
+                char hex[FAS100_RAW_DUMP_SIZE * 3 + 1];
+                int n = 0;
+                for (uint8_t i = 0; i < FAS100_RAW_DUMP_SIZE; i++) {
+                    n += snprintf(hex + n, sizeof(hex) - n, "%02X ",
+                                  raw_dump_buf[i]);
+                }
+                if (n > 0 && hex[n - 1] == ' ') hex[n - 1] = '\0';
+                saint_log_publish("info",
+                    "FAS100 raw RX (%s, %u bytes): %s",
+                    active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
+                    (unsigned)FAS100_RAW_DUMP_SIZE, hex);
+                raw_dump_armed = false;
+                raw_dump_last_ms = now;
+            }
+        }
         if (active_proto == PROTO_FBUS) {
             fbus_feed_byte(raw);
         } else {
