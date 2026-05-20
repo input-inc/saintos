@@ -746,7 +746,18 @@ static bool roboclaw_drv_load(const void* storage_ptr)
         }
     }
 
-    if (storage->roboclaw_config.unit_count == 0) return true;
+    // No saved peripheral → stay dormant. Surface this in the log so
+    // the operator doesn't burn time wondering why the UART is quiet:
+    // it's quiet on purpose because no RoboClaw config has been synced
+    // (or saved) yet. A sync from the dashboard fires
+    // roboclaw_drv_apply_config → roboclaw_init() and starts traffic.
+    if (storage->roboclaw_config.unit_count == 0) {
+        saint_log_publish("info",
+            "RoboClaw: no saved peripheral in flash — driver dormant "
+            "(no UART traffic). Sync a RoboClaw config from the dashboard "
+            "to bind the UART and start polling.");
+        return true;
+    }
 
     uint8_t count = storage->roboclaw_config.unit_count;
     if (count > ROBOCLAW_MAX_UNITS) count = ROBOCLAW_MAX_UNITS;
