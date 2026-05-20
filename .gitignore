@@ -176,6 +176,13 @@ saint_os/firmware/archive/
 *.img.sha256
 
 # =============================================================================
+# Vendored SDKs (large, fetched separately)
+# =============================================================================
+# Pico SDK lives at the repo root so the RP2040 build can pick it up via
+# PICO_SDK_PATH. It's not part of our source tree.
+/pico-sdk/
+
+# =============================================================================
 # Logs and Databases
 # =============================================================================
 *.log
