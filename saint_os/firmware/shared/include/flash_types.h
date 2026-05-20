@@ -20,7 +20,19 @@ extern "C" {
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   8
+#define FLASH_STORAGE_VERSION   9
+// Bump history:
+//   v8: added uart_pins block.
+//   v9: added estop_pin + uart_swap to flash_roboclaw_config_t units.
+//       Each unit grew 2 bytes (×FLASH_ROBOCLAW_MAX_UNITS = +16 bytes),
+//       which shifts every field AFTER roboclaw_config in
+//       flash_storage_data_t. Without a migration, loading an old v8
+//       blob into the new struct mis-aligns pathfinder_bms_config and
+//       uart_pins — concretely, FAS100 TX/RX pins read as 0 and the
+//       driver auto-starts probing on default pins, never locking.
+//       The v8→v9 migration zeros roboclaw_config, pathfinder_bms_
+//       config, and uart_pins; operators re-sync from the dashboard
+//       once, then everything persists correctly.
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32

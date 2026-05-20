@@ -49,6 +49,25 @@
 // recover within a couple of seconds.
 #define ROBOCLAW_REPROBE_INTERVAL_MS 2000
 
+// How often to re-send the last commanded duty for any unit that's
+// currently driving a motor (duty != 0). The RoboClaw has a built-in
+// serial-timeout safety (configured in Motion Studio's Packet Serial
+// Settings → Timeout, range 0–25.5 s; default 1 s, with 0 disabling
+// the feature entirely): if no serial data arrives for that long, it
+// kills the motors. Without a keepalive, a single set_duty() call
+// would start the motor and then the controller would chop it 1 s
+// later — exactly the "moves a bit, then stops" symptom this
+// keepalive defeats.
+//
+// 400 ms is comfortably under the default 1 s timeout AND any
+// reasonable operator setting (>= ~800 ms). The wire cost is low —
+// 6 TX + 1 RX bytes per resend at 38400 baud is ~2 ms — and we only
+// resend for units with duty != 0, so idle units don't generate
+// traffic. If the operator increases the Motion Studio Timeout to
+// something exotic (e.g. 25 s), this value still works fine because
+// it's bounded by the LOWER limit, not the upper.
+#define ROBOCLAW_DUTY_KEEPALIVE_MS  400
+
 // Pins requested by the operator (set via parse_json_params from the
 // peripheral config sync). Don't read these as "the UART is bound
 // here" — see active_tx_pin/active_rx_pin/active_uart below for that.
@@ -114,6 +133,13 @@ typedef struct {
     // typically all units on a node share the same value, but the
     // schema doesn't force it.
     uint8_t  uart_swap;
+    // Timestamp of the most recent M1DUTY packet sent for this unit.
+    // The duty-keepalive logic in roboclaw_update() re-sends the
+    // current duty when this gets older than ROBOCLAW_DUTY_KEEPALIVE_MS
+    // AND duty is non-zero. Without keepalive, the controller's
+    // serial-timeout safety kills the motor a second after the
+    // initial set_duty.
+    uint32_t last_duty_send_ms;
 } roboclaw_unit_t;
 
 // =============================================================================
@@ -629,9 +655,22 @@ void roboclaw_init(void)
     port_initialized = true;
 }
 
+/* Forward declaration — the helper itself lives just below
+ * roboclaw_update for proximity to roboclaw_set_duty (its companion
+ * sender), and roboclaw_update calls it inline. */
+static bool maybe_send_duty_keepalive(void);
+
 void roboclaw_update(void)
 {
     if (!port_initialized || unit_count == 0) return;
+
+    // Duty keepalive — fires at most once per update() tick. If any
+    // connected unit has duty != 0 and hasn't been refreshed in
+    // ROBOCLAW_DUTY_KEEPALIVE_MS, this re-sends the current duty so
+    // the RoboClaw's serial-timeout safety doesn't kill the motor.
+    // Skips the rest of this tick when it sends so we don't double
+    // up packets on the bus.
+    if (maybe_send_duty_keepalive()) return;
 
 #ifndef SIMULATION
     uint8_t u = poll_unit;
@@ -796,9 +835,60 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
     // wiring/baud/address, not the firmware send path.
     bool ack_ok = read_ack();
     mark_unit_response(unit, ack_ok);
+    // Record when we last sent duty so the keepalive in
+    // roboclaw_update() can decide whether a refresh is due. Set
+    // regardless of ACK status: even an unACKed write resets the
+    // controller's serial-timeout counter (the manual says "no
+    // serial data" triggers timeout — receiving valid OR invalid
+    // bytes keeps the watchdog fed).
+    units[unit].last_duty_send_ms = PLATFORM_MILLIS();
 #endif
 
     return true;
+}
+
+// Called from roboclaw_update() once per tick. Walks the connected
+// units and re-sends M1DUTY for any whose stored duty is non-zero
+// AND whose last_duty_send_ms is older than ROBOCLAW_DUTY_KEEPALIVE_MS.
+// Sends at most one packet per call so the round-robin telemetry
+// poller below still gets bus time.
+//
+// Returns true if a keepalive packet was sent this call — caller
+// uses this to skip the telemetry poll for the tick (one packet per
+// update() max keeps bus utilization bounded).
+//
+// NOTE: this function is intentionally OUTSIDE #ifndef SIMULATION
+// so the host test runner can verify the timing decision. The actual
+// send_command/read_ack calls are gated below.
+static bool maybe_send_duty_keepalive(void)
+{
+    if (!port_initialized || unit_count == 0) return false;
+
+    uint32_t now = PLATFORM_MILLIS();
+    for (uint8_t i = 0; i < unit_count; i++) {
+        roboclaw_unit_t* u = &units[i];
+        if (!u->connected) continue;
+        if (u->duty == 0) continue;      // stopped — nothing to keep alive
+        uint32_t since_last = now - u->last_duty_send_ms;
+        if (since_last < ROBOCLAW_DUTY_KEEPALIVE_MS) continue;
+
+        // Due for a resend. Same protocol as set_duty's wire-level
+        // path, no operator-visible logging because keepalives fire
+        // continuously while the motor is running — spamming the
+        // Logs tab would drown out everything else.
+#ifndef SIMULATION
+        if (!wire_ready()) return false;
+        uint8_t data[2];
+        data[0] = (uint8_t)((uint16_t)u->duty >> 8);
+        data[1] = (uint8_t)((uint16_t)u->duty & 0xFF);
+        send_command(u->address, ROBOCLAW_CMD_M1DUTY, data, 2);
+        bool ack_ok = read_ack();
+        mark_unit_response(i, ack_ok);
+#endif
+        u->last_duty_send_ms = now;
+        return true;   // one packet per update() tick
+    }
+    return false;
 }
 
 bool roboclaw_stop(uint8_t unit)

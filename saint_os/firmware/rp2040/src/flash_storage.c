@@ -99,6 +99,26 @@ bool flash_storage_load(flash_storage_data_t* data)
         if (mutable_data->version <= 7) {
             memset(&mutable_data->uart_pins, 0, sizeof(mutable_data->uart_pins));
         }
+        // Version 8 -> 9: Added estop_pin + uart_swap to flash_roboclaw_
+        // config_t units (each unit +2 bytes × 8 units = +16 bytes).
+        // The size grew INSIDE roboclaw_config, which shifts every field
+        // after it (pathfinder_bms_config, uart_pins) in the on-disk
+        // layout. We don't have the v8 struct definition any more to
+        // walk the shifted bytes back into the right slots, so the safe
+        // path is to zero the affected sections. fas100_config sits
+        // BEFORE roboclaw_config and is unaffected — only its UART pins
+        // (which live in uart_pins) need to be re-synced. We also clear
+        // fas100_config.enabled so the driver doesn't auto-start on
+        // default pins (GP0/GP1) before the operator's re-sync arrives.
+        if (mutable_data->version <= 8) {
+            memset(&mutable_data->roboclaw_config, 0,
+                   sizeof(mutable_data->roboclaw_config));
+            memset(&mutable_data->pathfinder_bms_config, 0,
+                   sizeof(mutable_data->pathfinder_bms_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+            mutable_data->fas100_config.enabled = 0;
+        }
 
         mutable_data->version = FLASH_STORAGE_VERSION;
     }

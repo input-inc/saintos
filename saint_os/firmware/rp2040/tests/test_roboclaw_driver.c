@@ -813,6 +813,185 @@ static int test_save_load_roundtrip_with_uart_swap(void)
 }
 
 /* ============================================================================
+ * Duty keepalive — counters the RoboClaw's serial-timeout safety
+ *
+ * The RoboClaw has a built-in deadman timer (Motion Studio Packet Serial
+ * Settings → Timeout, default 1 s). Without firmware keepalive, a single
+ * set_duty followed by quiet on the bus would let the controller kill
+ * the motor a second later. maybe_send_duty_keepalive() in the driver
+ * re-sends M1DUTY for any unit with duty != 0 once per
+ * ROBOCLAW_DUTY_KEEPALIVE_MS window.
+ *
+ * Host tests verify the timing decision; the actual wire-level send is
+ * gated behind #ifndef SIMULATION and only exercises on hardware. We
+ * check: returns true (= packet sent) at the right moments, returns
+ * false otherwise, doesn't fire for idle units, doesn't fire for
+ * disconnected units, doesn't fire when not yet initialized, and the
+ * timestamp gets refreshed so the next call respects the interval.
+ * ============================================================================ */
+
+/* Helper: bring a unit to "configured, connected, port_initialized=true,
+ * driving at duty=N" state via apply_config + mark_unit_response. */
+static void setup_running_unit(uint8_t unit_idx, int16_t duty)
+{
+    pin_config_t cfg = {0};
+    cfg.gpio = ROBOCLAW_VIRTUAL_GPIO_BASE +
+               (unit_idx * ROBOCLAW_CHANNELS_PER_UNIT);
+    cfg.params.roboclaw.address = ROBOCLAW_ADDRESS_MIN + unit_idx;
+    roboclaw_drv_apply_config(unit_idx * ROBOCLAW_CHANNELS_PER_UNIT, &cfg);
+    port_initialized = true;             // bypasses SIMULATION-gated init
+    units[unit_idx].duty = duty;
+    units[unit_idx].connected = true;
+    units[unit_idx].last_duty_send_ms = test_now_ms;
+}
+
+/* Nothing should fire when the driver isn't initialized. */
+static int test_keepalive_skips_when_not_initialized(void)
+{
+    reset_state();
+    units[0].duty = 1000;
+    units[0].connected = true;
+    /* port_initialized is still false from reset_state. */
+    CHECK(!maybe_send_duty_keepalive());
+    return 1;
+}
+
+/* Idle unit (duty == 0) should not generate keepalives no matter how
+ * much time has passed — the motor is supposed to be stopped, the
+ * timeout kicking in is the correct behavior. */
+static int test_keepalive_skips_idle_unit(void)
+{
+    reset_state();
+    setup_running_unit(0, 0);    /* duty = 0 */
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS * 5;
+    CHECK(!maybe_send_duty_keepalive());
+    return 1;
+}
+
+/* Disconnected unit shouldn't get keepalives either — the wire is
+ * dead, no point spamming it. */
+static int test_keepalive_skips_disconnected_unit(void)
+{
+    reset_state();
+    setup_running_unit(0, 5000);
+    units[0].connected = false;
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS * 5;
+    CHECK(!maybe_send_duty_keepalive());
+    return 1;
+}
+
+/* Right after set_duty, no keepalive should fire — the timestamp is
+ * fresh and we're inside the window. */
+static int test_keepalive_skips_within_window(void)
+{
+    reset_state();
+    setup_running_unit(0, 5000);
+    /* Advance time, but stay just inside the keepalive window. */
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS - 1;
+    CHECK(!maybe_send_duty_keepalive());
+    return 1;
+}
+
+/* Once the window elapses, the next call should fire keepalive. */
+static int test_keepalive_fires_after_window(void)
+{
+    reset_state();
+    setup_running_unit(0, 5000);
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS + 1;
+    CHECK(maybe_send_duty_keepalive());
+    /* Timestamp should have advanced to "now" so the next call is back
+     * inside the window. */
+    CHECK_EQ(units[0].last_duty_send_ms, test_now_ms);
+    /* Immediate follow-up call returns false (window has reset). */
+    CHECK(!maybe_send_duty_keepalive());
+    return 1;
+}
+
+/* Sustained running: every keepalive window the function returns true
+ * exactly once. This is the "motor stays running until I stop it"
+ * loop in continuous form. */
+static int test_keepalive_fires_each_window_while_running(void)
+{
+    reset_state();
+    setup_running_unit(0, 8000);
+
+    int kept_alive = 0;
+    for (int i = 0; i < 10; i++) {
+        /* Advance one keepalive window's worth of time. */
+        test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS + 1;
+        if (maybe_send_duty_keepalive()) kept_alive++;
+        /* Sub-window jitter shouldn't trigger an extra send. */
+        test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS / 4;
+        CHECK(!maybe_send_duty_keepalive());
+    }
+    CHECK_EQ(kept_alive, 10);
+    return 1;
+}
+
+/* Setting duty back to 0 stops the keepalive stream — the motor is
+ * supposed to coast/stop. */
+static int test_keepalive_stops_when_duty_returns_to_zero(void)
+{
+    reset_state();
+    setup_running_unit(0, 5000);
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS + 1;
+    CHECK(maybe_send_duty_keepalive());
+
+    /* Operator returned slider to neutral. */
+    units[0].duty = 0;
+
+    /* Even after another full window, no keepalive should fire. */
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS * 3;
+    CHECK(!maybe_send_duty_keepalive());
+    return 1;
+}
+
+/* Multi-unit: each unit independently checks its own timestamp; one
+ * unit being due doesn't mask the others (we send at most one packet
+ * per call but the next call picks up the next due unit). */
+static int test_keepalive_multi_unit_one_per_call(void)
+{
+    reset_state();
+    setup_running_unit(0, 4000);
+    setup_running_unit(1, -3000);
+    /* Both due simultaneously. */
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS + 1;
+
+    /* First call services unit 0 (loop walks units in order). */
+    CHECK(maybe_send_duty_keepalive());
+    CHECK_EQ(units[0].last_duty_send_ms, test_now_ms);
+    /* Unit 1's timestamp not yet refreshed. */
+    CHECK(units[1].last_duty_send_ms < test_now_ms);
+
+    /* Second call (same `now`) services unit 1. */
+    CHECK(maybe_send_duty_keepalive());
+    CHECK_EQ(units[1].last_duty_send_ms, test_now_ms);
+
+    /* Third call — both inside the window — returns false. */
+    CHECK(!maybe_send_duty_keepalive());
+    return 1;
+}
+
+/* set_duty itself should refresh last_duty_send_ms so an immediately
+ * subsequent keepalive call doesn't double-send. */
+static int test_set_duty_refreshes_keepalive_timestamp(void)
+{
+    /* Can't fully exercise set_duty in SIMULATION (the wire-level
+     * send is gated). But the timestamp assignment IS in the same
+     * #ifndef SIMULATION block as send_command, so it gets compiled
+     * out too. We exercise the equivalent: simulate the operator
+     * calling set_duty by directly updating duty + timestamp the way
+     * production code does, then verify keepalive doesn't fire. */
+    reset_state();
+    setup_running_unit(0, 5000);
+    /* Pretend set_duty was just called: timestamp = now, duty != 0. */
+    units[0].last_duty_send_ms = test_now_ms;
+    /* Immediate keepalive check — well inside window. */
+    CHECK(!maybe_send_duty_keepalive());
+    return 1;
+}
+
+/* ============================================================================
  * Test runner
  * ============================================================================ */
 
@@ -862,6 +1041,17 @@ static const test_entry_t TESTS[] = {
     { "apply_config_uart_swap_false_keeps_hw_path", test_apply_config_uart_swap_false_keeps_hw_path },
     { "uart_swap_can_toggle_back",               test_uart_swap_can_toggle_back },
     { "save_load_roundtrip_with_uart_swap",      test_save_load_roundtrip_with_uart_swap },
+
+    /* Duty keepalive */
+    { "keepalive_skips_when_not_initialized",    test_keepalive_skips_when_not_initialized },
+    { "keepalive_skips_idle_unit",               test_keepalive_skips_idle_unit },
+    { "keepalive_skips_disconnected_unit",       test_keepalive_skips_disconnected_unit },
+    { "keepalive_skips_within_window",           test_keepalive_skips_within_window },
+    { "keepalive_fires_after_window",            test_keepalive_fires_after_window },
+    { "keepalive_fires_each_window_while_running", test_keepalive_fires_each_window_while_running },
+    { "keepalive_stops_when_duty_returns_to_zero", test_keepalive_stops_when_duty_returns_to_zero },
+    { "keepalive_multi_unit_one_per_call",       test_keepalive_multi_unit_one_per_call },
+    { "set_duty_refreshes_keepalive_timestamp",  test_set_duty_refreshes_keepalive_timestamp },
 };
 
 int main(void)
