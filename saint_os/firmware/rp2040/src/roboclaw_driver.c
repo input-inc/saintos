@@ -24,6 +24,7 @@
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
+#include "hardware/adc.h"
 #endif
 
 // =============================================================================
@@ -180,8 +181,8 @@ static bool use_pio_uart = false;
 //   tx_bytes     — total byte count actually pushed into the TX FIFO
 //   ack_ok       — read_ack returned true (got 0xFF)
 //   ack_timeout  — read_ack timed out without seeing ANY byte (RX is
-//                  silent or our pull-up is winning over the
-//                  controller's TX driver)
+//                  silent — controller didn't transmit, or wiring is
+//                  cut, or BEC has browned the controller's logic out)
 //   ack_wrong    — read_ack got a byte but it wasn't 0xFF (line is
 //                  alive but bits are getting corrupted — bit
 //                  timing, framing error, level mismatch)
@@ -203,6 +204,75 @@ static uint8_t  wire_ack_last     = 0;
 static uint32_t wire_stats_last_dump_ms = 0;
 #define WIRE_STATS_DUMP_MS  5000
 
+// Supply-rail sag monitor. The RoboClaw manual (p. 12) explicitly warns
+// that overloading the BEC causes the controller's own logic to brown
+// out, with "erratic behavior" as the symptom — corrupt TX bytes, ACKs
+// with the wrong value, occasional ghost data, all of which we've seen
+// in the wire stats during heavy motor reverse. If the Feather is also
+// powered from that BEC, the same sag resets the MCU before any
+// software watchdog gets a chance to fire.
+//
+// This is the diagnostic side of that hazard: sample the supply rail
+// once per roboclaw_update() tick, track the min/max within each
+// wire-stats window, and roll the result into the existing dump line
+// so the operator sees rail voltage alongside corruption stats.
+//
+// Sample point: GP29 / ADC3 on the Adafruit Feather RP2040 is wired to
+// VBAT through a 100k / 100k divider — but ONLY when the bottom-side
+// JP1 jumper is closed (open from factory). With JP1 closed and the
+// Feather powered from the RoboClaw 5V BEC, expect ~2.2 V at the ADC
+// (4.4 V VBAT after the schottky, divided by 2). If JP1 is open the
+// ADC reads floating garbage; expect to see "vsys=~0 mV" or wild
+// jitter, and either close JP1 or change VSYS_MONITOR_ADC_CHAN below
+// to a pin you've wired yourself.
+#define VSYS_MONITOR_ADC_GPIO   29
+#define VSYS_MONITOR_ADC_CHAN   3
+// Sag threshold for an immediate (don't-wait-for-window-dump) warn log.
+// 4500 mV sits below normal 5V BEC idle (~4.8–5.0 V) but well above the
+// RP2040 brown-out threshold, so a dip past this is a real warning,
+// not a false alarm.
+#define VSYS_SAG_WARN_MV        4500
+
+static bool     vsys_init_done            = false;
+static uint16_t vsys_min_mv               = 0xFFFF;
+static uint16_t vsys_max_mv               = 0;
+static uint16_t vsys_last_mv              = 0;
+static uint32_t vsys_samples              = 0;
+static bool     vsys_sag_logged_in_window = false;
+
+#ifndef SIMULATION
+// 12-bit ADC at 3.3 V ref into a 2:1 external divider:
+//   V_at_source_mV = adc_raw * 3300 / 4095 * 2 = adc_raw * 6600 / 4095
+static inline uint16_t adc_to_source_mv(uint16_t raw)
+{
+    return (uint16_t)((uint32_t)raw * 6600u / 4095u);
+}
+
+static void vsys_sample(void)
+{
+    if (!vsys_init_done) return;
+    adc_select_input(VSYS_MONITOR_ADC_CHAN);
+    uint16_t raw = adc_read();
+    uint16_t mv  = adc_to_source_mv(raw);
+    vsys_last_mv = mv;
+    if (mv < vsys_min_mv) vsys_min_mv = mv;
+    if (mv > vsys_max_mv) vsys_max_mv = mv;
+    vsys_samples++;
+
+    if (mv < VSYS_SAG_WARN_MV && !vsys_sag_logged_in_window) {
+        // Fire-once-per-window so a sustained sag doesn't flood the
+        // Logs tab. The window-dump that follows will show the actual
+        // min/max so the operator can see how deep it went.
+        saint_log_publish("warn",
+            "RoboClaw: supply-rail sag — VSYS=%u mV (threshold %u mV). "
+            "Manual warns BEC overload causes controller logic brown-out "
+            "(p. 12). If Feather is on RoboClaw 5V, give it its own supply.",
+            (unsigned)mv, (unsigned)VSYS_SAG_WARN_MV);
+        vsys_sag_logged_in_window = true;
+    }
+}
+#endif
+
 static void wire_stats_maybe_dump(uint32_t now)
 {
     // Only dump while there's been bus activity; an idle driver
@@ -215,16 +285,41 @@ static void wire_stats_maybe_dump(uint32_t now)
     if (now - wire_stats_last_dump_ms < WIRE_STATS_DUMP_MS) return;
 
     uint32_t window_ms = now - wire_stats_last_dump_ms;
-    saint_log_publish("info",
-        "RoboClaw wire (%lu ms): tx=%lu pkts/%lu bytes, ack=%lu ok/"
-        "%lu timeout/%lu wrong (last=0x%02X), resp=%lu ok/%lu short/"
-        "%lu crc_bad",
-        (unsigned long)window_ms,
-        (unsigned long)wire_tx_packets, (unsigned long)wire_tx_bytes,
-        (unsigned long)wire_ack_ok, (unsigned long)wire_ack_timeout,
-        (unsigned long)wire_ack_wrong, (unsigned)wire_ack_last,
-        (unsigned long)wire_resp_ok, (unsigned long)wire_resp_short,
-        (unsigned long)wire_resp_crc_bad);
+
+    // Snapshot VSYS trackers BEFORE the format call so the values shown
+    // and the values reset are the same observation. n==0 means the
+    // monitor never sampled (init path didn't run, or SIMULATION) —
+    // render dashes so the operator can tell "no data" from "0 mV".
+    uint16_t vmin = vsys_min_mv;
+    uint16_t vmax = vsys_max_mv;
+    uint16_t vlast = vsys_last_mv;
+    uint32_t vn = vsys_samples;
+
+    if (vn > 0) {
+        saint_log_publish("info",
+            "RoboClaw wire (%lu ms): tx=%lu pkts/%lu bytes, ack=%lu ok/"
+            "%lu timeout/%lu wrong (last=0x%02X), resp=%lu ok/%lu short/"
+            "%lu crc_bad | VSYS min=%u mV max=%u mV last=%u mV (n=%lu)",
+            (unsigned long)window_ms,
+            (unsigned long)wire_tx_packets, (unsigned long)wire_tx_bytes,
+            (unsigned long)wire_ack_ok, (unsigned long)wire_ack_timeout,
+            (unsigned long)wire_ack_wrong, (unsigned)wire_ack_last,
+            (unsigned long)wire_resp_ok, (unsigned long)wire_resp_short,
+            (unsigned long)wire_resp_crc_bad,
+            (unsigned)vmin, (unsigned)vmax, (unsigned)vlast,
+            (unsigned long)vn);
+    } else {
+        saint_log_publish("info",
+            "RoboClaw wire (%lu ms): tx=%lu pkts/%lu bytes, ack=%lu ok/"
+            "%lu timeout/%lu wrong (last=0x%02X), resp=%lu ok/%lu short/"
+            "%lu crc_bad | VSYS monitor not active",
+            (unsigned long)window_ms,
+            (unsigned long)wire_tx_packets, (unsigned long)wire_tx_bytes,
+            (unsigned long)wire_ack_ok, (unsigned long)wire_ack_timeout,
+            (unsigned long)wire_ack_wrong, (unsigned)wire_ack_last,
+            (unsigned long)wire_resp_ok, (unsigned long)wire_resp_short,
+            (unsigned long)wire_resp_crc_bad);
+    }
 
     wire_tx_packets = 0;
     wire_tx_bytes = 0;
@@ -234,6 +329,10 @@ static void wire_stats_maybe_dump(uint32_t now)
     wire_resp_ok = 0;
     wire_resp_short = 0;
     wire_resp_crc_bad = 0;
+    vsys_min_mv = 0xFFFF;
+    vsys_max_mv = 0;
+    vsys_samples = 0;
+    vsys_sag_logged_in_window = false;
     wire_stats_last_dump_ms = now;
 }
 
@@ -676,13 +775,28 @@ void roboclaw_init(void)
         gpio_set_function(roboclaw_tx_pin, GPIO_FUNC_UART);
         gpio_set_function(roboclaw_rx_pin, GPIO_FUNC_UART);
 
-        // Enable the RP2040's internal pull-up on the RX line. The
-        // RoboClaw manual recommends a 1 kΩ–4.7 kΩ physical pull-up on
-        // the MCU RX pin; the RP2040 internal pull-up is ~50 kΩ which
-        // is enough for short PCB traces. See the long comment in the
-        // previous revision for full rationale and the FAS100 inverted-
-        // UART contrast.
-        gpio_pull_up(roboclaw_rx_pin);
+        // No pull-up on RX. The manual's 1k–4.7k pull-up requirement
+        // (manual p. 68) only applies when Multi-Unit Mode is enabled
+        // — that mode reconfigures S2 to open-drain so it can share a
+        // bus. In standard single-unit Packet Serial, S2 is push-pull
+        // and the RoboClaw outputs 3.3 V logic (manual p. 8) — direct
+        // match for the RP2040, no pull needed.
+    }
+
+    // VSYS monitor: hardware_init() already ran adc_init(), so we only
+    // need to switch the chosen pin out of digital-IO function before
+    // sampling. One-shot so re-binds (operator changes UART pins) don't
+    // re-init the ADC pin unnecessarily.
+    if (!vsys_init_done) {
+        adc_gpio_init(VSYS_MONITOR_ADC_GPIO);
+        vsys_init_done = true;
+        saint_log_publish("info",
+            "RoboClaw: VSYS monitor armed on GP%u / ADC%u (2:1 divider "
+            "assumed — Feather RP2040 needs JP1 jumper closed). "
+            "Sag warn threshold %u mV.",
+            (unsigned)VSYS_MONITOR_ADC_GPIO,
+            (unsigned)VSYS_MONITOR_ADC_CHAN,
+            (unsigned)VSYS_SAG_WARN_MV);
     }
 
     active_tx_pin = roboclaw_tx_pin;
@@ -707,8 +821,8 @@ void roboclaw_init(void)
             (unsigned)(ROBOCLAW_ADDRESS_MIN + ROBOCLAW_MAX_UNITS - 1));
     } else {
         saint_log_publish("info",
-            "RoboClaw: bound UART%u TX=%u RX=%u @ %u baud "
-            "(RX internal pull-up enabled, ~50 kΩ) — probing 0x%02X..0x%02X",
+            "RoboClaw: bound UART%u TX=%u RX=%u @ %u baud — "
+            "probing 0x%02X..0x%02X",
             (unsigned)configured_serial_port,
             (unsigned)roboclaw_tx_pin, (unsigned)roboclaw_rx_pin,
             (unsigned)configured_baud,
@@ -749,6 +863,16 @@ static bool maybe_send_duty_keepalive(void);
 void roboclaw_update(void)
 {
     if (!port_initialized || unit_count == 0) return;
+
+#ifndef SIMULATION
+    // Sample the supply rail every tick so the wire-stats dump has a
+    // min/max to report. ~2 µs per ADC read at 500 kHz default rate —
+    // negligible against tick budget. NOTE: this is a software sampler
+    // and won't catch a transient sub-millisecond brown-out (the kind
+    // that resets the MCU outright); it WILL catch sustained sags and
+    // gives a baseline reading to compare against during quiet periods.
+    vsys_sample();
+#endif
 
     // Periodic wire-level stats dump — see wire_stats_maybe_dump for
     // semantics. Cheap to call every tick; the function early-exits
@@ -952,8 +1076,8 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
 // flag tracks ACK reliability and is useful for diagnostics, but the
 // controller's serial-timeout watchdog only cares about INBOUND bytes
 // at ITS RX pin — it doesn't care whether we receive its ACK back.
-// On a flaky link (e.g. an underpowered RX pull-up causing most ACKs
-// to be missed), the unit will frequently appear "disconnected" from
+// On a flaky link (e.g. wire noise from motor commutation corrupting
+// the ACK bytes), the unit will frequently appear "disconnected" from
 // our point of view even though the controller is happily receiving
 // every duty packet we send. The old "gate keepalive on connected"
 // version stopped firing the moment ACKs went silent → outbound
