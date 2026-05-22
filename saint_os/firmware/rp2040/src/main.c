@@ -23,6 +23,84 @@
  * firmware/rp2040/bootloader/main.c. */
 #define OTA_GAVE_UP_MAGIC 0xFA11ED01u
 
+/* Hard-fault context captured by the ISR below and inspected at boot
+ * to surface "where did we crash last time" in the Logs tab.
+ *
+ * Lives in the .uninitialized_data section so the crt0 runtime DOES
+ * NOT zero it during bss-clear at startup. That means a watchdog or
+ * software reset (e.g. the watchdog_reboot() we trigger from the fault
+ * handler) preserves these fields, but a power-on / brown-out reset
+ * does NOT (RAM contents are undefined after POR/BOR). That's exactly
+ * the discrimination we want: if we boot and see crash_magic set to
+ * CRASH_MAGIC, the previous reset was a hard fault we caught; if it
+ * was cleared/random, the previous reset was likely brown-out.
+ *
+ * Why not watchdog scratch[]? scratch[0..6] are all claimed by the
+ * bootloader's OTA handoff protocol (size/crc/magic/retry counter),
+ * and scratch[7] alone isn't enough room for magic+pc+lr. The noinit
+ * RAM section is the standard place for crash persistence anyway.
+ */
+#define CRASH_MAGIC 0xFA1750FFu
+typedef struct {
+    uint32_t magic;   // == CRASH_MAGIC iff PC/LR below are valid
+    uint32_t pc;      // faulting instruction
+    uint32_t lr;      // return address at fault
+} crash_info_t;
+static __attribute__((section(".uninitialized_data")))
+    volatile crash_info_t crash_info;
+
+/* Hard-fault handler. Cortex-M0+ on RP2040 doesn't have BusFault /
+ * UsageFault — every escalation lands here. The exception entry pushes
+ * R0-R3, R12, LR, PC, xPSR onto whichever stack was active (SPSEL bit
+ * in EXC_RETURN says which). The naked trampoline reads SPSEL, picks
+ * the right SP, and forwards to the C handler with the stack pointer
+ * as its single argument. The C handler reads PC (sp[6]) and LR (sp[5])
+ * out of the exception frame, stashes them into crash_info, then
+ * triggers a clean watchdog reboot so the bootloader runs and the next
+ * boot can report what we caught.
+ *
+ * The function name `isr_hardfault` matches the weak symbol the Pico
+ * SDK's crt0 exposes for the HardFault vector — defining a strong
+ * symbol with this exact name overrides the default (which just sits
+ * in a wfi loop until the watchdog kills it).
+ */
+static void __attribute__((used)) isr_hardfault_c(uint32_t* sp);
+
+void __attribute__((naked, used)) isr_hardfault(void)
+{
+    __asm volatile(
+        "movs r0, #4         \n"   // bit 2 of EXC_RETURN = SPSEL
+        "mov  r1, lr         \n"
+        "tst  r0, r1         \n"
+        "beq  1f             \n"
+        "mrs  r0, psp        \n"   // SPSEL set → process stack was active
+        "b    2f             \n"
+        "1:                  \n"
+        "mrs  r0, msp        \n"   // SPSEL clear → main stack was active
+        "2:                  \n"
+        "ldr  r1, =isr_hardfault_c \n"
+        "bx   r1             \n"
+    );
+}
+
+static void __attribute__((used)) isr_hardfault_c(uint32_t* sp)
+{
+    /* Cortex-M0+ exception frame:
+     *   sp[0]=R0  sp[1]=R1  sp[2]=R2  sp[3]=R3
+     *   sp[4]=R12 sp[5]=LR  sp[6]=PC  sp[7]=xPSR
+     */
+    crash_info.pc    = sp[6];
+    crash_info.lr    = sp[5];
+    crash_info.magic = CRASH_MAGIC;
+    /* watchdog_reboot(0, 0, 0) arms a 1-tick watchdog and the function
+     * hangs until it fires — gives us a clean reset through the
+     * bootloader without re-executing the faulting instruction. */
+    watchdog_reboot(0, 0, 0);
+    while (1) {
+        tight_loop_contents();
+    }
+}
+
 /* Bootloader failure reason codes. Must mirror the OTA_FAIL_* set in
  * firmware/rp2040/bootloader/main.c. We don't share a header because
  * the bootloader builds in isolation; an unknown code maps to
@@ -1221,6 +1299,19 @@ int main(void)
     // after the previous boot's last log line in the Logs tab.
     bool boot_after_watchdog_timeout = watchdog_enable_caused_reboot();
 
+    // Same idea for hard fault: noinit RAM survives the
+    // watchdog_reboot() our fault handler triggers, so if magic ==
+    // CRASH_MAGIC the previous boot ended in isr_hardfault and the PC
+    // / LR captured there point at the faulting instruction and its
+    // caller. Snapshot them before clearing the sentinel so we only
+    // report once per crash.
+    bool boot_after_hardfault = (crash_info.magic == CRASH_MAGIC);
+    uint32_t crashed_pc = boot_after_hardfault ? crash_info.pc : 0;
+    uint32_t crashed_lr = boot_after_hardfault ? crash_info.lr : 0;
+    if (boot_after_hardfault) {
+        crash_info.magic = 0;
+    }
+
     // Also capture the OTA-gave-up sentinel from the bootloader before
     // anything touches scratch[3]. If non-zero, the previous OTA
     // attempt exceeded its retry budget and we're running the
@@ -1427,12 +1518,37 @@ int main(void)
     // direct saint_log_publish() would be dropped. Stage them via
     // boot_log_queue(); the announce-timer callback replays them once
     // the subscription is established (see boot_log_flush_if_due).
-    if (boot_after_watchdog_timeout) {
+    if (boot_after_hardfault) {
+        // A captured hard fault is more specific than "the watchdog
+        // fired" — log it first regardless of the watchdog flag, since
+        // our handler triggers a watchdog reboot to clean things up.
+        // Operator workflow: copy the PC into addr2line against the
+        // matching .elf to get file:line:
+        //   arm-none-eabi-addr2line -e build/saint_node.elf 0xXXXXXXXX
         boot_log_queue("error",
-            "Recovered from watchdog reset (previous boot crashed)");
+            "Recovered from hard fault: PC=0x%08lX LR=0x%08lX "
+            "(addr2line -e build/saint_node.elf 0x%08lX)",
+            (unsigned long)crashed_pc, (unsigned long)crashed_lr,
+            (unsigned long)crashed_pc);
+    } else if (boot_after_watchdog_timeout) {
+        // Watchdog timeout WITHOUT a captured hard fault: the main
+        // loop got stuck somewhere that wasn't a CPU exception
+        // (deadlock, infinite loop, blocked I/O), so there's no PC to
+        // report. Operator's clue: whatever was being commanded right
+        // before the reset is the suspect.
+        boot_log_queue("error",
+            "Recovered from watchdog reset — main loop hung "
+            "(no hard-fault PC captured)");
     } else {
+        // Neither hard fault nor watchdog timeout. On RP2040 the
+        // remaining candidate is HAD_POR (power-on / brown-out — these
+        // are indistinguishable in hardware), so a "Boot OK" line that
+        // follows a previous run's last log without either of the
+        // error lines above is the brown-out fingerprint. Worth noting
+        // in the message so the operator doesn't read "OK" as "fine."
         boot_log_queue("info",
-            "Boot OK — fw %s, bl %s, watchdog armed at %d ms",
+            "Boot OK — fw %s, bl %s, watchdog armed at %d ms "
+            "(if this is unexpected, suspect power-rail brown-out)",
             FIRMWARE_VERSION_FULL, g_bl_version, WATCHDOG_TIMEOUT_MS);
     }
     // The bootloader sets the OTA-gave-up sentinel when it exhausts
