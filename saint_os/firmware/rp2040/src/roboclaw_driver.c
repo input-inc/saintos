@@ -133,6 +133,20 @@ typedef struct {
     // typically all units on a node share the same value, but the
     // schema doesn't force it.
     uint8_t  uart_swap;
+    // When 1, the wire-level duty value is negated before it goes out
+    // (so positive operator commands turn the motor the opposite way).
+    // Lives alongside uart_swap because it has the same "PCB-specific
+    // wiring orientation" character — both come from the dashboard,
+    // both apply at the wire layer, and units[].duty stays in
+    // operator-intended units regardless.
+    //
+    // Flash persistence note: the per-unit struct in flash_roboclaw_
+    // config_t has no spare byte for this field (adding one would
+    // force a v9→v10 schema migration that zeros every operator's
+    // config). Instead we bit-pack it into the existing uart_swap
+    // flash byte: bit 0 = uart_swap, bit 1 = invert_direction. See
+    // roboclaw_drv_save / roboclaw_drv_load for the pack/unpack.
+    uint8_t  invert_direction;
     // Timestamp of the most recent M1DUTY packet sent for this unit.
     // The duty-keepalive logic in roboclaw_update() re-sends the
     // current duty when this gets older than ROBOCLAW_DUTY_KEEPALIVE_MS
@@ -993,6 +1007,16 @@ bool roboclaw_is_connected(void)
     return false;
 }
 
+// Apply the per-unit "invert direction" toggle. The clamp in
+// set_duty keeps duty in [-32767, +32767], so negation is symmetric
+// and can't overflow. Wire-only — units[unit].duty itself still
+// stores the operator's commanded value.
+static inline int16_t apply_direction(uint8_t unit, int16_t duty)
+{
+    if (unit >= ROBOCLAW_MAX_UNITS) return duty;
+    return units[unit].invert_direction ? (int16_t)-duty : duty;
+}
+
 bool roboclaw_set_duty(uint8_t unit, int16_t duty)
 {
     if (unit >= ROBOCLAW_MAX_UNITS) return false;
@@ -1023,9 +1047,10 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
             (int)use_pio_uart, (void*)hw_uart);
         return false;
     }
+    int16_t wire_duty = apply_direction(unit, duty);
     uint8_t data[2];
-    data[0] = (uint8_t)((uint16_t)duty >> 8);
-    data[1] = (uint8_t)((uint16_t)duty & 0xFF);
+    data[0] = (uint8_t)((uint16_t)wire_duty >> 8);
+    data[1] = (uint8_t)((uint16_t)wire_duty & 0xFF);
 
     // One-shot per unit: log the very first duty packet dispatched
     // so the operator gets confirmation that bytes are leaving the
@@ -1114,9 +1139,10 @@ static bool maybe_send_duty_keepalive(void)
         // Logs tab would drown out everything else.
 #ifndef SIMULATION
         if (!wire_ready()) return false;
+        int16_t wire_duty = apply_direction(i, u->duty);
         uint8_t data[2];
-        data[0] = (uint8_t)((uint16_t)u->duty >> 8);
-        data[1] = (uint8_t)((uint16_t)u->duty & 0xFF);
+        data[0] = (uint8_t)((uint16_t)wire_duty >> 8);
+        data[1] = (uint8_t)((uint16_t)wire_duty & 0xFF);
         send_command(u->address, ROBOCLAW_CMD_M1DUTY, data, 2);
         bool ack_ok = read_ack();
         mark_unit_response(i, ack_ok);
@@ -1242,6 +1268,7 @@ static bool roboclaw_drv_apply_config(uint8_t channel, const pin_config_t* confi
         units[unit].max_current_ma = config->params.roboclaw.max_current_ma;
         units[unit].estop_pin = config->params.roboclaw.estop_pin;
         units[unit].uart_swap = config->params.roboclaw.uart_swap;
+        units[unit].invert_direction = config->params.roboclaw.invert_direction;
     }
     // else: drv_load already populated units[unit], leave it alone.
 
@@ -1331,6 +1358,21 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
         }
     }
 
+    // Optional: invert_direction flag. true → positive duty drives
+    // motor in reverse. Applied at wire-level in set_duty / keepalive
+    // (see apply_direction). Absent in JSON ⇒ leave at whatever
+    // set_defaults / pre-existing pin_config_t left it (0 for fresh).
+    p = strstr(json_start, "\"invert_direction\"");
+    if (p && p < json_end) {
+        p = strchr(p, ':');
+        if (p) {
+            p++;
+            while (*p == ' ') p++;
+            config->params.roboclaw.invert_direction =
+                (strncmp(p, "true", 4) == 0) ? 1 : 0;
+        }
+    }
+
     uint8_t tx, rx, inst;
     if (uart_pin_pair_parse_json(json_start, json_end, &tx, &rx, &inst)) {
         roboclaw_tx_pin = tx;
@@ -1397,7 +1439,15 @@ static bool roboclaw_drv_save(void* storage_ptr)
         storage->roboclaw_config.units[i].deadband = units[i].deadband;
         storage->roboclaw_config.units[i].max_current_ma = units[i].max_current_ma;
         storage->roboclaw_config.units[i].estop_pin = units[i].estop_pin;
-        storage->roboclaw_config.units[i].uart_swap = units[i].uart_swap;
+        // Pack uart_swap (bit 0) + invert_direction (bit 1) into the
+        // single uart_swap flash byte to avoid a schema-version bump.
+        // The v9 schema reserved one byte here; we steal the upper bits
+        // for additional per-unit flags. Existing v9 saves had
+        // uart_swap ∈ {0,1}, so bit 1 was 0 — those loads come back as
+        // invert_direction=0 (off), preserving prior behavior.
+        storage->roboclaw_config.units[i].uart_swap =
+            (uint8_t)((units[i].uart_swap         & 0x01)        |
+                      ((units[i].invert_direction & 0x01) << 1));
     }
 
     return true;
@@ -1450,7 +1500,16 @@ static bool roboclaw_drv_load(const void* storage_ptr)
         units[i].deadband = storage->roboclaw_config.units[i].deadband;
         units[i].max_current_ma = storage->roboclaw_config.units[i].max_current_ma;
         units[i].estop_pin = storage->roboclaw_config.units[i].estop_pin;
-        units[i].uart_swap = storage->roboclaw_config.units[i].uart_swap;
+        // Flash byte packs uart_swap into bit 0 and invert_direction
+        // into bit 1 (see roboclaw_drv_save). v9 saves written before
+        // the invert_direction feature had bit 1 == 0, so they unpack
+        // as invert_direction=0 — preserves prior behavior across the
+        // OTA that introduces this field.
+        {
+            uint8_t flags = storage->roboclaw_config.units[i].uart_swap;
+            units[i].uart_swap        = (uint8_t)(flags        & 0x01);
+            units[i].invert_direction = (uint8_t)((flags >> 1) & 0x01);
+        }
         // Drive the E-stop pin LOW now — BEFORE roboclaw_init() runs
         // the probe sweep at the end of drv_load. If the saved config
         // assigned an E-stop pin, the controller may have latched

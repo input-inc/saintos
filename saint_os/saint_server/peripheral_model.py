@@ -224,6 +224,13 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             # can't swap directions; PIO can. Default False: use the
             # hardware UART exactly as before.
             PeripheralTypeParam("uart_swap", "Use PIO UART (swap TX/RX)", "bool", False),
+            # When true, positive duty commands drive the motor in
+            # reverse (and vice versa). Use when the motor wiring or
+            # mechanical mounting inverts the operator-intended
+            # direction and physically re-wiring is inconvenient.
+            # Inversion happens at the wire level in the firmware;
+            # encoder readings are NOT auto-inverted.
+            PeripheralTypeParam("invert_direction", "Invert motor direction", "bool", False),
         ],
     ),
     "pathfinder_bms": PeripheralType(

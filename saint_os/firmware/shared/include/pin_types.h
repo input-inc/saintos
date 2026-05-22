@@ -156,6 +156,17 @@ typedef struct {
             // and RX on GP0 via two PIO state machines on PIO1.
             // 0 (default) = use hardware UART exactly as before.
             uint8_t uart_swap;
+            // When 1, positive duty commands drive the motor in
+            // reverse (and vice versa). Use on rigs where the motor
+            // wiring or mechanical mounting inverts the operator-
+            // intended direction and physically re-wiring isn't
+            // convenient. The inversion is applied at the wire-level
+            // (in set_duty and the keepalive resend) so units[].duty
+            // still stores the operator's commanded value — the
+            // dashboard slider position matches what the operator
+            // expected. Encoder readings are NOT auto-inverted.
+            // 0 (default) = no inversion.
+            uint8_t invert_direction;
         } roboclaw;
         struct {
             uint16_t poll_interval_ms;
