@@ -24,7 +24,6 @@
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
-#include "hardware/adc.h"
 #endif
 
 // =============================================================================
@@ -204,75 +203,6 @@ static uint8_t  wire_ack_last     = 0;
 static uint32_t wire_stats_last_dump_ms = 0;
 #define WIRE_STATS_DUMP_MS  5000
 
-// Supply-rail sag monitor. The RoboClaw manual (p. 12) explicitly warns
-// that overloading the BEC causes the controller's own logic to brown
-// out, with "erratic behavior" as the symptom — corrupt TX bytes, ACKs
-// with the wrong value, occasional ghost data, all of which we've seen
-// in the wire stats during heavy motor reverse. If the Feather is also
-// powered from that BEC, the same sag resets the MCU before any
-// software watchdog gets a chance to fire.
-//
-// This is the diagnostic side of that hazard: sample the supply rail
-// once per roboclaw_update() tick, track the min/max within each
-// wire-stats window, and roll the result into the existing dump line
-// so the operator sees rail voltage alongside corruption stats.
-//
-// Sample point: GP29 / ADC3 on the Adafruit Feather RP2040 is wired to
-// VBAT through a 100k / 100k divider — but ONLY when the bottom-side
-// JP1 jumper is closed (open from factory). With JP1 closed and the
-// Feather powered from the RoboClaw 5V BEC, expect ~2.2 V at the ADC
-// (4.4 V VBAT after the schottky, divided by 2). If JP1 is open the
-// ADC reads floating garbage; expect to see "vsys=~0 mV" or wild
-// jitter, and either close JP1 or change VSYS_MONITOR_ADC_CHAN below
-// to a pin you've wired yourself.
-#define VSYS_MONITOR_ADC_GPIO   29
-#define VSYS_MONITOR_ADC_CHAN   3
-// Sag threshold for an immediate (don't-wait-for-window-dump) warn log.
-// 4500 mV sits below normal 5V BEC idle (~4.8–5.0 V) but well above the
-// RP2040 brown-out threshold, so a dip past this is a real warning,
-// not a false alarm.
-#define VSYS_SAG_WARN_MV        4500
-
-static bool     vsys_init_done            = false;
-static uint16_t vsys_min_mv               = 0xFFFF;
-static uint16_t vsys_max_mv               = 0;
-static uint16_t vsys_last_mv              = 0;
-static uint32_t vsys_samples              = 0;
-static bool     vsys_sag_logged_in_window = false;
-
-#ifndef SIMULATION
-// 12-bit ADC at 3.3 V ref into a 2:1 external divider:
-//   V_at_source_mV = adc_raw * 3300 / 4095 * 2 = adc_raw * 6600 / 4095
-static inline uint16_t adc_to_source_mv(uint16_t raw)
-{
-    return (uint16_t)((uint32_t)raw * 6600u / 4095u);
-}
-
-static void vsys_sample(void)
-{
-    if (!vsys_init_done) return;
-    adc_select_input(VSYS_MONITOR_ADC_CHAN);
-    uint16_t raw = adc_read();
-    uint16_t mv  = adc_to_source_mv(raw);
-    vsys_last_mv = mv;
-    if (mv < vsys_min_mv) vsys_min_mv = mv;
-    if (mv > vsys_max_mv) vsys_max_mv = mv;
-    vsys_samples++;
-
-    if (mv < VSYS_SAG_WARN_MV && !vsys_sag_logged_in_window) {
-        // Fire-once-per-window so a sustained sag doesn't flood the
-        // Logs tab. The window-dump that follows will show the actual
-        // min/max so the operator can see how deep it went.
-        saint_log_publish("warn",
-            "RoboClaw: supply-rail sag — VSYS=%u mV (threshold %u mV). "
-            "Manual warns BEC overload causes controller logic brown-out "
-            "(p. 12). If Feather is on RoboClaw 5V, give it its own supply.",
-            (unsigned)mv, (unsigned)VSYS_SAG_WARN_MV);
-        vsys_sag_logged_in_window = true;
-    }
-}
-#endif
-
 static void wire_stats_maybe_dump(uint32_t now)
 {
     // Only dump while there's been bus activity; an idle driver
@@ -285,41 +215,16 @@ static void wire_stats_maybe_dump(uint32_t now)
     if (now - wire_stats_last_dump_ms < WIRE_STATS_DUMP_MS) return;
 
     uint32_t window_ms = now - wire_stats_last_dump_ms;
-
-    // Snapshot VSYS trackers BEFORE the format call so the values shown
-    // and the values reset are the same observation. n==0 means the
-    // monitor never sampled (init path didn't run, or SIMULATION) —
-    // render dashes so the operator can tell "no data" from "0 mV".
-    uint16_t vmin = vsys_min_mv;
-    uint16_t vmax = vsys_max_mv;
-    uint16_t vlast = vsys_last_mv;
-    uint32_t vn = vsys_samples;
-
-    if (vn > 0) {
-        saint_log_publish("info",
-            "RoboClaw wire (%lu ms): tx=%lu pkts/%lu bytes, ack=%lu ok/"
-            "%lu timeout/%lu wrong (last=0x%02X), resp=%lu ok/%lu short/"
-            "%lu crc_bad | VSYS min=%u mV max=%u mV last=%u mV (n=%lu)",
-            (unsigned long)window_ms,
-            (unsigned long)wire_tx_packets, (unsigned long)wire_tx_bytes,
-            (unsigned long)wire_ack_ok, (unsigned long)wire_ack_timeout,
-            (unsigned long)wire_ack_wrong, (unsigned)wire_ack_last,
-            (unsigned long)wire_resp_ok, (unsigned long)wire_resp_short,
-            (unsigned long)wire_resp_crc_bad,
-            (unsigned)vmin, (unsigned)vmax, (unsigned)vlast,
-            (unsigned long)vn);
-    } else {
-        saint_log_publish("info",
-            "RoboClaw wire (%lu ms): tx=%lu pkts/%lu bytes, ack=%lu ok/"
-            "%lu timeout/%lu wrong (last=0x%02X), resp=%lu ok/%lu short/"
-            "%lu crc_bad | VSYS monitor not active",
-            (unsigned long)window_ms,
-            (unsigned long)wire_tx_packets, (unsigned long)wire_tx_bytes,
-            (unsigned long)wire_ack_ok, (unsigned long)wire_ack_timeout,
-            (unsigned long)wire_ack_wrong, (unsigned)wire_ack_last,
-            (unsigned long)wire_resp_ok, (unsigned long)wire_resp_short,
-            (unsigned long)wire_resp_crc_bad);
-    }
+    saint_log_publish("info",
+        "RoboClaw wire (%lu ms): tx=%lu pkts/%lu bytes, ack=%lu ok/"
+        "%lu timeout/%lu wrong (last=0x%02X), resp=%lu ok/%lu short/"
+        "%lu crc_bad",
+        (unsigned long)window_ms,
+        (unsigned long)wire_tx_packets, (unsigned long)wire_tx_bytes,
+        (unsigned long)wire_ack_ok, (unsigned long)wire_ack_timeout,
+        (unsigned long)wire_ack_wrong, (unsigned)wire_ack_last,
+        (unsigned long)wire_resp_ok, (unsigned long)wire_resp_short,
+        (unsigned long)wire_resp_crc_bad);
 
     wire_tx_packets = 0;
     wire_tx_bytes = 0;
@@ -329,12 +234,12 @@ static void wire_stats_maybe_dump(uint32_t now)
     wire_resp_ok = 0;
     wire_resp_short = 0;
     wire_resp_crc_bad = 0;
-    vsys_min_mv = 0xFFFF;
-    vsys_max_mv = 0;
-    vsys_samples = 0;
-    vsys_sag_logged_in_window = false;
     wire_stats_last_dump_ms = now;
 }
+
+// Forward-declared so roboclaw_update can call it; defined immediately
+// after the wire helpers since it uses them.
+static void temp_probe_diagnostic(uint32_t now);
 
 // =============================================================================
 // Internal Helpers — wire I/O abstraction over HW UART vs PIO UART
@@ -458,6 +363,125 @@ static bool read_ack(void)
     wire_ack_last = got;
     return false;
 }
+
+// Standalone GETTEMP diagnostic — fires every TEMP_PROBE_INTERVAL_MS
+// regardless of the unit's connected state, and logs the RAW bytes that
+// come back (or what bytes arrived before the per-byte timeout). The
+// existing telemetry round-robin only runs while the unit is in the
+// "connected" state, which in a noisy link is rarely true, so the
+// operator never gets to see what GETTEMP actually returns — even when
+// the controller IS responding, it gets rejected at the CRC layer and
+// quietly counted as resp_crc_bad. This bypasses that path so any byte
+// the controller sends shows up in the log verbatim.
+//
+// We deliberately do NOT update units[].temp_tenths from here — that's
+// still the round-robin path's job, gated on a clean CRC. This is purely
+// a diagnostic window into the wire.
+#define TEMP_PROBE_INTERVAL_MS 1000
+
+static uint32_t temp_probe_last_ms = 0;
+
+static void temp_probe_diagnostic(uint32_t now)
+{
+    if (!port_initialized || unit_count == 0) return;
+    if (!wire_ready()) return;
+    if (now - temp_probe_last_ms < TEMP_PROBE_INTERVAL_MS) return;
+    temp_probe_last_ms = now;
+
+    // Aim at unit 0 — single-unit setups are the common case, and a
+    // multi-unit operator can still see which controller answered by
+    // the address echoed in the log line. Keeping it simple by
+    // hard-targeting unit 0 avoids spamming N lines per second on
+    // populated rigs.
+    uint8_t addr = units[0].address;
+
+    // Drain anything in the FIFO from a previous (corrupt) exchange so
+    // we don't latch onto stale garbage as our response.
+    while (wire_is_readable()) (void)wire_getc();
+
+    send_command(addr, ROBOCLAW_CMD_GETTEMP, NULL, 0);
+
+    // Collect up to 4 bytes (Temp_hi, Temp_lo, CRC_hi, CRC_lo) with the
+    // same timeouts the normal read_response uses. If fewer arrive,
+    // report what we got — that itself is useful (was the controller
+    // silent? did it speak briefly? did it speak too long?).
+    uint8_t  buf[4] = {0, 0, 0, 0};
+    uint8_t  got    = 0;
+    uint32_t start  = PLATFORM_MILLIS();
+    while (got < 4) {
+        while (!wire_is_readable()) {
+            uint32_t waited = PLATFORM_MILLIS() - start;
+            uint32_t limit  = (got == 0) ? ROBOCLAW_RESPONSE_TIMEOUT_MS
+                                         : ROBOCLAW_BYTE_TIMEOUT_MS;
+            if (waited > limit) goto report;
+        }
+        buf[got++] = wire_getc();
+        start = PLATFORM_MILLIS();
+    }
+
+report:
+    if (got == 0) {
+        saint_log_publish("info",
+            "RoboClaw temp-probe: sent [0x%02X, 82] to unit 0 — NO bytes "
+            "received within %u ms (controller silent or wiring blocked)",
+            (unsigned)addr, (unsigned)ROBOCLAW_RESPONSE_TIMEOUT_MS);
+        return;
+    }
+
+    // Compute expected CRC against what the controller WOULD have sent
+    // (address + command + data bytes) so we can compare against the
+    // CRC bytes the controller actually sent. If got < 4 we can't
+    // compare, but we still log what we got.
+    bool        crc_ok        = false;
+    uint16_t    expected_crc  = 0;
+    uint16_t    received_crc  = 0;
+    int16_t     temp_tenths_c = 0;
+    if (got == 4) {
+        uint16_t crc = 0;
+        crc = roboclaw_crc16_update(crc, addr);
+        crc = roboclaw_crc16_update(crc, ROBOCLAW_CMD_GETTEMP);
+        crc = roboclaw_crc16_update(crc, buf[0]);
+        crc = roboclaw_crc16_update(crc, buf[1]);
+        expected_crc  = crc;
+        received_crc  = ((uint16_t)buf[2] << 8) | buf[3];
+        crc_ok        = (expected_crc == received_crc);
+        temp_tenths_c = (int16_t)(((uint16_t)buf[0] << 8) | buf[1]);
+    }
+
+    if (crc_ok) {
+        saint_log_publish("info",
+            "RoboClaw temp-probe: unit 0 (0x%02X) got %u bytes "
+            "[%02X %02X %02X %02X] — CRC OK, temp=%d.%d °C",
+            (unsigned)addr, (unsigned)got,
+            (unsigned)buf[0], (unsigned)buf[1],
+            (unsigned)buf[2], (unsigned)buf[3],
+            (int)(temp_tenths_c / 10),
+            (int)((temp_tenths_c < 0 ? -temp_tenths_c : temp_tenths_c) % 10));
+    } else if (got == 4) {
+        saint_log_publish("warn",
+            "RoboClaw temp-probe: unit 0 (0x%02X) got %u bytes "
+            "[%02X %02X %02X %02X] — CRC MISMATCH "
+            "(expected 0x%04X, received 0x%04X). "
+            "Bytes ARE arriving but the wire is corrupting them.",
+            (unsigned)addr, (unsigned)got,
+            (unsigned)buf[0], (unsigned)buf[1],
+            (unsigned)buf[2], (unsigned)buf[3],
+            (unsigned)expected_crc, (unsigned)received_crc);
+    } else {
+        // Partial response — got some bytes then timed out. Show what
+        // arrived; the gap tells us whether the controller started to
+        // respond and stopped, or never really got going.
+        saint_log_publish("warn",
+            "RoboClaw temp-probe: unit 0 (0x%02X) got %u of 4 bytes "
+            "[%02X %02X %02X %02X] then timed out — short response, "
+            "controller likely started replying but lost framing.",
+            (unsigned)addr, (unsigned)got,
+            (unsigned)buf[0], (unsigned)buf[1],
+            (unsigned)buf[2], (unsigned)buf[3]);
+    }
+}
+#else
+static inline void temp_probe_diagnostic(uint32_t now) { (void)now; }
 #endif
 
 // =============================================================================
@@ -783,22 +807,6 @@ void roboclaw_init(void)
         // match for the RP2040, no pull needed.
     }
 
-    // VSYS monitor: hardware_init() already ran adc_init(), so we only
-    // need to switch the chosen pin out of digital-IO function before
-    // sampling. One-shot so re-binds (operator changes UART pins) don't
-    // re-init the ADC pin unnecessarily.
-    if (!vsys_init_done) {
-        adc_gpio_init(VSYS_MONITOR_ADC_GPIO);
-        vsys_init_done = true;
-        saint_log_publish("info",
-            "RoboClaw: VSYS monitor armed on GP%u / ADC%u (2:1 divider "
-            "assumed — Feather RP2040 needs JP1 jumper closed). "
-            "Sag warn threshold %u mV.",
-            (unsigned)VSYS_MONITOR_ADC_GPIO,
-            (unsigned)VSYS_MONITOR_ADC_CHAN,
-            (unsigned)VSYS_SAG_WARN_MV);
-    }
-
     active_tx_pin = roboclaw_tx_pin;
     active_rx_pin = roboclaw_rx_pin;
     active_uart   = configured_serial_port;
@@ -864,15 +872,10 @@ void roboclaw_update(void)
 {
     if (!port_initialized || unit_count == 0) return;
 
-#ifndef SIMULATION
-    // Sample the supply rail every tick so the wire-stats dump has a
-    // min/max to report. ~2 µs per ADC read at 500 kHz default rate —
-    // negligible against tick budget. NOTE: this is a software sampler
-    // and won't catch a transient sub-millisecond brown-out (the kind
-    // that resets the MCU outright); it WILL catch sustained sags and
-    // gives a baseline reading to compare against during quiet periods.
-    vsys_sample();
-#endif
+    // Diagnostic GETTEMP probe (1 Hz) — fires regardless of the unit's
+    // connected state and logs raw response bytes. See
+    // temp_probe_diagnostic() above for rationale.
+    temp_probe_diagnostic(PLATFORM_MILLIS());
 
     // Periodic wire-level stats dump — see wire_stats_maybe_dump for
     // semantics. Cheap to call every tick; the function early-exits
