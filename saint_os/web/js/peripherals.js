@@ -229,6 +229,19 @@ class PeripheralManager {
             : `<button class="btn-secondary text-xs hover:bg-red-900/40 hover:border-red-700"
                        onclick="peripheralManager.removePeripheral('${escapeAttr(p.id)}')">Remove</button>`;
 
+        // Logging toggle. Disabled when the peripheral has no input
+        // channels — nothing to record.
+        const hasInputs = type ? type.channels.some(c => c.dir === 'in') : false;
+        const logOn = !!p.log_enabled;
+        const logBtn = hasInputs
+            ? `<button class="btn-secondary text-xs ${logOn ? 'bg-emerald-900/40 border-emerald-700 text-emerald-200' : ''}"
+                       onclick="peripheralManager.toggleLog('${escapeAttr(p.id)}', ${!logOn})"
+                       title="${logOn ? 'Disable' : 'Enable'} 30s/60s history + daily NDJSON log">
+                    Log ${logOn ? 'on' : 'off'}
+               </button>`
+            : `<button class="btn-secondary text-xs opacity-30 cursor-not-allowed" disabled
+                       title="No input channels to log">Log —</button>`;
+
         const border = p.builtin ? 'border-slate-600 bg-slate-800/40' : 'border-slate-700 bg-slate-900/40';
 
         return `
@@ -244,12 +257,39 @@ class PeripheralManager {
                         <div class="mt-2 flex flex-wrap gap-1">${channelChips}</div>
                     </div>
                     <div class="flex items-center gap-1 shrink-0">
+                        ${logBtn}
                         <button class="btn-secondary text-xs"
                                 onclick="peripheralManager.openEditModal('${escapeAttr(p.id)}')">Edit</button>
                         ${removeBtn}
                     </div>
                 </div>
             </div>`;
+    }
+
+    async toggleLog(peripheralId, enabled) {
+        try {
+            const result = await window.saintWS.management('set_peripheral_log_enabled', {
+                node_id: this.selectedNode,
+                peripheral_id: peripheralId,
+                enabled,
+            });
+            if (!result || result.success === false) {
+                alert(result?.message || 'Failed to toggle logging');
+                return;
+            }
+            // Optimistically flip in-memory + re-render so the button
+            // updates without a full round-trip to get_node_peripherals.
+            const p = this.peripherals.find(x => x.id === peripheralId);
+            if (p) p.log_enabled = !!enabled;
+            this.renderList();
+            // Notify the live-readings tab so it can backfill/clear its
+            // sparkline for this peripheral.
+            if (window.nodeLiveManager && typeof window.nodeLiveManager.onLogEnabledChanged === 'function') {
+                window.nodeLiveManager.onLogEnabledChanged(this.selectedNode, peripheralId, !!enabled);
+            }
+        } catch (err) {
+            alert('Failed to toggle logging: ' + (err.message || err));
+        }
     }
 
     describePins(p, type) {

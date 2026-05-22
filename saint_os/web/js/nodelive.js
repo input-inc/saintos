@@ -13,6 +13,11 @@
  * is even producing data.
  */
 
+// Sparkline window in seconds — matches PeripheralLogger's 30s deque.
+const SPARK_WINDOW_S = 30;
+const SPARK_W = 140;
+const SPARK_H = 24;
+
 class NodeLiveManager {
     constructor() {
         this.selectedNode = null;
@@ -20,6 +25,10 @@ class NodeLiveManager {
         this._catalog = null;
         this._peripherals = [];
         this._values = new Map();          // "peripheral_id/channel_id" -> {value, ts}
+        // 30s rolling window per channel, populated for log-enabled
+        // peripherals only. Array of [ts_seconds, value] tuples, oldest
+        // first; trimmed in _appendHistory.
+        this._history = new Map();         // "peripheral_id/channel_id" -> [[ts, v], ...]
         this._lastFeedback = 0;
         this._rerenderTimer = null;
     }
@@ -41,6 +50,7 @@ class NodeLiveManager {
         await this._unsubscribe();
         this.selectedNode = nodeId || null;
         this._values.clear();
+        this._history.clear();
         this._lastFeedback = 0;
 
         const grid = document.getElementById('node-live-grid');
@@ -59,12 +69,67 @@ class NodeLiveManager {
             ]);
             this._catalog = catalog;
             this._peripherals = (periph && periph.peripherals) || [];
+            // Pull the server's 30s ring buffer for every input channel
+            // of a log-enabled peripheral. Done in parallel; renders the
+            // grid immediately and then re-renders once the histories
+            // arrive (typically <100 ms for a small fleet).
             this._render();
+            await this._backfillHistory();
+            this._scheduleRender();
         } catch (err) {
             console.error('Failed to load live readings:', err);
             if (grid) grid.innerHTML =
                 `<p class="text-red-300 text-sm">Failed to load: ${escapeHtml(err.message || err)}</p>`;
         }
+    }
+
+    /** Called by peripheralManager when the operator flips the Log toggle. */
+    async onLogEnabledChanged(nodeId, peripheralId, enabled) {
+        if (nodeId !== this.selectedNode) return;
+        const p = this._peripherals.find(x => x.id === peripheralId);
+        if (p) p.log_enabled = !!enabled;
+        if (enabled) {
+            await this._backfillPeripheralHistory(peripheralId);
+        } else {
+            // Drop the local rings for this peripheral — they'd otherwise
+            // keep filling from the pin_state stream below.
+            for (const k of [...this._history.keys()]) {
+                if (k.startsWith(`${peripheralId}/`)) this._history.delete(k);
+            }
+        }
+        this._scheduleRender();
+    }
+
+    async _backfillHistory() {
+        const enabled = this._peripherals.filter(p => p.log_enabled);
+        await Promise.all(enabled.map(p => this._backfillPeripheralHistory(p.id)));
+    }
+
+    async _backfillPeripheralHistory(peripheralId) {
+        const typesById = this._typesById();
+        const p = this._peripherals.find(x => x.id === peripheralId);
+        if (!p) return;
+        const type = typesById[p.type];
+        if (!type) return;
+        const ws = window.saintWS;
+        const inputs = type.channels.filter(c => c.dir === 'in');
+        // Fire all channel requests for this peripheral in parallel.
+        await Promise.all(inputs.map(async (ch) => {
+            try {
+                const r = await ws.management('get_peripheral_history', {
+                    node_id: this.selectedNode,
+                    peripheral_id: peripheralId,
+                    channel_id: ch.id,
+                    window: '30s',
+                });
+                if (!r || !Array.isArray(r.samples)) return;
+                const key = `${peripheralId}/${ch.id}`;
+                this._history.set(key, r.samples.map(s => [s.ts, s.v]));
+            } catch (e) {
+                // Fall through — sparkline just won't render until live
+                // samples arrive. Don't spam the console on transient errs.
+            }
+        }));
     }
 
     async _unsubscribe() {
@@ -89,18 +154,43 @@ class NodeLiveManager {
         if (!data) return;
         if (data.last_feedback) this._lastFeedback = data.last_feedback;
         const channels = Array.isArray(data.channels) ? data.channels : [];
+        // Build a quick lookup of which peripherals are log-enabled so we
+        // don't waste memory keeping history for the rest.
+        const logSet = new Set(
+            this._peripherals.filter(p => p.log_enabled).map(p => p.id)
+        );
         let touched = false;
         for (const ch of channels) {
             if (!ch.peripheral_id || !ch.channel_id) continue;
             const key = `${ch.peripheral_id}/${ch.channel_id}`;
-            this._values.set(key, {
-                value: ch.value,
-                ts: ch.last_updated || (Date.now() / 1000),
-            });
+            const ts = ch.last_updated || (Date.now() / 1000);
+            this._values.set(key, { value: ch.value, ts });
+            if (logSet.has(ch.peripheral_id) && typeof ch.value === 'number') {
+                this._appendHistory(key, ts, ch.value);
+            }
             touched = true;
         }
         if (touched) this._scheduleRender();
         this._updateStatus(data.stale);
+    }
+
+    _appendHistory(key, ts, value) {
+        let arr = this._history.get(key);
+        if (!arr) {
+            arr = [];
+            this._history.set(key, arr);
+        }
+        arr.push([ts, value]);
+        // Trim entries older than the window. Cheap to do inline since
+        // samples arrive monotonically — usually shifts 0–1 items.
+        const cutoff = (Date.now() / 1000) - SPARK_WINDOW_S;
+        while (arr.length && arr[0][0] < cutoff) arr.shift();
+    }
+
+    _typesById() {
+        const out = {};
+        for (const t of (this._catalog?.peripheral_types || [])) out[t.id] = t;
+        return out;
     }
 
     _updateStatus(stale) {
@@ -140,8 +230,7 @@ class NodeLiveManager {
             return;
         }
 
-        const typesById = {};
-        for (const t of (this._catalog?.peripheral_types || [])) typesById[t.id] = t;
+        const typesById = this._typesById();
 
         grid.innerHTML = this._peripherals.map(p => {
             const type = typesById[p.type];
@@ -149,11 +238,14 @@ class NodeLiveManager {
             const channels = (type?.channels) || [];
 
             const rows = channels.length
-                ? channels.map(ch => this._channelRow(p.id, ch)).join('')
+                ? channels.map(ch => this._channelRow(p, ch)).join('')
                 : '<div class="text-xs text-slate-500 italic">No declared channels</div>';
 
             const builtinBadge = p.builtin
                 ? '<span class="px-2 py-0.5 rounded-full text-xs bg-slate-700 text-slate-300 ml-2">Built-in</span>'
+                : '';
+            const logBadge = p.log_enabled
+                ? '<span class="px-2 py-0.5 rounded-full text-xs bg-emerald-900/40 text-emerald-200 ml-2" title="Recording to peripherals.log">Logging</span>'
                 : '';
 
             return `
@@ -161,7 +253,7 @@ class NodeLiveManager {
                     <div class="flex items-center justify-between mb-3">
                         <div>
                             <h4 class="text-base font-semibold text-white">${escapeHtml(p.label || p.id)}</h4>
-                            <div class="text-xs text-slate-500">${escapeHtml(typeLabel)} · <span class="font-mono">${escapeHtml(p.id)}</span>${builtinBadge}</div>
+                            <div class="text-xs text-slate-500">${escapeHtml(typeLabel)} · <span class="font-mono">${escapeHtml(p.id)}</span>${builtinBadge}${logBadge}</div>
                         </div>
                     </div>
                     <div class="space-y-1">${rows}</div>
@@ -170,8 +262,8 @@ class NodeLiveManager {
         }).join('');
     }
 
-    _channelRow(peripheralId, ch) {
-        const key = `${peripheralId}/${ch.id}`;
+    _channelRow(p, ch) {
+        const key = `${p.id}/${ch.id}`;
         const v = this._values.get(key);
         const valStr = (v === undefined || v.value === null || v.value === undefined)
             ? '<span class="text-slate-500">—</span>'
@@ -179,15 +271,62 @@ class NodeLiveManager {
         const ageStr = v
             ? `${Math.max(0, (Date.now() / 1000 - v.ts)).toFixed(1)}s ago`
             : '';
+        // Sparkline only for input channels on log-enabled peripherals
+        // — output channels' setpoints aren't recorded by the logger.
+        const spark = (p.log_enabled && ch.dir === 'in')
+            ? this._sparkline(this._history.get(key))
+            : '';
         return `
             <div class="flex items-center justify-between text-sm font-mono py-1 border-b border-slate-800 last:border-b-0">
                 <span class="text-slate-400">${escapeHtml(ch.display || ch.id)}</span>
                 <div class="flex items-center gap-3">
+                    ${spark}
                     ${valStr}
                     <span class="text-xs text-slate-600 w-20 text-right">${ageStr}</span>
                 </div>
             </div>
         `;
+    }
+
+    /** Inline SVG sparkline of the 30s window. Returns empty when no data. */
+    _sparkline(samples) {
+        if (!samples || samples.length < 2) {
+            return `<span class="inline-block" style="width:${SPARK_W}px;height:${SPARK_H}px"></span>`;
+        }
+        const nowS = Date.now() / 1000;
+        const t0 = nowS - SPARK_WINDOW_S;
+        // Build x/y arrays, mapping ts to [0..SPARK_W] and value to
+        // [SPARK_H-1..1] (inverted because SVG y grows downward).
+        let lo = Infinity, hi = -Infinity;
+        for (const [, v] of samples) {
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        if (!isFinite(lo) || !isFinite(hi)) {
+            return `<span class="inline-block" style="width:${SPARK_W}px;height:${SPARK_H}px"></span>`;
+        }
+        const span = hi - lo || 1;
+        const pts = samples.map(([ts, v]) => {
+            const x = Math.max(0, Math.min(SPARK_W,
+                ((ts - t0) / SPARK_WINDOW_S) * SPARK_W));
+            const y = (SPARK_H - 2) - ((v - lo) / span) * (SPARK_H - 4) + 1;
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+        }).join(' ');
+        const last = samples[samples.length - 1];
+        const lx = Math.max(0, Math.min(SPARK_W,
+            ((last[0] - t0) / SPARK_WINDOW_S) * SPARK_W));
+        const ly = (SPARK_H - 2) - ((last[1] - lo) / span) * (SPARK_H - 4) + 1;
+        const titleAttr = `min=${this._formatValue(lo)} max=${this._formatValue(hi)} (30s)`;
+        return `<svg width="${SPARK_W}" height="${SPARK_H}"
+                     viewBox="0 0 ${SPARK_W} ${SPARK_H}"
+                     class="text-cyan-400" title="${escapeAttr(titleAttr)}"
+                     aria-label="${escapeAttr(titleAttr)}">
+                    <polyline fill="none" stroke="currentColor" stroke-width="1.25"
+                              stroke-linejoin="round" stroke-linecap="round"
+                              points="${pts}"/>
+                    <circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="1.5"
+                            fill="currentColor"/>
+                </svg>`;
     }
 
     _formatValue(v) {
