@@ -151,11 +151,6 @@ COMMON_DEPS=(
     # nodes get IPs handed out from the configured range and can resolve
     # the server's hostname even without mDNS.
     dnsmasq
-    # rsync is used by this script to deploy ROS2 + saint_os payloads.
-    # Pi OS Bookworm and Ubuntu Noble both ship it, but listing it here
-    # makes the dependency explicit and ensures it's present on minimal
-    # base images.
-    rsync
 )
 
 # Python 3.11 specifically: the bundled ROS2 was built against libpython3.11.
