@@ -230,5 +230,9 @@ yarn-error.log*
 # Rust
 # =============================================================================
 target/
-Cargo.lock
+# Cargo.lock IS committed: the only Rust crate in this repo
+# (controller/src-tauri/) is a binary, where checking in the lock file
+# guarantees reproducible offline builds. Without it the Steam Deck
+# (and any other build host) has to re-resolve the dependency graph
+# from crates.io on every fresh checkout, which fails without network.
 **/*.rs.bk
