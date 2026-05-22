@@ -498,11 +498,17 @@ static inline void temp_probe_diagnostic(uint32_t now) { (void)now; }
  * telemetry. */
 static bool probe_unit(uint8_t unit_idx, char* version_out, size_t version_out_size)
 {
-    if (!hw_uart || unit_idx >= ROBOCLAW_MAX_UNITS) return false;
+    // Use wire_ready() (which dispatches on use_pio_uart) instead of
+    // hw_uart directly — otherwise on a PIO-UART setup hw_uart is NULL
+    // and every probe short-circuits to false, the unit never gets
+    // marked connected via the periodic re-probe path, and telemetry
+    // never starts. Same fix for the read loop below (wire_is_readable
+    // / wire_getc).
+    if (!wire_ready() || unit_idx >= ROBOCLAW_MAX_UNITS) return false;
 
     // Drain any stale bytes from a previous failed exchange so the
     // version parser doesn't latch onto leftover garbage.
-    while (uart_is_readable(hw_uart)) (void)uart_getc(hw_uart);
+    while (wire_is_readable()) (void)wire_getc();
 
     send_command(units[unit_idx].address, ROBOCLAW_CMD_GETVERSION, NULL, 0);
 
@@ -511,12 +517,12 @@ static bool probe_unit(uint8_t unit_idx, char* version_out, size_t version_out_s
     uint8_t len = 0;
     bool got_null = false;
     while (len < ROBOCLAW_VERSION_MAX_LEN) {
-        while (!uart_is_readable(hw_uart)) {
+        while (!wire_is_readable()) {
             if (PLATFORM_MILLIS() - start > ROBOCLAW_RESPONSE_TIMEOUT_MS) {
                 return false;
             }
         }
-        resp[len] = uart_getc(hw_uart);
+        resp[len] = wire_getc();
         if (resp[len] == 0) {
             got_null = true;
             len++;
@@ -529,12 +535,12 @@ static bool probe_unit(uint8_t unit_idx, char* version_out, size_t version_out_s
 
     // Slurp the 2 CRC bytes that follow the null terminator.
     for (uint8_t j = 0; j < 2; j++) {
-        while (!uart_is_readable(hw_uart)) {
+        while (!wire_is_readable()) {
             if (PLATFORM_MILLIS() - start > ROBOCLAW_BYTE_TIMEOUT_MS) {
                 return false;
             }
         }
-        resp[len++] = uart_getc(hw_uart);
+        resp[len++] = wire_getc();
         start = PLATFORM_MILLIS();
     }
 
@@ -1206,11 +1212,38 @@ static bool roboclaw_drv_apply_config(uint8_t channel, const pin_config_t* confi
     uint8_t unit = channel / ROBOCLAW_CHANNELS_PER_UNIT;
     if (unit >= ROBOCLAW_MAX_UNITS) return false;
 
-    units[unit].address = config->params.roboclaw.address;
-    units[unit].deadband = config->params.roboclaw.deadband;
-    units[unit].max_current_ma = config->params.roboclaw.max_current_ma;
-    units[unit].estop_pin = config->params.roboclaw.estop_pin;
-    units[unit].uart_swap = config->params.roboclaw.uart_swap;
+    // Two call paths land here, and only ONE of them has real per-
+    // peripheral params in `config`:
+    //
+    //   1. JSON sync (apply_peripherals_json → set_defaults →
+    //      parse_json_params → apply_hardware): cfg.params have the
+    //      dashboard-specified values, including a non-zero address
+    //      (catalog default is 128).
+    //
+    //   2. Boot reload (pin_config_load → drv_load → apply_hardware):
+    //      cfg.params are zero-initialized because flash_pin_config_t
+    //      only stores gpio/mode/name/param1/param2 — uart_swap and
+    //      estop_pin live in roboclaw_config (loaded by drv_load into
+    //      units[]). Without this guard the apply_hardware sweep that
+    //      fires right after drv_load would copy zeros over the
+    //      uart_swap / estop_pin / address that drv_load just restored,
+    //      and roboclaw_init would rebind on the hardware UART even
+    //      though the saved config said PIO — manifesting as "comms
+    //      don't work until I sync" after every reboot.
+    //
+    // Address == 0 is the boot fingerprint: a real sync always has a
+    // valid 0x80..0x87 address. If we see address 0 here AND units[]
+    // already has a populated address, trust units[] and skip the
+    // field copy.
+    bool cfg_has_real_params = (config->params.roboclaw.address != 0);
+    if (cfg_has_real_params) {
+        units[unit].address = config->params.roboclaw.address;
+        units[unit].deadband = config->params.roboclaw.deadband;
+        units[unit].max_current_ma = config->params.roboclaw.max_current_ma;
+        units[unit].estop_pin = config->params.roboclaw.estop_pin;
+        units[unit].uart_swap = config->params.roboclaw.uart_swap;
+    }
+    // else: drv_load already populated units[unit], leave it alone.
 
     if (unit >= unit_count) {
         unit_count = unit + 1;

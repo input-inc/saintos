@@ -888,6 +888,39 @@ class WebSocketHandler:
             result = self.state_manager.remove_node_peripheral(node_id, peripheral_id)
             return {"status": "ok", "data": result}
 
+        elif action == 'set_peripheral_log_enabled':
+            node_id = params.get('node_id')
+            peripheral_id = params.get('peripheral_id')
+            enabled = params.get('enabled')
+            if not node_id or not peripheral_id or enabled is None:
+                return {"status": "error",
+                        "message": "Missing node_id, peripheral_id, or enabled"}
+            result = self.state_manager.set_peripheral_log_enabled(
+                node_id, peripheral_id, bool(enabled))
+            return {"status": "ok", "data": result}
+
+        elif action == 'get_peripheral_history':
+            node_id = params.get('node_id')
+            peripheral_id = params.get('peripheral_id')
+            channel_id = params.get('channel_id')
+            window = params.get('window', '30s')
+            if not node_id or not peripheral_id or not channel_id:
+                return {"status": "error",
+                        "message": "Missing node_id, peripheral_id, or channel_id"}
+            if window not in ('30s', '60s'):
+                return {"status": "error", "message": "window must be '30s' or '60s'"}
+            plog = self.state_manager.peripheral_logger
+            samples = (plog.history(node_id, peripheral_id, channel_id, window)
+                       if plog is not None else [])
+            return {"status": "ok", "data": {
+                "node_id": node_id,
+                "peripheral_id": peripheral_id,
+                "channel_id": channel_id,
+                "window": window,
+                # Compact wire format — same shape as the NDJSON file lines.
+                "samples": [{"ts": ts, "v": v} for ts, v in samples],
+            }}
+
         elif action == 'get_node_logs':
             node_id = params.get('node_id')
             if not node_id:

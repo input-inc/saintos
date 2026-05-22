@@ -25,6 +25,7 @@ import threading
 from typing import Optional, Dict, Any, List
 
 from saint_server.webserver.state_manager import StateManager
+from saint_server.peripheral_logger import PeripheralLogger
 from saint_server.roles import RoleManager
 from saint_server.livelink import LiveLinkReceiver, LiveLinkRouter
 from saint_server.livelink.receiver import LiveLinkConfig
@@ -69,6 +70,22 @@ class SaintServerNode(Node):
             server_name=self.server_name,
             logger=self.get_logger()
         )
+
+        # Peripheral telemetry logger — opt-in per peripheral, writes
+        # NDJSON to ${SAINT_LOG_DIR}/peripherals/peripherals.log with
+        # daily rotation. SAINT_LOG_DIR is set by the systemd unit;
+        # falls back to /var/log/saint-os for dev runs and finally to
+        # /tmp so the server still starts on a host without /var/log.
+        log_root = os.environ.get("SAINT_LOG_DIR") or "/var/log/saint-os"
+        if not os.access(os.path.dirname(log_root) or "/", os.W_OK):
+            log_root = "/tmp/saint-os"
+        self.peripheral_logger = PeripheralLogger(
+            log_dir=os.path.join(log_root, "peripherals"),
+            logger=self.get_logger(),
+        )
+        # Hand it to the state manager so update_pin_actual can feed
+        # samples and so the WS log_enabled toggle finds it.
+        self.state_manager.set_peripheral_logger(self.peripheral_logger)
 
         # Web server components (set during start_async_services)
         self.web_server = None
@@ -1218,6 +1235,14 @@ class SaintServerNode(Node):
             self._async_thread.join(timeout=5.0)
             if self._async_thread.is_alive():
                 self.get_logger().warn('Async thread did not stop in time')
+
+        # Flush the peripheral logger's disk queue so we don't lose the
+        # last second of samples on a clean exit. Daemon thread would
+        # die with the process anyway; shutdown() drains the queue first.
+        try:
+            self.peripheral_logger.shutdown()
+        except Exception as e:
+            self.get_logger().warn(f'PeripheralLogger shutdown failed: {e}')
 
 
 def main(args=None):

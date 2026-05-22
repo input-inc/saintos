@@ -389,7 +389,7 @@ class NodeRuntimeState:
         if gpio in self.pins:
             self.pins[gpio].desired_value = value
 
-    def update_from_firmware(self, pins_data: List[Dict[str, Any]]):
+    def update_from_firmware(self, pins_data: List[Dict[str, Any]]) -> List[Tuple[str, str, float]]:
         """Update actual values from firmware feedback.
 
         The firmware still publishes its peripheral channels on
@@ -398,9 +398,14 @@ class NodeRuntimeState:
         peripheral-first ``channels`` view that the routing graph
         and the UI consume. Once the firmware grows a channel-
         addressed publisher, this translation goes away.
+
+        Returns the list of (peripheral_id, channel_id, value) tuples
+        that were resolved on this call — the caller uses this to feed
+        the optional peripheral logger without re-deriving the mapping.
         """
         now = time.time()
         self.last_feedback = now
+        channel_updates: List[Tuple[str, str, float]] = []
 
         for pin_data in pins_data:
             gpio = pin_data.get('gpio')
@@ -430,7 +435,11 @@ class NodeRuntimeState:
             peripheral_id = pin.logical_name
             channel_id = _firmware_channel_id(mode, gpio)
             if value is not None and peripheral_id and channel_id:
-                self.set_channel(peripheral_id, channel_id, float(value))
+                fvalue = float(value)
+                self.set_channel(peripheral_id, channel_id, fvalue)
+                channel_updates.append((peripheral_id, channel_id, fvalue))
+
+        return channel_updates
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -589,6 +598,12 @@ class StateManager:
         self.peripheral_catalog: Dict[str, PeripheralType] = dict(DEFAULT_CATALOG)
         self.widget_catalog: Dict[str, WidgetType] = dict(DEFAULT_WIDGET_CATALOG)
 
+        # Optional peripheral telemetry logger. Wired by server_node at
+        # startup so that load_all_node_configs() (called below) can
+        # rehydrate the enabled set without a separate pass — see the
+        # set_peripheral_logger() seeding logic.
+        self.peripheral_logger = None
+
         # Chip + board YAML catalog. Replaces the firmware-emitted
         # capability JSON as the source of truth for "what pins this
         # node has." Loaded at startup; the Settings UI will support
@@ -611,6 +626,23 @@ class StateManager:
     def set_node_log_callback(self, callback: Callable[[str, Dict[str, Any]], None]):
         """Set callback for per-node log events. Takes (node_id, entry)."""
         self._node_log_callback = callback
+
+    def set_peripheral_logger(self, logger) -> None:
+        """Attach the optional peripheral telemetry logger.
+
+        Walks the already-loaded node configs and seeds the logger's
+        enabled set so persisted log_enabled flags take effect without
+        a restart-after-config-edit. Safe to call with None to detach.
+        """
+        self.peripheral_logger = logger
+        if logger is None:
+            return
+        for node_id, node in self.state.adopted_nodes.items():
+            if not node.peripheral_config:
+                continue
+            for p in node.peripheral_config.peripherals:
+                if p.log_enabled:
+                    logger.set_enabled(node_id, p.id, True)
 
     def get_node_logs(self, node_id: str) -> List[Dict[str, Any]]:
         """Return the log buffer for a node (oldest first). Empty if unknown."""
@@ -1437,6 +1469,11 @@ class StateManager:
 
         pid = peripheral_payload.get("id") or self._generate_peripheral_id(node, type_id)
         existing = node.peripheral_config.get(pid)
+        # Preserve log_enabled across upserts unless the payload sets it
+        # explicitly — the typical config-edit path (label/params) should
+        # not flip logging off.
+        prev_log_enabled = existing.log_enabled if existing else False
+        log_enabled = bool(peripheral_payload.get("log_enabled", prev_log_enabled))
         if existing and existing.builtin:
             # Preserve hardwired pins + builtin flag for built-in peripherals
             peripheral = PeripheralInstance(
@@ -1446,6 +1483,7 @@ class StateManager:
                 pins=dict(existing.pins),
                 params=dict(peripheral_payload.get("params", existing.params)),
                 builtin=True,
+                log_enabled=log_enabled,
             )
         else:
             peripheral = PeripheralInstance(
@@ -1455,6 +1493,7 @@ class StateManager:
                 pins=dict(peripheral_payload.get("pins", {})),
                 params=dict(peripheral_payload.get("params", {})),
                 builtin=False,
+                log_enabled=log_enabled,
             )
 
         # Validate pin assignments don't conflict (call out to peripheral_model)
@@ -1470,6 +1509,9 @@ class StateManager:
             return {"success": False, "message": "; ".join(conflicts)}
 
         self._save_node_config(node_id)
+        # Keep the logger's enabled set in sync with the persisted flag.
+        if self.peripheral_logger is not None:
+            self.peripheral_logger.set_enabled(node_id, pid, peripheral.log_enabled)
         self._log_activity(
             f"Saved peripheral '{peripheral.label}'", "info", node_id=node_id
         )
@@ -1478,6 +1520,26 @@ class StateManager:
             "peripheral": peripheral.to_dict(),
             "version": node.peripheral_config.version,
         }
+
+    def set_peripheral_log_enabled(self, node_id: str, peripheral_id: str,
+                                   enabled: bool) -> Dict[str, Any]:
+        """Toggle the log_enabled flag for one peripheral and persist.
+
+        Lighter-weight than upsert_node_peripheral — doesn't re-run pin
+        validation and doesn't cascade to routes; just flips the flag,
+        saves, and updates the logger.
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.peripheral_config:
+            return {"success": False, "message": "Node has no peripherals"}
+        peripheral = node.peripheral_config.get(peripheral_id)
+        if not peripheral:
+            return {"success": False, "message": f"Peripheral {peripheral_id} not found"}
+        peripheral.log_enabled = bool(enabled)
+        self._save_node_config(node_id)
+        if self.peripheral_logger is not None:
+            self.peripheral_logger.set_enabled(node_id, peripheral_id, peripheral.log_enabled)
+        return {"success": True, "log_enabled": peripheral.log_enabled}
 
     def remove_node_peripheral(self, node_id: str, peripheral_id: str) -> Dict[str, Any]:
         """Remove a peripheral from a node. Cascades: drops routes touching it."""
@@ -1496,6 +1558,10 @@ class StateManager:
             self._save_system_routing()
 
         self._save_node_config(node_id)
+        # Drop the in-memory buffers; deleting a peripheral implies the
+        # historical samples are no longer addressable.
+        if self.peripheral_logger is not None:
+            self.peripheral_logger.set_enabled(node_id, peripheral_id, False)
         self._log_activity(
             f"Removed peripheral {peripheral_id}", "info", node_id=node_id
         )
@@ -1953,7 +2019,15 @@ class StateManager:
         if not runtime_state:
             return False
 
-        runtime_state.update_from_firmware(pins_data)
+        channel_updates = runtime_state.update_from_firmware(pins_data)
+
+        # Hand the resolved channel values to the optional logger.
+        # record() short-circuits cheaply when the peripheral isn't
+        # in its enabled set, so calling unconditionally is fine.
+        plog = self.peripheral_logger
+        if plog is not None:
+            for peripheral_id, channel_id, value in channel_updates:
+                plog.record(node_id, peripheral_id, channel_id, value)
         return True
 
     def get_runtime_state(self, node_id: str) -> Optional[Dict[str, Any]]:

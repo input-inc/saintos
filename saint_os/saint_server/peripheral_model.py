@@ -272,6 +272,7 @@ class PeripheralInstance:
     pins: Dict[str, int] = field(default_factory=dict)
     params: Dict[str, Any] = field(default_factory=dict)
     builtin: bool = False
+    log_enabled: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -285,6 +286,7 @@ class PeripheralInstance:
             pins=dict(d.get("pins", {})),
             params=dict(d.get("params", {})),
             builtin=bool(d.get("builtin", False)),
+            log_enabled=bool(d.get("log_enabled", False)),
         )
 
     def channels(self, catalog: Dict[str, PeripheralType]) -> List[PeripheralChannel]:
