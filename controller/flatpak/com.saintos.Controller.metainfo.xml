@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.saintos.Controller</id>
+
+  <name>SAINT Controller</name>
+  <summary>Controller app for SAINT.OS rovers</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      Operator-side controller for SAINT.OS rovers. Connects to a rover's
+      onboard server over WebSocket, surfaces detected peripherals, and
+      maps gamepad / Steam Deck inputs to motor and effector commands.
+    </p>
+    <p>
+      Auto-discovers SAINT.OS instances on the local network via mDNS,
+      so the operator doesn't have to type a hostname or IP. Works on
+      the Steam Deck's gamepad inputs (including gyro), with binding
+      profiles persisted between sessions.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.saintos.Controller.desktop</launchable>
+
+  <content_rating type="oars-1.1"/>
+
+  <categories>
+    <category>Utility</category>
+    <category>Network</category>
+  </categories>
+
+  <provides>
+    <binary>saint-controller</binary>
+  </provides>
+
+  <releases>
+    <release version="0.1.0" date="2026-05-22">
+      <description>
+        <p>Initial Flatpak release. Includes mDNS auto-discovery, gamepad
+           binding profiles, gyro input, peripheral telemetry, and
+           emergency-stop integration.</p>
+      </description>
+    </release>
+  </releases>
+</component>

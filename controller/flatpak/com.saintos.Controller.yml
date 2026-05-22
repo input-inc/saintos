@@ -1,0 +1,121 @@
+# Flatpak manifest for the SAINT.OS Controller.
+#
+# Builds the Angular frontend + Tauri Rust binary INSIDE the Flatpak
+# sandbox, against the GNOME runtime's bundled webkit2gtk-4.1. That
+# avoids the distrobox-vs-host glibc/webkit mismatch that bit us when
+# trying to run the bare `tauri build` binary on SteamOS.
+#
+# Build (from controller/):
+#   flatpak-builder --user --install --force-clean \
+#       build-dir flatpak/com.saintos.Controller.yml
+#
+# Run:
+#   flatpak run com.saintos.Controller
+#
+# Or, for a one-file artifact you can distribute:
+#   flatpak-builder --repo=repo --force-clean build-dir flatpak/com.saintos.Controller.yml
+#   flatpak build-bundle repo SAINT-Controller.flatpak com.saintos.Controller
+#
+# Prereqs on the Steam Deck (one-time, requires internet once):
+#   flatpak install --user flathub org.flatpak.Builder
+#   flatpak install --user flathub org.gnome.Sdk//47 org.gnome.Platform//47
+#   flatpak install --user flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
+#   flatpak install --user flathub org.freedesktop.Sdk.Extension.node20//24.08
+
+app-id: com.saintos.Controller
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+
+# SDK extensions provide the Rust and Node toolchains inside the
+# sandbox. The Rust + Node versions are SDK-side only — they don't
+# bleed into the runtime, so the final Flatpak is smaller than it'd be
+# if we baked them in.
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node20
+
+command: saint-controller
+
+# Sandbox permissions. Tight — we only let the app reach what it
+# actually needs to function:
+#   - ipc/x11/wayland: graphics
+#   - pulseaudio: future audio cues (not strictly needed today)
+#   - device=all: gamepads / HID joysticks / Steam Deck inputs
+#   - network: the WebSocket connection to the rover
+#   - filesystem=xdg-config: where we persist connection settings
+#   - filesystem=xdg-data: where Tauri's logger writes log files
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=all
+  - --device=dri
+  - --filesystem=xdg-config/saint-controller:create
+  - --filesystem=xdg-data/saint-controller:create
+
+# Build-time environment: put the SDK extension binaries on PATH,
+# point CARGO_HOME at a writeable in-build location (the default
+# ~/.cargo is read-only in the sandbox), and allow network during
+# the build so cargo can fetch crates and npm can fetch packages.
+# Vendoring those would let us drop --share=network here at the cost
+# of ~1 GB committed; not worth it for an internal-build artifact.
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/saint-controller/cargo
+    npm_config_cache: /run/build/saint-controller/npm-cache
+
+modules:
+  - name: saint-controller
+    buildsystem: simple
+    build-commands:
+      # Frontend (Angular) — produces the bundle Tauri serves.
+      - cd controller && npm ci --no-audit --no-fund
+      - cd controller && npm run build
+
+      # Backend (Rust) — release binary. We hit cargo directly rather
+      # than `tauri build` because Tauri's bundler would try to make
+      # .deb/.rpm/.AppImage on top of the Flatpak, which we don't want.
+      - cd controller/src-tauri && cargo build --release --bins
+
+      # Install paths follow the Flatpak conventions so KDE Discover
+      # / Game Mode find the app properly.
+      - install -Dm755 controller/src-tauri/target/release/saint-controller
+                       /app/bin/saint-controller
+      - install -Dm644 controller/flatpak/com.saintos.Controller.desktop
+                       /app/share/applications/com.saintos.Controller.desktop
+      - install -Dm644 controller/flatpak/com.saintos.Controller.metainfo.xml
+                       /app/share/metainfo/com.saintos.Controller.metainfo.xml
+      - install -Dm644 controller/src-tauri/icons/icon.png
+                       /app/share/icons/hicolor/256x256/apps/com.saintos.Controller.png
+
+    sources:
+      # The whole repo, relative to the manifest. flatpak-builder
+      # copies this into the build sandbox. We skip the heavy build
+      # outputs so the copy is fast — those'll be regenerated inside
+      # the sandbox anyway.
+      - type: dir
+        path: ../..
+        skip:
+          - controller/node_modules
+          - controller/dist
+          - controller/.angular
+          - controller/src-tauri/target
+          - controller/src-tauri/gen
+          - dist
+          - build
+          - install
+          - log
+          - _ros2
+          - _ros2_src
+          - _debs
+          - pico-sdk
+          - saint_os/firmware/rp2040/build
+          - saint_os/firmware/rp2040/build_sim
+          - saint_os/firmware/teensy41/.pio
+          - .git
