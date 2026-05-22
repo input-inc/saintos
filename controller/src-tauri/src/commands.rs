@@ -1,23 +1,41 @@
 use crate::bindings::{BindingProfile, InputMapper};
+use crate::discovery::{DiscoveredServer, DiscoveryService};
 use crate::input::InputManager;
 use crate::protocol::{ConnectionState, WebSocketClient};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Runtime, State, WebviewWindow};
 
 pub struct AppState {
     pub input_manager: InputManager,
     pub ws_client: WebSocketClient,
     pub mapper: RwLock<InputMapper>,
+    /// mDNS discovery / resolution helper. Optional because the daemon
+    /// can fail to bind its UDP socket on locked-down hosts (the
+    /// Steam Deck Game Mode sandbox notably) — in that case we still
+    /// want the rest of the app to work, just without auto-discovery.
+    pub discovery: Option<DiscoveryService>,
 }
 
 impl AppState {
     pub fn new() -> Self {
+        // Best-effort start. If mDNS doesn't come up we log it and
+        // keep going; the operator can still connect by typing an IP
+        // address manually.
+        let discovery = match DiscoveryService::start() {
+            Ok(d) => Some(d),
+            Err(e) => {
+                log::warn!("mDNS discovery disabled: {}", e);
+                None
+            }
+        };
         Self {
             input_manager: InputManager::new(),
             ws_client: WebSocketClient::new(),
             mapper: RwLock::new(InputMapper::new()),
+            discovery,
         }
     }
 }
@@ -28,7 +46,16 @@ impl Default for AppState {
     }
 }
 
-/// Connect to the SAINT.OS server
+/// Connect to the SAINT.OS server.
+///
+/// If `host` is a `.local` hostname, we try to resolve it through our
+/// own embedded mDNS client BEFORE handing it to the WebSocket library.
+/// `tokio-tungstenite` calls getaddrinfo internally, and on Steam Deck
+/// (and many other Linux setups) getaddrinfo doesn't know how to
+/// resolve `.local` — so resolving in-process is the difference
+/// between "Connect" working and the operator having to type an IP.
+/// Non-`.local` hosts (IPs, normal DNS names) skip the resolution and
+/// flow straight through to the existing connect path.
 #[tauri::command]
 pub fn connect<R: Runtime + 'static>(
     app_handle: AppHandle<R>,
@@ -37,7 +64,41 @@ pub fn connect<R: Runtime + 'static>(
     port: u16,
     password: String,
 ) -> Result<(), String> {
-    state.ws_client.connect(app_handle, &host, port, &password)
+    let effective_host = maybe_resolve_local(&state, &host);
+    state
+        .ws_client
+        .connect(app_handle, &effective_host, port, &password)
+}
+
+/// Return the bare-IP form of `host` if it's a `.local` name that
+/// resolves through the mDNS client, else `host` unchanged. Two-second
+/// timeout — long enough for the multicast round-trip on a quiet LAN,
+/// short enough that a wrong hostname surfaces a connect error
+/// promptly instead of looking like a hang.
+fn maybe_resolve_local(state: &State<'_, Arc<AppState>>, host: &str) -> String {
+    if !host.ends_with(".local") && !host.ends_with(".local.") {
+        return host.to_string();
+    }
+    let Some(d) = state.discovery.as_ref() else {
+        log::warn!("Host '{}' looks like mDNS but discovery is disabled", host);
+        return host.to_string();
+    };
+    match d.resolve(host, Duration::from_secs(2)) {
+        Some(ip) => {
+            log::info!("Resolved '{}' → {} via embedded mDNS", host, ip);
+            ip.to_string()
+        }
+        None => {
+            // Let the existing connect path try anyway — it'll fail
+            // with a clear error in the dashboard. We don't want to
+            // pre-empt the connect attempt with our own error here
+            // because some hosts (Linux desktops with nss-mdns) will
+            // resolve through the OS even though mDNS didn't answer
+            // our query in time.
+            log::warn!("mDNS resolve for '{}' returned no answer", host);
+            host.to_string()
+        }
+    }
 }
 
 /// Disconnect from the server
@@ -426,5 +487,36 @@ pub fn hide_keyboard() -> Result<(), String> {
     {
         log::info!("hide_keyboard called on non-Linux platform (no-op)");
         Ok(())
+    }
+}
+
+/// Snapshot of SAINT.OS servers the embedded mDNS browser has seen
+/// since the controller launched. Returns an empty list (not an
+/// error) when discovery is disabled — the UI treats missing results
+/// the same as "found nothing" and falls back to the typed-host form.
+#[tauri::command]
+pub fn discover_servers(state: State<'_, Arc<AppState>>) -> Vec<DiscoveredServer> {
+    match state.discovery.as_ref() {
+        Some(d) => d.snapshot(),
+        None => Vec::new(),
+    }
+}
+
+/// Resolve a `.local` hostname through the embedded mDNS client and
+/// return the dotted-IP string. Exposed for the connect form so the
+/// frontend can pre-flight a hostname and show a helpful error before
+/// the user clicks Connect. Returns Err on timeout or when discovery
+/// is disabled.
+#[tauri::command]
+pub fn resolve_host(
+    state: State<'_, Arc<AppState>>,
+    host: String,
+) -> Result<String, String> {
+    let Some(d) = state.discovery.as_ref() else {
+        return Err("mDNS discovery is disabled on this host".into());
+    };
+    match d.resolve(&host, Duration::from_secs(2)) {
+        Some(ip) => Ok(ip.to_string()),
+        None => Err(format!("No mDNS answer for '{}' within 2 s", host)),
     }
 }

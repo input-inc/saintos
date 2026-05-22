@@ -29,6 +29,12 @@ parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+# Pure-Rust mDNS / DNS-SD client. Used in src/discovery.rs to resolve
+# .local hostnames and browse for SAINT.OS server instances on the LAN
+# without relying on the host OS resolver — critical on Steam Deck,
+# where SteamOS doesn't ship libnss-mdns and the read-only root makes
+# the operator-facing fix awkward.
+mdns-sd = "0.13"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 gilrs = "0.11"

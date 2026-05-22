@@ -1,5 +1,6 @@
 mod bindings;
 mod commands;
+mod discovery;
 mod input;
 mod protocol;
 
@@ -127,6 +128,8 @@ pub fn run() {
             commands::log_frontend,
             commands::show_keyboard,
             commands::hide_keyboard,
+            commands::discover_servers,
+            commands::resolve_host,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

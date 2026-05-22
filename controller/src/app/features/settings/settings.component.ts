@@ -1,8 +1,18 @@
-import { Component, signal } from '@angular/core';
+import { Component, OnDestroy, OnInit, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ConnectionService, ConnectionStatus, ConnectionConfig } from '../../core/services/connection.service';
 import { invoke } from '@tauri-apps/api/core';
+
+/** Mirrors crate::discovery::DiscoveredServer. The Rust backend
+ *  serializes this shape verbatim, so any rename on either side must
+ *  be coordinated. */
+interface DiscoveredServer {
+  instance_name: string;
+  hostname: string;
+  ipv4: string | null;
+  port: number;
+}
 
 @Component({
   selector: 'app-settings',
@@ -15,13 +25,35 @@ import { invoke } from '@tauri-apps/api/core';
         <h2 class="text-lg font-semibold mb-4">Connection</h2>
 
         <div class="space-y-4">
+          <!-- Detected servers (mDNS) -->
+          @if (discoveredServers().length > 0 && !connectionService.isConnected()) {
+            <div>
+              <label class="block text-sm text-saint-text-muted mb-1">
+                Detected servers
+                <span class="text-xs">(auto-discovered on this network)</span>
+              </label>
+              <div class="flex flex-col gap-1">
+                @for (server of discoveredServers(); track server.instance_name) {
+                  <button type="button"
+                          class="btn btn-secondary text-left flex justify-between items-center"
+                          (click)="selectDiscoveredServer(server)">
+                    <span class="font-mono">{{ server.hostname || 'unknown' }}.local</span>
+                    <span class="text-xs text-saint-text-muted">
+                      {{ server.ipv4 || '(resolving…)' }}:{{ server.port }}
+                    </span>
+                  </button>
+                }
+              </div>
+            </div>
+          }
+
           <div class="grid grid-cols-2 gap-4">
             <div>
               <label class="block text-sm text-saint-text-muted mb-1">Host</label>
               <input type="text" class="input w-full"
                      [(ngModel)]="config.host"
                      [disabled]="connectionService.isConnected()"
-                     placeholder="192.168.1.100">
+                     placeholder="192.168.1.100 or opensaint.local">
             </div>
             <div>
               <label class="block text-sm text-saint-text-muted mb-1">Port</label>
@@ -169,7 +201,7 @@ import { invoke } from '@tauri-apps/api/core';
     </div>
   `
 })
-export class SettingsComponent {
+export class SettingsComponent implements OnInit, OnDestroy {
   config: ConnectionConfig = {
     host: 'localhost',
     port: 80,
@@ -180,6 +212,13 @@ export class SettingsComponent {
   throttleMs = 50;
   devtoolsOpen = signal(false);
   uiScale = 1.0;
+
+  /** mDNS-discovered SAINT.OS servers on the LAN. Populated by a
+   *  background poll while the controller is NOT connected — once
+   *  connected we don't need to keep looking, and stopping the poll
+   *  keeps the LAN multicast group quieter. */
+  discoveredServers = signal<DiscoveredServer[]>([]);
+  private discoveryPollHandle: ReturnType<typeof setInterval> | null = null;
 
   readonly scaleOptions = [
     { value: 1.0, label: '100% (Default)' },
@@ -273,6 +312,55 @@ export class SettingsComponent {
 
   async disconnect(): Promise<void> {
     await this.connectionService.disconnect();
+  }
+
+  ngOnInit(): void {
+    // Initial pull is cheap (snapshot of whatever the embedded mDNS
+    // browser has already cached) and lets the dropdown show
+    // immediately when the page mounts. The interval keeps it fresh
+    // as servers come and go on the LAN.
+    void this.refreshDiscoveredServers();
+    this.discoveryPollHandle = setInterval(() => {
+      // Skip the poll while connected — once we've joined a server,
+      // refreshing the list would only add noise.
+      if (!this.connectionService.isConnected()) {
+        void this.refreshDiscoveredServers();
+      }
+    }, 3000);
+  }
+
+  ngOnDestroy(): void {
+    if (this.discoveryPollHandle !== null) {
+      clearInterval(this.discoveryPollHandle);
+      this.discoveryPollHandle = null;
+    }
+  }
+
+  private async refreshDiscoveredServers(): Promise<void> {
+    try {
+      const servers: DiscoveredServer[] = await invoke('discover_servers');
+      this.discoveredServers.set(servers);
+    } catch (err) {
+      // Discovery being disabled (e.g. mDNS daemon couldn't bind its
+      // socket) is reported as an empty list, not an error, so an
+      // actual error here means something unexpected — log and keep
+      // showing whatever we had before.
+      console.warn('discover_servers failed:', err);
+    }
+  }
+
+  /** Operator clicked a row in the discovered-servers list — copy its
+   *  hostname/port into the form so the next Connect press uses it.
+   *  The embedded mDNS resolver kicks in inside the connect command,
+   *  so even on Steam Deck the `.local` name resolves correctly. */
+  selectDiscoveredServer(server: DiscoveredServer): void {
+    const hostLabel = server.hostname ? `${server.hostname}.local` : (server.ipv4 ?? '');
+    if (hostLabel) {
+      this.config.host = hostLabel;
+    }
+    if (server.port > 0) {
+      this.config.port = server.port;
+    }
   }
 
   async checkDevtoolsState(): Promise<void> {
