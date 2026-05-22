@@ -1462,6 +1462,7 @@ class StateManager:
         conflicts = detect_pin_conflicts(
             node.peripheral_config,
             uart_pairs=node.capabilities.uart_pairs if node.capabilities else None,
+            catalog=self.peripheral_catalog,
         )
         if conflicts:
             # Roll back the upsert if conflicts found

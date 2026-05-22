@@ -291,6 +291,35 @@ class PeripheralInstance:
         t = catalog.get(self.type)
         return list(t.channels) if t else []
 
+    def claimed_gpios(self, catalog: Dict[str, PeripheralType]) -> Dict[str, int]:
+        """All GPIO numbers this peripheral claims, by source label.
+
+        Combines `pins` (UART tx/rx, single-gpio peripherals, etc.) with
+        any `params` whose schema declares type == "gpio" — those are
+        configurable pin assignments stored alongside the peripheral's
+        other parameters (e.g. RoboClaw's `estop_pin`). A param value of
+        0 is the "no pin assigned" sentinel and is excluded.
+
+        Both `detect_pin_conflicts` (here) and the dashboard's pin-
+        availability widget need to see GPIO-typed params or they'd let
+        the operator double-claim the same pin (e.g. RoboClaw's E-stop +
+        a Button on the same GPIO) without warning.
+        """
+        out: Dict[str, int] = {}
+        for k, v in self.pins.items():
+            if isinstance(v, int) and v > 0:
+                out[k] = v
+        t = catalog.get(self.type)
+        if t is None:
+            return out
+        for p in t.params:
+            if p.type != "gpio":
+                continue
+            v = self.params.get(p.id)
+            if isinstance(v, int) and v > 0:
+                out[p.id] = v
+        return out
+
 
 @dataclass
 class NodePeripheralConfig:
@@ -619,13 +648,25 @@ class SystemRouting:
 
 
 def detect_pin_conflicts(config: NodePeripheralConfig,
-                         uart_pairs: Optional[List[Dict[str, int]]] = None
+                         uart_pairs: Optional[List[Dict[str, int]]] = None,
+                         catalog: Optional[Dict[str, PeripheralType]] = None,
                          ) -> List[str]:
-    """Return a list of human-readable conflict messages, or empty."""
+    """Return a list of human-readable conflict messages, or empty.
+
+    Catalog is needed so the conflict check can also see GPIO-typed
+    `params` (e.g. RoboClaw's `estop_pin`), not just `pins`. Without it,
+    we'd let the operator double-claim the same GPIO between a
+    RoboClaw's E-stop and another peripheral's primary pin. The
+    parameter is Optional for backwards compatibility with callers
+    that haven't been updated yet; in that case we fall back to the
+    pins-only check and silently miss GPIO-typed params.
+    """
     errors: List[str] = []
     by_pin: Dict[int, PeripheralInstance] = {}
+    cat = catalog or {}
     for p in config.peripherals:
-        for pin in p.pins.values():
+        claimed = p.claimed_gpios(cat) if cat else dict(p.pins)
+        for pin in claimed.values():
             if pin in by_pin:
                 other = by_pin[pin]
                 errors.append(

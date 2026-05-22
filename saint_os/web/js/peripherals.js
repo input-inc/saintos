@@ -308,10 +308,26 @@ class PeripheralManager {
     }
 
     buildPinClaimIndex() {
+        // Mirror of PeripheralInstance.claimed_gpios() on the server:
+        // walk both `pins` AND any `params` whose catalog schema declares
+        // type === "gpio" (e.g. RoboClaw estop_pin). A value of 0 is the
+        // "no pin assigned" sentinel and is skipped.
         const claimed = {};
+        const types = this.catalog?.peripheral_types || [];
+        const gpioParamsByType = {};
+        for (const t of types) {
+            gpioParamsByType[t.id] = (t.params || [])
+                .filter(p => p.type === 'gpio')
+                .map(p => p.id);
+        }
         for (const p of this.peripherals) {
             for (const v of Object.values(p.pins || {})) {
-                claimed[v] = p;
+                if (typeof v === 'number' && v > 0) claimed[v] = p;
+            }
+            const gpioParams = gpioParamsByType[p.type] || [];
+            for (const paramId of gpioParams) {
+                const v = p.params?.[paramId];
+                if (typeof v === 'number' && v > 0) claimed[v] = p;
             }
         }
         return claimed;
