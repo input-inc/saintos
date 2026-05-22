@@ -576,7 +576,12 @@ export class BindingsComponent {
   // Form state for analog binding editor
   analogForm = {
     input: 'left_stick_x' as AnalogInput,
-    actionType: 'direct_control' as 'direct_control' | 'modifier',
+    // Widened to include 'differential_drive' so loadAnalogForm can
+    // assign binding.action.type without a narrowing error. The
+    // editor UI only renders fields for 'direct_control' and
+    // 'modifier' — differential_drive bindings are configured
+    // elsewhere — so loadAnalogForm early-returns for that case.
+    actionType: 'direct_control' as 'direct_control' | 'modifier' | 'differential_drive',
     targetRole: '',
     targetFunction: '',
     targetName: '',
@@ -749,6 +754,19 @@ export class BindingsComponent {
   loadAnalogForm(binding: AnalogBinding): void {
     this.analogForm.input = binding.input;
     this.analogForm.actionType = binding.action.type;
+
+    // The analog form's UI only renders editors for direct_control
+    // and modifier. Differential-drive analog bindings live in a
+    // separate flow; trying to load one into this form would leave
+    // every direct_control / modifier field at its previous value,
+    // which is confusing. Bail out early so the operator sees an
+    // empty/default form instead of a stale-looking one.
+    if (binding.action.type === 'differential_drive') {
+      console.warn(
+        'loadAnalogForm: differential_drive bindings are not editable here',
+      );
+      return;
+    }
 
     if (binding.action.type === 'direct_control') {
       this.analogForm.targetRole = binding.action.target.role;
