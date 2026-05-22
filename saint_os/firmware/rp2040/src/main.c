@@ -290,13 +290,43 @@ static void resolve_bootloader_version(void)
 #endif
 }
 
+// -----------------------------------------------------------------------------
+// Deferred boot-status logging buffer
+// -----------------------------------------------------------------------------
+//
+// The boot-log queue stores log entries created BEFORE the server has
+// created our per-node /saint/nodes/<id>/log subscription. boot_log_queue
+// and boot_log_flush_if_due (defined further down) drive its public
+// API, but the struct + globals live up here so saint_log_publish can
+// fall into the same buffer when ros_log_ready is still false.
+//
+// Bumped from 5 to 24 because saint_log_publish now also enqueues here
+// when ROS isn't ready, so every driver's boot-time log (RoboClaw
+// restored/bound/probe lines, FAS100/SyRen equivalents, etc.) has to
+// fit alongside the handful of main.c lines. 24 × ~210 B ≈ 5 KB of
+// RAM, comfortable on RP2040.
+#define BOOT_LOG_MAX        24
+#define BOOT_LOG_LEVEL_LEN  8
+#define BOOT_LOG_TEXT_LEN   200
+typedef struct {
+    char level[BOOT_LOG_LEVEL_LEN];
+    char text[BOOT_LOG_TEXT_LEN];
+} boot_log_entry_t;
+static boot_log_entry_t g_boot_log[BOOT_LOG_MAX];
+static size_t           g_boot_log_count   = 0;
+static bool             g_boot_log_flushed = false;
+static unsigned         g_announce_count   = 0;
+
 // =============================================================================
 // Remote logging
 // =============================================================================
 //
 // saint_log_publish() ships a single line to the server over the
-// /saint/nodes/<id>/log topic AND prints to UART. Best-effort: if the
-// agent isn't connected yet, the line is dropped after the printf.
+// /saint/nodes/<id>/log topic AND prints to UART. When ROS isn't
+// connected yet, the entry is buffered into the boot-log queue above
+// and replayed later by boot_log_flush_if_due — that's the only way
+// early-boot driver logs (e.g. RoboClaw's "bound PIO UART" line
+// emitted from inside pin_config_load) reach the dashboard.
 // Format: {"level":"info|warn|error","text":"...","uptime_ms":N}.
 //
 // Keep individual lines under ~200 chars to fit log_buffer with the
@@ -314,7 +344,23 @@ void saint_log_publish(const char* level, const char* fmt, ...)
     // Always echo to UART so a serial dev console still sees everything.
     printf("[%s] %s\n", level, text);
 
-    if (!ros_log_ready) return;
+    if (!ros_log_ready) {
+        // Buffer for later replay so early-boot driver logs (e.g.
+        // RoboClaw's "bound PIO UART" line emitted from inside
+        // pin_config_load → drv_load → roboclaw_init) survive the
+        // window where ROS isn't connected yet. boot_log_flush_if_due
+        // drains this queue once the second announcement has gone
+        // out. The buffer is bounded — once full we drop subsequent
+        // entries silently rather than evicting earlier ones, since
+        // the EARLY logs are the diagnostic gold we'd lose first
+        // otherwise. If you hit the cap, raise BOOT_LOG_MAX.
+        if (g_boot_log_count < BOOT_LOG_MAX && !g_boot_log_flushed) {
+            boot_log_entry_t* e = &g_boot_log[g_boot_log_count++];
+            snprintf(e->level, sizeof(e->level), "%s", level);
+            snprintf(e->text,  sizeof(e->text),  "%s", text);
+        }
+        return;
+    }
 
     uint32_t up = to_ms_since_boot(get_absolute_time());
 
@@ -360,17 +406,10 @@ void saint_log_publish(const char* level, const char* fmt, ...)
 // announce-timer callback once at least two announcements have gone
 // out. That window (≥1 s) is enough for the server to create its
 // subscription on receipt of the first announce.
-#define BOOT_LOG_MAX        5
-#define BOOT_LOG_LEVEL_LEN  8
-#define BOOT_LOG_TEXT_LEN   200
-typedef struct {
-    char level[BOOT_LOG_LEVEL_LEN];
-    char text[BOOT_LOG_TEXT_LEN];
-} boot_log_entry_t;
-static boot_log_entry_t g_boot_log[BOOT_LOG_MAX];
-static size_t           g_boot_log_count   = 0;
-static bool             g_boot_log_flushed = false;
-static unsigned         g_announce_count   = 0;
+//
+// The buffer (boot_log_entry_t / g_boot_log[] / counters) is declared
+// up above saint_log_publish so that function can fall into the same
+// buffer when ROS isn't ready yet.
 
 static void boot_log_queue(const char* level, const char* fmt, ...)
 {
