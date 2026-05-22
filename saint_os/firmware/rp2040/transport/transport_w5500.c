@@ -34,9 +34,10 @@
 // Local UDP port for micro-ROS client
 #define UROS_LOCAL_PORT     9999
 
-// DHCP configuration
-#define DHCP_TIMEOUT_MS     10000   // 10 second DHCP timeout
-#define DHCP_RETRY_COUNT    5       // Number of DHCP retries
+// DHCP configuration. The DORA exchange completes in <50ms on a direct-attach
+// LAN; the timeout is short on purpose so a missed window (server still
+// binding 192.168.10.1) is detected quickly and we move to the next retry.
+#define DHCP_TIMEOUT_MS     3000
 
 // =============================================================================
 // State Variables
@@ -272,12 +273,16 @@ bool transport_w5500_connect(void)
     }
     printf("Ethernet link detected after %lu ms\n", (unsigned long)link_wait_ms);
 
-    // DHCP, retrying forever with backoff. The server's dnsmasq takes
-    // tens of seconds to come up from cold boot — one 10-second attempt
-    // isn't enough. We never fall back to the static IP when DHCP is on
-    // because the compile-time fallback is on a different subnet than
-    // the server: a "successful" fallback would just IP-conflict with
-    // every other node doing the same thing.
+    // DHCP, retrying forever with backoff. Cold-boot: server and node power
+    // up together, and dnsmasq isn't bound on 192.168.10.1 until NM finishes
+    // activating eth0 — so the first few DISCOVERs land in dead air. Short
+    // attempts + short backoff get us through that window in a couple of
+    // seconds instead of a minute.
+    //
+    // We never fall back to the static IP when DHCP is on because the
+    // compile-time fallback is on a different subnet than the server: a
+    // "successful" fallback would just IP-conflict with every other node
+    // doing the same thing.
     if (g_node.use_dhcp) {
         uint32_t attempt = 0;
         while (true) {
@@ -287,9 +292,11 @@ bool transport_w5500_connect(void)
                 connected = true;
                 return true;
             }
-            // Backoff: 2s for the first few attempts (server might be
-            // about to finish booting), then 5s to keep log volume sane.
-            uint32_t backoff_ms = (attempt < 5) ? 2000 : 5000;
+            // Backoff: 500ms while we're hammering through the server's
+            // boot window, stretching to 5s after ~20 attempts (~10s
+            // elapsed) to keep log volume sane if something is actually
+            // wrong with the network.
+            uint32_t backoff_ms = (attempt < 20) ? 500 : 5000;
             printf("DHCP attempt %lu failed; retrying in %lu ms\n",
                    (unsigned long)attempt, (unsigned long)backoff_ms);
             // Sleep in 100ms chunks so the LED keeps animating.
