@@ -112,7 +112,23 @@ modules:
       # want those layered under the Flatpak — and AppImage in
       # particular needs linuxdeploy + FUSE which doesn't play well
       # inside flatpak-builder's nested sandbox).
-      - cd controller && npm ci --no-audit --no-fund
+      # npm ci always wipes and reinstalls node_modules, which makes
+      # warm rebuilds expensive even when build.sh's
+      # --keep-build-dirs preserves the directory. Short-circuit by
+      # comparing the running lockfile snapshot (.package-lock.json
+      # inside node_modules — npm writes this on every successful
+      # install) against the source-tree package-lock.json. If they
+      # match byte-for-byte, the install is already exact and we skip.
+      # Anything else (missing snapshot, lockfile drift, partial
+      # install) falls through to a full `npm ci`.
+      - |
+        cd controller
+        if [ -f node_modules/.package-lock.json ] \
+            && cmp -s package-lock.json node_modules/.package-lock.json; then
+          echo "node_modules matches package-lock.json — skipping npm ci"
+        else
+          npm ci --no-audit --no-fund
+        fi
       - cd controller && npx tauri build --no-bundle
 
       # Install paths follow the Flatpak conventions so KDE Discover

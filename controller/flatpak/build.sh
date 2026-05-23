@@ -2,10 +2,22 @@
 #
 # Build the SAINT Controller Flatpak and install it for the current user.
 #
+# Builds are INCREMENTAL by default. The per-module build dir (which
+# holds cargo's target/, node_modules, CARGO_HOME, npm cache) survives
+# between runs via flatpak-builder's --keep-build-dirs flag, so a
+# no-change rebuild is seconds and a small-edit rebuild is tens of
+# seconds rather than the multi-minute full rebuild this used to be.
+#
 # Usage:
-#   controller/flatpak/build.sh           # build + install (default)
-#   controller/flatpak/build.sh --bundle  # also produce a portable .flatpak file
+#   controller/flatpak/build.sh           # incremental build + install
+#   controller/flatpak/build.sh --bundle  # also produce a portable .flatpak
 #   controller/flatpak/build.sh --prereqs # install runtime/SDK deps first
+#   controller/flatpak/build.sh --clean   # wipe per-module build dirs first
+#                                         # (full cargo + npm rebuild, but
+#                                         #  KEEPS source downloads + ccache)
+#   controller/flatpak/build.sh --nuke    # wipe the entire cache root
+#                                         # (re-downloads everything; last
+#                                         #  resort for corrupted state)
 #
 # Run this from anywhere; the script chdirs to controller/ so the
 # manifest's `path: ../..` resolves correctly.
@@ -87,18 +99,56 @@ else
 fi
 
 # Common builder args shared between the install and bundle paths.
+#
 # --state-dir replaces flatpak-builder's default
-# (~/.local/share/flatpak-builder/) which is fine on most hosts but
-# we want a single tree we can wipe with one `rm -rf` if things go
-# sideways. --ccache enables the compile cache; its path is set via
-# the CCACHE_DIR env var (exported above, forwarded into the sandbox).
+#   (~/.local/share/flatpak-builder/) which is fine on most hosts but
+#   we want a single tree we can wipe with one `rm -rf` if things go
+#   sideways.
+# --ccache enables the C/C++ compile cache; its path is set via
+#   the CCACHE_DIR env var (exported above, forwarded into the sandbox).
+# --keep-build-dirs preserves per-module build dirs under
+#   $STATE_DIR/build/ between invocations. THIS is what makes builds
+#   incremental — without it, cargo's target/ and node_modules get
+#   wiped after every successful run and the next build starts cold.
+#   The manifest's `skip` list ensures the re-extracted source tree
+#   doesn't overwrite those preserved artifacts. To force a cold
+#   rebuild, use `--clean` (wipes per-module dirs) or `--nuke`
+#   (wipes everything including the source download cache).
+# --force-clean wipes the positional $BUILD_DIR (the staging output
+#   passed to flatpak-builder, not the per-module build dir). Without
+#   this, flatpak-builder refuses to run when $BUILD_DIR exists from
+#   a prior invocation. Re-creating the staging tree is cheap; the
+#   incremental work happens in $STATE_DIR/build/ where target/ lives.
 BUILDER_COMMON=(
     --user
     --force-clean
+    --keep-build-dirs
     --install-deps-from=flathub
     --state-dir="$STATE_DIR"
     --ccache
 )
+
+clean_build_dirs() {
+    # Wipe per-module build dirs (forces full cargo + npm recompile
+    # next time). KEEPS the source download cache + ccache so we don't
+    # re-fetch a few GB of crates and npm tarballs.
+    echo "==> --clean: wiping per-module build dirs (forces full rebuild)"
+    echo "    removing: $STATE_DIR/build"
+    echo "    removing: $BUILD_DIR"
+    rm -rf "$STATE_DIR/build" "$BUILD_DIR"
+    mkdir -p "$BUILD_DIR"
+}
+
+nuke_cache() {
+    # Wipe EVERYTHING. Forces re-downloading cargo registry, npm
+    # tarballs, flatpak runtime extension snapshots, ccache. Last
+    # resort — use when --clean isn't enough and you suspect a
+    # corrupted state dir or want to reclaim disk.
+    echo "==> --nuke: wiping entire flatpak cache root"
+    echo "    removing: $CACHE_ROOT"
+    rm -rf "$CACHE_ROOT"
+    mkdir -p "$BUILD_DIR" "$REPO_DIR" "$STATE_DIR" "$CCACHE_DIR" "$TMPDIR_LOCAL"
+}
 
 prereqs() {
     # Run once per host. Flathub is already on a stock Steam Deck;
@@ -180,20 +230,62 @@ bundle() {
     echo "  flatpak install --user $out"
 }
 
-case "${1:-}" in
-    --prereqs)
-        prereqs
-        ;;
-    --bundle)
-        build_and_install
-        bundle
-        ;;
-    "")
-        build_and_install
-        ;;
-    *)
-        echo "Unknown option: $1" >&2
-        echo "Usage: $0 [--prereqs|--bundle]" >&2
-        exit 2
-        ;;
-esac
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Build + install the SAINT Controller Flatpak. Incremental by default.
+
+Options:
+  --bundle    Also produce a portable .flatpak file after install.
+  --prereqs   Install required Flatpak runtimes/SDK extensions, then exit.
+  --clean     Wipe per-module build dirs before building. Forces a full
+              cargo + npm rebuild but keeps source downloads + ccache.
+              Use when you've changed Cargo flags / toolchain / suspect
+              a stale artifact.
+  --nuke      Wipe the entire cache root before building. Re-downloads
+              everything. Use only when --clean isn't enough.
+  -h, --help  Show this help and exit.
+
+Flags can be combined, e.g. \`$(basename "$0") --clean --bundle\`.
+EOF
+}
+
+# Multi-flag parser. Order-independent. --prereqs short-circuits to
+# just prereq install. --nuke / --clean run before the build phase.
+DO_BUNDLE=0
+DO_PREREQS=0
+DO_CLEAN=0
+DO_NUKE=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --bundle)       DO_BUNDLE=1 ;;
+        --prereqs)      DO_PREREQS=1 ;;
+        --clean)        DO_CLEAN=1 ;;
+        --nuke|--reset) DO_NUKE=1 ;;
+        -h|--help)      usage; exit 0 ;;
+        *)
+            echo "Unknown option: $arg" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ "$DO_PREREQS" = 1 ]; then
+    prereqs
+    exit 0
+fi
+
+if [ "$DO_NUKE" = 1 ]; then
+    nuke_cache
+elif [ "$DO_CLEAN" = 1 ]; then
+    clean_build_dirs
+fi
+
+build_and_install
+
+if [ "$DO_BUNDLE" = 1 ]; then
+    bundle
+fi

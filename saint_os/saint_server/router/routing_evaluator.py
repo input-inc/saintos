@@ -250,14 +250,26 @@ class RoutingEvaluator:
                 return 0.0
             op_node = sheet.find_operator(op_id)
             if op_node is None:
+                # Wire references an operator that isn't on this sheet —
+                # almost always a stale id left behind by a delete-and-
+                # recreate. Loud because the silent 0 here is the
+                # ultimate cause of "math chain returns nothing".
+                known = [o.id for o in sheet.operators]
+                self._log("warn",
+                          f"eval_operator: op '{op_id}' missing on sheet "
+                          f"'{sheet.node_id}' (have: {known}). "
+                          "Treating as 0 — fix the stale wire.")
                 return 0.0
             visiting.add(op_id)
             try:
-                inputs = self._collect_operator_inputs(sheet, op_node, eval_operator)
+                inputs = self._collect_operator_inputs(sheet, op_node, eval_operator,
+                                                      output_cache)
                 value = _apply_operator(op_node, inputs)
             finally:
                 visiting.discard(op_id)
             op_cache[op_id] = value
+            self._log("info",
+                      f"eval {op_node.op}({op_id}) inputs={inputs} → {value}")
             return value
 
         # Pass 1: resolve and dispatch outputs first so output_cache is
