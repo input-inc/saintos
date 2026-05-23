@@ -189,6 +189,22 @@ export class ConnectionService implements OnDestroy {
   }
 
   /**
+   * Request enumeration of WS-input slots across routing sheets.
+   * Response arrives on the `discovery-ws-inputs` Tauri event.
+   */
+  async discoverWsInputs(): Promise<void> {
+    if (!this.isConnected()) {
+      throw new Error('Not connected');
+    }
+    try {
+      await this.tauri.invoke('discover_ws_inputs');
+    } catch (err) {
+      console.error('[ConnectionService] discoverWsInputs error:', err);
+      throw err;
+    }
+  }
+
+  /**
    * Request discovery of controllable functions from the server
    */
   async discoverControllable(): Promise<void> {

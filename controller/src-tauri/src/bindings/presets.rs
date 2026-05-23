@@ -35,7 +35,7 @@ pub fn create_default_profile() -> BindingProfile {
         AnalogBinding {
             input: AnalogInput::RightStickX,
             action: AnalogAction::DirectControl {
-                target: ControlTarget {
+                target: ControlTarget::Topic {
                     topic: "/saint/head".to_string(),
                     channel: "pan".to_string(),
                     name: Some("Head Pan".to_string()),
@@ -52,7 +52,7 @@ pub fn create_default_profile() -> BindingProfile {
         AnalogBinding {
             input: AnalogInput::RightStickY,
             action: AnalogAction::DirectControl {
-                target: ControlTarget {
+                target: ControlTarget::Topic {
                     topic: "/saint/head".to_string(),
                     channel: "tilt".to_string(),
                     name: Some("Head Tilt".to_string()),

@@ -139,6 +139,28 @@ build_and_install() {
     echo "  Steam → Games → Add a Non-Steam Game → Browse →"
     echo "  $HOME/.local/share/flatpak/exports/bin/$APP_ID"
     echo "  (per-user install — system installs would be under /var/lib/flatpak/exports/bin/)"
+
+    # Auto-set Steam library artwork. Runs on the HOST shell (not in
+    # the Flatpak sandbox) so it sees ~/.local/share/Steam/ without
+    # needing finish-args permissions. Exits 1 with a friendly
+    # message if the operator hasn't added the controller as a
+    # Non-Steam Game yet — we treat that as a soft warning rather
+    # than a build failure, since the install ITSELF was fine.
+    echo
+    echo "==> Configuring Steam library artwork (post-install hook)"
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 "$SCRIPT_DIR/../scripts/set-steamdeck-artwork.py"; then
+            :  # success message already printed by the script
+        else
+            echo "    (Artwork not installed yet. Add the controller as a"
+            echo "     Non-Steam Game in Steam, then re-run:"
+            echo "       flatpak run --command=saint-controller-artwork-setup $APP_ID)"
+        fi
+    else
+        echo "    python3 not found on host — skipping. Re-run after"
+        echo "    adding the controller to Steam:"
+        echo "      flatpak run --command=saint-controller-artwork-setup $APP_ID"
+    fi
 }
 
 bundle() {

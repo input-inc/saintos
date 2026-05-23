@@ -30,15 +30,45 @@ export type NavigateDirection = 'up' | 'down' | 'left' | 'right' | 'next_item' |
 // Actions
 // ============================================================================
 
-export interface ControlTarget {
+/**
+ * Where a binding writes its value. Two shapes are persisted:
+ *  - WsInput: addresses a sheet's WebSocket-input slot. New bindings
+ *    authored against the routing-graph picker use this. The server
+ *    routes the value straight into the routing evaluator.
+ *  - Topic: addresses a raw ROS topic/channel pair. Legacy shape —
+ *    profiles.json files written before the WS-input refactor parse
+ *    as this so existing setups keep working.
+ *
+ * Discriminate at runtime via `'sheet_id' in target`.
+ */
+export type ControlTarget = WsInputTarget | TopicTarget;
+
+export interface WsInputTarget {
+  sheet_id: string;
+  input_id: string;
+  /** Operator-visible label. */
+  name?: string;
+}
+
+export interface TopicTarget {
   /** ROS topic this binding writes to (e.g. "/tracks", "/saint/head"). */
   topic: string;
   /** Scalar field inside the topic's message — dotted + [N] syntax
-   *  (e.g. "linear.x", "axes[2]"). The server's set_topic_channel
-   *  handler merges this into a per-topic buffer and republishes. */
+   *  (e.g. "linear.x", "axes[2]"). */
   channel: string;
   /** Operator-visible label. Falls back to "topic.channel" in the UI. */
   name?: string;
+}
+
+export function isWsInputTarget(t: ControlTarget): t is WsInputTarget {
+  return (t as WsInputTarget).sheet_id !== undefined;
+}
+
+export function targetDisplayName(t: ControlTarget): string {
+  if (t.name) return t.name;
+  return isWsInputTarget(t)
+    ? `${t.sheet_id}/${t.input_id}`
+    : `${(t as TopicTarget).topic}:${(t as TopicTarget).channel}`;
 }
 
 export interface InputTransform {

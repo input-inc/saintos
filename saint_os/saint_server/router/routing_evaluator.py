@@ -34,6 +34,10 @@ from saint_server.peripheral_model import (
 # (topic, field) → most recent scalar value, or None if no message yet.
 SourceKey = Tuple[str, str]
 
+# (sheet_node_id, ws_input_id) → most recent scalar value pushed by a
+# controller. Per-sheet to keep input ids stable across renamed sheets.
+WSInputKey = Tuple[str, str]
+
 
 class RoutingEvaluator:
     """Evaluates routing sheets and emits peripheral / widget outputs."""
@@ -59,6 +63,8 @@ class RoutingEvaluator:
         self._lock = Lock()
         # Latest scalar value seen for each (topic, field).
         self._sources: Dict[SourceKey, float] = {}
+        # Latest scalar value pushed by a controller into each WS input.
+        self._ws_input_values: Dict[WSInputKey, float] = {}
         # Currently-subscribed topics on behalf of the routing graph.
         self._subscribed_topics: Set[str] = set()
         # Snapshot of the routing graph used for evaluation; refreshed
@@ -68,9 +74,9 @@ class RoutingEvaluator:
         # so widgets can render server-evaluated readings.
         self._widget_values: Dict[Tuple[str, str], float] = {}
         # Per-sheet value snapshot: sheet_node_id → {kind: {id: value}}
-        # where `kind` is one of "inputs", "operators", "outputs",
-        # "widgets". Refreshed on each _evaluate_sheet pass and shipped
-        # to the UI via _on_values_changed.
+        # where `kind` is one of "inputs", "ws_inputs", "operators",
+        # "outputs", "widgets". Refreshed on each _evaluate_sheet pass
+        # and shipped to the UI via _on_values_changed.
         self._sheet_values: Dict[str, Dict[str, Dict[str, float]]] = {}
 
     # ── public API ──────────────────────────────────────────────────
@@ -93,6 +99,44 @@ class RoutingEvaluator:
             self._subscribe(topic)
         for topic in to_drop:
             self._unsubscribe(topic)
+
+    def set_ws_input(self, sheet_id: str, input_id: str, value: float) -> bool:
+        """Push a controller-driven value into a sheet's WS input.
+
+        Hot path on every gamepad-axis tick. Updates the cache, then
+        re-evaluates the owning sheet so peripheral sinks and ROS-output
+        taps see the new value immediately. Returns False if the sheet
+        or input doesn't exist so the caller can surface a useful error.
+        """
+        routing = self._routing
+        if routing is None:
+            return False
+        sheet = routing.sheets.get(sheet_id)
+        if sheet is None:
+            return False
+        if sheet.find_ws_input(input_id) is None:
+            return False
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError):
+            return False
+
+        with self._lock:
+            self._ws_input_values[(sheet_id, input_id)] = scalar
+
+        try:
+            self._evaluate_sheet(sheet)
+        except Exception as e:
+            self._log("error",
+                      f"Sheet '{sheet.node_id}' evaluation failed: {e}")
+            return True
+
+        if self._on_values_changed is not None:
+            try:
+                self._on_values_changed(self.get_value_snapshot())
+            except Exception as e:
+                self._log("error", f"routing_values broadcast failed: {e}")
+        return True
 
     def on_topic_message(self, topic: str, data: Dict[str, Any]) -> None:
         """Hot path: a ROS message arrived for `topic`. Re-evaluate any
@@ -153,9 +197,14 @@ class RoutingEvaluator:
         # once per evaluation pass. `visiting` doubles as a cycle guard.
         op_cache: Dict[str, float] = {}
         visiting: Set[str] = set()
+        # Output node values for this tick — needed before we can resolve
+        # any wire whose source.kind == "output" (the tap path that feeds
+        # WS-input → math → ROS-publish → peripheral on one sheet).
+        output_cache: Dict[str, float] = {}
         # Per-evaluation buckets — copied into self._sheet_values at the
         # end so the UI snapshot reflects this pass atomically.
         sheet_input_vals: Dict[str, float] = {}
+        sheet_ws_input_vals: Dict[str, float] = {}
         sheet_output_vals: Dict[str, float] = {}
         sheet_widget_vals: Dict[str, float] = {}
 
@@ -164,6 +213,10 @@ class RoutingEvaluator:
             v = self._sources.get((inp.topic, inp.field))
             if v is not None:
                 sheet_input_vals[inp.id] = v
+        for ws in sheet.ws_inputs:
+            v = self._ws_input_values.get((sheet.node_id, ws.id))
+            if v is not None:
+                sheet_ws_input_vals[ws.id] = v
 
         def eval_operator(op_id: str) -> float:
             if op_id in op_cache:
@@ -185,20 +238,32 @@ class RoutingEvaluator:
             op_cache[op_id] = value
             return value
 
-        # Walk all wires that terminate at a peripheral, widget, or
-        # output sink. Operator outputs are computed on-demand via
-        # eval_operator (and memoized in op_cache for cross-wire reuse).
+        # Pass 1: resolve and dispatch outputs first so output_cache is
+        # populated before any peripheral wire tries to tap an output as
+        # its source.
         for wire in sheet.wires:
-            if wire.sink.kind not in ("peripheral", "widget", "output"):
+            if wire.sink.kind != "output":
                 continue
-            value = self._resolve_source(sheet, wire.source, eval_operator)
+            value = self._resolve_source(sheet, wire.source, eval_operator,
+                                         output_cache)
+            if value is None:
+                continue
+            if wire.sink.parts:
+                output_cache[wire.sink.parts[0]] = float(value)
+                sheet_output_vals[wire.sink.parts[0]] = float(value)
+            self._dispatch_sink(sheet, wire, value)
+
+        # Pass 2: peripheral and widget sinks; these can reference both
+        # operators and outputs as sources.
+        for wire in sheet.wires:
+            if wire.sink.kind not in ("peripheral", "widget"):
+                continue
+            value = self._resolve_source(sheet, wire.source, eval_operator,
+                                         output_cache)
             if value is None:
                 continue
             self._dispatch_sink(sheet, wire, value)
-            # Record sink values for UI display.
-            if wire.sink.kind == "output" and wire.sink.parts:
-                sheet_output_vals[wire.sink.parts[0]] = float(value)
-            elif wire.sink.kind == "widget" and len(wire.sink.parts) >= 2:
+            if wire.sink.kind == "widget" and len(wire.sink.parts) >= 2:
                 sheet_widget_vals[f"{wire.sink.parts[0]}/{wire.sink.parts[1]}"] = float(value)
 
         # Atomically swap the per-sheet snapshot — operator values come
@@ -206,13 +271,15 @@ class RoutingEvaluator:
         # by a sink (orphaned ops) are not surfaced.
         self._sheet_values[sheet.node_id] = {
             "inputs":    sheet_input_vals,
+            "ws_inputs": sheet_ws_input_vals,
             "operators": {k: float(v) for k, v in op_cache.items()},
             "outputs":   sheet_output_vals,
             "widgets":   sheet_widget_vals,
         }
 
     def _collect_operator_inputs(self, sheet: NodeSheet, op_node: OperatorNode,
-                                 eval_operator: Callable[[str], float]
+                                 eval_operator: Callable[[str], float],
+                                 output_cache: Dict[str, float],
                                  ) -> Dict[str, float]:
         op_type = OPERATOR_CATALOG.get(op_node.op)
         if op_type is None:
@@ -235,13 +302,15 @@ class RoutingEvaluator:
             pin = sink.parts[1] if len(sink.parts) > 1 else None
             if pin is None:
                 continue
-            value = self._resolve_source(sheet, wire.source, eval_operator)
+            value = self._resolve_source(sheet, wire.source, eval_operator,
+                                         output_cache)
             if value is not None:
                 inputs[pin] = value
         return inputs
 
     def _resolve_source(self, sheet: NodeSheet, source,
-                        eval_operator: Callable[[str], float]
+                        eval_operator: Callable[[str], float],
+                        output_cache: Dict[str, float],
                         ) -> Optional[float]:
         if source.kind == "input":
             if not source.parts:
@@ -250,10 +319,22 @@ class RoutingEvaluator:
             if inp is None:
                 return None
             return self._sources.get((inp.topic, inp.field))
+        if source.kind == "ws_input":
+            if not source.parts:
+                return None
+            return self._ws_input_values.get((sheet.node_id, source.parts[0]))
         if source.kind == "operator":
             if not source.parts:
                 return None
             return eval_operator(source.parts[0])
+        if source.kind == "output":
+            # Tap an Output node: its value was computed in pass 1 of
+            # _evaluate_sheet. Returns None if this wire's source output
+            # has no value yet (no wire feeding the output's sink, or
+            # value was None for any reason).
+            if not source.parts:
+                return None
+            return output_cache.get(source.parts[0])
         # peripheral / widget sources are not supported as wire sources today.
         return None
 

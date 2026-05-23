@@ -102,6 +102,38 @@ impl OutgoingMessage {
         }
     }
 
+    /// Enumerate WebSocket-input nodes defined across routing sheets.
+    /// Each sheet exposes WS inputs as named scratch slots the
+    /// controller can write into; the binding picker uses this list
+    /// instead of the old topic/channel picker.
+    pub fn list_websocket_inputs() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "router".to_string(),
+            action: "list_websocket_inputs".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// Push a scalar value onto a WebSocket-input slot on a routing
+    /// sheet. Addressed by (sheet_id, input_id); the server routes the
+    /// value straight into the routing evaluator's source cache so
+    /// downstream operators and peripheral sinks see it immediately.
+    pub fn set_ws_input(sheet_id: &str, input_id: &str, value: Value) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "router".to_string(),
+            action: "set_input".to_string(),
+            params: Some(serde_json::json!({
+                "sheet_id": sheet_id,
+                "input_id": input_id,
+                "value": value,
+            })),
+            password: None,
+        }
+    }
+
     /// Push a single scalar onto a ROS topic channel. The server-side
     /// `set_topic_channel` handler maintains a per-topic buffer so we
     /// only need to send the one field that changed; the merged

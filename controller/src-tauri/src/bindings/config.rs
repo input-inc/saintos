@@ -152,14 +152,36 @@ pub enum ModifierEffect {
 // Targets and Transforms
 // ============================================================================
 
+/// What a binding writes into. WsInput addresses a sheet's WebSocket
+/// input slot (the new path); Topic addresses a raw ROS topic/channel
+/// pair (legacy, kept so existing profiles.json files load unchanged).
+///
+/// Untagged so the JSON shape on disk decides the variant — old
+/// profiles persist with {topic, channel, name} and parse as Topic; new
+/// bindings authored against the WS-input picker persist with
+/// {sheet_id, input_id, name} and parse as WsInput.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControlTarget {
-    /// ROS topic this binding writes to.
-    pub topic: String,
-    /// Scalar field within the topic message (e.g. "linear.x", "axes[3]").
-    pub channel: String,
-    /// Human-readable name
-    pub name: Option<String>,
+#[serde(untagged)]
+pub enum ControlTarget {
+    WsInput {
+        sheet_id: String,
+        input_id: String,
+        name: Option<String>,
+    },
+    Topic {
+        topic: String,
+        channel: String,
+        name: Option<String>,
+    },
+}
+
+impl ControlTarget {
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            ControlTarget::Topic { name, .. } | ControlTarget::WsInput { name, .. } =>
+                name.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

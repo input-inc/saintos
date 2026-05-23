@@ -1725,6 +1725,48 @@ class StateManager:
         self._save_system_routing()
         return {"success": True, "input": node.to_dict()}
 
+    def add_routing_ws_input(self, node_id: str, label: str = "",
+                             position: Optional[List[int]] = None
+                             ) -> Dict[str, Any]:
+        err = self._validate_sheet_owner(node_id)
+        if err:
+            return {"success": False, "message": err}
+        pos = self._coerce_position(position)
+        sheet = self.state.system_routing.get_sheet(node_id)
+        node = sheet.add_ws_input(label=label, position=pos)
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True, "ws_input": node.to_dict()}
+
+    def list_ws_inputs(self) -> List[Dict[str, Any]]:
+        """Flat enumeration of every WS input across all sheets.
+
+        Powers the controller's binding picker — the picker shows
+        {sheet_id, input_id, label} tuples and writes back via
+        routing/set_input.
+        """
+        out: List[Dict[str, Any]] = []
+        for sheet_id, sheet in self.state.system_routing.sheets.items():
+            for ws in sheet.ws_inputs:
+                out.append({
+                    "sheet_id": sheet_id,
+                    "input_id": ws.id,
+                    "label": ws.label,
+                })
+        return out
+
+    def push_ws_input(self, sheet_id: str, input_id: str, value: float) -> bool:
+        """Forward a controller write into the live routing evaluator."""
+        if self._routing_evaluator is None:
+            return False
+        try:
+            return bool(self._routing_evaluator.set_ws_input(
+                sheet_id, input_id, value))
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"push_ws_input failed: {e}")
+            return False
+
     def add_routing_output(self, node_id: str, topic: str, field: str,
                            label: str = "",
                            position: Optional[List[int]] = None) -> Dict[str, Any]:
@@ -1788,6 +1830,7 @@ class StateManager:
             return {"success": False, "message": err}
         sheet = self.state.system_routing.get_sheet(node_id)
         target = (sheet.find_input(sheet_node_id)
+                  or sheet.find_ws_input(sheet_node_id)
                   or sheet.find_output(sheet_node_id)
                   or sheet.find_operator(sheet_node_id)
                   or sheet.find_widget(sheet_node_id))
@@ -1815,6 +1858,7 @@ class StateManager:
         if sheet is None:
             return {"success": False, "message": f"Sheet '{node_id}' not found"}
         removed = (sheet.remove_input(sheet_node_id)
+                   or sheet.remove_ws_input(sheet_node_id)
                    or sheet.remove_output(sheet_node_id)
                    or sheet.remove_operator(sheet_node_id)
                    or sheet.remove_widget(sheet_node_id))
@@ -1857,6 +1901,14 @@ class StateManager:
                 sheet = self.state.system_routing.get_sheet(sheet_node_id)
                 if not sheet.find_input(ep.parts[0]):
                     return f"{role}: input '{ep.parts[0]}' not on this sheet"
+            elif ep.kind == "ws_input":
+                if role == "sink":
+                    return "sink: ws_input cannot be a wire sink (controller-driven only)"
+                if not ep.parts:
+                    return f"{role}: ws_input endpoint needs [ws_input_id]"
+                sheet = self.state.system_routing.get_sheet(sheet_node_id)
+                if not sheet.find_ws_input(ep.parts[0]):
+                    return f"{role}: ws_input '{ep.parts[0]}' not on this sheet"
             elif ep.kind == "operator":
                 if len(ep.parts) < 2:
                     return f"{role}: operator endpoint needs [op_id, pin]"
@@ -1900,10 +1952,9 @@ class StateManager:
                 if t and not any(i.id == ep.parts[1] for i in t.inputs):
                     return f"{role}: input '{ep.parts[1]}' not on widget type '{widget.type}'"
             elif ep.kind == "output":
-                # Outputs are sinks only — a wire's source can never be an
-                # output node (outputs don't produce values).
-                if role == "source":
-                    return "source: output nodes cannot be wire sources"
+                # Outputs are taps: valid as both sink (the value that
+                # gets ROS-published) and source (re-emit to downstream
+                # peripherals on the same sheet).
                 if not ep.parts:
                     return f"{role}: output endpoint needs [output_id]"
                 sheet = self.state.system_routing.get_sheet(sheet_node_id)
@@ -2015,16 +2066,86 @@ class StateManager:
             with open(self.system_routing_path, "r") as f:
                 data = yaml.safe_load(f) or {}
             self.state.system_routing = SystemRouting.from_dict(data)
+            migrated = self._migrate_state_only_inputs_to_ws()
+            if migrated > 0:
+                # Persist the rewrite so the next load is clean.
+                self._save_system_routing()
             if self.logger:
                 routing = self.state.system_routing
                 wire_count = sum(len(s.wires) for s in routing.sheets.values())
                 self.logger.info(
                     f"Loaded system routing: {len(routing.sheets)} sheets, "
-                    f"{wire_count} wires, {len(routing.widgets)} widgets"
+                    f"{wire_count} wires"
                 )
+                if migrated > 0:
+                    self.logger.info(
+                        f"Migrated {migrated} state-only ROS input(s) to WS inputs"
+                    )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Failed to load system routing: {e}")
+
+    def _state_only_endpoint_paths(self) -> set:
+        """Parse endpoints.yaml directly to find paths with state_type but no command_type.
+
+        We read the yaml ourselves (rather than depending on the ROS
+        bridge being initialized) so migration runs early in startup.
+        Returns an empty set if the yaml isn't reachable — migration
+        becomes a no-op rather than failing.
+        """
+        try:
+            from pathlib import Path as _Path
+            yaml_path = _Path(__file__).resolve().parents[1] / "ros_bridge" / "endpoints.yaml"
+            with open(yaml_path, "r") as f:
+                doc = yaml.safe_load(f) or {}
+            endpoints = (doc.get("endpoints") or {})
+            return {path for path, cfg in endpoints.items()
+                    if isinstance(cfg, dict)
+                    and cfg.get("state_type")
+                    and not cfg.get("command_type")}
+        except Exception:
+            return set()
+
+    def _migrate_state_only_inputs_to_ws(self) -> int:
+        """Convert old controller-write InputNodes to WebSocketInputNodes.
+
+        Pre-WS-input bindings addressed state-only ROS endpoints
+        (e.g. /saint/track left_velocity) via the bridge's mirror loop.
+        That path is gone — those nodes need to be WS inputs now or the
+        sheet silently breaks. We identify them by checking which paths
+        in endpoints.yaml are state-only and rewriting any InputNode
+        that targets one. Wires keep working because we reuse the input
+        id and flip the wire's source.kind from "input" to "ws_input".
+        """
+        state_only_paths = self._state_only_endpoint_paths()
+        if not state_only_paths:
+            return 0
+        migrated = 0
+        for sheet in self.state.system_routing.sheets.values():
+            to_migrate = [inp for inp in sheet.inputs
+                          if inp.topic in state_only_paths]
+            if not to_migrate:
+                continue
+            keep_inputs = [inp for inp in sheet.inputs
+                           if inp.topic not in state_only_paths]
+            migrated_ids = {inp.id for inp in to_migrate}
+            for inp in to_migrate:
+                # Reuse the original id so existing wires keep pointing
+                # at the same node — only their source.kind flips.
+                label = inp.label or f"{inp.topic}{('.' + inp.field) if inp.field else ''}"
+                from saint_server.peripheral_model import WebSocketInputNode
+                sheet.ws_inputs.append(WebSocketInputNode(
+                    id=inp.id, label=label, position=inp.position,
+                ))
+                migrated += 1
+            sheet.inputs = keep_inputs
+            for w in sheet.wires:
+                if (w.source.kind == "input"
+                        and w.source.parts and w.source.parts[0] in migrated_ids):
+                    w.source.kind = "ws_input"
+        if migrated > 0:
+            self.state.system_routing.bump_version()
+        return migrated
 
     # =========================================================================
     # Host controller — the Pi server modeled as a built-in node

@@ -1146,6 +1146,18 @@ class WebSocketHandler:
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
 
+        elif action == 'add_routing_ws_input':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            result = self.state_manager.add_routing_ws_input(
+                node_id=node_id,
+                label=params.get('label', ''),
+                position=params.get('position'),
+            )
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
         elif action == 'add_widget':
             node_id = params.get('node_id')
             type_id = params.get('type')
@@ -1367,9 +1379,35 @@ class WebSocketHandler:
             return {"status": "error", "message": f"Unknown subscribe action: {action}"}
 
     async def _handle_router(self, client: WebSocketClient, action: str, params: dict) -> dict:
-        """Handle router configuration messages."""
-        # Router configuration not yet implemented
-        return {"status": "error", "message": "Router configuration not yet implemented"}
+        """Handle routing-runtime messages.
+
+        Used by the controller's binding system to discover WS-input
+        nodes declared on routing sheets and to push axis values into
+        them. Sheet authoring lives on the management channel — this
+        handler is just the live data path.
+        """
+        if action == 'list_websocket_inputs':
+            return {"status": "ok",
+                    "data": {"ws_inputs": self.state_manager.list_ws_inputs()}}
+
+        if action == 'set_input':
+            sheet_id = params.get('sheet_id')
+            input_id = params.get('input_id')
+            value = params.get('value')
+            if not sheet_id or not input_id or value is None:
+                return {"status": "error",
+                        "message": "Missing sheet_id, input_id, or value"}
+            try:
+                scalar = float(value)
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "Invalid value type"}
+            ok = self.state_manager.push_ws_input(sheet_id, input_id, scalar)
+            if not ok:
+                return {"status": "error",
+                        "message": f"No WS input {sheet_id}/{input_id} (or evaluator offline)"}
+            return {"status": "ok"}
+
+        return {"status": "error", "message": f"Unknown router action: {action}"}
 
     async def _handle_control(self, client: WebSocketClient, action: str, params: dict) -> dict:
         """Handle pin control messages with throttling."""

@@ -63,6 +63,12 @@ finish-args:
   - --device=dri
   - --filesystem=xdg-config/saint-controller:create
   - --filesystem=xdg-data/saint-controller:create
+  # Steam userdata: read shortcuts.vdf, write into config/grid/.
+  # Only needed by the bundled saint-controller-artwork-setup
+  # helper. The main controller binary never touches this path,
+  # but Flatpak finish-args are app-wide so the grant applies to
+  # every entry point. Worth it for the one-command artwork setup.
+  - --filesystem=xdg-data/Steam
 
 # Build-time environment: put the SDK extension binaries on PATH,
 # point CARGO_HOME at a writeable in-build location (the default
@@ -119,6 +125,35 @@ modules:
                        /app/share/metainfo/com.saintos.Controller.metainfo.xml
       - install -Dm644 controller/src-tauri/icons/icon.png
                        /app/share/icons/hicolor/256x256/apps/com.saintos.Controller.png
+
+      # Steam library art (capsule + hero). Steam doesn't read these
+      # itself — non-Steam game artwork lives in
+      # ~/.local/share/Steam/userdata/<user>/config/grid/ named after
+      # the operator-assigned app ID. We bundle them here so the
+      # operator has a stable, predictable path to point Steam's
+      # "Set Custom Artwork" dialog at, regardless of what dev
+      # machine the controller was synced from. After install the
+      # files are at:
+      #   ~/.local/share/flatpak/app/com.saintos.Controller/current/
+      #     active/files/share/com.saintos.Controller/art/
+      # (user install) or under /var/lib/flatpak for system installs.
+      - install -Dm644 controller/images/libraryCapsule.png
+                       /app/share/com.saintos.Controller/art/library-capsule.png
+      - install -Dm644 controller/images/libraryHero.png
+                       /app/share/com.saintos.Controller/art/library-hero.png
+
+      # Helper script that reads ~/.local/share/Steam/userdata/.../
+      # shortcuts.vdf to find the operator-assigned non-Steam-game
+      # appid, then copies the bundled art into the grid dir with the
+      # filenames Steam looks for. Exposed at /app/bin/ so the
+      # operator can invoke it after the controller's installed:
+      #   flatpak run --command=saint-controller-artwork-setup \
+      #     com.saintos.Controller
+      # build.sh also runs it from the HOST shell as a post-install
+      # step (which doesn't need Flatpak filesystem perms — the host
+      # shell already has full home access).
+      - install -Dm755 controller/scripts/set-steamdeck-artwork.py
+                       /app/bin/saint-controller-artwork-setup
 
     sources:
       # The whole repo, relative to the manifest. flatpak-builder

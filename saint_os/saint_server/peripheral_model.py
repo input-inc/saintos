@@ -406,8 +406,10 @@ class NodePeripheralConfig:
 # two controllers, it appears as an InputNode on each sheet. The special
 # pseudo-sheet "dashboard" hosts the widget sinks. Endpoint kinds are:
 #
-#   kind == "input":      parts = [sheet_node_id]       (output pin always "out")
-#   kind == "operator":   parts = [sheet_node_id, pin]  (pin = "out" or input id)
+#   kind == "input":      parts = [input_id]            (ROS-topic input; pin always "out")
+#   kind == "ws_input":   parts = [ws_input_id]         (controller-driven input; pin always "out")
+#   kind == "operator":   parts = [op_id, pin]          (pin = "out" or input id)
+#   kind == "output":     parts = [output_id]           (ROS-topic output; valid as sink and tap source)
 #   kind == "peripheral": parts = [node_id, peripheral_id, channel_id]
 #   kind == "widget":     parts = [widget_id, input_id]
 
@@ -467,14 +469,48 @@ class InputNode:
 
 
 @dataclass
-class OutputNode:
-    """A ROS topic sink on a sheet.
+class WebSocketInputNode:
+    """A controller-driven input on a sheet (no ROS topic involved).
 
-    The mirror of InputNode: a wire feeding this node's `value` pin gets
-    published back onto `topic.field` via the bridge's set_topic_channel
-    buffer (same path used by controller bindings). Lets the operator
-    take a sensor reading, run it through operators, and emit the result
-    onto a different topic.
+    Distinct from InputNode (which subscribes to a real ROS topic). A
+    controller binding addresses this node by (sheet_id, input_id) over
+    the websocket and the value flows straight into the routing
+    evaluator's source cache. Used for joystick/gamepad axes whose only
+    purpose is to drive operators and peripheral channels — no need to
+    round-trip through ROS or pretend they're state topics.
+    """
+    id: str
+    label: str = ""
+    position: Tuple[int, int] = (0, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "position": list(self.position),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WebSocketInputNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            label=d.get("label", ""),
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+        )
+
+
+@dataclass
+class OutputNode:
+    """A ROS topic sink that also taps the value as a wire source.
+
+    A wire feeding this node's `value` sink gets published onto
+    `topic.field` via the bridge's set_topic_channel buffer. The same
+    value is exposed as a wire *source* (kind="output", parts=[id]) so
+    the sheet can fan the same value onward to a peripheral — letting a
+    single sheet describe controller-input → math → ROS-publish →
+    peripheral end to end.
     """
     id: str
     topic: str
@@ -586,6 +622,7 @@ class NodeSheet:
     """
     node_id: str
     inputs: List[InputNode] = field(default_factory=list)
+    ws_inputs: List[WebSocketInputNode] = field(default_factory=list)
     outputs: List["OutputNode"] = field(default_factory=list)
     operators: List[OperatorNode] = field(default_factory=list)
     widgets: List["WidgetInstance"] = field(default_factory=list)
@@ -595,6 +632,7 @@ class NodeSheet:
         return {
             "node_id": self.node_id,
             "inputs": [n.to_dict() for n in self.inputs],
+            "ws_inputs": [n.to_dict() for n in self.ws_inputs],
             "outputs": [n.to_dict() for n in self.outputs],
             "operators": [n.to_dict() for n in self.operators],
             "widgets": [w.to_dict() for w in self.widgets],
@@ -607,6 +645,7 @@ class NodeSheet:
         return cls(
             node_id=d["node_id"],
             inputs=[InputNode.from_dict(x) for x in d.get("inputs", [])],
+            ws_inputs=[WebSocketInputNode.from_dict(x) for x in d.get("ws_inputs", [])],
             outputs=[OutputNode.from_dict(x) for x in d.get("outputs", [])],
             operators=[OperatorNode.from_dict(x) for x in d.get("operators", [])],
             widgets=[WidgetInstance.from_dict(x) for x in d.get("widgets", [])],
@@ -629,6 +668,17 @@ class NodeSheet:
             position=position,
         )
         self.inputs.append(node)
+        return node
+
+    def add_ws_input(self, label: str = "",
+                     position: Tuple[int, int] = (0, 0)) -> WebSocketInputNode:
+        existing = {n.id for n in self.ws_inputs}
+        node = WebSocketInputNode(
+            id=self._next_id("wsin", existing),
+            label=label,
+            position=position,
+        )
+        self.ws_inputs.append(node)
         return node
 
     def add_output(self, topic: str, field: str, label: str = "",
@@ -690,13 +740,28 @@ class NodeSheet:
                       if not (w.source.kind == "input" and w.source.parts and w.source.parts[0] == input_id)]
         return True
 
+    def remove_ws_input(self, input_id: str) -> bool:
+        before = len(self.ws_inputs)
+        self.ws_inputs = [n for n in self.ws_inputs if n.id != input_id]
+        if len(self.ws_inputs) == before:
+            return False
+        self.wires = [w for w in self.wires
+                      if not (w.source.kind == "ws_input"
+                              and w.source.parts and w.source.parts[0] == input_id)]
+        return True
+
     def remove_output(self, output_id: str) -> bool:
         before = len(self.outputs)
         self.outputs = [n for n in self.outputs if n.id != output_id]
         if len(self.outputs) == before:
             return False
-        self.wires = [w for w in self.wires
-                      if not (w.sink.kind == "output" and w.sink.parts and w.sink.parts[0] == output_id)]
+        # Output participates as both sink (publish) and source (tap);
+        # drop wires that reference it on either end.
+        self.wires = [
+            w for w in self.wires
+            if not ((w.sink.kind == "output" and w.sink.parts and w.sink.parts[0] == output_id)
+                    or (w.source.kind == "output" and w.source.parts and w.source.parts[0] == output_id))
+        ]
         return True
 
     def remove_operator(self, op_id: str) -> bool:
@@ -729,6 +794,9 @@ class NodeSheet:
 
     def find_input(self, input_id: str) -> Optional[InputNode]:
         return next((n for n in self.inputs if n.id == input_id), None)
+
+    def find_ws_input(self, input_id: str) -> Optional[WebSocketInputNode]:
+        return next((n for n in self.ws_inputs if n.id == input_id), None)
 
     def find_output(self, output_id: str) -> Optional[OutputNode]:
         return next((n for n in self.outputs if n.id == output_id), None)

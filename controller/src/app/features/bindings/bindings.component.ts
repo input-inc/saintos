@@ -14,7 +14,9 @@ import {
   NavigateDirection,
   ControlTarget,
   InputTransform,
-  ModifierEffect
+  ModifierEffect,
+  isWsInputTarget,
+  targetDisplayName,
 } from '../../core/services/bindings.service';
 import { DiscoveryService } from '../../core/services/discovery.service';
 
@@ -156,7 +158,7 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
                   <div class="mt-3 pt-3 border-t border-saint-border grid grid-cols-4 gap-4 text-sm">
                     <div>
                       <span class="text-saint-text-muted">Target:</span>
-                      <span class="ml-1">{{ binding.action.target.name || (binding.action.target.topic + ':' + binding.action.target.channel) }}</span>
+                      <span class="ml-1">{{ targetDisplayName(binding.action.target) }}</span>
                     </div>
                     <div>
                       <span class="text-saint-text-muted">Deadzone:</span>
@@ -337,28 +339,61 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
               </div>
 
               @if (analogForm.actionType === 'direct_control') {
-                <div class="grid grid-cols-2 gap-4">
-                  <div>
-                    <label class="block text-sm text-saint-text-muted mb-1">Topic</label>
-                    <select class="input w-full" [(ngModel)]="analogForm.targetTopic"
-                            (ngModelChange)="onTopicChange()">
-                      <option value="">-- Select Topic --</option>
-                      @for (topic of availableTopics(); track topic) {
-                        <option [value]="topic">{{ topic }}</option>
-                      }
-                    </select>
-                  </div>
-                  <div>
-                    <label class="block text-sm text-saint-text-muted mb-1">Channel</label>
-                    <select class="input w-full" [(ngModel)]="analogForm.targetChannel"
-                            [disabled]="!analogForm.targetTopic">
-                      <option value="">-- Select Channel --</option>
-                      @for (ch of availableChannelsForSelectedTopic(); track ch.field) {
-                        <option [value]="ch.field">{{ ch.label }}</option>
-                      }
-                    </select>
-                  </div>
+                <div>
+                  <label class="block text-sm text-saint-text-muted mb-1">Target Kind</label>
+                  <select class="input w-full" [(ngModel)]="analogForm.targetKind">
+                    <option value="ws_input">WebSocket Input (routing sheet)</option>
+                    <option value="topic">ROS Topic / Channel (legacy)</option>
+                  </select>
                 </div>
+                @if (analogForm.targetKind === 'ws_input') {
+                  <div class="grid grid-cols-2 gap-4">
+                    <div>
+                      <label class="block text-sm text-saint-text-muted mb-1">Sheet</label>
+                      <select class="input w-full" [(ngModel)]="analogForm.targetSheetId"
+                              (ngModelChange)="onSheetChange()">
+                        <option value="">-- Select Sheet --</option>
+                        @for (sheet of availableSheets(); track sheet) {
+                          <option [value]="sheet">{{ sheet }}</option>
+                        }
+                      </select>
+                    </div>
+                    <div>
+                      <label class="block text-sm text-saint-text-muted mb-1">WS Input</label>
+                      <select class="input w-full" [(ngModel)]="analogForm.targetInputId"
+                              [disabled]="!analogForm.targetSheetId">
+                        <option value="">-- Select Input --</option>
+                        @for (slot of availableInputsForSelectedSheet(); track slot.input_id) {
+                          <option [value]="slot.input_id">{{ slot.label || slot.input_id }}</option>
+                        }
+                      </select>
+                    </div>
+                  </div>
+                }
+                @if (analogForm.targetKind === 'topic') {
+                  <div class="grid grid-cols-2 gap-4">
+                    <div>
+                      <label class="block text-sm text-saint-text-muted mb-1">Topic</label>
+                      <select class="input w-full" [(ngModel)]="analogForm.targetTopic"
+                              (ngModelChange)="onTopicChange()">
+                        <option value="">-- Select Topic --</option>
+                        @for (topic of availableTopics(); track topic) {
+                          <option [value]="topic">{{ topic }}</option>
+                        }
+                      </select>
+                    </div>
+                    <div>
+                      <label class="block text-sm text-saint-text-muted mb-1">Channel</label>
+                      <select class="input w-full" [(ngModel)]="analogForm.targetChannel"
+                              [disabled]="!analogForm.targetTopic">
+                        <option value="">-- Select Channel --</option>
+                        @for (ch of availableChannelsForSelectedTopic(); track ch.field) {
+                          <option [value]="ch.field">{{ ch.label }}</option>
+                        }
+                      </select>
+                    </div>
+                  </div>
+                }
                 <div>
                   <label class="block text-sm text-saint-text-muted mb-1">Display Name</label>
                   <input type="text" class="input w-full" [(ngModel)]="analogForm.targetName">
@@ -573,15 +608,16 @@ export class BindingsComponent {
   editingAnalogIndex = -1;
   editingDigitalIndex = -1;
 
-  // Form state for analog binding editor
+  // Form state for analog binding editor.
+  // `targetKind` switches between the new WS-input picker (default for
+  // freshly authored bindings) and the legacy topic/channel picker
+  // (used when editing a binding that's still in the old shape).
   analogForm = {
     input: 'left_stick_x' as AnalogInput,
-    // Widened to include 'differential_drive' so loadAnalogForm can
-    // assign binding.action.type without a narrowing error. The
-    // editor UI only renders fields for 'direct_control' and
-    // 'modifier' — differential_drive bindings are configured
-    // elsewhere — so loadAnalogForm early-returns for that case.
     actionType: 'direct_control' as 'direct_control' | 'modifier' | 'differential_drive',
+    targetKind: 'ws_input' as 'ws_input' | 'topic',
+    targetSheetId: '',
+    targetInputId: '',
     targetTopic: '',
     targetChannel: '',
     targetName: '',
@@ -618,10 +654,13 @@ export class BindingsComponent {
   readonly digitalActionTypes = DIGITAL_ACTION_TYPES;
   readonly navigateDirections = NAVIGATE_DIRECTIONS;
 
-  // Topic/channel catalog from the server's list_topic_channels (and
-  // legacy role list, still surfaced for non-direct-control digital
-  // actions that reference roles).
+  // Topic/channel catalog (legacy picker — only shown when editing
+  // a binding that's still in the topic/channel shape).
   readonly availableTopics = computed(() => this.discoveryService.availableTopics());
+
+  // WS-input picker catalog. Sheets are the outer dropdown; each sheet
+  // exposes its declared WS-input slots in the inner dropdown.
+  readonly availableSheets = computed(() => this.discoveryService.wsInputSheets());
 
   constructor(
     public bindingsService: BindingsService,
@@ -637,6 +676,12 @@ export class BindingsComponent {
     return this.discoveryService.getChannelsForTopic(this.analogForm.targetTopic);
   }
 
+  // WS inputs declared on the sheet selected in the analog form.
+  availableInputsForSelectedSheet() {
+    if (!this.analogForm.targetSheetId) return [];
+    return this.discoveryService.getWsInputsForSheet(this.analogForm.targetSheetId);
+  }
+
   // Channels available on the topic selected in the digital form.
   availableChannelsForDigitalTopic() {
     if (!this.digitalForm.topic) return [];
@@ -646,6 +691,11 @@ export class BindingsComponent {
   // When analog topic changes, reset channel selection.
   onTopicChange(): void {
     this.analogForm.targetChannel = '';
+  }
+
+  // When analog sheet changes, reset WS-input selection.
+  onSheetChange(): void {
+    this.analogForm.targetInputId = '';
   }
 
   // When digital topic changes, reset channel selection.
@@ -682,9 +732,13 @@ export class BindingsComponent {
     return DIGITAL_INPUTS.find(i => i.value === input)?.label || input;
   }
 
+  // Expose the helpers on the template so binding rows can use them.
+  isWsInputTarget = isWsInputTarget;
+  targetDisplayName = targetDisplayName;
+
   formatAnalogAction(action: AnalogAction): string {
     if (action.type === 'direct_control') {
-      return `Direct Control → ${action.target.name || `${action.target.topic}:${action.target.channel}`}`;
+      return `Direct Control → ${targetDisplayName(action.target)}`;
     }
     if (action.type === 'modifier') {
       switch (action.effect.type) {
@@ -705,7 +759,7 @@ export class BindingsComponent {
       case 'select_panel_item': return 'Select Panel Item';
       case 'toggle_output': return `Toggle: ${action.target_id}`;
       case 'cycle_output': return `Cycle: ${action.target_id} (${action.values.join(', ')})`;
-      case 'direct_control': return `Direct Control → ${action.target.topic}:${action.target.channel} = ${action.value}`;
+      case 'direct_control': return `Direct Control → ${targetDisplayName(action.target)} = ${action.value}`;
       case 'e_stop': return 'Emergency Stop';
       case 'none': return 'None';
     }
@@ -738,6 +792,9 @@ export class BindingsComponent {
     this.analogForm = {
       input: 'left_stick_x',
       actionType: 'direct_control',
+      targetKind: 'ws_input',
+      targetSheetId: '',
+      targetInputId: '',
       targetTopic: '',
       targetChannel: '',
       targetName: '',
@@ -771,9 +828,17 @@ export class BindingsComponent {
     }
 
     if (binding.action.type === 'direct_control') {
-      this.analogForm.targetTopic = binding.action.target.topic;
-      this.analogForm.targetChannel = binding.action.target.channel;
-      this.analogForm.targetName = binding.action.target.name || '';
+      const target = binding.action.target;
+      if (isWsInputTarget(target)) {
+        this.analogForm.targetKind = 'ws_input';
+        this.analogForm.targetSheetId = target.sheet_id;
+        this.analogForm.targetInputId = target.input_id;
+      } else {
+        this.analogForm.targetKind = 'topic';
+        this.analogForm.targetTopic = target.topic;
+        this.analogForm.targetChannel = target.channel;
+      }
+      this.analogForm.targetName = target.name || '';
       this.analogForm.deadzone = binding.action.transform.deadzone;
       this.analogForm.scale = binding.action.transform.scale;
       this.analogForm.expo = binding.action.transform.expo;
@@ -795,13 +860,20 @@ export class BindingsComponent {
     let action: AnalogAction;
 
     if (this.analogForm.actionType === 'direct_control') {
+      const target: ControlTarget = this.analogForm.targetKind === 'ws_input'
+        ? {
+            sheet_id: this.analogForm.targetSheetId,
+            input_id: this.analogForm.targetInputId,
+            name: this.analogForm.targetName || undefined,
+          }
+        : {
+            topic: this.analogForm.targetTopic,
+            channel: this.analogForm.targetChannel,
+            name: this.analogForm.targetName || undefined,
+          };
       action = {
         type: 'direct_control',
-        target: {
-          topic: this.analogForm.targetTopic,
-          channel: this.analogForm.targetChannel,
-          name: this.analogForm.targetName || undefined
-        },
+        target,
         transform: {
           deadzone: this.analogForm.deadzone,
           scale: this.analogForm.scale,
@@ -901,11 +973,24 @@ export class BindingsComponent {
         this.digitalForm.targetId = binding.action.target_id;
         this.digitalForm.cycleValues = binding.action.values.join(', ');
         break;
-      case 'direct_control':
-        this.digitalForm.topic = binding.action.target.topic;
-        this.digitalForm.channel = binding.action.target.channel;
+      case 'direct_control': {
+        const t = binding.action.target;
+        if (isWsInputTarget(t)) {
+          // The digital editor only supports the topic/channel shape
+          // today; flagging is the least-bad option until the picker
+          // grows a sheet/input dropdown like the analog editor.
+          console.warn(
+            'loadDigitalForm: WS-input digital direct_control not editable here',
+          );
+          this.digitalForm.topic = '';
+          this.digitalForm.channel = '';
+        } else {
+          this.digitalForm.topic = t.topic;
+          this.digitalForm.channel = t.channel;
+        }
         this.digitalForm.value = binding.action.value;
         break;
+      }
     }
   }
 

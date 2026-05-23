@@ -10,8 +10,15 @@
 /* Material Icons - bundled locally */
 @import 'material-icons/iconfont/material-icons.css';
 
-/* Material Symbols - for newer icons */
-@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200');
+/* Material Symbols - bundled locally (NOT from fonts.googleapis.com).
+   The CDN URL we used to import here only resolved when the device
+   had internet, which the Steam Deck attached to the rover's network
+   does not. The bindings tabs + moods area use these glyphs, and
+   they came up as blank rectangles whenever offline. The
+   `material-symbols` npm package ships the same outlined variable
+   font and font-face declarations locally — bundle it into the
+   Tauri build so the icons work in any environment. */
+@import 'material-symbols/outlined.css';
 
 @tailwind base;
 @tailwind components;

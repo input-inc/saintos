@@ -193,6 +193,26 @@ pub fn send_topic_channel_value(
     state.ws_client.send_topic_channel_value(&topic, &channel, value)
 }
 
+/// Request enumeration of WS-input slots across all routing sheets.
+/// Result is delivered on the `discovery-ws-inputs` Tauri event.
+#[tauri::command]
+pub fn discover_ws_inputs(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_discover_ws_inputs()
+}
+
+/// Push a scalar value into a sheet's WS-input slot. The bindings
+/// runtime calls this on every gamepad-axis tick that maps to a WS
+/// input — the value flows straight into the routing evaluator.
+#[tauri::command]
+pub fn send_ws_input_value(
+    state: State<'_, Arc<AppState>>,
+    sheet_id: String,
+    input_id: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    state.ws_client.send_ws_input_value(&sheet_id, &input_id, value)
+}
+
 /// Check if a gamepad is connected
 #[tauri::command]
 pub fn is_gamepad_connected(state: State<'_, Arc<AppState>>) -> bool {

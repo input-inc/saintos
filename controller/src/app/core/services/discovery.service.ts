@@ -48,6 +48,19 @@ export interface TopicChannelTopic {
   channels: TopicChannel[];
 }
 
+/**
+ * A WebSocket-input slot on a routing sheet. The new bindings picker
+ * lists these (per-sheet) instead of raw ROS topic channels — a
+ * gamepad axis writes into the slot, and the server-side routing
+ * graph evaluator picks the value up and fans it onward through math
+ * nodes / ROS outputs / peripheral channels.
+ */
+export interface WsInputSlot {
+  sheet_id: string;
+  input_id: string;
+  label: string;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -55,6 +68,7 @@ export class DiscoveryService {
   private _controllable = signal<ControllableNode[]>([]);
   private _roles = signal<RoleDefinition[]>([]);
   private _topics = signal<TopicChannelTopic[]>([]);
+  private _wsInputs = signal<WsInputSlot[]>([]);
   private _loading = signal(false);
   private _lastFetched = signal<Date | null>(null);
 
@@ -76,6 +90,22 @@ export class DiscoveryService {
   /** Channels available on a given topic. */
   getChannelsForTopic(topic: string): TopicChannel[] {
     return this._topics().find(t => t.topic === topic)?.channels ?? [];
+  }
+
+  /** WS-input slots declared across all routing sheets — the new
+   *  bindings picker enumerates these in place of topic/channel. */
+  readonly wsInputs = this._wsInputs.asReadonly();
+
+  /** Unique sheet ids (with at least one WS input), sorted. */
+  readonly wsInputSheets = computed(() => {
+    const sheets = new Set<string>();
+    for (const s of this._wsInputs()) sheets.add(s.sheet_id);
+    return Array.from(sheets).sort();
+  });
+
+  /** WS inputs declared on a given sheet. */
+  getWsInputsForSheet(sheetId: string): WsInputSlot[] {
+    return this._wsInputs().filter(s => s.sheet_id === sheetId);
   }
 
   /** Loading state */
@@ -145,6 +175,13 @@ export class DiscoveryService {
       }
     });
 
+    this.tauri.listen<{ ws_inputs: WsInputSlot[] }>('discovery-ws-inputs').subscribe(data => {
+      console.log('[DiscoveryService] Received discovery-ws-inputs event:', data);
+      if (data && Array.isArray(data.ws_inputs)) {
+        this._wsInputs.set(data.ws_inputs);
+      }
+    });
+
     // Auto-refresh when connection status changes to connected
     this.tauri.listen<{ status: string }>('connection-status').subscribe(state => {
       console.log('[DiscoveryService] Connection status event received:', state.status);
@@ -182,12 +219,21 @@ export class DiscoveryService {
       await this.connection.discoverRoles();
       console.log('[DiscoveryService] discoverRoles request sent');
 
-      // Topic/channel catalog — used by the new bindings picker.
+      // Topic/channel catalog — kept for legacy bindings authored
+      // against the old picker; new bindings should use WS inputs.
       console.log('[DiscoveryService] Calling discoverTopicChannels...');
       try {
         await this.connection.discoverTopicChannels();
       } catch (err) {
         console.warn('[DiscoveryService] discoverTopicChannels failed:', err);
+      }
+
+      // WS-input slots from routing sheets — the new picker for bindings.
+      console.log('[DiscoveryService] Calling discoverWsInputs...');
+      try {
+        await this.connection.discoverWsInputs();
+      } catch (err) {
+        console.warn('[DiscoveryService] discoverWsInputs failed:', err);
       }
 
       // The actual data will arrive via Tauri events and be handled by the listeners in constructor

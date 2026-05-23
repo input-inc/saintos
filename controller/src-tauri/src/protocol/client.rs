@@ -249,6 +249,80 @@ impl WebSocketClient {
             })
     }
 
+    /// Request enumeration of WebSocket-input slots defined across all
+    /// routing sheets. Server replies with `discovery-ws-inputs`.
+    pub fn request_discover_ws_inputs(&self) -> Result<(), String> {
+        log::info!("Requesting WS-input discovery from server...");
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| {
+                log::warn!("request_discover_ws_inputs: Not connected");
+                "Not connected".to_string()
+            })?;
+
+        let msg = OutgoingMessage::list_websocket_inputs();
+        log::debug!("Sending list_websocket_inputs: {}", msg.to_json());
+
+        tx.blocking_send(msg)
+            .map_err(|e| {
+                log::error!("Failed to send WS-input discovery: {}", e);
+                format!("Failed to send WS-input discovery: {}", e)
+            })
+    }
+
+    /// Push a scalar onto a sheet's WebSocket-input slot. The binding
+    /// runtime calls this on every gamepad-axis tick that maps to a WS
+    /// input — same throttle policy as the legacy topic/channel path.
+    pub fn send_ws_input_value(&self, sheet_id: &str, input_id: &str, value: Value)
+        -> Result<(), String>
+    {
+        if sheet_id.is_empty() || input_id.is_empty() {
+            log::warn!(
+                "send_ws_input_value: empty sheet_id ('{}') or input_id ('{}'); \
+                 re-bind this axis in the bindings UI",
+                sheet_id, input_id
+            );
+            return Ok(());
+        }
+        let is_stop_command = match &value {
+            Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
+            _ => false,
+        };
+        let throttle_key = format!("ws::{}::{}", sheet_id, input_id);
+        if !is_stop_command {
+            let mut times = self.last_command_times.write();
+            let now = Instant::now();
+            if let Some(last_time) = times.get(&throttle_key) {
+                if now.duration_since(*last_time) < Duration::from_millis(THROTTLE_MS) {
+                    return Ok(());
+                }
+            }
+            times.insert(throttle_key, now);
+        }
+        log::debug!("→ set_ws_input {}::{} = {}", sheet_id, input_id, value);
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+
+        let msg = OutgoingMessage::set_ws_input(sheet_id, input_id, value);
+        match tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                log::trace!("Channel full, dropped ws_input write for {}::{}", sheet_id, input_id);
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err("Connection closed".to_string())
+            }
+        }
+    }
+
     /// Push a single scalar onto a ROS topic channel. Used by the
     /// bindings runtime: a joystick axis movement results in
     /// `set_topic_channel(topic, channel, value)` which the server
@@ -256,6 +330,18 @@ impl WebSocketClient {
     pub fn send_topic_channel_value(&self, topic: &str, channel: &str, value: Value)
         -> Result<(), String>
     {
+        if topic.is_empty() || channel.is_empty() {
+            // Common failure mode: a binding was saved with the old
+            // role/function schema and the migration left topic/channel
+            // empty. Flag it once at warn so the operator sees why
+            // nothing is happening.
+            log::warn!(
+                "send_topic_channel_value: empty topic ('{}') or channel ('{}'); \
+                 re-bind this axis in the bindings UI",
+                topic, channel
+            );
+            return Ok(());
+        }
         let is_stop_command = match &value {
             Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
             _ => false,
@@ -271,6 +357,7 @@ impl WebSocketClient {
             }
             times.insert(throttle_key, now);
         }
+        log::debug!("→ set_topic_channel {}::{} = {}", topic, channel, value);
 
         let tx = self
             .command_tx
@@ -486,11 +573,18 @@ async fn handle_connection<R: Runtime>(
                                             tracing::error!("Failed to emit discovery-active-roles: {}", e);
                                         }
                                     }
-                                    // Check for topic-channels response (new bindings picker).
+                                    // Check for topic-channels response (legacy bindings picker).
                                     if data.get("topics").is_some() {
                                         tracing::info!("Emitting discovery-topic-channels event to frontend");
                                         if let Err(e) = app_handle.emit("discovery-topic-channels", data) {
                                             tracing::error!("Failed to emit discovery-topic-channels: {}", e);
+                                        }
+                                    }
+                                    // Check for WS-input response (new bindings picker).
+                                    if data.get("ws_inputs").is_some() {
+                                        tracing::info!("Emitting discovery-ws-inputs event to frontend");
+                                        if let Err(e) = app_handle.emit("discovery-ws-inputs", data) {
+                                            tracing::error!("Failed to emit discovery-ws-inputs: {}", e);
                                         }
                                     }
                                 }

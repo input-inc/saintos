@@ -321,9 +321,20 @@ class ROSBridge:
         """
         endpoint = get_endpoint(endpoint_path)
         if not endpoint:
+            # Loud once-per-bad-topic warning so misconfigured bindings
+            # don't fail silently. Many of these come from controller
+            # presets that reference a topic that never made it into
+            # endpoints.yaml; without the log the operator has no
+            # signal that their joystick is doing nothing.
+            self.log('warn',
+                     f'set_topic_channel: unknown endpoint "{endpoint_path}" '
+                     f'(field "{field}"). Add it to endpoints.yaml or fix the binding.')
             return {'status': 'error',
                     'message': f'Unknown endpoint: {endpoint_path}'}
         if not endpoint.command_type:
+            self.log('warn',
+                     f'set_topic_channel: endpoint {endpoint_path} has no command_type; '
+                     f'cannot publish (state-only topic).')
             return {'status': 'error',
                     'message': f'Endpoint {endpoint_path} does not support publishing.'}
 
@@ -356,7 +367,10 @@ class ROSBridge:
                          f'Failed to publish channel {field} to {endpoint_path}: {e}')
                 return {'status': 'error',
                         'message': f'Failed to publish: {str(e)}'}
-        self.log('debug',
+        # Visible-by-default so the operator can tell at a glance that
+        # bindings are actually pushing values through. Cheap; throttle
+        # in the channel buffer keeps this to ~CONTROL_THROTTLE_MS bursts.
+        self.log('info',
                  f'set_topic_channel {endpoint_path} {field}={value} (client {client_id})')
         return {'status': 'ok', 'data': {'throttled': False}}
 
