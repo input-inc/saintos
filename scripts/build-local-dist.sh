@@ -101,8 +101,21 @@ log "Building version: ${VERSION}"
 
 if (( CLEAN )); then
     log "Cleaning local build artifacts"
-    rm -rf _ros2 _debs install dist saint_os/resources/firmware
+    # Top-level extract / colcon outputs / staged firmware
+    rm -rf _ros2 _debs install build dist saint_os/resources/firmware
+    # Per-firmware build dirs (CMake out-of-source trees). Incremental
+    # builds normally keep these between runs; --clean is the only path
+    # that wipes them.
+    rm -rf saint_os/firmware/rp2040/build
+    rm -rf saint_os/firmware/teensy41/.pio
+    rm -rf saint_os/firmware/rpi5/dist
 fi
+
+# colcon `build/` and `install/` at the repo root persist between runs
+# (the container bind-mounts `$PWD` to `/work`, so colcon's outputs land
+# here on the host). That's why a server-only iteration after the first
+# typically takes seconds — only the changed package gets recompiled.
+# Use `--clean` above to start fresh.
 
 # --- ROS2 install tree (cached) ---------------------------------------------
 #
@@ -167,21 +180,19 @@ build_firmware_rp2040() {
         warn "RP2040 build script missing — skipping"
         return
     fi
-    log "Building RP2040 hardware firmware (OTA bootloader ON)"
+    log "Building RP2040 hardware firmware (OTA bootloader ON, incremental)"
     # Build with the OTA bootloader enabled so the dist tarball contains
     # both the combined first-flash .uf2 and the body-only .bin the
     # bootloader fetches over HTTP.
     #
-    # Robust build-dir clean: macOS' Finder / Spotlight occasionally drops
-    # a fresh .DS_Store into the directory while `rm -rf` is iterating,
-    # which makes rm bail with "Directory not empty". Try once, sleep
-    # briefly to let any racing Finder write settle, try again, then
-    # mkdir. The second rm is a no-op on the happy path.
+    # Incremental: keep build/ between runs so cmake + make only rebuild
+    # what changed. `--clean` wipes it. The previous version did
+    # `rm -rf build` every time on the theory that cmake config drift
+    # could leave stale state — but cmake is robust to re-running on an
+    # existing tree, and our config (-DSIMULATION + -DSAINT_OS_OTA_BOOTLOADER)
+    # doesn't change run-to-run unless someone edits this script.
     ( cd saint_os/firmware/rp2040 \
-        && rm -rf build 2>/dev/null || true \
-        && sleep 0.2 \
-        && rm -rf build \
-        && mkdir build && cd build \
+        && mkdir -p build && cd build \
         && cmake -DSIMULATION=OFF -DSAINT_OS_OTA_BOOTLOADER=ON .. > /dev/null \
         && make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
                saint_node saint_ota_bootloader saint_node_combined ) \
@@ -317,6 +328,7 @@ iw
 avahi-daemon
 libnss-mdns
 dnsmasq
+zstd
 DEB_LIST
 
 DEB_LIST_HASH=$(printf '%s' "$RUNTIME_DEB_LIST" | shasum -a 256 | awk '{print $1}' | cut -c1-12)
@@ -408,7 +420,7 @@ CONTAINER_EOF
 log "Assembling dist tarball"
 .github/scripts/make-dist.sh "${VERSION}" "${ARCH}" "${ROS_DISTRO}"
 
-TARBALL=$(ls -t dist/saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}.tar.gz 2>/dev/null | head -n1)
+TARBALL=$(ls -t dist/saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}.tar.zst 2>/dev/null | head -n1)
 [[ -f "$TARBALL" ]] || die "make-dist.sh did not produce a tarball"
 
 log "Done."
@@ -419,5 +431,8 @@ echo "  SHA-256:   $($SHA256 "$TARBALL" | cut -d' ' -f1)"
 echo
 echo "  Copy to USB and use the dashboard's 'Install from USB' flow, or:"
 echo "    scp ${TARBALL} pi@opensaint.local:/tmp/"
-echo "    ssh pi@opensaint.local 'cd /tmp && tar xzf $(basename "$TARBALL") && sudo $(basename "$TARBALL" .tar.gz)/install.sh'"
+# tar -xaf auto-detects compression from the extension — works for both
+# .tar.gz (legacy) and .tar.zst (current). Requires GNU tar 1.32+, which
+# is on every supported target.
+echo "    ssh pi@opensaint.local 'cd /tmp && tar -xaf $(basename "$TARBALL") && sudo $(basename "$TARBALL" .tar.zst)/install.sh'"
 echo

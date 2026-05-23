@@ -410,8 +410,38 @@ static void temp_probe_diagnostic(uint32_t now)
     uint8_t addr = units[0].address;
 
     // Drain anything in the FIFO from a previous (corrupt) exchange so
-    // we don't latch onto stale garbage as our response.
-    while (wire_is_readable()) (void)wire_getc();
+    // we don't latch onto stale garbage as our response. Track the
+    // drain count — non-zero here is itself a diagnostic signal: it
+    // means either the previous exchange left bytes orphaned in the
+    // FIFO (we asked for N bytes and N+M came back) or noise on a
+    // floating RX line clocked in phantom bytes between exchanges.
+    uint8_t pre_drain = 0;
+    uint8_t pre_drain_bytes[8] = {0};
+    while (wire_is_readable()) {
+        uint8_t b = wire_getc();
+        if (pre_drain < (uint8_t)(sizeof(pre_drain_bytes))) {
+            pre_drain_bytes[pre_drain] = b;
+        }
+        pre_drain++;
+    }
+    if (pre_drain > 0) {
+        // Format the captured bytes for the log so we can see whether
+        // they look like real RoboClaw responses (mostly 0x80+ for
+        // address echoes) or random noise (uniformly distributed).
+        char buf[40];
+        int n = snprintf(buf, sizeof(buf), "%u byte%s (",
+                         (unsigned)pre_drain, pre_drain == 1 ? "" : "s");
+        for (uint8_t i = 0; i < pre_drain && i < 8 && n < (int)sizeof(buf) - 4; i++) {
+            n += snprintf(buf + n, sizeof(buf) - n, "%s%02X",
+                          i == 0 ? "" : " ", (unsigned)pre_drain_bytes[i]);
+        }
+        if (n < (int)sizeof(buf) - 4) snprintf(buf + n, sizeof(buf) - n, "%s)",
+            pre_drain > 8 ? " …" : "");
+        saint_log_publish("warn",
+            "RoboClaw temp-probe: drained %s of stale RX BEFORE sending — "
+            "previous exchange left orphans OR noise on idle RX",
+            buf);
+    }
 
     send_command(addr, ROBOCLAW_CMD_GETTEMP, NULL, 0);
 
@@ -435,10 +465,49 @@ static void temp_probe_diagnostic(uint32_t now)
 
 report:
     if (got == 0) {
-        saint_log_publish("info",
-            "RoboClaw temp-probe: sent [0x%02X, 82] to unit 0 — NO bytes "
-            "received within %u ms (controller silent or wiring blocked)",
-            (unsigned)addr, (unsigned)ROBOCLAW_RESPONSE_TIMEOUT_MS);
+        // Loiter for one more byte-time after the timeout to distinguish:
+        //   (a) controller really silent — nothing comes
+        //   (b) PIO RX SM stalled mid-response — bytes arrive late, but
+        //       they're useless to us because the framing's drifted
+        //   (c) the response landed just past the timer — controller
+        //       is alive but slower than our 50 ms budget
+        //
+        // At 38400 baud one byte is ~260 µs; we poll for another ~10 ms
+        // (≈ 38 byte-times) to catch any laggard byte plus a few-byte
+        // gap. Whatever arrives we report — it's much more informative
+        // than "nothing".
+        uint8_t  late[8] = {0};
+        uint8_t  late_n  = 0;
+        uint32_t late_deadline = PLATFORM_MILLIS() + 10;
+        while (PLATFORM_MILLIS() < late_deadline && late_n < 8) {
+            if (wire_is_readable()) {
+                late[late_n++] = wire_getc();
+            }
+        }
+        if (late_n == 0) {
+            saint_log_publish("info",
+                "RoboClaw temp-probe: sent [0x%02X, 82] to unit 0 — NO bytes "
+                "received within %u ms NOR in the 10 ms grace window "
+                "(controller silent or wiring blocked)",
+                (unsigned)addr, (unsigned)ROBOCLAW_RESPONSE_TIMEOUT_MS);
+        } else {
+            // Format the late bytes.
+            char lbuf[40];
+            int ln = snprintf(lbuf, sizeof(lbuf), "%u byte%s [",
+                              (unsigned)late_n, late_n == 1 ? "" : "s");
+            for (uint8_t i = 0; i < late_n && ln < (int)sizeof(lbuf) - 4; i++) {
+                ln += snprintf(lbuf + ln, sizeof(lbuf) - ln, "%s%02X",
+                               i == 0 ? "" : " ", (unsigned)late[i]);
+            }
+            if (ln < (int)sizeof(lbuf) - 2) snprintf(lbuf + ln, sizeof(lbuf) - ln, "]");
+            saint_log_publish("warn",
+                "RoboClaw temp-probe: sent [0x%02X, 82] to unit 0 — 0 bytes "
+                "in %u ms BUT %s arrived in the grace window. Controller IS "
+                "alive; our timeout/framing is slipping. Check the "
+                "configured baud (%u) and bus integrity.",
+                (unsigned)addr, (unsigned)ROBOCLAW_RESPONSE_TIMEOUT_MS,
+                lbuf, (unsigned)configured_baud);
+        }
         return;
     }
 
@@ -807,6 +876,24 @@ void roboclaw_init(void)
                 "RoboClaw: PIO UART init failed (no free SMs/instructions?) — "
                 "falling back to hardware UART. Wires likely still swapped.");
             use_pio_uart = false;
+        } else {
+            // Belt-and-suspenders pull-up. pio_uart_rx_program_init
+            // already calls gpio_pull_up on the RX pin (see
+            // pio_uart.pio), but reassert here AND drive the TX pin
+            // HIGH (just in case anything later in boot — including
+            // apply_estop_pin running on a neighbouring GPIO — left
+            // the pad in a weird state). Idle-HIGH is the required
+            // resting state for both wires on UART; without it the
+            // PIO RX SM can mis-trigger on a noise transition and
+            // push phantom bytes into the FIFO (the "last=0x78"
+            // wrong-ACK pattern in the wire stats).
+            gpio_pull_up(roboclaw_tx_pin);  // physical RX (we receive)
+            gpio_pull_up(roboclaw_rx_pin);  // physical TX (we drive)
+            saint_log_publish("info",
+                "RoboClaw: PIO RX pull-up reasserted on GP%u "
+                "(idle-HIGH defense; floating RX is the most common "
+                "cause of phantom ACK bytes)",
+                (unsigned)roboclaw_tx_pin);
         }
         // Don't clear hw_uart — if the fallback fires below we'll
         // bind it. Otherwise leave it stale; wire_* helpers gate on
@@ -819,12 +906,17 @@ void roboclaw_init(void)
         gpio_set_function(roboclaw_tx_pin, GPIO_FUNC_UART);
         gpio_set_function(roboclaw_rx_pin, GPIO_FUNC_UART);
 
-        // No pull-up on RX. The manual's 1k–4.7k pull-up requirement
-        // (manual p. 68) only applies when Multi-Unit Mode is enabled
-        // — that mode reconfigures S2 to open-drain so it can share a
-        // bus. In standard single-unit Packet Serial, S2 is push-pull
-        // and the RoboClaw outputs 3.3 V logic (manual p. 8) — direct
-        // match for the RP2040, no pull needed.
+        // Defensive pull-up on RX. The earlier reasoning was that
+        // single-unit Packet Serial drives S2 push-pull (manual p. 8)
+        // so no pull is needed — and that's true *while the controller
+        // is actively driving*. But during boot, OTA, brown-outs, or
+        // any window where the controller's logic is stalled, S2 can
+        // briefly float. The PIO RX SM (and the HW UART RX too) will
+        // happily misinterpret noise as a start bit and push phantom
+        // bytes into the FIFO. Re-enabling the pull-up costs nothing
+        // (internal ~50–80 kΩ, no fight with the controller's driver
+        // during normal operation) and removes that failure mode.
+        gpio_pull_up(roboclaw_rx_pin);
     }
 
     active_tx_pin = roboclaw_tx_pin;

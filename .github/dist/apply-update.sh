@@ -33,7 +33,12 @@ STAGING="$(mktemp -d /tmp/saint-os-update.XXXXXX)"
 trap 'rm -rf "${STAGING}"' EXIT
 
 echo "Extracting ${TARBALL} -> ${STAGING}" >&2
-tar -xzf "${TARBALL}" -C "${STAGING}"
+# -xaf = auto-detect compression from filename extension. Accepts both
+# .tar.gz (legacy builds) and .tar.zst (current). Requires GNU tar
+# 1.32+ — present on every supported target (Pi OS Bookworm, Ubuntu
+# 24.04, etc.) and on the zstd runtime being installed (install.sh
+# adds `zstd` to the apt deps list).
+tar -xaf "${TARBALL}" -C "${STAGING}"
 
 # Locate the unpacked payload directory (single top-level dir per tarball).
 PAYLOAD=$(find "${STAGING}" -mindepth 1 -maxdepth 1 -type d | head -n1)

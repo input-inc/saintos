@@ -151,6 +151,14 @@ COMMON_DEPS=(
     # nodes get IPs handed out from the configured range and can resolve
     # the server's hostname even without mDNS.
     dnsmasq
+    # zstd: distribution tarballs since 2026-05 ship as .tar.zst (the
+    # build step compresses ~3× faster than gzip and the archives are
+    # slightly smaller). apply-update.sh uses `tar -xaf` which calls
+    # zstd via the system path; without this package an OTA update of
+    # a zstd-compressed tarball would fail with "Cannot exec zstd".
+    # Pi OS Bookworm bundles it with dpkg already, but Ubuntu noble
+    # and minimal Debian images don't — listing it here closes the gap.
+    zstd
 )
 
 # Python 3.11 specifically: the bundled ROS2 was built against libpython3.11.

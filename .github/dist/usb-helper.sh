@@ -11,7 +11,7 @@
 # Subcommands:
 #   scan
 #       Print "<size_bytes>\t<absolute_path>" per discovered tarball
-#       matching saint-os_*_*.tar.gz on any mounted removable filesystem
+#       matching saint-os_*_*.tar.{gz,zst} on any mounted removable filesystem
 #       under /media, /mnt, or /run/media. Searches up to 4 directory
 #       levels deep so e.g. /media/<user>/<label>/<file> is reachable.
 #
@@ -46,9 +46,10 @@ scan() {
         [[ "$target" =~ $USB_TARGET_RE ]] || continue
 
         # Up to 4 levels of nesting catches /media/<user>/<label>/<file>
-        # and /run/media/<user>/<label>/updates/<file>.
+        # and /run/media/<user>/<label>/updates/<file>. Accept both
+        # legacy gzip and current zstd-compressed tarballs.
         find "$target" -maxdepth 4 -type f \
-            -name 'saint-os_*_*.tar.gz' \
+            \( -name 'saint-os_*_*.tar.gz' -o -name 'saint-os_*_*.tar.zst' \) \
             -printf '%s\t%p\n' 2>/dev/null
     done
 }

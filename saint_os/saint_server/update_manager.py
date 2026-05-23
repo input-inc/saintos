@@ -47,12 +47,16 @@ APPLY_WRAPPER = INSTALL_PREFIX / "bin" / "apply-update.sh"
 USB_HELPER = INSTALL_PREFIX / "bin" / "usb-helper.sh"
 
 # Tarballs published by the dist workflow look like:
-#   saint-os_0.5.1_arm64_jazzy.tar.gz
-#   saint-os_v0.5.1_arm64_jazzy.tar.gz
+#   saint-os_0.5.1_arm64_jazzy.tar.zst         (current)
+#   saint-os_v0.5.1_arm64_jazzy.tar.zst
+#   saint-os_0.5.1_arm64_jazzy.tar.gz          (legacy, pre-zstd switch)
 TARBALL_RE = re.compile(
     r"^saint-os_v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:[-+][^_]+)?)"
-    r"_(?P<arch>[a-z0-9]+)_(?P<ros>[a-z0-9]+)\.tar\.gz$"
+    r"_(?P<arch>[a-z0-9]+)_(?P<ros>[a-z0-9]+)\.tar\.(?:gz|zst)$"
 )
+# File-extension suffix accepted by the on-disk scanner (sorted longest-first
+# so endswith() over the tuple works without false-positive prefixes).
+TARBALL_EXTS = (".tar.zst", ".tar.gz")
 
 
 @dataclass
@@ -377,7 +381,7 @@ class UpdateManager:
             return
         for entry in entries:
             try:
-                if entry.is_file(follow_symlinks=False) and entry.name.endswith(".tar.gz"):
+                if entry.is_file(follow_symlinks=False) and entry.name.endswith(TARBALL_EXTS):
                     yield entry.path
                 elif entry.is_dir(follow_symlinks=False):
                     yield from UpdateManager._scan_dir(entry.path, depth - 1)

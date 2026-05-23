@@ -364,15 +364,40 @@ void saint_log_publish(const char* level, const char* fmt, ...)
 
     uint32_t up = to_ms_since_boot(get_absolute_time());
 
-    // JSON-escape quote and backslash inside the text so the server can
-    // json.loads() it. Anything weirder than that we just leave alone.
+    // JSON-escape inside the text so the server can json.loads() it.
+    // The big three escapes are quote, backslash, and any control char
+    // (0x00-0x1F). Control chars MUST be escaped in JSON — a literal
+    // newline in a string is the most common offender (the RoboClaw
+    // GETVERSION response ends with \n, and the version log line
+    // embeds that). Previous version of this function only escaped
+    // " and \, so the server saw `"...v4.4.8\n"` with a real newline
+    // and json.loads() bailed with "Invalid control character at
+    // line 1 column N". We now expand the common controls into their
+    // backslash forms and pass everything else through.
     char escaped[256];
     size_t ei = 0;
-    for (size_t i = 0; text[i] && ei < sizeof(escaped) - 2; i++) {
-        if (text[i] == '"' || text[i] == '\\') {
-            if (ei < sizeof(escaped) - 3) escaped[ei++] = '\\';
+    for (size_t i = 0; text[i] && ei < sizeof(escaped) - 7; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c == '"' || c == '\\') {
+            escaped[ei++] = '\\';
+            escaped[ei++] = (char)c;
+        } else if (c == '\n') {
+            escaped[ei++] = '\\'; escaped[ei++] = 'n';
+        } else if (c == '\r') {
+            escaped[ei++] = '\\'; escaped[ei++] = 'r';
+        } else if (c == '\t') {
+            escaped[ei++] = '\\'; escaped[ei++] = 't';
+        } else if (c < 0x20) {
+            // Rare control char — emit \u00XX so the server stays parseable
+            // without us having to remember every escape rule.
+            static const char hex[] = "0123456789abcdef";
+            escaped[ei++] = '\\'; escaped[ei++] = 'u';
+            escaped[ei++] = '0';  escaped[ei++] = '0';
+            escaped[ei++] = hex[(c >> 4) & 0xF];
+            escaped[ei++] = hex[c & 0xF];
+        } else {
+            escaped[ei++] = (char)c;
         }
-        escaped[ei++] = text[i];
     }
     escaped[ei] = '\0';
 
