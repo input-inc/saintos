@@ -175,6 +175,11 @@ class WebSocketHandler:
         # outputs) or "release" (clear the latch).
         self._estop_node_callback: Optional[Callable[[str, str], None]] = None
 
+        # Callback for sending a RoboClaw debug passthrough to a node
+        # (set by server_node). Payload is a dict matching the firmware's
+        # roboclaw_debug_handle_json format.
+        self._roboclaw_debug_callback: Optional[Callable[[str, dict], None]] = None
+
         # System-wide E-Stop latch state. Mutated by 'estop' command
         # handlers; broadcast to subscribers on the 'estop' topic so
         # multiple dashboards stay in sync.
@@ -253,6 +258,13 @@ class WebSocketHandler:
         """Set callback for sending emergency stop to a node.
         Callback takes (node_id, action) where action is 'engage' or 'release'."""
         self._estop_node_callback = callback
+
+    def set_roboclaw_debug_callback(self, callback: Callable[[str, dict], None]):
+        """Set callback for forwarding a RoboClaw debug payload to a node.
+        Callback takes (node_id, payload_dict). The payload is the full
+        debug message (op + op-specific fields) which server_node will
+        wrap in the control envelope and publish."""
+        self._roboclaw_debug_callback = callback
 
     def set_update_manager(self, update_manager):
         """Wire the update manager and subscribe to state changes."""
@@ -916,6 +928,30 @@ class WebSocketHandler:
                 "active": self._estop_active,
                 "changed_at": self._estop_changed_at,
             }}
+
+        elif action == 'roboclaw_debug':
+            # Diagnostic passthrough to the RoboClaw driver on a node.
+            # The payload (op + op-specific keys) is forwarded verbatim
+            # to the firmware; the response comes back over the normal
+            # log stream as a "roboclaw_dbg:" entry the caller can watch.
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            op = params.get('op')
+            if op not in ('raw', 'sniff', 'reconfigure'):
+                return {"status": "error",
+                        "message": "op must be raw|sniff|reconfigure"}
+            if not self._roboclaw_debug_callback:
+                return {"status": "error",
+                        "message": "RoboClaw debug callback not configured"}
+            # Only forward whitelisted keys to keep the wire payload tight.
+            payload = {'op': op}
+            for k in ('tx_hex', 'read_len', 'timeout_ms',
+                      'duration_ms', 'baud', 'swap'):
+                if k in params:
+                    payload[k] = params[k]
+            self._roboclaw_debug_callback(node_id, payload)
+            return {"status": "ok", "data": {"message": f"roboclaw_debug {op} dispatched"}}
 
         # Pin Configuration Actions
         elif action == 'get_roles':

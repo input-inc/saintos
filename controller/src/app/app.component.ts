@@ -6,6 +6,7 @@ import { ConnectionService, ConnectionStatus } from './core/services/connection.
 import { InputService, ButtonEvent } from './core/services/input.service';
 import { BindingsService, DigitalInput } from './core/services/bindings.service';
 import { KeyboardService } from './core/services/keyboard.service';
+import { DragScrollService } from './core/services/drag-scroll.service';
 import { VirtualJoystickComponent, JoystickPosition } from './shared/components/virtual-joystick/virtual-joystick.component';
 import { PresetPanelComponent } from './shared/components/preset-panel/preset-panel.component';
 import { VirtualKeyboardComponent } from './shared/components/virtual-keyboard/virtual-keyboard.component';
@@ -503,7 +504,8 @@ export class AppComponent implements OnInit, OnDestroy {
     public connectionService: ConnectionService,
     public inputService: InputService,
     public bindingsService: BindingsService,
-    private keyboardService: KeyboardService
+    private keyboardService: KeyboardService,
+    private dragScrollService: DragScrollService,
   ) {
     // Apply saved UI scale on startup
     const savedScale = localStorage.getItem('saint-controller-ui-scale');
@@ -513,6 +515,15 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    // Install document-level pointer-based drag-scroll. Required on
+    // Steam Deck Game Mode where gamescope's touch-to-cursor
+    // emulation makes WebKit see mouse events for screen taps, and
+    // WebKit's native pan-scroll only fires for pointerType: touch.
+    // No-op on platforms where native scrolling already works fine
+    // (the threshold + interactive-element guards keep the override
+    // out of the way for taps and small jitter).
+    this.dragScrollService.install();
+
     // Subscribe to hardware button events
     this.buttonSubscription = this.inputService.buttonEvents$.subscribe(event => {
       this.handleHardwareButton(event);

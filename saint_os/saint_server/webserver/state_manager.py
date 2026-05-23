@@ -1742,14 +1742,20 @@ class StateManager:
         """Flat enumeration of every WS input across all sheets.
 
         Powers the controller's binding picker — the picker shows
-        {sheet_id, input_id, label} tuples and writes back via
-        routing/set_input.
+        {sheet_id, sheet_label, input_id, label} tuples and writes back
+        via routing/set_input. `sheet_label` is the adopted node's
+        display_name so the picker shows "Track Drive Right" rather
+        than "teensy41_A1B2C3D4".
         """
         out: List[Dict[str, Any]] = []
         for sheet_id, sheet in self.state.system_routing.sheets.items():
+            node = self.state.adopted_nodes.get(sheet_id)
+            sheet_label = (node.display_name if node and node.display_name
+                           else sheet_id)
             for ws in sheet.ws_inputs:
                 out.append({
                     "sheet_id": sheet_id,
+                    "sheet_label": sheet_label,
                     "input_id": ws.id,
                     "label": ws.label,
                 })

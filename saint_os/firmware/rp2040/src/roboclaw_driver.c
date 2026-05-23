@@ -583,6 +583,235 @@ static inline void temp_probe_diagnostic(uint32_t now) { (void)now; }
 #endif
 
 // =============================================================================
+// Wire-level debug passthrough
+// =============================================================================
+//
+// Lets the host drive the RoboClaw UART directly. Operations:
+//   {"action":"roboclaw_debug","op":"raw",
+//    "tx_hex":"8015","read_len":4,"timeout_ms":200}
+//   {"action":"roboclaw_debug","op":"sniff","duration_ms":1000}
+//   {"action":"roboclaw_debug","op":"reconfigure","baud":19200,"swap":1}
+//
+// Every result is published via saint_log_publish with a "roboclaw_dbg:"
+// prefix so the host CLI can filter for it in the log stream.
+
+#ifndef SIMULATION
+
+static uint8_t debug_parse_hex(const char* s, const char* end,
+                                uint8_t* out, uint8_t out_max)
+{
+    uint8_t n = 0;
+    while (s < end && n < out_max) {
+        while (s < end && (*s == ' ' || *s == ',')) s++;
+        if (s + 1 >= end) break;
+        char h = s[0], l = s[1];
+        int hi = (h >= '0' && h <= '9') ? h - '0'
+               : (h >= 'a' && h <= 'f') ? h - 'a' + 10
+               : (h >= 'A' && h <= 'F') ? h - 'A' + 10 : -1;
+        int lo = (l >= '0' && l <= '9') ? l - '0'
+               : (l >= 'a' && l <= 'f') ? l - 'a' + 10
+               : (l >= 'A' && l <= 'F') ? l - 'A' + 10 : -1;
+        if (hi < 0 || lo < 0) break;
+        out[n++] = (uint8_t)((hi << 4) | lo);
+        s += 2;
+    }
+    return n;
+}
+
+static void debug_format_hex(const uint8_t* in, uint8_t in_len,
+                              char* out, size_t out_size)
+{
+    size_t pos = 0;
+    for (uint8_t i = 0; i < in_len && pos + 3 < out_size; i++) {
+        pos += (size_t)snprintf(out + pos, out_size - pos,
+                                 "%s%02X", i == 0 ? "" : " ",
+                                 (unsigned)in[i]);
+    }
+    if (pos < out_size) out[pos] = '\0';
+    else if (out_size > 0) out[out_size - 1] = '\0';
+}
+
+static void debug_op_raw(const char* json)
+{
+    const char* p = strstr(json, "\"tx_hex\"");
+    if (!p) {
+        saint_log_publish("warn", "roboclaw_dbg: raw missing tx_hex");
+        return;
+    }
+    p = strchr(p, ':');
+    if (!p) return;
+    p++;
+    while (*p == ' ') p++;
+    if (*p != '"') {
+        saint_log_publish("warn", "roboclaw_dbg: raw tx_hex must be a string");
+        return;
+    }
+    p++;
+    const char* tx_end = strchr(p, '"');
+    if (!tx_end) return;
+    uint8_t tx[32];
+    uint8_t tx_len = debug_parse_hex(p, tx_end, tx, sizeof(tx));
+    if (tx_len == 0) {
+        saint_log_publish("warn", "roboclaw_dbg: raw tx_hex parsed 0 bytes");
+        return;
+    }
+
+    uint8_t read_len = 4;
+    const char* q = strstr(json, "\"read_len\"");
+    if (q && (q = strchr(q, ':'))) {
+        q++; while (*q == ' ') q++;
+        int v = atoi(q);
+        if (v > 0 && v <= 64) read_len = (uint8_t)v;
+    }
+
+    uint16_t timeout_ms = 100;
+    q = strstr(json, "\"timeout_ms\"");
+    if (q && (q = strchr(q, ':'))) {
+        q++; while (*q == ' ') q++;
+        int v = atoi(q);
+        if (v > 0 && v <= 10000) timeout_ms = (uint16_t)v;
+    }
+
+    if (!wire_ready()) {
+        saint_log_publish("warn", "roboclaw_dbg: raw — UART not bound");
+        return;
+    }
+
+    uint8_t drain[16];
+    uint8_t drain_n = 0;
+    while (wire_is_readable() && drain_n < (uint8_t)sizeof(drain)) {
+        drain[drain_n++] = wire_getc();
+    }
+    char drain_hex[64];
+    debug_format_hex(drain, drain_n, drain_hex, sizeof(drain_hex));
+
+    char tx_hex[80];
+    debug_format_hex(tx, tx_len, tx_hex, sizeof(tx_hex));
+    uint32_t t_send = PLATFORM_MILLIS();
+    wire_write_blocking(tx, tx_len);
+
+    uint8_t rx[64];
+    uint8_t rx_n = 0;
+    uint32_t t_first = 0;
+    uint32_t t_last = 0;
+    uint32_t deadline = t_send + timeout_ms;
+    while (rx_n < read_len && PLATFORM_MILLIS() < deadline) {
+        if (wire_is_readable()) {
+            if (rx_n == 0) t_first = PLATFORM_MILLIS();
+            rx[rx_n++] = wire_getc();
+            t_last = PLATFORM_MILLIS();
+        }
+    }
+    uint32_t t_done = PLATFORM_MILLIS();
+
+    char rx_hex[200];
+    debug_format_hex(rx, rx_n, rx_hex, sizeof(rx_hex));
+
+    saint_log_publish("info",
+        "roboclaw_dbg: raw tx=[%s] drained=[%s](%u) rx=[%s] "
+        "got=%u/%u in %lu ms first@+%lu last@+%lu",
+        tx_hex, drain_hex, (unsigned)drain_n, rx_hex,
+        (unsigned)rx_n, (unsigned)read_len,
+        (unsigned long)(t_done - t_send),
+        (unsigned long)(rx_n > 0 ? t_first - t_send : 0),
+        (unsigned long)(rx_n > 0 ? t_last - t_send : 0));
+}
+
+static void debug_op_sniff(const char* json)
+{
+    uint16_t duration_ms = 1000;
+    const char* p = strstr(json, "\"duration_ms\"");
+    if (p && (p = strchr(p, ':'))) {
+        p++; while (*p == ' ') p++;
+        int v = atoi(p);
+        if (v > 0 && v <= 10000) duration_ms = (uint16_t)v;
+    }
+
+    if (!wire_ready()) {
+        saint_log_publish("warn", "roboclaw_dbg: sniff — UART not bound");
+        return;
+    }
+
+    uint8_t buf[128];
+    uint8_t n = 0;
+    uint32_t deadline = PLATFORM_MILLIS() + duration_ms;
+    while (PLATFORM_MILLIS() < deadline && n < (uint8_t)sizeof(buf)) {
+        if (wire_is_readable()) {
+            buf[n++] = wire_getc();
+        }
+    }
+
+    char hex[400];
+    debug_format_hex(buf, n, hex, sizeof(hex));
+    saint_log_publish("info",
+        "roboclaw_dbg: sniff duration=%u ms captured=%u byte%s [%s]",
+        (unsigned)duration_ms, (unsigned)n, n == 1 ? "" : "s", hex);
+}
+
+static void debug_op_reconfigure(const char* json)
+{
+    long baud = (long)configured_baud;
+    int swap_override = -1;
+    const char* p = strstr(json, "\"baud\"");
+    if (p && (p = strchr(p, ':'))) {
+        p++; while (*p == ' ') p++;
+        long v = strtol(p, NULL, 10);
+        // configured_baud is uint16_t — cap at 57600 (covers RoboClaw's
+        // common range 2400/9600/19200/38400/57600; higher rates would
+        // need a wider type in flash_roboclaw_config_t too).
+        if (v >= 1200 && v <= 57600) baud = v;
+    }
+    p = strstr(json, "\"swap\"");
+    if (p && (p = strchr(p, ':'))) {
+        p++; while (*p == ' ') p++;
+        swap_override = atoi(p) ? 1 : 0;
+    }
+
+    configured_baud = (uint16_t)baud;
+    if (swap_override == 0 || swap_override == 1) {
+        if (unit_count == 0) {
+            units[0].address = ROBOCLAW_DEFAULT_ADDRESS;
+            unit_count = 1;
+        }
+        units[0].uart_swap = (uint8_t)swap_override;
+    }
+
+    // Force the idempotent fast-path to miss so the rebind actually
+    // runs even when the pin pair didn't change.
+    active_tx_pin = 0xFF;
+    active_rx_pin = 0xFF;
+    active_uart   = 0xFF;
+    roboclaw_init();
+
+    saint_log_publish("info",
+        "roboclaw_dbg: reconfigured baud=%ld swap=%d (active baud=%u, pio=%d)",
+        baud, swap_override,
+        (unsigned)configured_baud, (int)use_pio_uart);
+}
+
+void roboclaw_debug_handle_json(const char* json)
+{
+    if (!json) return;
+    if (strstr(json, "\"op\":\"raw\"")
+        || strstr(json, "\"op\": \"raw\"")) {
+        debug_op_raw(json);
+    } else if (strstr(json, "\"op\":\"sniff\"")
+               || strstr(json, "\"op\": \"sniff\"")) {
+        debug_op_sniff(json);
+    } else if (strstr(json, "\"op\":\"reconfigure\"")
+               || strstr(json, "\"op\": \"reconfigure\"")) {
+        debug_op_reconfigure(json);
+    } else {
+        saint_log_publish("warn",
+            "roboclaw_dbg: unknown op (expected raw|sniff|reconfigure)");
+    }
+}
+
+#else  // SIMULATION
+void roboclaw_debug_handle_json(const char* json) { (void)json; }
+#endif
+
+// =============================================================================
 // Probe / connection tracking
 // =============================================================================
 

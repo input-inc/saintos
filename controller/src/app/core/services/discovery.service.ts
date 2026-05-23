@@ -54,9 +54,13 @@ export interface TopicChannelTopic {
  * gamepad axis writes into the slot, and the server-side routing
  * graph evaluator picks the value up and fans it onward through math
  * nodes / ROS outputs / peripheral channels.
+ *
+ * `sheet_label` is the owning node's display_name (e.g. "Track Drive
+ * Right") so the picker doesn't have to surface raw node IDs.
  */
 export interface WsInputSlot {
   sheet_id: string;
+  sheet_label: string;
   input_id: string;
   label: string;
 }
@@ -96,11 +100,17 @@ export class DiscoveryService {
    *  bindings picker enumerates these in place of topic/channel. */
   readonly wsInputs = this._wsInputs.asReadonly();
 
-  /** Unique sheet ids (with at least one WS input), sorted. */
+  /** Unique sheets (with at least one WS input) as {id, label} pairs,
+   *  sorted by label — that's what the binding picker presents. */
   readonly wsInputSheets = computed(() => {
-    const sheets = new Set<string>();
-    for (const s of this._wsInputs()) sheets.add(s.sheet_id);
-    return Array.from(sheets).sort();
+    const byId = new Map<string, string>();
+    for (const s of this._wsInputs()) {
+      // Last-write-wins on label — server should be consistent across
+      // all rows of the same sheet, so this is just a defensive merge.
+      byId.set(s.sheet_id, s.sheet_label || s.sheet_id);
+    }
+    return Array.from(byId, ([id, label]) => ({ id, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
   });
 
   /** WS inputs declared on a given sheet. */

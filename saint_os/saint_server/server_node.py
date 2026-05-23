@@ -674,6 +674,26 @@ class SaintServerNode(Node):
             node_id, f"Sent emergency stop {verb}",
             "warn" if action == "engage" else "info")
 
+    def send_roboclaw_debug_command(self, node_id: str, payload: dict):
+        """Forward a RoboClaw wire-level debug payload to the node.
+
+        `payload` is the {op, op-specific keys} dict; we wrap it in
+        the control envelope ({"action":"roboclaw_debug", ...}) and
+        publish. The firmware replies asynchronously via the normal
+        log stream with a 'roboclaw_dbg:' prefix.
+        """
+        import json
+
+        pub = self._ensure_node_control_publisher(node_id)
+        control_data = {"action": "roboclaw_debug", **payload}
+        msg = String()
+        msg.data = json.dumps(control_data)
+        pub.publish(msg)
+        self.get_logger().info(
+            f'Sent roboclaw_debug {payload.get("op")} to {node_id}')
+        self.state_manager.log_node_event(
+            node_id, f"roboclaw_debug {payload.get('op')} dispatched", "info")
+
     def send_firmware_update_command(self, node_id: str, simulation: bool = False, force: bool = False):
         """Send firmware update command to a node via ROS2.
 
@@ -1136,6 +1156,9 @@ class SaintServerNode(Node):
                 )
                 self.web_server.ws_handler.set_estop_node_callback(
                     lambda node_id, action: self.send_estop_command(node_id, action)
+                )
+                self.web_server.ws_handler.set_roboclaw_debug_callback(
+                    lambda node_id, payload: self.send_roboclaw_debug_command(node_id, payload)
                 )
 
                 # Initialize ROS Bridge for WebSocket-ROS communication

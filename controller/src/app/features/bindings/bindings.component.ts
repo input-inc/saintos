@@ -353,8 +353,8 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
                       <select class="input w-full" [(ngModel)]="analogForm.targetSheetId"
                               (ngModelChange)="onSheetChange()">
                         <option value="">-- Select Sheet --</option>
-                        @for (sheet of availableSheets(); track sheet) {
-                          <option [value]="sheet">{{ sheet }}</option>
+                        @for (sheet of availableSheets(); track sheet.id) {
+                          <option [value]="sheet.id">{{ sheet.label }}</option>
                         }
                       </select>
                     </div>
@@ -734,11 +734,27 @@ export class BindingsComponent {
 
   // Expose the helpers on the template so binding rows can use them.
   isWsInputTarget = isWsInputTarget;
-  targetDisplayName = targetDisplayName;
+
+  /** Friendly target name. For WS inputs, resolve sheet_id to the
+   *  node's display_name via discovery so the UI shows "Track Drive
+   *  Right" instead of a raw node id like "teensy41_A1B2C3D4". */
+  targetDisplayName = (t: ControlTarget): string => {
+    if (t.name) return t.name;
+    if (isWsInputTarget(t)) {
+      const sheet = this.discoveryService.wsInputSheets()
+        .find(s => s.id === t.sheet_id);
+      const slot = this.discoveryService.getWsInputsForSheet(t.sheet_id)
+        .find(s => s.input_id === t.input_id);
+      const sheetLabel = sheet?.label || t.sheet_id;
+      const slotLabel = slot?.label || t.input_id;
+      return `${sheetLabel} · ${slotLabel}`;
+    }
+    return targetDisplayName(t);
+  };
 
   formatAnalogAction(action: AnalogAction): string {
     if (action.type === 'direct_control') {
-      return `Direct Control → ${targetDisplayName(action.target)}`;
+      return `Direct Control → ${this.targetDisplayName(action.target)}`;
     }
     if (action.type === 'modifier') {
       switch (action.effect.type) {
@@ -759,7 +775,7 @@ export class BindingsComponent {
       case 'select_panel_item': return 'Select Panel Item';
       case 'toggle_output': return `Toggle: ${action.target_id}`;
       case 'cycle_output': return `Cycle: ${action.target_id} (${action.values.join(', ')})`;
-      case 'direct_control': return `Direct Control → ${targetDisplayName(action.target)} = ${action.value}`;
+      case 'direct_control': return `Direct Control → ${this.targetDisplayName(action.target)} = ${action.value}`;
       case 'e_stop': return 'Emergency Stop';
       case 'none': return 'None';
     }

@@ -845,6 +845,15 @@ static void control_subscription_callback(const void* msgin)
         return;
     }
 
+    // RoboClaw wire-level debug passthrough. Diagnostic-only; the host
+    // CLI uses this to send raw bytes, sniff the idle line, and rebind
+    // the PIO UART without an OTA. See roboclaw_debug_handle_json().
+    if (strstr(msg->data.data, "\"action\":\"roboclaw_debug\"")
+        || strstr(msg->data.data, "\"action\": \"roboclaw_debug\"")) {
+        roboclaw_debug_handle_json(msg->data.data);
+        return;
+    }
+
     // Apply pin control command
     if (pin_control_apply_json(msg->data.data, msg->data.size)) {
         printf("Control command applied\n");

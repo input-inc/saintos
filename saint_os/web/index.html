@@ -897,18 +897,25 @@
                 <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
                     <div class="card">
                         <div class="flex items-center justify-between mb-4">
-                            <h3 class="text-lg font-semibold text-white">Add input</h3>
+                            <h3 class="text-lg font-semibold text-white">Add input node</h3>
                             <button onclick="routingPage.closeInputModal()" class="text-slate-400 hover:text-white">
                                 <span class="material-icons md-20">close</span>
                             </button>
                         </div>
                         <div class="space-y-4">
                             <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Kind</label>
+                                <select id="routing-input-kind" class="input-field w-full">
+                                    <option value="ws_input">WebSocket Input (controller-driven)</option>
+                                    <option value="topic">ROS Topic (subscribe to state)</option>
+                                </select>
+                            </div>
+                            <div id="routing-input-topic-row">
                                 <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
                                 <select id="routing-input-topic" class="input-field w-full"></select>
                                 <p id="routing-input-topic-desc" class="text-xs text-slate-500 mt-1"></p>
                             </div>
-                            <div>
+                            <div id="routing-input-field-row">
                                 <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
                                 <select id="routing-input-field" class="input-field w-full"></select>
                             </div>
@@ -2567,6 +2574,7 @@
         .routing-pin-row.output .routing-pin-value { margin-left: auto; }
         .routing-pin-row.input  .routing-pin-value { margin-left: auto; margin-right: 0.35rem; }
         .routing-node[data-kind="input"]      .routing-node-header { background: #1e3a4a; color: #67e8f9; }
+        .routing-node[data-kind="ws_input"]   .routing-node-header { background: #14532d; color: #86efac; }
         .routing-node[data-kind="output"]     .routing-node-header { background: #4a1e1e; color: #fda4af; }
         .routing-node[data-kind="operator"]   .routing-node-header { background: #2e1e4a; color: #c4b5fd; }
         .routing-node[data-kind="peripheral"] .routing-node-header { background: #0f4c5c; }

@@ -146,7 +146,8 @@ class RoutingPage {
 
     _sheetData(sheetId) {
         return this.routing.sheets?.[sheetId]
-            || { node_id: sheetId, inputs: [], outputs: [], operators: [], widgets: [], wires: [] };
+            || { node_id: sheetId, inputs: [], ws_inputs: [],
+                 outputs: [], operators: [], widgets: [], wires: [] };
     }
 
     _activeSheet() {
@@ -212,9 +213,11 @@ class RoutingPage {
         if (subtitle) {
             const sheet = this._sheetData(node.node_id);
             const periphCount = (node.peripherals || []).length;
+            const wsCount = (sheet.ws_inputs || []).length;
             subtitle.textContent =
                 `${periphCount} peripheral${periphCount === 1 ? '' : 's'} · `
               + `${sheet.inputs.length} in · `
+              + `${wsCount} ws-in · `
               + `${sheet.outputs.length} out · `
               + `${sheet.operators.length} op · `
               + `${sheet.widgets.length} widget${sheet.widgets.length === 1 ? '' : 's'} · `
@@ -270,10 +273,14 @@ class RoutingPage {
         for (const g of this.graphNodes) {
             if (g.kind === 'input') {
                 set(idFor(g.id, 'out', 'out'), sheetVals.inputs?.[g.sheetNodeId]);
+            } else if (g.kind === 'ws_input') {
+                set(idFor(g.id, 'out', 'out'), sheetVals.ws_inputs?.[g.sheetNodeId]);
             } else if (g.kind === 'operator') {
                 set(idFor(g.id, 'out', 'out'), sheetVals.operators?.[g.sheetNodeId]);
             } else if (g.kind === 'output') {
-                set(idFor(g.id, 'value', 'in'), sheetVals.outputs?.[g.sheetNodeId]);
+                // Same value flows through both pins (sink in, tap out).
+                set(idFor(g.id, 'value', 'in'),  sheetVals.outputs?.[g.sheetNodeId]);
+                set(idFor(g.id, 'out',   'out'), sheetVals.outputs?.[g.sheetNodeId]);
             } else if (g.kind === 'widget' && g.widget) {
                 const wType = this._widgetType(g.widget.type);
                 for (const inp of (wType?.inputs || [])) {
@@ -287,11 +294,17 @@ class RoutingPage {
     _buildGraphNodes() {
         const out = [];
         const sheet = this._activeSheet();
-        // Input nodes (left column).
+        // Input nodes (left column) — subscribed to a real ROS topic.
         for (const n of (sheet.inputs || [])) {
             const id = `in::${n.id}`;
             const pos = this._positionFor(id, n.position);
             out.push({ id, kind: 'input', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
+        }
+        // WebSocket-input nodes (left column) — controller writes the value.
+        for (const n of (sheet.ws_inputs || [])) {
+            const id = `ws::${n.id}`;
+            const pos = this._positionFor(id, n.position);
+            out.push({ id, kind: 'ws_input', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
         }
         // Operator nodes (middle column).
         for (const n of (sheet.operators || [])) {
@@ -339,8 +352,8 @@ class RoutingPage {
     _layoutMissing(graphNodes) {
         // Default columns: inputs on the left, operators middle, sinks
         // (output topics, widgets, peripherals) on the right.
-        const cols = { input: 30, operator: 320, output: 640, widget: 640, peripheral: 900 };
-        const cursorY = { input: 30, operator: 30, output: 30, widget: 30, peripheral: 30 };
+        const cols = { input: 30, ws_input: 30, operator: 320, output: 640, widget: 640, peripheral: 900 };
+        const cursorY = { input: 30, ws_input: 30, operator: 30, output: 30, widget: 30, peripheral: 30 };
         const SPACING = 140;
         for (const g of graphNodes) {
             if (g.x === 0 && g.y === 0) {
@@ -443,8 +456,18 @@ class RoutingPage {
             const topicMeta = this.topicCatalog.find(t => t.topic === inp.topic);
             return {
                 title: inp.label || `${inp.topic}${inp.field ? '.' + inp.field : ''}`,
-                subtitle: `${inp.topic}${inp.field ? ' · ' + inp.field : ''}`
+                subtitle: `ROS · ${inp.topic}${inp.field ? ' · ' + inp.field : ''}`
                           + (topicMeta ? ` (${topicMeta.state_type})` : ''),
+                builtin: false, removable: true,
+                inputs: [],
+                outputs: [{ id: 'out', label: 'value' }],
+            };
+        }
+        if (g.kind === 'ws_input') {
+            const inp = g.data;
+            return {
+                title: inp.label || inp.id,
+                subtitle: `WebSocket input · ${inp.id}`,
                 builtin: false, removable: true,
                 inputs: [],
                 outputs: [{ id: 'out', label: 'value' }],
@@ -459,7 +482,10 @@ class RoutingPage {
                           + (topicMeta ? ` (${topicMeta.state_type})` : ''),
                 builtin: false, removable: true,
                 inputs: [{ id: 'value', label: 'value' }],
-                outputs: [],
+                // Tap pin: a wire from this pin re-emits the same value
+                // that was published to ROS, so the same sheet can chain
+                // ROS output → peripheral on the same value.
+                outputs: [{ id: 'out', label: 'tap' }],
             };
         }
         if (g.kind === 'operator') {
@@ -557,7 +583,15 @@ class RoutingPage {
     _endpointToHandle(ep, dirHint) {
         if (!ep) return null;
         if (ep.kind === 'input')      return `in::${ep.parts[0]}/out`;
-        if (ep.kind === 'output')     return `out::${ep.parts[0]}/value`;
+        if (ep.kind === 'ws_input')   return `ws::${ep.parts[0]}/out`;
+        if (ep.kind === 'output') {
+            // Output is both a sink (left pin "value") and a tap source
+            // (right pin "out"). Pick by direction so wires render to
+            // the right side of the card.
+            return dirHint === 'out'
+                ? `out::${ep.parts[0]}/out`
+                : `out::${ep.parts[0]}/value`;
+        }
         if (ep.kind === 'operator')   return `op::${ep.parts[0]}/${ep.parts[1] || 'out'}`;
         if (ep.kind === 'peripheral') return `p::${ep.parts[0]}::${ep.parts[1]}/${ep.parts[2]}`;
         if (ep.kind === 'widget')     return `w::${ep.parts[0]}/${ep.parts[1]}`;
@@ -568,6 +602,9 @@ class RoutingPage {
         const [graphNodeId, pinId] = handle.split('/');
         if (graphNodeId.startsWith('in::')) {
             return { kind: 'input', parts: [graphNodeId.slice(4)] };
+        }
+        if (graphNodeId.startsWith('ws::')) {
+            return { kind: 'ws_input', parts: [graphNodeId.slice(4)] };
         }
         if (graphNodeId.startsWith('out::')) {
             return { kind: 'output', parts: [graphNodeId.slice(5)] };
@@ -732,7 +769,8 @@ class RoutingPage {
         // removed through the same remove_sheet_node action — the server
         // dispatches by id across the four lists.
         let sheetNodeId = null;
-        if (graphNodeId.startsWith('in::'))  sheetNodeId = graphNodeId.slice(4);
+        if (graphNodeId.startsWith('in::'))   sheetNodeId = graphNodeId.slice(4);
+        else if (graphNodeId.startsWith('ws::'))  sheetNodeId = graphNodeId.slice(4);
         else if (graphNodeId.startsWith('out::')) sheetNodeId = graphNodeId.slice(5);
         else if (graphNodeId.startsWith('op::'))  sheetNodeId = graphNodeId.slice(4);
         else if (graphNodeId.startsWith('w::'))   sheetNodeId = graphNodeId.slice(3);
@@ -763,11 +801,14 @@ class RoutingPage {
 
     openInputModal() {
         if (!this.activeSheetId) return;
+        const kindSel = document.getElementById('routing-input-kind');
         const topicSel = document.getElementById('routing-input-topic');
         const fieldSel = document.getElementById('routing-input-field');
         const desc = document.getElementById('routing-input-topic-desc');
         const labelInput = document.getElementById('routing-input-label');
-        if (!topicSel || !fieldSel) return;
+        const topicRow = document.getElementById('routing-input-topic-row');
+        const fieldRow = document.getElementById('routing-input-field-row');
+        if (!topicSel || !fieldSel || !kindSel) return;
 
         topicSel.innerHTML = this.topicCatalog.map(t =>
             `<option value="${escapeAttr(t.topic)}">${escapeHtml(t.topic)}</option>`
@@ -783,6 +824,20 @@ class RoutingPage {
         topicSel.onchange = refreshFields;
         refreshFields();
 
+        const refreshKindUI = () => {
+            const isWs = kindSel.value === 'ws_input';
+            topicRow.classList.toggle('hidden', isWs);
+            fieldRow.classList.toggle('hidden', isWs);
+            labelInput.placeholder = isWs
+                ? 'e.g. "Left stick X"'
+                : 'Defaults to topic.channel';
+        };
+        kindSel.onchange = refreshKindUI;
+        // Default to WS input — that's the path the controller bindings
+        // now use; ROS-state subscriptions are the secondary option.
+        kindSel.value = 'ws_input';
+        refreshKindUI();
+
         labelInput.value = '';
         document.getElementById('routing-input-error').classList.add('hidden');
         document.getElementById('routing-input-modal').classList.remove('hidden');
@@ -793,20 +848,28 @@ class RoutingPage {
     }
 
     async saveInputModal() {
-        const topic = document.getElementById('routing-input-topic').value;
-        const field = document.getElementById('routing-input-field').value;
+        const kind = document.getElementById('routing-input-kind').value;
         const label = document.getElementById('routing-input-label').value.trim();
         const errEl = document.getElementById('routing-input-error');
         errEl.classList.add('hidden');
-        if (!topic) {
-            errEl.textContent = 'Pick a ROS topic';
-            errEl.classList.remove('hidden');
-            return;
-        }
         try {
-            const result = await window.saintWS.management('add_routing_input', {
-                node_id: this.activeSheetId, topic, field, label,
-            });
+            let result;
+            if (kind === 'ws_input') {
+                result = await window.saintWS.management('add_routing_ws_input', {
+                    node_id: this.activeSheetId, label,
+                });
+            } else {
+                const topic = document.getElementById('routing-input-topic').value;
+                const field = document.getElementById('routing-input-field').value;
+                if (!topic) {
+                    errEl.textContent = 'Pick a ROS topic';
+                    errEl.classList.remove('hidden');
+                    return;
+                }
+                result = await window.saintWS.management('add_routing_input', {
+                    node_id: this.activeSheetId, topic, field, label,
+                });
+            }
             if (result && result.success === false) {
                 errEl.textContent = result.message || 'Failed to add input';
                 errEl.classList.remove('hidden');
