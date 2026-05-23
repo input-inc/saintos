@@ -222,8 +222,17 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
         console.log('[VirtualKeyboard] onChange callback:', input);
         this.ngZone.run(() => this.onInputChange(input));
       },
+      // onKeyPress is left wired as a defense-in-depth fallback —
+      // if simple-keyboard's internal handling does fire (e.g. on a
+      // desktop dev machine running tauri dev), we still respond.
+      // But we DON'T rely on it: a manual pointerdown delegate
+      // installed below catches every key press regardless of
+      // whether simple-keyboard's events fired. That delegate is
+      // what makes the keyboard usable in Game Mode, where touch
+      // events inside gamescope + Flatpak don't reach the library's
+      // internal listeners cleanly.
       onKeyPress: (button) => {
-        console.log('[VirtualKeyboard] onKeyPress callback:', button);
+        console.log('[VirtualKeyboard] onKeyPress callback (library):', button);
         this.ngZone.run(() => this.onKeyPress(button));
       },
       layout: {
@@ -267,11 +276,46 @@ export class VirtualKeyboardComponent implements OnInit, AfterViewInit, OnDestro
       theme: 'simple-keyboard hg-theme-default',
       useButtonTag: true,  // Use <button> elements for better touch support
       disableButtonHold: true,  // Disable hold behavior for simpler touch handling
-      useTouchEvents: true,  // Use touch events instead of mouse events
-      useMouseEvents: true,  // Also keep mouse events for desktop testing
+      // Turn OFF simple-keyboard's own touch + mouse handlers. They
+      // bound onto each key element in a way that didn't fire under
+      // gamescope/Flatpak in Steam Deck Game Mode — keys rendered
+      // but nothing happened when tapped. The pointerdown delegate
+      // we install below replaces them with a single, more reliable
+      // handler.
+      useTouchEvents: false,
+      useMouseEvents: false,
     });
 
-    // Note: simple-keyboard's onKeyPress callback handles button clicks
+    // Manual pointerdown delegate on the keyboard wrapper.
+    //
+    // simple-keyboard renders each key as a <button> with a
+    // `data-skbtn="<key>"` attribute holding the key value. We catch
+    // pointerdown anywhere in the wrapper, find the closest
+    // [data-skbtn] ancestor, and route its value through our
+    // handleKeyPress. pointerdown (not click) so:
+    //   - A single tap fires immediately, no mousedown→mouseup race
+    //   - Works for touch, mouse, pen, and gamescope-synthesized
+    //     events uniformly (pointer events are the Web's normalized
+    //     input abstraction across all input modalities)
+    //   - Avoids losing the press if the user's finger drifts slightly
+    //     between down and up (which would invalidate a click)
+    //
+    // preventDefault keeps the press from stealing focus from the
+    // text input the keyboard is editing on its behalf.
+    this.keyboardContainer.nativeElement.addEventListener(
+      'pointerdown',
+      (event: PointerEvent) => {
+        const target = event.target as HTMLElement | null;
+        if (!target) return;
+        const btn = target.closest('[data-skbtn]') as HTMLElement | null;
+        if (!btn) return;
+        const key = btn.getAttribute('data-skbtn');
+        if (!key) return;
+        event.preventDefault();
+        console.log('[VirtualKeyboard] pointerdown delegate fired:', key);
+        this.ngZone.run(() => this.handleKeyPress(key));
+      },
+    );
 
     // Set initial value
     this.keyboard.setInput(this.inputValue());

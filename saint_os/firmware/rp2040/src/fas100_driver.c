@@ -198,6 +198,20 @@ static uint32_t stat_heartbeats     = 0;  // CRC-valid 0x00-header (no-data) fra
 static uint32_t stats_last_dump_ms  = 0;
 #define FAS100_STATS_DUMP_MS  5000
 
+// Consecutive non-known-data frames seen by the parser since the last
+// known-data-id success. A run of these is the smoking gun for byte-
+// alignment loss inside an otherwise live S.Port stream — once it
+// crosses FAS100_CONSEC_BAD_THRESH the main loop triggers an out-of-
+// cycle soft-resync. Heartbeats DO NOT reset the streak: a shifted
+// all-zero payload still validates as an empty-header heartbeat by
+// luck, so they're an unreliable alignment indicator.
+static uint32_t stat_consecutive_bad = 0;
+// ~1 s at the steady ~17 polls/s rate. Long enough to ride out a
+// single transient crc_bad without flushing, short enough that
+// genuine alignment loss is corrected ~4× faster than the 4 s
+// last_response_ms path.
+#define FAS100_CONSEC_BAD_THRESH 16
+
 // Diagnostic raw-byte capture. The parser only reports pass/fail
 // counts; this dumps the actual bytes between two consecutive polls
 // so we can see (a) whether the sensor's first byte is 0x10 like the
@@ -259,6 +273,7 @@ static void reset_stats(void)
     stat_unknown_id = 0;
     stat_heartbeats = 0;
     stat_soft_resyncs = 0;
+    stat_consecutive_bad = 0;
     stats_last_dump_ms = PLATFORM_MILLIS();
     raw_dump_armed = false;
     raw_dump_pos = 0;
@@ -477,6 +492,12 @@ static void sport_feed_byte(uint8_t raw)
                     && data_id != SPORT_DATA_ID_TEMP1
                     && data_id != SPORT_DATA_ID_TEMP2) {
                     stat_unknown_id++;
+                    stat_consecutive_bad++;
+                } else {
+                    // Strong alignment signal: known data_id with valid
+                    // CRC. Clear the streak so a future drop starts
+                    // counting fresh.
+                    stat_consecutive_bad = 0;
                 }
                 store_telemetry(data_id, value);
             } else {
@@ -487,15 +508,36 @@ static void sport_feed_byte(uint8_t raw)
                 stat_heartbeats++;
                 sensor_responded = true;
                 last_response_ms = PLATFORM_MILLIS();
+                // Deliberately NOT touching stat_consecutive_bad here.
+                // A misaligned all-zero payload validates as a heartbeat
+                // by luck, so heartbeats can't be trusted as an
+                // alignment indicator.
             }
+            rx_pos = 0;
+            rx_in_stuff = false;
         } else {
+            // Valid-looking header but CRC mismatch. Could be a stray
+            // bit-flip, but in practice the dominant cause is that we
+            // lost byte alignment with the sensor's frame stream and
+            // the 8-byte window we collected straddles two real frames.
+            // Shift-and-retry: drop the oldest byte and let the next
+            // received byte complete the next alignment attempt.
             stat_frames_crc_bad++;
+            stat_consecutive_bad++;
+            memmove(rx_buf, rx_buf + 1, FAS100_RESPONSE_FRAME_SIZE - 1);
+            rx_pos = FAS100_RESPONSE_FRAME_SIZE - 1;
         }
     } else {
+        // Header byte is neither 0x10 nor 0x00 — definitely misaligned
+        // (or staring at sensor-id leak / EMI debris). Same shift-and-
+        // retry as the bad-CRC path: within at most 7 byte-times we
+        // either re-sync or stat_consecutive_bad trips the fast soft-
+        // resync from fas100_update().
         stat_frames_crc_bad++;
+        stat_consecutive_bad++;
+        memmove(rx_buf, rx_buf + 1, FAS100_RESPONSE_FRAME_SIZE - 1);
+        rx_pos = FAS100_RESPONSE_FRAME_SIZE - 1;
     }
-    rx_pos = 0;
-    rx_in_stuff = false;
 }
 
 /* FBUS parser. FBUS frames have no byte stuffing but DO have a fixed
@@ -555,10 +597,14 @@ static void fbus_feed_byte(uint8_t raw)
             && data_id != SPORT_DATA_ID_TEMP1
             && data_id != SPORT_DATA_ID_TEMP2) {
             stat_unknown_id++;
+            stat_consecutive_bad++;
+        } else {
+            stat_consecutive_bad = 0;
         }
         store_telemetry(data_id, value);
     } else {
         stat_frames_crc_bad++;
+        stat_consecutive_bad++;
     }
     rx_pos = 0;
 }
@@ -774,14 +820,23 @@ void fas100_update(void)
                 (unsigned long)byte_silence,
                 other == PROTO_FBUS ? "FBUS" : "S.Port");
             enter_phase(target, other);
-        } else if (valid_silence >= FAS100_LOST_LINK_MS
-                   && (now - last_soft_resync_ms) >= FAS100_LOST_LINK_MS) {
+        } else if ((valid_silence >= FAS100_LOST_LINK_MS
+                    && (now - last_soft_resync_ms) >= FAS100_LOST_LINK_MS)
+                   || stat_consecutive_bad >= FAS100_CONSEC_BAD_THRESH) {
             // Bytes are arriving (link is alive) but none have CRC-
             // validated in a while — parser is desynced or the wire is
-            // briefly noisy. Flush the UART FIFO and reset the frame
-            // accumulator so we start fresh on the next 0x7E poll
-            // echo (S.Port) or 0x08 header (FBUS). Stay in PHASE_LOCKED;
-            // sensor_responded stays true so is_connected doesn't flap.
+            // briefly noisy. Two paths in:
+            //  1) valid_silence ≥ 4 s — the original watchdog. Slow but
+            //     conservative; never fires on a transient blip.
+            //  2) stat_consecutive_bad ≥ THRESH — the fast path. A run
+            //     of crc_bad / unknown_id frames is the direct signature
+            //     of byte-alignment loss; heartbeats can't keep it
+            //     suppressed because they don't clear the streak.
+            // Flush the UART FIFO and reset the frame accumulator so
+            // we start fresh on the next 0x7E poll echo (S.Port) or
+            // 0x08 header (FBUS). Stay in PHASE_LOCKED; sensor_responded
+            // stays true so is_connected doesn't flap.
+            bool fast = stat_consecutive_bad >= FAS100_CONSEC_BAD_THRESH;
 #ifndef SIMULATION
             if (fas100_uart) {
                 while (uart_is_readable(fas100_uart)) (void)uart_getc(fas100_uart);
@@ -790,13 +845,22 @@ void fas100_update(void)
             rx_pos = 0;
             rx_in_stuff = false;
             sport_skip_addr = false;
+            uint32_t bad_at_trigger = stat_consecutive_bad;
+            stat_consecutive_bad = 0;
             last_soft_resync_ms = now;
             stat_soft_resyncs++;
-            saint_log_publish("info",
-                "FAS100: soft-resync (%s, no valid frame for %lu ms, "
-                "bus still active)",
-                active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
-                (unsigned long)valid_silence);
+            if (fast) {
+                saint_log_publish("info",
+                    "FAS100: fast soft-resync (%s, %lu consecutive bad frames)",
+                    active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
+                    (unsigned long)bad_at_trigger);
+            } else {
+                saint_log_publish("info",
+                    "FAS100: soft-resync (%s, no valid frame for %lu ms, "
+                    "bus still active)",
+                    active_proto == PROTO_FBUS ? "FBUS" : "S.Port",
+                    (unsigned long)valid_silence);
+            }
         }
     }
 
