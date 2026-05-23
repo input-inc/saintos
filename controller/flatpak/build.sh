@@ -39,16 +39,15 @@ prereqs() {
         flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
     echo "==> Installing required runtimes + SDK extensions"
-    # Versions match the manifest's runtime-version. GNOME 47 hit EOL
-    # in October 2025; we use //48 (released March 2025, supported
-    # through ~September 2026). When bumping further, change both
-    # this script AND com.saintos.Controller.yml in lockstep.
+    # Versions match the manifest's runtime-version. Bumped together
+    # — GNOME runtimes EOL ~12 months after release. Check current
+    # with `flatpak remote-info flathub org.gnome.Platform`.
     flatpak install --user --noninteractive --or-update flathub \
         org.flatpak.Builder \
-        org.gnome.Sdk//48 \
-        org.gnome.Platform//48 \
-        org.freedesktop.Sdk.Extension.rust-stable//24.08 \
-        org.freedesktop.Sdk.Extension.node20//24.08
+        org.gnome.Sdk//50 \
+        org.gnome.Platform//50 \
+        org.freedesktop.Sdk.Extension.rust-stable//25.08 \
+        org.freedesktop.Sdk.Extension.node20//25.08
 }
 
 build_and_install() {
