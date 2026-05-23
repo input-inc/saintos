@@ -18,13 +18,19 @@
 #
 # Prereqs on the Steam Deck (one-time, requires internet once):
 #   flatpak install --user flathub org.flatpak.Builder
-#   flatpak install --user flathub org.gnome.Sdk//47 org.gnome.Platform//47
+#   flatpak install --user flathub org.gnome.Sdk//48 org.gnome.Platform//48
 #   flatpak install --user flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
 #   flatpak install --user flathub org.freedesktop.Sdk.Extension.node20//24.08
+#
+# Runtime version note: bump together with the SDK. As of writing,
+# GNOME 47 hit EOL in October 2025 (Flathub will install it but warns
+# loudly), so we use //48 — released March 2025, supported through
+# ~September 2026. When GNOME 48 EOLs we'll move to whatever's
+# current. webkit2gtk-4.1 is in the GNOME runtime through at least 48.
 
 app-id: com.saintos.Controller
 runtime: org.gnome.Platform
-runtime-version: '47'
+runtime-version: '48'
 sdk: org.gnome.Sdk
 
 # SDK extensions provide the Rust and Node toolchains inside the

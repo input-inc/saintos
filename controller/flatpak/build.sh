@@ -19,6 +19,17 @@ APP_ID="com.saintos.Controller"
 BUILD_DIR="$CONTROLLER_DIR/flatpak-build"
 REPO_DIR="$CONTROLLER_DIR/flatpak-repo"
 
+# Resolve which `flatpak-builder` to use. On most distros it's a host
+# package; on SteamOS (read-only root) it's installed as the Flathub
+# Flatpak `org.flatpak.Builder` and invoked via `flatpak run`. Use
+# the host binary if it exists, otherwise fall through to the Flatpak.
+# Built as an array so the call-site can expand cleanly with args.
+if command -v flatpak-builder >/dev/null 2>&1; then
+    FLATPAK_BUILDER=(flatpak-builder)
+else
+    FLATPAK_BUILDER=(flatpak run org.flatpak.Builder)
+fi
+
 prereqs() {
     # Run once per host. Flathub is already on a stock Steam Deck;
     # the install commands are no-ops if the runtimes are already
@@ -28,10 +39,14 @@ prereqs() {
         flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
     echo "==> Installing required runtimes + SDK extensions"
+    # Versions match the manifest's runtime-version. GNOME 47 hit EOL
+    # in October 2025; we use //48 (released March 2025, supported
+    # through ~September 2026). When bumping further, change both
+    # this script AND com.saintos.Controller.yml in lockstep.
     flatpak install --user --noninteractive --or-update flathub \
         org.flatpak.Builder \
-        org.gnome.Sdk//47 \
-        org.gnome.Platform//47 \
+        org.gnome.Sdk//48 \
+        org.gnome.Platform//48 \
         org.freedesktop.Sdk.Extension.rust-stable//24.08 \
         org.freedesktop.Sdk.Extension.node20//24.08
 }
@@ -39,7 +54,7 @@ prereqs() {
 build_and_install() {
     echo "==> Building + installing $APP_ID"
     cd "$CONTROLLER_DIR"
-    flatpak-builder \
+    "${FLATPAK_BUILDER[@]}" \
         --user \
         --install \
         --force-clean \
@@ -58,7 +73,7 @@ build_and_install() {
 bundle() {
     echo "==> Building $APP_ID into a portable .flatpak"
     cd "$CONTROLLER_DIR"
-    flatpak-builder \
+    "${FLATPAK_BUILDER[@]}" \
         --user \
         --repo="$REPO_DIR" \
         --force-clean \
