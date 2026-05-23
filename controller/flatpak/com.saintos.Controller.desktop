@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=SAINT Controller
-GenericName=Rover Controller
-Comment=Controller app for SAINT.OS rovers
+GenericName=Robot Controller
+Comment=Controller app for SAINT.OS robots
 Exec=saint-controller
 Icon=com.saintos.Controller
 Terminal=false
 Categories=Network;RemoteAccess;Utility;
 StartupNotify=true
 StartupWMClass=saint-controller
-Keywords=SAINT;OpenSAINT;Rover;Robotics;
+Keywords=SAINT;OpenSAINT;Robot;Robotics;

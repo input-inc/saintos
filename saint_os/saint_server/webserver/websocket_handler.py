@@ -1109,33 +1109,33 @@ class WebSocketHandler:
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
 
+        elif action == 'add_routing_output':
+            node_id = params.get('node_id')
+            topic = params.get('topic')
+            if not node_id or not topic:
+                return {"status": "error", "message": "Missing node_id or topic"}
+            result = self.state_manager.add_routing_output(
+                node_id=node_id,
+                topic=topic,
+                field=params.get('field', ''),
+                label=params.get('label', ''),
+                position=params.get('position'),
+            )
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
         elif action == 'add_widget':
+            node_id = params.get('node_id')
             type_id = params.get('type')
-            if not type_id:
-                return {"status": "error", "message": "Missing type"}
+            if not node_id or not type_id:
+                return {"status": "error", "message": "Missing node_id or type"}
             result = self.state_manager.add_widget(
+                node_id=node_id,
                 type_id=type_id,
                 label=params.get('label'),
                 position=params.get('position'),
                 params=params.get('params'),
             )
-            await self._broadcast_routing()
-            return {"status": "ok", "data": result}
-
-        elif action == 'update_widget':
-            widget_id = params.get('widget_id')
-            if not widget_id:
-                return {"status": "error", "message": "Missing widget_id"}
-            changes = {k: v for k, v in params.items() if k in ('label', 'position', 'params')}
-            result = self.state_manager.update_widget(widget_id, **changes)
-            await self._broadcast_routing()
-            return {"status": "ok", "data": result}
-
-        elif action == 'remove_widget':
-            widget_id = params.get('widget_id')
-            if not widget_id:
-                return {"status": "error", "message": "Missing widget_id"}
-            result = self.state_manager.remove_widget(widget_id)
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
 

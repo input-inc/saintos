@@ -467,6 +467,44 @@ class InputNode:
 
 
 @dataclass
+class OutputNode:
+    """A ROS topic sink on a sheet.
+
+    The mirror of InputNode: a wire feeding this node's `value` pin gets
+    published back onto `topic.field` via the bridge's set_topic_channel
+    buffer (same path used by controller bindings). Lets the operator
+    take a sensor reading, run it through operators, and emit the result
+    onto a different topic.
+    """
+    id: str
+    topic: str
+    field: str
+    label: str = ""
+    position: Tuple[int, int] = (0, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "topic": self.topic,
+            "field": self.field,
+            "label": self.label,
+            "position": list(self.position),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "OutputNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            topic=d["topic"],
+            field=d.get("field", "value"),
+            label=d.get("label", ""),
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+        )
+
+
+@dataclass
 class OperatorNode:
     """A server-evaluated transform on a sheet.
 
@@ -530,32 +568,48 @@ class Wire:
         )
 
 
-# Sentinel node_id for the dashboard sheet (widgets only — no peripherals).
+# Sentinel used by the legacy widgets-only sheet; kept so old yaml files
+# loaded by from_dict can be migrated (widgets moved onto a real sheet),
+# but no longer exposed in the routing UI.
 DASHBOARD_SHEET_ID = "_dashboard"
 
 
 @dataclass
 class NodeSheet:
-    """All routing state owned by one controller node (or the dashboard)."""
+    """All routing state owned by one controller node.
+
+    A sheet contains the ROS topic Inputs, Operator transforms, Output
+    topic publishers, Widget sinks, and the Wires connecting them. Each
+    sheet is hard-scoped to one controller node — the peripherals
+    visible on the canvas are exactly that node's peripherals, and
+    widgets here are surfaced on that controller's dashboard view.
+    """
     node_id: str
     inputs: List[InputNode] = field(default_factory=list)
+    outputs: List["OutputNode"] = field(default_factory=list)
     operators: List[OperatorNode] = field(default_factory=list)
+    widgets: List["WidgetInstance"] = field(default_factory=list)
     wires: List[Wire] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "node_id": self.node_id,
             "inputs": [n.to_dict() for n in self.inputs],
+            "outputs": [n.to_dict() for n in self.outputs],
             "operators": [n.to_dict() for n in self.operators],
+            "widgets": [w.to_dict() for w in self.widgets],
             "wires": [w.to_dict() for w in self.wires],
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "NodeSheet":
+        # Forward reference: WidgetInstance is declared below.
         return cls(
             node_id=d["node_id"],
             inputs=[InputNode.from_dict(x) for x in d.get("inputs", [])],
+            outputs=[OutputNode.from_dict(x) for x in d.get("outputs", [])],
             operators=[OperatorNode.from_dict(x) for x in d.get("operators", [])],
+            widgets=[WidgetInstance.from_dict(x) for x in d.get("widgets", [])],
             wires=[Wire.from_dict(x) for x in d.get("wires", [])],
         )
 
@@ -577,6 +631,18 @@ class NodeSheet:
         self.inputs.append(node)
         return node
 
+    def add_output(self, topic: str, field: str, label: str = "",
+                   position: Tuple[int, int] = (0, 0)) -> OutputNode:
+        existing = {n.id for n in self.outputs}
+        node = OutputNode(
+            id=self._next_id("out", existing),
+            topic=topic, field=field,
+            label=label or f"{topic}{('.' + field) if field else ''}",
+            position=position,
+        )
+        self.outputs.append(node)
+        return node
+
     def add_operator(self, op: str, label: str = "",
                      params: Optional[Dict[str, Any]] = None,
                      defaults: Optional[Dict[str, float]] = None,
@@ -591,6 +657,19 @@ class NodeSheet:
         )
         self.operators.append(node)
         return node
+
+    def add_widget(self, type_id: str, label: str,
+                   position: Tuple[int, int] = (0, 0),
+                   params: Optional[Dict[str, Any]] = None) -> "WidgetInstance":
+        existing = {w.id for w in self.widgets}
+        n = sum(1 for w in self.widgets if w.type == type_id) + 1
+        while f"{type_id}-{n}" in existing:
+            n += 1
+        widget = WidgetInstance(id=f"{type_id}-{n}", type=type_id,
+                                label=label or type_id,
+                                position=position, params=dict(params or {}))
+        self.widgets.append(widget)
+        return widget
 
     def add_wire(self, source: RouteEndpoint, sink: RouteEndpoint) -> Wire:
         existing = {w.id for w in self.wires}
@@ -611,6 +690,15 @@ class NodeSheet:
                       if not (w.source.kind == "input" and w.source.parts and w.source.parts[0] == input_id)]
         return True
 
+    def remove_output(self, output_id: str) -> bool:
+        before = len(self.outputs)
+        self.outputs = [n for n in self.outputs if n.id != output_id]
+        if len(self.outputs) == before:
+            return False
+        self.wires = [w for w in self.wires
+                      if not (w.sink.kind == "output" and w.sink.parts and w.sink.parts[0] == output_id)]
+        return True
+
     def remove_operator(self, op_id: str) -> bool:
         before = len(self.operators)
         self.operators = [n for n in self.operators if n.id != op_id]
@@ -623,6 +711,17 @@ class NodeSheet:
         ]
         return True
 
+    def remove_widget(self, widget_id: str) -> bool:
+        before = len(self.widgets)
+        self.widgets = [w for w in self.widgets if w.id != widget_id]
+        if len(self.widgets) == before:
+            return False
+        self.wires = [
+            w for w in self.wires
+            if not (w.sink.kind == "widget" and w.sink.parts and w.sink.parts[0] == widget_id)
+        ]
+        return True
+
     def remove_wire(self, wire_id: str) -> bool:
         before = len(self.wires)
         self.wires = [w for w in self.wires if w.id != wire_id]
@@ -631,8 +730,14 @@ class NodeSheet:
     def find_input(self, input_id: str) -> Optional[InputNode]:
         return next((n for n in self.inputs if n.id == input_id), None)
 
+    def find_output(self, output_id: str) -> Optional[OutputNode]:
+        return next((n for n in self.outputs if n.id == output_id), None)
+
     def find_operator(self, op_id: str) -> Optional[OperatorNode]:
         return next((n for n in self.operators if n.id == op_id), None)
+
+    def find_widget(self, widget_id: str) -> Optional["WidgetInstance"]:
+        return next((w for w in self.widgets if w.id == widget_id), None)
 
 
 # ── Operator catalog ──────────────────────────────────────────────────
@@ -856,16 +961,14 @@ DEFAULT_WIDGET_CATALOG: Dict[str, WidgetType] = {
 @dataclass
 class SystemRouting:
     version: int = 0
-    # Sheets keyed by owning node_id (controller id, or DASHBOARD_SHEET_ID
-    # for the widgets-only pseudo-sheet).
+    # Sheets keyed by owning controller node_id. Each sheet owns its
+    # own inputs / outputs / operators / widgets / wires.
     sheets: Dict[str, NodeSheet] = field(default_factory=dict)
-    widgets: List[WidgetInstance] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "version": self.version,
             "sheets":  {nid: s.to_dict() for nid, s in self.sheets.items()},
-            "widgets": [w.to_dict() for w in self.widgets],
         }
 
     @classmethod
@@ -877,10 +980,18 @@ class SystemRouting:
             sd = dict(sd)
             sd.setdefault("node_id", nid)
             sheets[nid] = NodeSheet.from_dict(sd)
+        # Migration: legacy yamls held a top-level `widgets` list (the
+        # old global dashboard). Stash any survivors on the legacy
+        # DASHBOARD_SHEET_ID sheet so the operator can re-place them
+        # rather than silently losing them.
+        legacy_widgets = d.get("widgets") or []
+        if legacy_widgets:
+            legacy = sheets.setdefault(DASHBOARD_SHEET_ID, NodeSheet(node_id=DASHBOARD_SHEET_ID))
+            for w in legacy_widgets:
+                legacy.widgets.append(WidgetInstance.from_dict(w))
         return cls(
             version=int(d.get("version", 0)),
             sheets=sheets,
-            widgets=[WidgetInstance.from_dict(w) for w in d.get("widgets", [])],
         )
 
     # ── Sheet access ──────────────────────────────────────────────────
@@ -945,50 +1056,15 @@ class SystemRouting:
             self.version += 1
         return dropped
 
-    # ── Widgets ───────────────────────────────────────────────────────
+    # ── Widget lookup across sheets (used by `wires_touching_widget`) ──
 
-    def _next_widget_id(self, type_id: str) -> str:
-        existing = {w.id for w in self.widgets}
-        n = sum(1 for w in self.widgets if w.type == type_id) + 1
-        while f"{type_id}-{n}" in existing:
-            n += 1
-        return f"{type_id}-{n}"
-
-    def add_widget(self, type_id: str, label: str,
-                   position: Tuple[int, int] = (0, 0),
-                   widget_id: Optional[str] = None,
-                   params: Optional[Dict[str, Any]] = None) -> WidgetInstance:
-        wid = widget_id or self._next_widget_id(type_id)
-        w = WidgetInstance(id=wid, type=type_id, label=label,
-                           position=position, params=dict(params or {}))
-        self.widgets.append(w)
-        self.version += 1
-        return w
-
-    def update_widget(self, widget_id: str, **changes) -> Optional[WidgetInstance]:
-        for w in self.widgets:
-            if w.id == widget_id:
-                for k, v in changes.items():
-                    if hasattr(w, k):
-                        setattr(w, k, v)
-                self.version += 1
-                return w
-        return None
-
-    def remove_widget(self, widget_id: str) -> bool:
-        before = len(self.widgets)
-        # Cascade: drop wires across every sheet that target this widget.
+    def find_widget(self, widget_id: str) -> Optional[Tuple[NodeSheet, WidgetInstance]]:
+        """Locate which sheet owns the widget, if any."""
         for sheet in self.sheets.values():
-            sheet.wires = [
-                w for w in sheet.wires
-                if not any(ep.kind == "widget" and ep.parts and ep.parts[0] == widget_id
-                           for ep in (w.source, w.sink))
-            ]
-        self.widgets = [w for w in self.widgets if w.id != widget_id]
-        if len(self.widgets) < before:
-            self.version += 1
-            return True
-        return False
+            w = sheet.find_widget(widget_id)
+            if w is not None:
+                return sheet, w
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

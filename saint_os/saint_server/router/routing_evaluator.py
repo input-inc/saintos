@@ -147,11 +147,11 @@ class RoutingEvaluator:
             op_cache[op_id] = value
             return value
 
-        # Walk all wires that terminate at a peripheral or widget sink
-        # and resolve each source. Operator outputs are computed on-
-        # demand via eval_operator.
+        # Walk all wires that terminate at a peripheral, widget, or
+        # output sink. Operator outputs are computed on-demand via
+        # eval_operator (and memoized in op_cache for cross-wire reuse).
         for wire in sheet.wires:
-            if wire.sink.kind not in ("peripheral", "widget"):
+            if wire.sink.kind not in ("peripheral", "widget", "output"):
                 continue
             value = self._resolve_source(sheet, wire.source, eval_operator)
             if value is None:
@@ -224,6 +224,24 @@ class RoutingEvaluator:
             if len(sink.parts) < 2:
                 return
             self._widget_values[(sink.parts[0], sink.parts[1])] = float(value)
+        elif sink.kind == "output":
+            # Output nodes republish onto a ROS topic channel via the
+            # bridge's per-topic buffer — same path the controller
+            # bindings use, so an Output is effectively the operator's
+            # way to turn computed values back into ROS state.
+            if not sink.parts:
+                return
+            out_node = sheet.find_output(sink.parts[0])
+            if out_node is None or not out_node.topic:
+                return
+            try:
+                self._bridge.set_topic_channel(
+                    out_node.topic, out_node.field, float(value),
+                    client_id="_routing_evaluator",
+                )
+            except Exception as e:
+                self._log("error",
+                          f"Failed to publish output {out_node.id} → {out_node.topic}.{out_node.field}: {e}")
 
     # ── subscription plumbing ───────────────────────────────────────
 

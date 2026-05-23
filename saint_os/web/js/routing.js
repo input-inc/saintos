@@ -13,14 +13,12 @@
  * server-side.
  */
 
-const DASHBOARD_SHEET_ID = '_dashboard';
-
 class RoutingPage {
     constructor() {
         this.catalog = null;          // peripheral_types + widget_types + operator_types
         this.topicCatalog = [];       // list of {topic, state_type, channels[]}
         this.nodes = [];              // adopted controller nodes (with peripherals)
-        this.routing = { version: 0, sheets: {}, widgets: [] };
+        this.routing = { version: 0, sheets: {} };
 
         this.activeSheetId = this._loadActiveSheet();
         // Map "sheetId:nodeId" → {x, y}
@@ -40,6 +38,8 @@ class RoutingPage {
     init() {
         document.getElementById('btn-routing-add-input')
             ?.addEventListener('click', () => this.openInputModal());
+        document.getElementById('btn-routing-add-output')
+            ?.addEventListener('click', () => this.openOutputModal());
         document.getElementById('btn-routing-add-operator')
             ?.addEventListener('click', () => this.openOperatorModal());
         document.getElementById('btn-routing-add-widget')
@@ -51,7 +51,7 @@ class RoutingPage {
         if (ws) {
             ws.on('state', (msg) => {
                 if (!msg || msg.node !== 'system_routing') return;
-                this.routing = msg.data || { version: 0, sheets: {}, widgets: [] };
+                this.routing = msg.data || { version: 0, sheets: {} };
                 if (this._active) this.render();
             });
         }
@@ -77,7 +77,7 @@ class RoutingPage {
             ]);
             this.catalog = catalog;
             this.nodes = await this._enrichNodesWithPeripherals(nodes?.nodes || []);
-            this.routing = routing || { version: 0, sheets: {}, widgets: [] };
+            this.routing = routing || { version: 0, sheets: {} };
             this.topicCatalog = (topics?.topics) || [];
 
             this._ensureActiveSheet();
@@ -121,10 +121,8 @@ class RoutingPage {
     }
 
     _sheetIds() {
-        // Sheets in display order: each adopted controller, then dashboard.
-        const ids = this.nodes.map(n => n.node_id);
-        ids.push(DASHBOARD_SHEET_ID);
-        return ids;
+        // Sheets in display order: one per adopted controller node.
+        return this.nodes.map(n => n.node_id);
     }
 
     selectSheet(sheetId) {
@@ -135,7 +133,8 @@ class RoutingPage {
     }
 
     _sheetData(sheetId) {
-        return this.routing.sheets?.[sheetId] || { node_id: sheetId, inputs: [], operators: [], wires: [] };
+        return this.routing.sheets?.[sheetId]
+            || { node_id: sheetId, inputs: [], outputs: [], operators: [], widgets: [], wires: [] };
     }
 
     _activeSheet() {
@@ -145,8 +144,6 @@ class RoutingPage {
     _activeNode() {
         return this.nodes.find(n => n.node_id === this.activeSheetId) || null;
     }
-
-    _isDashboard() { return this.activeSheetId === DASHBOARD_SHEET_ID; }
 
     // ── Rendering ─────────────────────────────────────────────────────
 
@@ -174,54 +171,41 @@ class RoutingPage {
                 </div>
             `);
         }
-        const dashboardSheet = this._sheetData(DASHBOARD_SHEET_ID);
-        const dashCount = (dashboardSheet.wires || []).length;
-        const dashActive = this.activeSheetId === DASHBOARD_SHEET_ID;
-        html.push(`
-            <div class="routing-sheet-item ${dashActive ? 'active' : ''}"
-                 onclick="routingPage.selectSheet('${DASHBOARD_SHEET_ID}')">
-                <span class="material-icons">dashboard</span>
-                <span class="truncate">Dashboard</span>
-                ${dashCount ? `<span class="routing-sheet-count">${dashCount}</span>` : ''}
-            </div>
-        `);
-        list.innerHTML = html.join('');
+        list.innerHTML = html.join('') || '<div class="text-xs text-slate-500 p-2">No controller nodes adopted yet.</div>';
     }
 
     _renderToolbar() {
         const title = document.getElementById('routing-sheet-title');
         const subtitle = document.getElementById('routing-sheet-subtitle');
         const addInput = document.getElementById('btn-routing-add-input');
+        const addOutput = document.getElementById('btn-routing-add-output');
         const addOp = document.getElementById('btn-routing-add-operator');
         const addWidget = document.getElementById('btn-routing-add-widget');
         const autoBtn = document.getElementById('btn-routing-auto-layout');
 
         const hasSheet = !!this.activeSheetId;
-        if (addInput) addInput.disabled = !hasSheet;
-        if (addOp)    addOp.disabled    = !hasSheet;
-        if (autoBtn)  autoBtn.disabled  = !hasSheet;
+        if (addInput)  addInput.disabled  = !hasSheet;
+        if (addOutput) addOutput.disabled = !hasSheet;
+        if (addOp)     addOp.disabled     = !hasSheet;
+        if (addWidget) addWidget.disabled = !hasSheet;
+        if (autoBtn)   autoBtn.disabled   = !hasSheet;
 
-        if (this._isDashboard()) {
-            if (title)    title.textContent    = 'Dashboard';
-            if (subtitle) subtitle.textContent = 'Drive widgets from routed inputs and operators.';
-            if (addWidget) addWidget.classList.remove('hidden');
-            return;
-        }
-        if (addWidget) addWidget.classList.add('hidden');
         const node = this._activeNode();
         if (!node) {
             if (title)    title.textContent    = 'Routing';
             if (subtitle) subtitle.textContent = 'Adopt a controller node to start.';
             return;
         }
-        if (title)    title.textContent    = node.display_name || node.node_id;
+        if (title) title.textContent = node.display_name || node.node_id;
         if (subtitle) {
             const sheet = this._sheetData(node.node_id);
             const periphCount = (node.peripherals || []).length;
             subtitle.textContent =
                 `${periphCount} peripheral${periphCount === 1 ? '' : 's'} · `
-              + `${sheet.inputs.length} input${sheet.inputs.length === 1 ? '' : 's'} · `
-              + `${sheet.operators.length} operator${sheet.operators.length === 1 ? '' : 's'} · `
+              + `${sheet.inputs.length} in · `
+              + `${sheet.outputs.length} out · `
+              + `${sheet.operators.length} op · `
+              + `${sheet.widgets.length} widget${sheet.widgets.length === 1 ? '' : 's'} · `
               + `${sheet.wires.length} wire${sheet.wires.length === 1 ? '' : 's'}`;
         }
     }
@@ -259,23 +243,26 @@ class RoutingPage {
             const pos = this._positionFor(id, n.position);
             out.push({ id, kind: 'operator', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
         }
-        // Peripheral sinks (right column) — only for controller sheets.
-        if (!this._isDashboard()) {
-            const node = this._activeNode();
-            for (const p of ((node && node.peripherals) || [])) {
-                const id = `p::${node.node_id}::${p.id}`;
-                const pos = this._positionFor(id, null);
-                out.push({ id, kind: 'peripheral', nodeId: node.node_id,
-                           nodeLabel: node.display_name || node.node_id,
-                           peripheral: p, x: pos.x, y: pos.y });
-            }
-        } else {
-            // Widget sinks on the dashboard sheet.
-            for (const w of (this.routing.widgets || [])) {
-                const id = `w::${w.id}`;
-                const pos = this._positionFor(id, w.position);
-                out.push({ id, kind: 'widget', widget: w, x: pos.x, y: pos.y });
-            }
+        // Output nodes (right column) — publish back into ROS topics.
+        for (const n of (sheet.outputs || [])) {
+            const id = `out::${n.id}`;
+            const pos = this._positionFor(id, n.position);
+            out.push({ id, kind: 'output', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
+        }
+        // Widget sinks — attached to this controller's dashboard surface.
+        for (const w of (sheet.widgets || [])) {
+            const id = `w::${w.id}`;
+            const pos = this._positionFor(id, w.position);
+            out.push({ id, kind: 'widget', sheetNodeId: w.id, widget: w, x: pos.x, y: pos.y });
+        }
+        // Peripheral sinks (right-most column) — this controller's peripherals.
+        const node = this._activeNode();
+        for (const p of ((node && node.peripherals) || [])) {
+            const id = `p::${node.node_id}::${p.id}`;
+            const pos = this._positionFor(id, null);
+            out.push({ id, kind: 'peripheral', nodeId: node.node_id,
+                       nodeLabel: node.display_name || node.node_id,
+                       peripheral: p, x: pos.x, y: pos.y });
         }
         return out;
     }
@@ -294,8 +281,10 @@ class RoutingPage {
     }
 
     _layoutMissing(graphNodes) {
-        const cols = { input: 30, operator: 320, peripheral: 700, widget: 700 };
-        const cursorY = { input: 30, operator: 30, peripheral: 30, widget: 30 };
+        // Default columns: inputs on the left, operators middle, sinks
+        // (output topics, widgets, peripherals) on the right.
+        const cols = { input: 30, operator: 320, output: 640, widget: 640, peripheral: 900 };
+        const cursorY = { input: 30, operator: 30, output: 30, widget: 30, peripheral: 30 };
         const SPACING = 140;
         for (const g of graphNodes) {
             if (g.x === 0 && g.y === 0) {
@@ -401,6 +390,18 @@ class RoutingPage {
                 outputs: [{ id: 'out', label: 'value' }],
             };
         }
+        if (g.kind === 'output') {
+            const o = g.data;
+            const topicMeta = this.topicCatalog.find(t => t.topic === o.topic);
+            return {
+                title: o.label || `${o.topic}${o.field ? '.' + o.field : ''}`,
+                subtitle: `→ ${o.topic}${o.field ? ' · ' + o.field : ''}`
+                          + (topicMeta ? ` (${topicMeta.state_type})` : ''),
+                builtin: false, removable: true,
+                inputs: [{ id: 'value', label: 'value' }],
+                outputs: [],
+            };
+        }
         if (g.kind === 'operator') {
             const op = g.data;
             const type = this._operatorType(op.op);
@@ -496,6 +497,7 @@ class RoutingPage {
     _endpointToHandle(ep, dirHint) {
         if (!ep) return null;
         if (ep.kind === 'input')      return `in::${ep.parts[0]}/out`;
+        if (ep.kind === 'output')     return `out::${ep.parts[0]}/value`;
         if (ep.kind === 'operator')   return `op::${ep.parts[0]}/${ep.parts[1] || 'out'}`;
         if (ep.kind === 'peripheral') return `p::${ep.parts[0]}::${ep.parts[1]}/${ep.parts[2]}`;
         if (ep.kind === 'widget')     return `w::${ep.parts[0]}/${ep.parts[1]}`;
@@ -506,6 +508,9 @@ class RoutingPage {
         const [graphNodeId, pinId] = handle.split('/');
         if (graphNodeId.startsWith('in::')) {
             return { kind: 'input', parts: [graphNodeId.slice(4)] };
+        }
+        if (graphNodeId.startsWith('out::')) {
+            return { kind: 'output', parts: [graphNodeId.slice(5)] };
         }
         if (graphNodeId.startsWith('op::')) {
             return { kind: 'operator', parts: [graphNodeId.slice(4), pinId] };
@@ -602,17 +607,14 @@ class RoutingPage {
                     const key = `${this.activeSheetId}:${g.id}`;
                     this.positions[key] = { x: g.x, y: g.y };
                     this._savePositions();
-                    // Persist sheet-node positions to the server too so
-                    // they survive on other clients.
-                    if (g.kind === 'input' || g.kind === 'operator') {
+                    // Persist sheet-owned node positions to the server too so
+                    // they're shared across clients. Peripherals aren't
+                    // sheet-owned (they belong to the controller).
+                    if (g.sheetNodeId) {
                         window.saintWS.management('update_sheet_node', {
                             node_id: this.activeSheetId,
                             sheet_node_id: g.sheetNodeId,
                             position: [g.x, g.y],
-                        }).catch(() => {});
-                    } else if (g.kind === 'widget') {
-                        window.saintWS.management('update_widget', {
-                            widget_id: g.widget.id, position: [g.x, g.y],
                         }).catch(() => {});
                     }
                 }
@@ -666,22 +668,21 @@ class RoutingPage {
     }
 
     async removeSheetNode(graphNodeId) {
-        if (graphNodeId.startsWith('w::')) {
-            if (!confirm('Remove this widget? Wires touching it will be deleted.')) return;
-            try {
-                await window.saintWS.management('remove_widget', { widget_id: graphNodeId.slice(3) });
-            } catch (e) { console.error('Remove widget failed:', e); }
-            return;
-        }
-        if (graphNodeId.startsWith('in::') || graphNodeId.startsWith('op::')) {
-            if (!confirm('Remove this node? Wires touching it will be deleted.')) return;
-            const sheetNodeId = graphNodeId.slice(4);
-            try {
-                await window.saintWS.management('remove_sheet_node', {
-                    node_id: this.activeSheetId, sheet_node_id: sheetNodeId,
-                });
-            } catch (e) { console.error('Remove sheet node failed:', e); }
-        }
+        // Every sheet-owned node (input, output, operator, widget) is
+        // removed through the same remove_sheet_node action — the server
+        // dispatches by id across the four lists.
+        let sheetNodeId = null;
+        if (graphNodeId.startsWith('in::'))  sheetNodeId = graphNodeId.slice(4);
+        else if (graphNodeId.startsWith('out::')) sheetNodeId = graphNodeId.slice(5);
+        else if (graphNodeId.startsWith('op::'))  sheetNodeId = graphNodeId.slice(4);
+        else if (graphNodeId.startsWith('w::'))   sheetNodeId = graphNodeId.slice(3);
+        if (!sheetNodeId) return;
+        if (!confirm('Remove this node? Wires touching it will be deleted.')) return;
+        try {
+            await window.saintWS.management('remove_sheet_node', {
+                node_id: this.activeSheetId, sheet_node_id: sheetNodeId,
+            });
+        } catch (e) { console.error('Remove sheet node failed:', e); }
     }
 
     async setOperatorDefault(opId, pinId, valueStr) {
@@ -752,6 +753,70 @@ class RoutingPage {
                 return;
             }
             this.closeInputModal();
+        } catch (err) {
+            errEl.textContent = String(err.message || err);
+            errEl.classList.remove('hidden');
+        }
+    }
+
+    // ── Add Output modal ─────────────────────────────────────────────
+
+    openOutputModal() {
+        if (!this.activeSheetId) return;
+        const topicSel = document.getElementById('routing-output-topic');
+        const fieldSel = document.getElementById('routing-output-field');
+        const desc = document.getElementById('routing-output-topic-desc');
+        const labelInput = document.getElementById('routing-output-label');
+        if (!topicSel || !fieldSel) return;
+
+        // Only show topics that have a publishable command type. The
+        // server's list_topic_channels currently returns every endpoint
+        // with a state type; treat the same set as candidates and let
+        // the server reject if the endpoint isn't publishable.
+        topicSel.innerHTML = this.topicCatalog.map(t =>
+            `<option value="${escapeAttr(t.topic)}">${escapeHtml(t.topic)}</option>`
+        ).join('') || '<option value="">(no ROS topics discovered)</option>';
+
+        const refreshFields = () => {
+            const t = this.topicCatalog.find(x => x.topic === topicSel.value);
+            desc.textContent = t ? `${t.state_type} · ${t.channels.length} channel(s)` : '';
+            fieldSel.innerHTML = (t?.channels || []).map(c =>
+                `<option value="${escapeAttr(c.field)}">${escapeHtml(c.label)} (${escapeHtml(c.type || 'num')})</option>`
+            ).join('') || '<option value="">(message has no scalar fields)</option>';
+        };
+        topicSel.onchange = refreshFields;
+        refreshFields();
+
+        labelInput.value = '';
+        document.getElementById('routing-output-error').classList.add('hidden');
+        document.getElementById('routing-output-modal').classList.remove('hidden');
+    }
+
+    closeOutputModal() {
+        document.getElementById('routing-output-modal')?.classList.add('hidden');
+    }
+
+    async saveOutputModal() {
+        const topic = document.getElementById('routing-output-topic').value;
+        const field = document.getElementById('routing-output-field').value;
+        const label = document.getElementById('routing-output-label').value.trim();
+        const errEl = document.getElementById('routing-output-error');
+        errEl.classList.add('hidden');
+        if (!topic) {
+            errEl.textContent = 'Pick a ROS topic';
+            errEl.classList.remove('hidden');
+            return;
+        }
+        try {
+            const result = await window.saintWS.management('add_routing_output', {
+                node_id: this.activeSheetId, topic, field, label,
+            });
+            if (result && result.success === false) {
+                errEl.textContent = result.message || 'Failed to add output';
+                errEl.classList.remove('hidden');
+                return;
+            }
+            this.closeOutputModal();
         } catch (err) {
             errEl.textContent = String(err.message || err);
             errEl.classList.remove('hidden');
@@ -837,6 +902,7 @@ class RoutingPage {
     }
 
     async saveWidgetModal() {
+        if (!this.activeSheetId) return;
         const sel = document.getElementById('routing-widget-type');
         const labelEl = document.getElementById('routing-widget-label');
         const type = sel.value;
@@ -845,7 +911,7 @@ class RoutingPage {
         errEl.classList.add('hidden');
         try {
             const result = await window.saintWS.management('add_widget', {
-                type, label, position: [720, 20],
+                node_id: this.activeSheetId, type, label, position: [640, 20],
             });
             if (result && result.success === false) {
                 errEl.textContent = result.message || 'Failed to add widget';

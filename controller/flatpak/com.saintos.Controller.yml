@@ -50,7 +50,7 @@ command: saint-controller
 #   - ipc/x11/wayland: graphics
 #   - pulseaudio: future audio cues (not strictly needed today)
 #   - device=all: gamepads / HID joysticks / Steam Deck inputs
-#   - network: the WebSocket connection to the rover
+#   - network: the WebSocket connection to the robot
 #   - filesystem=xdg-config: where we persist connection settings
 #   - filesystem=xdg-data: where Tauri's logger writes log files
 finish-args:
@@ -77,6 +77,16 @@ build-options:
   env:
     CARGO_HOME: /run/build/saint-controller/cargo
     npm_config_cache: /run/build/saint-controller/npm-cache
+    # Suppress interactive prompts from tools that don't realize
+    # they're running in a sandbox without a tty. Angular CLI in
+    # particular asks for analytics consent on first run and
+    # crashes with `force closed the prompt with 0 null` when it
+    # can't read stdin. NG_CLI_ANALYTICS=false skips the prompt
+    # entirely; CI=true is the conventional flag a lot of other
+    # tools (npm, ng, cargo subcommands) check to suppress
+    # interactivity. Belt and suspenders.
+    NG_CLI_ANALYTICS: 'false'
+    CI: 'true'
 
 modules:
   - name: saint-controller

@@ -20,7 +20,7 @@
 //!      `_http._tcp.local.` services. The SAINT.OS server advertises
 //!      itself via avahi at install time (see
 //!      `.github/dist/install.sh` `setup_mdns`), so the controller
-//!      sees every reachable rover and can show the operator a
+//!      sees every reachable robot and can show the operator a
 //!      dropdown instead of asking them to type a hostname.
 //!
 //! Both paths use multicast UDP on `224.0.0.251:5353` (and the v6

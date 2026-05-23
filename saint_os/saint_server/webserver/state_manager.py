@@ -17,13 +17,13 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable, Tuple
 
 from saint_server.peripheral_model import (
-    DASHBOARD_SHEET_ID,
     DEFAULT_CATALOG,
     DEFAULT_WIDGET_CATALOG,
     InputNode,
     NodePeripheralConfig,
     OPERATOR_CATALOG,
     OperatorNode,
+    OutputNode,
     PeripheralInstance,
     PeripheralType,
     RouteEndpoint,
@@ -1649,6 +1649,21 @@ class StateManager:
         self._save_system_routing()
         return {"success": True, "input": node.to_dict()}
 
+    def add_routing_output(self, node_id: str, topic: str, field: str,
+                           label: str = "",
+                           position: Optional[List[int]] = None) -> Dict[str, Any]:
+        if not topic:
+            return {"success": False, "message": "Missing topic"}
+        err = self._validate_sheet_owner(node_id)
+        if err:
+            return {"success": False, "message": err}
+        pos = self._coerce_position(position)
+        sheet = self.state.system_routing.get_sheet(node_id)
+        node = sheet.add_output(topic=topic, field=field or "", label=label, position=pos)
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True, "output": node.to_dict()}
+
     def add_routing_operator(self, node_id: str, op: str, label: str = "",
                              params: Optional[Dict[str, Any]] = None,
                              defaults: Optional[Dict[str, float]] = None,
@@ -1684,12 +1699,22 @@ class StateManager:
 
     def update_sheet_node(self, node_id: str, sheet_node_id: str,
                           **changes) -> Dict[str, Any]:
-        """Mutate an InputNode or OperatorNode in place (label/params/defaults/position)."""
+        """Mutate one sheet node in place (Input / Output / Operator / Widget).
+
+        Supported keys depend on the node kind:
+          - any node:        position, label
+          - OperatorNode:    params, defaults
+          - InputNode/OutputNode: topic, field
+          - WidgetInstance:  params
+        """
         err = self._validate_sheet_owner(node_id)
         if err:
             return {"success": False, "message": err}
         sheet = self.state.system_routing.get_sheet(node_id)
-        target = sheet.find_input(sheet_node_id) or sheet.find_operator(sheet_node_id)
+        target = (sheet.find_input(sheet_node_id)
+                  or sheet.find_output(sheet_node_id)
+                  or sheet.find_operator(sheet_node_id)
+                  or sheet.find_widget(sheet_node_id))
         if target is None:
             return {"success": False, "message": f"Sheet node '{sheet_node_id}' not found"}
         for k, v in changes.items():
@@ -1697,13 +1722,13 @@ class StateManager:
                 target.position = (int(v[0]), int(v[1]))
             elif k == "label" and isinstance(v, str):
                 target.label = v
-            elif k == "params" and isinstance(target, OperatorNode):
+            elif k == "params" and isinstance(target, (OperatorNode, WidgetInstance)):
                 target.params = dict(v or {})
             elif k == "defaults" and isinstance(target, OperatorNode):
                 target.defaults = {dk: float(dv) for dk, dv in (v or {}).items()}
-            elif k == "topic" and isinstance(target, InputNode) and isinstance(v, str):
+            elif k == "topic" and isinstance(target, (InputNode, OutputNode)) and isinstance(v, str):
                 target.topic = v
-            elif k == "field" and isinstance(target, InputNode) and isinstance(v, str):
+            elif k == "field" and isinstance(target, (InputNode, OutputNode)) and isinstance(v, str):
                 target.field = v
         self.state.system_routing.bump_version()
         self._save_system_routing()
@@ -1713,7 +1738,11 @@ class StateManager:
         sheet = self.state.system_routing.sheets.get(node_id)
         if sheet is None:
             return {"success": False, "message": f"Sheet '{node_id}' not found"}
-        if not (sheet.remove_input(sheet_node_id) or sheet.remove_operator(sheet_node_id)):
+        removed = (sheet.remove_input(sheet_node_id)
+                   or sheet.remove_output(sheet_node_id)
+                   or sheet.remove_operator(sheet_node_id)
+                   or sheet.remove_widget(sheet_node_id))
+        if not removed:
             return {"success": False, "message": f"Sheet node '{sheet_node_id}' not found"}
         self.state.system_routing.bump_version()
         self._save_system_routing()
@@ -1785,18 +1814,27 @@ class StateManager:
                 if t and not any(c.id == channel_id for c in t.channels):
                     return f"{role}: channel '{channel_id}' not on peripheral type '{peripheral.type}'"
             elif ep.kind == "widget":
-                if sheet_node_id != DASHBOARD_SHEET_ID:
-                    return f"{role}: widget endpoints only allowed on the dashboard sheet"
                 if len(ep.parts) < 2:
                     return f"{role}: widget endpoint needs [widget_id, input_id]"
-                widget_id = ep.parts[0]
-                widget = next((w for w in self.state.system_routing.widgets
-                               if w.id == widget_id), None)
+                # Widgets are sheet-local; only the active sheet's widgets
+                # are addressable from its wires.
+                sheet = self.state.system_routing.get_sheet(sheet_node_id)
+                widget = sheet.find_widget(ep.parts[0])
                 if not widget:
-                    return f"{role}: unknown widget '{widget_id}'"
+                    return f"{role}: widget '{ep.parts[0]}' not on this sheet"
                 t = self.widget_catalog.get(widget.type)
                 if t and not any(i.id == ep.parts[1] for i in t.inputs):
                     return f"{role}: input '{ep.parts[1]}' not on widget type '{widget.type}'"
+            elif ep.kind == "output":
+                # Outputs are sinks only — a wire's source can never be an
+                # output node (outputs don't produce values).
+                if role == "source":
+                    return "source: output nodes cannot be wire sources"
+                if not ep.parts:
+                    return f"{role}: output endpoint needs [output_id]"
+                sheet = self.state.system_routing.get_sheet(sheet_node_id)
+                if not sheet.find_output(ep.parts[0]):
+                    return f"{role}: output '{ep.parts[0]}' not on this sheet"
             else:
                 return f"{role}: unknown endpoint kind '{ep.kind}'"
         # Source pins must be outputs; sink pins must be inputs.
@@ -1830,34 +1868,30 @@ class StateManager:
             return f"{role}: '{chan.display}' is a {actual}; cannot wire it that way"
         return None
 
-    def add_widget(self, type_id: str, label: Optional[str] = None,
+    def add_widget(self, node_id: str, type_id: str,
+                   label: Optional[str] = None,
                    position: Optional[List[int]] = None,
                    params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Attach a widget to a controller sheet. Widgets are sheet-local —
+        a wire on that sheet can drive the widget's input pin and the
+        operator sees the value on their dashboard."""
         if type_id not in self.widget_catalog:
             return {"success": False, "message": f"Unknown widget type '{type_id}'"}
-        pos: Tuple[int, int] = (int(position[0]), int(position[1])) if position and len(position) >= 2 else (0, 0)
-        widget = self.state.system_routing.add_widget(
+        err = self._validate_sheet_owner(node_id)
+        if err:
+            return {"success": False, "message": err}
+        pos = self._coerce_position(position)
+        sheet = self.state.system_routing.get_sheet(node_id)
+        widget = sheet.add_widget(
             type_id=type_id,
             label=label or self.widget_catalog[type_id].label,
             position=pos,
             params=params,
         )
+        self.state.system_routing.bump_version()
         self._save_system_routing()
-        self._log_activity(f"Added widget {widget.id} ({widget.type})", "info")
+        self._log_activity(f"Added widget {widget.id} ({widget.type}) to {node_id}", "info")
         return {"success": True, "widget": widget.to_dict()}
-
-    def update_widget(self, widget_id: str, **changes) -> Dict[str, Any]:
-        widget = self.state.system_routing.update_widget(widget_id, **changes)
-        if not widget:
-            return {"success": False, "message": f"Widget {widget_id} not found"}
-        self._save_system_routing()
-        return {"success": True, "widget": widget.to_dict()}
-
-    def remove_widget(self, widget_id: str) -> Dict[str, Any]:
-        if self.state.system_routing.remove_widget(widget_id):
-            self._save_system_routing()
-            return {"success": True}
-        return {"success": False, "message": f"Widget {widget_id} not found"}
 
     # =========================================================================
     # Persistence (system_routing.yaml + per-node peripheral configs)

@@ -775,11 +775,15 @@
                                     <span class="material-icons icon-sm">login</span>
                                     Input
                                 </button>
+                                <button id="btn-routing-add-output" class="btn-secondary" disabled>
+                                    <span class="material-icons icon-sm">logout</span>
+                                    Output
+                                </button>
                                 <button id="btn-routing-add-operator" class="btn-secondary" disabled>
                                     <span class="material-icons icon-sm">functions</span>
                                     Operator
                                 </button>
-                                <button id="btn-routing-add-widget" class="btn-secondary hidden">
+                                <button id="btn-routing-add-widget" class="btn-secondary" disabled>
                                     <span class="material-icons icon-sm">widgets</span>
                                     Widget
                                 </button>
@@ -834,6 +838,43 @@
                         <div class="flex items-center gap-3 mt-6">
                             <button onclick="routingPage.closeInputModal()" class="btn-secondary flex-1">Cancel</button>
                             <button onclick="routingPage.saveInputModal()" class="btn-primary flex-1">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add-output modal for routing page -->
+            <div id="routing-output-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="routingPage.closeOutputModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Add output</h3>
+                            <button onclick="routingPage.closeOutputModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
+                                <select id="routing-output-topic" class="input-field w-full"></select>
+                                <p id="routing-output-topic-desc" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
+                                <select id="routing-output-field" class="input-field w-full"></select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+                                <input id="routing-output-label" class="input-field w-full" placeholder="Defaults to topic.channel">
+                            </div>
+                            <div id="routing-output-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-6">
+                            <button onclick="routingPage.closeOutputModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="routingPage.saveOutputModal()" class="btn-primary flex-1">Add</button>
                         </div>
                     </div>
                 </div>
@@ -2432,6 +2473,7 @@
         }
         .routing-pin-default:focus { outline: 1px solid #06b6d4; }
         .routing-node[data-kind="input"]      .routing-node-header { background: #1e3a4a; color: #67e8f9; }
+        .routing-node[data-kind="output"]     .routing-node-header { background: #4a1e1e; color: #fda4af; }
         .routing-node[data-kind="operator"]   .routing-node-header { background: #2e1e4a; color: #c4b5fd; }
         .routing-node[data-kind="peripheral"] .routing-node-header { background: #0f4c5c; }
         .routing-node[data-kind="widget"]     .routing-node-header { background: #5c4a0f; }

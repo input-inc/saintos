@@ -3,14 +3,14 @@
   <id>com.saintos.Controller</id>
 
   <name>SAINT Controller</name>
-  <summary>Controller app for SAINT.OS rovers</summary>
+  <summary>Controller app for SAINT.OS robots</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
 
   <description>
     <p>
-      Operator-side controller for SAINT.OS rovers. Connects to a rover's
+      Operator-side controller for SAINT.OS robots. Connects to a robot's
       onboard server over WebSocket, surfaces detected peripherals, and
       maps gamepad / Steam Deck inputs to motor and effector commands.
     </p>
