@@ -739,17 +739,31 @@ static void control_subscription_callback(const void* msgin)
         return;
     }
 
-    // Check for emergency stop command
+    // Emergency stop — engage. Sets all outputs to safe values AND
+    // drives peripheral e-stop latches (e.g. RoboClaw estop_pin → HIGH).
     if (strstr(msg->data.data, "\"action\":\"estop\"") ||
         strstr(msg->data.data, "\"action\": \"estop\"")) {
         printf("\n");
         printf("====================================\n");
         printf("EMERGENCY STOP ACTIVATED\n");
         printf("====================================\n");
-
-        // Set all outputs to safe values
         pin_control_estop();
+        printf("====================================\n\n");
+        return;
+    }
 
+    // Emergency stop — release. Drives peripheral latches back to
+    // their deasserted state (RoboClaw estop_pin → LOW) so motor
+    // commands flow again. Direct pin outputs (PWM/servo/digital)
+    // are NOT auto-restored — the host should resend whatever
+    // values it wants.
+    if (strstr(msg->data.data, "\"action\":\"clear_estop\"") ||
+        strstr(msg->data.data, "\"action\": \"clear_estop\"")) {
+        printf("\n");
+        printf("====================================\n");
+        printf("EMERGENCY STOP RELEASED\n");
+        printf("====================================\n");
+        pin_control_clear_estop();
         printf("====================================\n\n");
         return;
     }

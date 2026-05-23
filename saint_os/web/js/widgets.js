@@ -11,12 +11,22 @@
  * — only the per-input numbers are stubbed.
  */
 
+// Sparkline geometry — matches nodelive.js so both views look identical.
+const WIDGET_SPARK_WINDOW_S = 30;
+const WIDGET_SPARK_W = 140;
+const WIDGET_SPARK_H = 24;
+
 class WidgetsDashboard {
     constructor() {
         this.catalog = null;
         this.routing = { version: 0, routes: [], widgets: [] };
         this.nodesById = new Map();           // node_id -> {peripherals:[], display_name}
         this._lastValues = new Map();         // "widget_id/input_id" -> {value, lastUpdate}
+        // Rolling 30s history per (widget_id, input_id) for the inline
+        // sparkline. Browser-clock timestamps only — see comment in
+        // nodelive.js _ingest for why we don't mix in the server's
+        // last_updated.
+        this._history = new Map();            // "widget_id/input_id" -> [[ts, v], ...]
         this._pinStateSubs = new Set();
         this._refreshInterval = null;
         this._stateHandler = null;
@@ -179,6 +189,7 @@ class WidgetsDashboard {
     /** Push a channel reading to every widget input that routes from it. */
     _dispatchChannelValue(nodeId, peripheralId, channelId, value) {
         let any = false;
+        const tsMs = Date.now();
         for (const r of (this.routing.routes || [])) {
             if (r.source?.kind !== 'peripheral') continue;
             if (r.source.parts[0] !== nodeId) continue;
@@ -186,10 +197,24 @@ class WidgetsDashboard {
             if (r.source.parts[2] !== channelId) continue;
             if (r.sink?.kind !== 'widget') continue;
             const key = `${r.sink.parts[0]}/${r.sink.parts[1]}`;
-            this._lastValues.set(key, { value, ts: Date.now() });
+            this._lastValues.set(key, { value, ts: tsMs });
+            if (typeof value === 'number') {
+                this._appendHistory(key, tsMs / 1000, value);
+            }
             any = true;
         }
         return any;
+    }
+
+    _appendHistory(key, ts, value) {
+        let arr = this._history.get(key);
+        if (!arr) {
+            arr = [];
+            this._history.set(key, arr);
+        }
+        arr.push([ts, value]);
+        const cutoff = (Date.now() / 1000) - WIDGET_SPARK_WINDOW_S;
+        while (arr.length && arr[0][0] < cutoff) arr.shift();
     }
 
     // ─── Rendering ───────────────────────────────────────────────────
@@ -216,6 +241,13 @@ class WidgetsDashboard {
                 <div class="text-sm text-slate-400">Unknown widget type: ${escapeHtml(w.type)}</div>
             </div>`;
         }
+        // FAS100 Power Monitor has a distinct mocked-up appearance —
+        // amber-accented header, per-input progress bars alongside the
+        // sparkline. Other widget types fall through to the generic
+        // renderer below.
+        if (type.id === 'battery_monitor') {
+            return this._renderFas100Card(w, type);
+        }
 
         const inputsHtml = (type.inputs || []).map(input => {
             const src = this.sourceForInput(w.id, input.id);
@@ -235,7 +267,6 @@ class WidgetsDashboard {
         }).join('');
 
         const iconMap = {
-            battery_monitor: 'bolt',
             estop_indicator: 'warning',
             single_gauge: 'speed',
             status_led_indicator: 'fiber_manual_record',
@@ -257,24 +288,104 @@ class WidgetsDashboard {
             </div>`;
     }
 
+    /** Mockup-faithful rendering for the FAS100 Power Monitor widget.
+     *  Color-coded per input (amber for voltage, cyan for current,
+     *  rose for temps), with an inline 30s sparkline + a thin progress
+     *  bar showing the value's position within its expected range. */
+    _renderFas100Card(w, type) {
+        // Per-input range + accent color. Ranges are generous defaults
+        // — they're only used to scale the progress fill, never as
+        // clamps on the displayed value.
+        const meta = {
+            voltage: { max: 30,  unit: 'V',  color: 'bg-amber-500',
+                       barText: 'text-amber-400' },
+            current: { max: 100, unit: 'A',  color: 'bg-cyan-500',
+                       barText: 'text-cyan-400' },
+            temp1:   { max: 80,  unit: '°C', color: 'bg-rose-500',
+                       barText: 'text-rose-300' },
+            temp2:   { max: 80,  unit: '°C', color: 'bg-rose-500',
+                       barText: 'text-rose-300' },
+        };
+
+        const rowsHtml = (type.inputs || []).map(input => {
+            const src = this.sourceForInput(w.id, input.id);
+            const srcLabel = this.sourceLabel(src);
+            const valId = `widget-${w.id}-${input.id}`;
+            const m = meta[input.id] || meta.voltage;
+            const showBar = input.id === 'voltage' || input.id === 'current';
+            const barHtml = showBar ? `
+                <div class="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden ml-2">
+                    <div id="${valId}-bar" class="${m.color} h-full transition-all"
+                         style="width:0%"></div>
+                </div>` : '';
+            return `
+                <div class="border-t border-slate-700/60 pt-2 mt-2 first:border-t-0 first:pt-0 first:mt-0">
+                    <div class="flex items-center justify-between">
+                        <span class="stat-label">${escapeHtml(input.display)}</span>
+                        <span class="inline-flex items-center gap-2">
+                            <span id="${valId}-spark" class="inline-flex items-center"
+                                  style="width:${WIDGET_SPARK_W}px;height:${WIDGET_SPARK_H}px"></span>
+                            <span id="${valId}" class="stat-value ${m.barText}">—</span>
+                            <span class="text-xs text-slate-500">${m.unit}</span>
+                        </span>
+                    </div>
+                    <div class="flex items-center mt-1">
+                        <div class="text-[0.65rem] text-slate-500 truncate flex-1" title="${escapeAttr(srcLabel)}">
+                            ${src ? '← ' : ''}${escapeHtml(srcLabel)}
+                        </div>
+                        ${barHtml}
+                    </div>
+                </div>`;
+        }).join('');
+
+        return `
+            <div class="card" data-widget-id="${escapeAttr(w.id)}">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center gap-2">
+                        <span class="material-icons text-amber-400 icon-md">bolt</span>
+                        <h4 class="text-base font-semibold text-white">${escapeHtml(w.label)}</h4>
+                    </div>
+                    <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-amber-900/40 text-amber-200">
+                        FAS100
+                    </span>
+                </div>
+                <div class="h-0.5 bg-amber-500 rounded-full mb-3"></div>
+                <div>${rowsHtml || '<p class="text-xs text-slate-500 italic">No inputs configured.</p>'}</div>
+            </div>`;
+    }
+
     _renderInputValue(typeId, input, valId) {
-        // Most inputs render the value as a stat. Status indicators get a
-        // colored dot. Battery monitor's current/voltage/temp use the
-        // default stat path.
+        // Status indicators get a colored dot. Analog inputs render the
+        // value plus an inline 30s sparkline that the live pin_state
+        // stream feeds. Digital inputs skip the sparkline (an on/off
+        // line doesn't graph meaningfully).
         if (typeId === 'estop_indicator' || typeId === 'status_led_indicator') {
             return `<span id="${valId}" class="inline-block w-3 h-3 rounded-full bg-slate-600" data-empty="1"></span>`;
         }
-        return `<span id="${valId}" class="stat-value">—</span>`;
+        const isDigital = input.cap === 'digital_in' || input.cap === 'digital_out';
+        const sparkSpan = isDigital ? '' :
+            `<span id="${valId}-spark" class="inline-flex items-center"
+                   style="width:${WIDGET_SPARK_W}px;height:${WIDGET_SPARK_H}px"></span>`;
+        return `<span class="inline-flex items-center gap-2">
+                    ${sparkSpan}
+                    <span id="${valId}" class="stat-value">—</span>
+                </span>`;
     }
 
     renderValues() {
+        // Per-input ranges for the FAS100 progress bars. Kept in sync
+        // with the same table in _renderFas100Card.
+        const fas100Max = { voltage: 30, current: 100, temp1: 80, temp2: 80 };
         for (const w of (this.routing.widgets || [])) {
             const type = this._widgetType(w.type);
             if (!type) continue;
             for (const input of (type.inputs || [])) {
                 const key = `${w.id}/${input.id}`;
                 const last = this._lastValues.get(key);
-                const valEl = document.getElementById(`widget-${w.id}-${input.id}`);
+                const valId = `widget-${w.id}-${input.id}`;
+                const valEl = document.getElementById(valId);
+                const sparkEl = document.getElementById(`${valId}-spark`);
+                const barEl = document.getElementById(`${valId}-bar`);
                 if (!valEl) continue;
                 if (!last || (Date.now() - last.ts) > 15000) {
                     if (valEl.dataset.empty === '1') {
@@ -282,6 +393,8 @@ class WidgetsDashboard {
                     } else {
                         valEl.textContent = '—';
                     }
+                    if (sparkEl) sparkEl.innerHTML = '';
+                    if (barEl) barEl.style.width = '0%';
                     continue;
                 }
                 if (valEl.dataset.empty === '1') {
@@ -291,8 +404,49 @@ class WidgetsDashboard {
                 } else {
                     valEl.textContent = this._formatValue(input, last.value);
                 }
+                if (sparkEl) {
+                    sparkEl.innerHTML = this._sparkline(this._history.get(key));
+                }
+                if (barEl && type.id === 'battery_monitor'
+                        && typeof last.value === 'number') {
+                    const max = fas100Max[input.id] || 1;
+                    const pct = Math.max(0, Math.min(100, (last.value / max) * 100));
+                    barEl.style.width = `${pct.toFixed(1)}%`;
+                }
             }
         }
+    }
+
+    /** Inline SVG sparkline of the 30s window. Same shape as nodelive's. */
+    _sparkline(samples) {
+        if (!samples || samples.length < 2) return '';
+        const t0 = (Date.now() / 1000) - WIDGET_SPARK_WINDOW_S;
+        let lo = Infinity, hi = -Infinity;
+        for (const [, v] of samples) {
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        if (!isFinite(lo) || !isFinite(hi)) return '';
+        const span = hi - lo || 1;
+        const pts = samples.map(([ts, v]) => {
+            const x = Math.max(0, Math.min(WIDGET_SPARK_W,
+                ((ts - t0) / WIDGET_SPARK_WINDOW_S) * WIDGET_SPARK_W));
+            const y = (WIDGET_SPARK_H - 2) - ((v - lo) / span) * (WIDGET_SPARK_H - 4) + 1;
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+        }).join(' ');
+        const last = samples[samples.length - 1];
+        const lx = Math.max(0, Math.min(WIDGET_SPARK_W,
+            ((last[0] - t0) / WIDGET_SPARK_WINDOW_S) * WIDGET_SPARK_W));
+        const ly = (WIDGET_SPARK_H - 2) - ((last[1] - lo) / span) * (WIDGET_SPARK_H - 4) + 1;
+        return `<svg width="${WIDGET_SPARK_W}" height="${WIDGET_SPARK_H}"
+                     viewBox="0 0 ${WIDGET_SPARK_W} ${WIDGET_SPARK_H}"
+                     class="text-cyan-400">
+                    <polyline fill="none" stroke="currentColor" stroke-width="1.25"
+                              stroke-linejoin="round" stroke-linecap="round"
+                              points="${pts}"/>
+                    <circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="1.5"
+                            fill="currentColor"/>
+                </svg>`;
     }
 
     _formatValue(input, value) {

@@ -66,6 +66,15 @@ void peripheral_estop_all(void)
     }
 }
 
+void peripheral_clear_estop_all(void)
+{
+    for (uint8_t i = 0; i < driver_count; i++) {
+        if (drivers[i]->clear_estop) {
+            drivers[i]->clear_estop();
+        }
+    }
+}
+
 // =============================================================================
 // Lookup
 // =============================================================================

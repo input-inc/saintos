@@ -1416,10 +1416,64 @@ static bool roboclaw_drv_parse_json(const char* json_start, const char* json_end
     return true;
 }
 
+/* Assert the configured estop_pin HIGH for one unit. Mirror of
+ * apply_estop_pin (which deasserts at config time); split out so
+ * roboclaw_drv_estop can flip every configured pin in one place. */
+static void assert_estop_pin(uint8_t unit_idx)
+{
+#ifndef SIMULATION
+    if (unit_idx >= ROBOCLAW_MAX_UNITS) return;
+    uint8_t pin = units[unit_idx].estop_pin;
+    if (pin == 0 || pin > 29) return;
+    // gpio_init is idempotent; we re-init defensively so that if the
+    // pin was repurposed between apply_estop_pin and here it goes
+    // back to a known OUTPUT state before being driven.
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_OUT);
+    gpio_put(pin, 1);  // HIGH = asserted = motor disabled / S3 latched
+#else
+    (void)unit_idx;
+#endif
+}
+
 static void roboclaw_drv_estop(void)
 {
+    // Two paths to stop motion, defense in depth:
+    //   1) Wire-level: drive each unit's estop_pin HIGH. The RoboClaw
+    //      S3 input is configured for "Default → E-Stop (Latching)" in
+    //      Packet Serial mode, so a HIGH on this pin trips the on-
+    //      controller emergency stop independent of anything the MCU
+    //      does next. Any motor command that arrives afterward is
+    //      ACK'd by the controller but silently ignored until the
+    //      latch is cleared. This is the primary safety guarantee.
+    //   2) Wire-level: also command every unit to duty=0 over packet
+    //      serial. Belt-and-suspenders — covers the case where the
+    //      operator never wired an estop_pin (estop_pin=0).
+    for (uint8_t i = 0; i < unit_count; i++) {
+        assert_estop_pin(i);
+    }
     roboclaw_stop_all();
-    saint_log_publish("warn", "RoboClaw: ESTOP — all units commanded to duty=0");
+    saint_log_publish("warn",
+        "RoboClaw: ESTOP — estop_pin asserted HIGH on %u unit(s), "
+        "all duties commanded to 0",
+        (unsigned)unit_count);
+}
+
+/* Counterpart to roboclaw_drv_estop. Drives every unit's estop_pin
+ * back LOW so the RoboClaw S3 latch clears on the next motor command.
+ * Motor duty stays at 0 — bringing it back up requires a fresh
+ * command from the host (intentional: the operator should make a
+ * deliberate move after releasing the latch, not have the robot
+ * pick up wherever it left off). */
+static void roboclaw_drv_clear_estop(void)
+{
+    for (uint8_t i = 0; i < unit_count; i++) {
+        apply_estop_pin(i);  // existing helper drives LOW
+    }
+    saint_log_publish("info",
+        "RoboClaw: ESTOP RELEASED — estop_pin deasserted on %u unit(s). "
+        "Motor duty remains at 0 until the next command.",
+        (unsigned)unit_count);
 }
 
 static bool roboclaw_drv_save(void* storage_ptr)
@@ -1550,6 +1604,7 @@ static const peripheral_driver_t roboclaw_peripheral = {
     .apply_config      = roboclaw_drv_apply_config,
     .parse_json_params = roboclaw_drv_parse_json,
     .estop             = roboclaw_drv_estop,
+    .clear_estop       = roboclaw_drv_clear_estop,
     .save_config       = roboclaw_drv_save,
     .load_config       = roboclaw_drv_load,
 };

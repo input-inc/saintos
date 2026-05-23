@@ -57,8 +57,15 @@ typedef struct peripheral_driver {
     bool (*parse_json_params)(const char* json_start, const char* json_end,
                               pin_config_t* config);
 
-    // Emergency stop
+    // Emergency stop.
+    //   estop:       latch on  — assert e-stop (motors → 0, e-stop pins
+    //                            driven into their asserted state, etc.)
+    //   clear_estop: latch off — return outputs to their normal control
+    //                            path. May be NULL on drivers where the
+    //                            engaged action has no persistent side
+    //                            effect (e.g. SyRen, FAS100).
     void (*estop)(void);
+    void (*clear_estop)(void);
 
     // Flash persistence
     bool (*save_config)(void* storage);
@@ -75,6 +82,7 @@ bool peripheral_register(const peripheral_driver_t* driver);
 void peripheral_init_all(void);
 void peripheral_update_all(void);
 void peripheral_estop_all(void);
+void peripheral_clear_estop_all(void);
 
 const peripheral_driver_t* peripheral_find_by_gpio(uint16_t gpio);
 const peripheral_driver_t* peripheral_find_by_mode(pin_mode_t mode);

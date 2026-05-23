@@ -54,9 +54,9 @@ pub fn run() {
                         match event {
                             ActionEvent::Command(cmd) => {
                                 // Send control command to server (logging is at trace level in client)
-                                if let Err(e) = state_for_processing.ws_client.send_function_control(
-                                    &cmd.role,
-                                    &cmd.function,
+                                if let Err(e) = state_for_processing.ws_client.send_topic_channel_value(
+                                    &cmd.topic,
+                                    &cmd.channel,
                                     cmd.value,
                                 ) {
                                     // Only log errors, don't spam for "not connected"
@@ -115,6 +115,8 @@ pub fn run() {
             commands::send_function_control,
             commands::discover_roles,
             commands::discover_controllable,
+            commands::discover_topic_channels,
+            commands::send_topic_channel_value,
             commands::is_gamepad_connected,
             commands::emergency_stop,
             commands::get_gamepad_debug_info,

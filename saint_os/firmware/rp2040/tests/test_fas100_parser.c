@@ -128,6 +128,7 @@ static void reset_state(void)
     stat_soft_resyncs = 0;
     stat_unknown_id = 0;
     stat_heartbeats = 0;
+    stat_consecutive_bad = 0;
     log_count = 0;
     test_now_ms = 1000;
     port_initialized = true;
@@ -391,11 +392,16 @@ static int test_sport_two_responses_back_to_back(void)
     return 1;
 }
 
-/* If a poll-echo's tail byte (the address byte 0x22) somehow leaks
- * past the drain and lands at the start of what the parser thinks is
- * a new frame, the parser's rx_buf[0]==SPORT_DATA_HEADER check will
- * reject it and the next 0x7E re-syncs. */
-static int test_sport_leaked_addr_byte_rejected(void)
+/* If a poll-echo's tail byte (the address byte 0x22) somehow leaks past
+ * the drain and lands at the start of what the parser thinks is a new
+ * frame, the parser now shift-and-retries: the first 8-byte window is
+ * rejected (rx_buf[0]=0x22 → crc_bad++), then the buffer slides left
+ * by one so the next received byte completes the next alignment
+ * attempt. The result is that the very next valid response parses
+ * cleanly inside the same poll cycle, instead of having to wait for a
+ * 0x7E to re-sync (which never arrives during steady polling because
+ * drain_echo_bytes consumes it before the parser can see it). */
+static int test_sport_leaked_addr_byte_recovers_via_shift(void)
 {
     reset_state();
     /* Address byte arrives without preceding 0x7E. Parser accumulates. */
@@ -404,20 +410,18 @@ static int test_sport_leaked_addr_byte_rejected(void)
     CHECK_EQ(rx_pos, 1);
     CHECK(rx_buf[0] != SPORT_DATA_HEADER);
 
-    /* Now a full valid response arrives. With rx_buf[0]=0x22 already in,
-     * the parser will fill 7 more bytes (the full real response) and at
-     * rx_pos=8 will see rx_buf[0]=0x22 != 0x10 → reject as crc_bad. */
+    /* The real response arrives. After 7 more bytes the rx_pos=8
+     * dispatch sees rx_buf[0]=0x22 (bad header), counts one crc_bad and
+     * shifts left — rx_buf is now [0x10, 0x00, 0x02, 0x32, 0x00, 0x00,
+     * 0x00, X] with rx_pos=7. The 8th frame byte (the real CRC) fills
+     * rx_buf[7]; the second dispatch sees a valid header and matching
+     * CRC, so the frame is recovered as stat_frames_ok=1. */
     uint8_t frame[8];
     build_sport_response(SPORT_DATA_ID_CURRENT, 50, frame);
     feed_sport(frame, 8);
     CHECK_EQ(stat_frames_crc_bad, 1);
-    CHECK_EQ(stat_frames_ok, 0);
-
-    /* Next cycle: echo arrives, 0x7E resyncs. New response parses cleanly. */
-    uint8_t echo[2] = { SPORT_POLL_HEADER, SPORT_FAS100_PHYSICAL_ID };
-    feed_sport(echo, 2);
-    feed_sport(frame, 8);
     CHECK_EQ(stat_frames_ok, 1);
+    CHECK_FLOAT(current_amps, 5.0f);
     return 1;
 }
 
@@ -591,6 +595,53 @@ static int test_is_connected_sticky_after_response_cleared(void)
     return 1;
 }
 
+/* The streak counter is the trigger for the fast soft-resync path.
+ * Exercise its three movement rules in isolation: bumped on crc_bad /
+ * unknown_id / bad-header dispatch, cleared on a known-data-id success,
+ * NOT cleared on a heartbeat (since shifted all-zero payloads can spoof
+ * a heartbeat). */
+static int test_sport_consecutive_bad_streak(void)
+{
+    reset_state();
+
+    /* 1) A bad-header byte at the start (no preceding 0x7E) — shift-and-
+     * retry path bumps the streak. */
+    uint8_t junk[8] = { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22 };
+    feed_sport(junk, 8);
+    CHECK_EQ(stat_consecutive_bad, 1);
+
+    /* 2) A heartbeat does NOT reset the streak. We expect parser to
+     * still be in mid-flight from the shift-and-retry above, so re-sync
+     * with an explicit poll first. */
+    uint8_t echo[2] = { SPORT_POLL_HEADER, SPORT_FAS100_PHYSICAL_ID };
+    feed_sport(echo, 2);
+    uint8_t hb[8] = { SPORT_EMPTY_HEADER, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0xFD };
+    feed_sport(hb, 8);
+    CHECK_EQ(stat_heartbeats, 1);
+    CHECK_EQ(stat_consecutive_bad, 1);  /* unchanged */
+
+    /* 3) A CRC-valid data frame with a known data_id resets the streak. */
+    feed_sport(echo, 2);
+    uint8_t frame[8];
+    build_sport_response(SPORT_DATA_ID_CURRENT, 50, frame);
+    feed_sport(frame, 8);
+    CHECK_EQ(stat_frames_ok, 1);
+    CHECK_EQ(stat_consecutive_bad, 0);
+
+    /* 4) A CRC-valid data frame with an UNKNOWN data_id bumps the streak. */
+    feed_sport(echo, 2);
+    uint8_t unk[8];
+    unk[0] = SPORT_DATA_HEADER;
+    unk[1] = 0xFF;  /* data_id = 0xBEEF — not one of ours */
+    unk[2] = 0xBE;
+    unk[3] = 0x01; unk[4] = 0x00; unk[5] = 0x00; unk[6] = 0x00;
+    unk[7] = sport_crc_calculate(unk, 7);
+    feed_sport(unk, 8);
+    CHECK_EQ(stat_unknown_id, 1);
+    CHECK_EQ(stat_consecutive_bad, 1);
+    return 1;
+}
+
 /* sport_feed_byte does NOT update last_byte_ms — only the UART read
  * loop in fas100_update() does. So feeding bytes through the parser
  * in tests should not affect last_byte_ms. We exercise this by
@@ -628,8 +679,9 @@ static const test_entry_t TESTS[] = {
     { "sport_empty_header_bad_crc_rejected",
                                         test_sport_empty_header_bad_crc_rejected },
     { "sport_two_responses_back_to_back", test_sport_two_responses_back_to_back },
-    { "sport_leaked_addr_byte_rejected", test_sport_leaked_addr_byte_rejected },
+    { "sport_leaked_addr_byte_recovers_via_shift", test_sport_leaked_addr_byte_recovers_via_shift },
     { "sport_mid_frame_sync",           test_sport_mid_frame_sync },
+    { "sport_consecutive_bad_streak",   test_sport_consecutive_bad_streak },
     { "fbus_basic_response",            test_fbus_basic_response },
     { "fbus_parser_alignment",          test_fbus_parser_alignment },
     { "fbus_bad_prefix_dropped",        test_fbus_bad_prefix_dropped },

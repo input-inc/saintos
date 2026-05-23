@@ -405,6 +405,10 @@ class SaintApp {
             }
         });
 
+        // The routing page wants the full viewport under the nav, so it
+        // breaks out of <main>'s max-w / padding via a body-level class.
+        document.body.classList.toggle('routing-fullwidth', pageId === 'routes');
+
         this.currentPage = pageId;
 
         // Load page-specific data
@@ -804,8 +808,22 @@ class SaintApp {
         const ws = window.saintWS;
 
         try {
-            // Subscribe to state updates
-            await ws.subscribe(['system', 'nodes'], 1);
+            // Subscribe to state updates. 'estop' carries the latching
+            // E-Stop state — broadcast by the server whenever the
+            // latch flips so every connected dashboard tracks it.
+            await ws.subscribe(['system', 'nodes', 'estop'], 1);
+
+            // Pull the current latch state so the button doesn't
+            // start in a stale "released" look when the page loads
+            // mid-engagement.
+            try {
+                const r = await ws.management('get_estop_state', {});
+                if (r && typeof r.active === 'boolean') {
+                    this.setEstopState(r.active);
+                }
+            } catch (e) {
+                // Non-fatal — broadcast will catch us up.
+            }
 
             // Load current page data
             await this.loadPageData(this.currentPage);
@@ -870,6 +888,10 @@ class SaintApp {
             }
             // Update UI based on current page
             this.updateNodesUI();
+        } else if (message.node === 'estop') {
+            // Server-side latch flipped (by us or by another dashboard).
+            // Mirror the visual state.
+            this.setEstopState(!!message.data?.active);
         }
         // pin_state/<id> broadcasts are also handled by widgetsDashboard
         // — it subscribes itself when the dashboard activates.
@@ -1826,17 +1848,56 @@ class SaintApp {
     }
 
     /**
-     * Emergency stop all motion.
+     * Latching emergency stop. First press engages (drives RoboClaw
+     * estop_pins HIGH, sets motor duty to 0 on every adopted node, and
+     * fires each peripheral driver's estop hook). Second press
+     * releases the latch so motor commands flow again. The button's
+     * visual state is driven by the server's broadcast on the 'estop'
+     * topic — don't optimistically flip it here, otherwise two
+     * dashboards racing would diverge from the canonical state.
      */
     async emergencyStop() {
         const ws = window.saintWS;
-
+        // Toggle direction from the last broadcast we saw. If we
+        // haven't received one yet (fresh page, server unreachable),
+        // default to engage — the safer side of the unknown.
+        const desired = this._estopActive ? 'release' : 'engage';
         try {
-            await ws.command('system', 'estop', { target: 'all' });
-            this.addActivityLogEntry({ text: 'Emergency stop activated', level: 'warn' });
+            const r = await ws.command('system', 'estop', {
+                target: 'all', state: desired,
+            });
+            // The 'estop' state broadcast updates the button; here we
+            // just log the user action and any server-side error.
+            const detail = r?.data ? ` (${r.data.node_count} nodes)` : '';
+            this.addActivityLogEntry({
+                text: `Emergency stop ${desired}${detail}`,
+                level: desired === 'engage' ? 'warn' : 'info',
+            });
         } catch (error) {
             console.error('E-Stop failed:', error);
-            this.addActivityLogEntry({ text: 'E-Stop failed!', level: 'error' });
+            this.addActivityLogEntry({ text: 'E-Stop command failed!', level: 'error' });
+        }
+    }
+
+    /** Apply server-reported estop state to the button. Idempotent. */
+    setEstopState(active) {
+        this._estopActive = !!active;
+        const btn = document.getElementById('btn-estop');
+        const icon = document.getElementById('btn-estop-icon');
+        const label = document.getElementById('btn-estop-label');
+        if (!btn) return;
+        btn.dataset.estopActive = this._estopActive ? 'true' : 'false';
+        if (this._estopActive) {
+            // Engaged: pulsing red, label flips to "Release". We
+            // override btn-danger's hover/active styles with explicit
+            // utility classes so the active state is unmistakable.
+            btn.classList.add('ring-2', 'ring-red-400', 'animate-pulse');
+            if (icon) icon.textContent = 'lock';
+            if (label) label.textContent = 'E-Stop ENGAGED — click to release';
+        } else {
+            btn.classList.remove('ring-2', 'ring-red-400', 'animate-pulse');
+            if (icon) icon.textContent = 'warning';
+            if (label) label.textContent = 'E-Stop';
         }
     }
 

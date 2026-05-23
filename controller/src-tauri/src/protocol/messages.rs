@@ -88,6 +88,38 @@ impl OutgoingMessage {
         }
     }
 
+    /// Discovery request to enumerate ROS topic channels (topic + the
+    /// scalar fields inside each message). Replaces the legacy
+    /// role/function picker in the bindings UI with a topic/channel
+    /// picker that mirrors the server-side routing graph.
+    pub fn discover_topic_channels() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "ros".to_string(),
+            action: "list_topic_channels".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// Push a single scalar onto a ROS topic channel. The server-side
+    /// `set_topic_channel` handler maintains a per-topic buffer so we
+    /// only need to send the one field that changed; the merged
+    /// message is published with the existing throttle.
+    pub fn set_topic_channel(topic: &str, channel: &str, value: Value) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "ros".to_string(),
+            action: "set_topic_channel".to_string(),
+            params: Some(serde_json::json!({
+                "endpoint": topic,
+                "field": channel,
+                "value": value,
+            })),
+            password: None,
+        }
+    }
+
     pub fn subscribe(topics: &[&str]) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),

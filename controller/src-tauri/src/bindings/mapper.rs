@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// Mapped command ready to send to the server using role/function abstraction
+/// A command ready to ship over the WS: one scalar onto a topic/channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MappedCommand {
-    pub role: String,
-    pub function: String,
+    pub topic: String,
+    pub channel: String,
     pub value: Value,
 }
 
@@ -223,16 +223,16 @@ impl InputMapper {
                         self.last_analog_values.insert(key, modified);
 
                         events.push(ActionEvent::Command(MappedCommand {
-                            role: target.role.clone(),
-                            function: target.function.clone(),
+                            topic: target.topic.clone(),
+                            channel: target.channel.clone(),
                             value: Value::from(modified),
                         }));
                     }
                 }
                 AnalogAction::DifferentialDrive {
-                    role,
-                    left_function,
-                    right_function,
+                    topic,
+                    left_channel,
+                    right_channel,
                     throttle_transform,
                     turn_transform,
                 } => {
@@ -276,8 +276,8 @@ impl InputMapper {
                     }
 
                     // Check if we should send (same logic as DirectControl but for the combined values)
-                    let key_left = format!("{}_{}", role, left_function);
-                    let key_right = format!("{}_{}", role, right_function);
+                    let key_left = format!("{}::{}", topic, left_channel);
+                    let key_right = format!("{}::{}", topic, right_channel);
                     let last_left = self.last_analog_values.get(&key_left).copied().unwrap_or(0.0);
                     let last_right = self.last_analog_values.get(&key_right).copied().unwrap_or(0.0);
 
@@ -295,13 +295,13 @@ impl InputMapper {
 
                         // Send both left and right commands
                         events.push(ActionEvent::Command(MappedCommand {
-                            role: role.clone(),
-                            function: left_function.clone(),
+                            topic: topic.clone(),
+                            channel: left_channel.clone(),
                             value: Value::from(left),
                         }));
                         events.push(ActionEvent::Command(MappedCommand {
-                            role: role.clone(),
-                            function: right_function.clone(),
+                            topic: topic.clone(),
+                            channel: right_channel.clone(),
                             value: Value::from(right),
                         }));
                     }
@@ -415,8 +415,8 @@ impl InputMapper {
                 }
                 DigitalAction::DirectControl { target, value } => {
                     events.push(ActionEvent::Command(MappedCommand {
-                        role: target.role.clone(),
-                        function: target.function.clone(),
+                        topic: target.topic.clone(),
+                        channel: target.channel.clone(),
                         value: Value::from(*value),
                     }));
                 }

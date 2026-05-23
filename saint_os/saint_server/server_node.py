@@ -73,14 +73,32 @@ class SaintServerNode(Node):
 
         # Peripheral telemetry logger — opt-in per peripheral, writes
         # NDJSON to ${SAINT_LOG_DIR}/peripherals/peripherals.log with
-        # daily rotation. SAINT_LOG_DIR is set by the systemd unit;
-        # falls back to /var/log/saint-os for dev runs and finally to
-        # /tmp so the server still starts on a host without /var/log.
-        log_root = os.environ.get("SAINT_LOG_DIR") or "/var/log/saint-os"
-        if not os.access(os.path.dirname(log_root) or "/", os.W_OK):
-            log_root = "/tmp/saint-os"
+        # daily rotation. SAINT_LOG_DIR is set by the systemd unit and
+        # is pre-created + chowned to the service user by install.sh,
+        # so the candidate path is writable in production. We test the
+        # target directory itself (after ensuring it exists) — earlier
+        # versions checked the parent's writability, which is /var/log
+        # for the production path and is root-owned, so the check
+        # always failed and the logger silently fell through to
+        # /tmp/saint-os (which is isolated by PrivateTmp=true and thus
+        # invisible from outside the service).
+        candidate = os.environ.get("SAINT_LOG_DIR") or "/var/log/saint-os"
+        peripherals_dir = os.path.join(candidate, "peripherals")
+        log_dir = peripherals_dir
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            if not os.access(log_dir, os.W_OK):
+                raise PermissionError(f"{log_dir} not writable")
+        except (OSError, PermissionError) as e:
+            fallback = "/tmp/saint-os/peripherals"
+            self.get_logger().warn(
+                f"PeripheralLogger: {peripherals_dir} unusable ({e}); "
+                f"falling back to {fallback}"
+            )
+            os.makedirs(fallback, exist_ok=True)
+            log_dir = fallback
         self.peripheral_logger = PeripheralLogger(
-            log_dir=os.path.join(log_root, "peripherals"),
+            log_dir=log_dir,
             logger=self.get_logger(),
         )
         # Hand it to the state manager so update_pin_actual can feed
@@ -617,25 +635,44 @@ class SaintServerNode(Node):
         self.get_logger().info(f'Sent identify command to {node_id}')
         self.state_manager.log_node_event(node_id, "Sent identify (blink LED) command", "info")
 
-    def send_estop_command(self, node_id: str):
+    def send_estop_command(self, node_id: str, action: str = "engage"):
         """Send emergency stop command to a node via ROS2.
 
-        This tells the node to immediately stop all outputs (PWM, servo, digital).
+        Args:
+            node_id: target node id
+            action: "engage" to assert e-stop (motors → 0, peripheral
+                e-stop hooks fire, e.g. RoboClaw drives its estop_pin
+                HIGH), or "release" to clear the latch and return
+                peripherals to their normal control path.
         """
         import json
 
         pub = self._ensure_node_control_publisher(node_id)
 
+        # JSON wire format kept backward-compatible: the legacy
+        # firmware path matches on "action":"estop" for the engage
+        # case. New firmware also matches "clear_estop" for release.
+        # We emit BOTH the legacy action and an explicit state field
+        # so old controllers keep stopping while new ones can also
+        # release.
+        if action == "release":
+            wire_action = "clear_estop"
+        else:
+            wire_action = "estop"
         control_data = {
-            "action": "estop"
+            "action": wire_action,
+            "state": "engaged" if action == "engage" else "released",
         }
 
         msg = String()
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
-        self.get_logger().info(f'Sent emergency stop command to {node_id}')
-        self.state_manager.log_node_event(node_id, "Sent emergency stop", "warn")
+        verb = "engage" if action == "engage" else "release"
+        self.get_logger().info(f'Sent emergency stop {verb} to {node_id}')
+        self.state_manager.log_node_event(
+            node_id, f"Sent emergency stop {verb}",
+            "warn" if action == "engage" else "info")
 
     def send_firmware_update_command(self, node_id: str, simulation: bool = False, force: bool = False):
         """Send firmware update command to a node via ROS2.
@@ -1098,7 +1135,7 @@ class SaintServerNode(Node):
                     lambda node_id: self.send_identify_command(node_id)
                 )
                 self.web_server.ws_handler.set_estop_node_callback(
-                    lambda node_id: self.send_estop_command(node_id)
+                    lambda node_id, action: self.send_estop_command(node_id, action)
                 )
 
                 # Initialize ROS Bridge for WebSocket-ROS communication
@@ -1110,6 +1147,24 @@ class SaintServerNode(Node):
                     # Override the callback to use thread-safe async broadcast
                     self.ros_bridge.set_message_callback(self._broadcast_ros_message)
                     self.get_logger().info('ROS Bridge initialized and connected to WebSocket handler')
+
+                    # Routing graph evaluator — drives peripheral channels
+                    # from ROS topic inputs through user-defined sheets.
+                    try:
+                        from saint_server.router.routing_evaluator import RoutingEvaluator
+                        self.routing_evaluator = RoutingEvaluator(
+                            ros_bridge=self.ros_bridge,
+                            send_channel=self.send_channel_command,
+                            peripheral_type_lookup=self.state_manager.lookup_peripheral_type,
+                            logger=self.get_logger(),
+                        )
+                        self.ros_bridge.add_routing_listener(
+                            self.routing_evaluator.on_topic_message
+                        )
+                        self.state_manager.set_routing_evaluator(self.routing_evaluator)
+                        self.get_logger().info('Routing graph evaluator initialized')
+                    except Exception as e:
+                        self.get_logger().warn(f'Routing evaluator not available: {e}')
                 except Exception as e:
                     self.get_logger().warn(f'ROS Bridge not available: {e}')
 

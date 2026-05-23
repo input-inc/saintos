@@ -25,6 +25,19 @@
     user-select: none;
     /* Enable touch scrolling */
     -webkit-overflow-scrolling: touch;
+    /* Disable touch gestures at the document root. gamescope (Steam
+       Deck Game Mode) forwards swipe-from-edge gestures the same
+       way it forwards interior touches, so without this an upward
+       drag from the screen bottom — or a drag on a scrollbar near
+       the edge — gets interpreted as an attempt to grab the window
+       (looks like a resize, since the window is fullscreen and
+       can't actually move). Scrollable containers below re-enable
+       pan-y for their own contents.
+       overscroll-behavior: none stops the WebKit pull-to-refresh /
+       rubber-band that otherwise fires when you drag a scrollbar
+       past its end. */
+    touch-action: none;
+    overscroll-behavior: none;
   }
 
   /* Allow text selection only in input fields */
@@ -34,10 +47,15 @@
     touch-action: auto;
   }
 
-  /* Ensure scrollable containers work properly with touch */
+  /* Ensure scrollable containers work properly with touch. pan-y
+     re-enables vertical-only panning inside these (we said `none`
+     at the root); overscroll-behavior: contain keeps the gesture
+     from leaking back out to the document and re-triggering the
+     "edge grab looks like resize" bug. */
   .overflow-y-auto, .overflow-auto, [class*="overflow-y-scroll"] {
     touch-action: pan-y;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
 
   /* Prevent tap highlighting that interferes with scrolling */
@@ -48,10 +66,12 @@
   /* Main content scrolling - ensure touch events work for scrolling */
   main {
     touch-action: pan-y;
+    overscroll-behavior: contain;
   }
 
   main > div {
     touch-action: pan-y;
+    overscroll-behavior: contain;
   }
 
   ::-webkit-scrollbar {

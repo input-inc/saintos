@@ -223,6 +223,74 @@ impl WebSocketClient {
             })
     }
 
+    /// Request enumeration of ROS topics and the scalar channels each
+    /// message exposes. Server responds via a `discovery-topic-channels`
+    /// Tauri event so the binding UI can populate its Topic/Channel
+    /// pickers (the role/function picker's replacement).
+    pub fn request_discover_topic_channels(&self) -> Result<(), String> {
+        log::info!("Requesting topic-channel discovery from server...");
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| {
+                log::warn!("request_discover_topic_channels: Not connected");
+                "Not connected".to_string()
+            })?;
+
+        let msg = OutgoingMessage::discover_topic_channels();
+        log::debug!("Sending discover_topic_channels: {}", msg.to_json());
+
+        tx.blocking_send(msg)
+            .map_err(|e| {
+                log::error!("Failed to send discovery request: {}", e);
+                format!("Failed to send discovery request: {}", e)
+            })
+    }
+
+    /// Push a single scalar onto a ROS topic channel. Used by the
+    /// bindings runtime: a joystick axis movement results in
+    /// `set_topic_channel(topic, channel, value)` which the server
+    /// merges into its per-topic buffer and republishes.
+    pub fn send_topic_channel_value(&self, topic: &str, channel: &str, value: Value)
+        -> Result<(), String>
+    {
+        let is_stop_command = match &value {
+            Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
+            _ => false,
+        };
+        let throttle_key = format!("{}::{}", topic, channel);
+        if !is_stop_command {
+            let mut times = self.last_command_times.write();
+            let now = Instant::now();
+            if let Some(last_time) = times.get(&throttle_key) {
+                if now.duration_since(*last_time) < Duration::from_millis(THROTTLE_MS) {
+                    return Ok(());
+                }
+            }
+            times.insert(throttle_key, now);
+        }
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+
+        let msg = OutgoingMessage::set_topic_channel(topic, channel, value);
+        match tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                log::trace!("Channel full, dropped command for {}::{}", topic, channel);
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err("Connection closed".to_string())
+            }
+        }
+    }
+
     /// Send emergency stop command (bypasses throttling)
     pub fn send_emergency_stop(&self) -> Result<(), String> {
         let tx = self
@@ -416,6 +484,13 @@ async fn handle_connection<R: Runtime>(
                                         tracing::info!("Emitting discovery-active-roles event to frontend");
                                         if let Err(e) = app_handle.emit("discovery-active-roles", data) {
                                             tracing::error!("Failed to emit discovery-active-roles: {}", e);
+                                        }
+                                    }
+                                    // Check for topic-channels response (new bindings picker).
+                                    if data.get("topics").is_some() {
+                                        tracing::info!("Emitting discovery-topic-channels event to frontend");
+                                        if let Err(e) = app_handle.emit("discovery-topic-channels", data) {
+                                            tracing::error!("Failed to emit discovery-topic-channels: {}", e);
                                         }
                                     }
                                 }

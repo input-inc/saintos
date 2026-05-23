@@ -122,10 +122,11 @@
                         </button>
                     </div>
 
-                    <!-- Global E-Stop -->
-                    <button id="btn-estop" class="btn-danger">
-                        <span class="material-icons icon-sm">warning</span>
-                        E-Stop
+                    <!-- Global E-Stop (latching toggle — visual state
+                         updates from the server's 'estop' broadcast) -->
+                    <button id="btn-estop" class="btn-danger" data-estop-active="false">
+                        <span id="btn-estop-icon" class="material-icons icon-sm">warning</span>
+                        <span id="btn-estop-label">E-Stop</span>
                     </button>
                 </div>
             </div>
@@ -750,47 +751,126 @@
             </div>
 
             <!-- Routing Page -->
-            <section id="page-routes" class="page">
-                <div class="flex items-center justify-between mb-4">
-                    <div>
-                        <h2 class="text-2xl font-bold text-white">Routing</h2>
-                        <p class="text-sm text-slate-400">
-                            Connect peripheral channels to widgets and logical signals.
-                        </p>
-                    </div>
-                    <div class="flex gap-2">
-                        <button id="btn-routing-add-signal" class="btn-secondary">
-                            <span class="material-icons icon-sm">add</span>
-                            Signal
-                        </button>
-                        <button id="btn-routing-add-widget" class="btn-secondary">
-                            <span class="material-icons icon-sm">widgets</span>
-                            Widget
-                        </button>
-                        <button id="btn-routing-auto-layout" class="btn-secondary" title="Auto-arrange nodes">
-                            <span class="material-icons icon-sm">grid_view</span>
-                            Auto-layout
-                        </button>
-                    </div>
-                </div>
+            <section id="page-routes" class="page routing-page">
+                <div class="routing-shell">
+                    <!-- Left rail: one entry per controller node sheet -->
+                    <aside class="routing-sidebar">
+                        <div class="routing-sidebar-header">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Sheets</span>
+                        </div>
+                        <div id="routing-sheet-list" class="routing-sheet-list"></div>
+                    </aside>
 
-                <div class="card">
-                    <p class="text-xs text-slate-400 mb-3">
-                        Drag node headers to reposition. Click an
-                        <span class="inline-block align-middle" style="width:10px;height:10px;background:#f59e0b;border-radius:50%;"></span>
-                        output then a
-                        <span class="inline-block align-middle" style="width:10px;height:10px;background:#06b6d4;border-radius:50%;"></span>
-                        input to wire them. Click a wire to delete it.
-                    </p>
+                    <!-- Main area: per-sheet toolbar + canvas -->
+                    <div class="routing-main">
+                        <div class="routing-toolbar">
+                            <div class="min-w-0">
+                                <h2 id="routing-sheet-title" class="text-lg font-semibold text-white truncate">Routing</h2>
+                                <p id="routing-sheet-subtitle" class="text-xs text-slate-400 truncate">
+                                    Pick a sheet on the left to wire its peripherals.
+                                </p>
+                            </div>
+                            <div class="flex gap-2 items-center">
+                                <button id="btn-routing-add-input" class="btn-secondary" disabled>
+                                    <span class="material-icons icon-sm">login</span>
+                                    Input
+                                </button>
+                                <button id="btn-routing-add-operator" class="btn-secondary" disabled>
+                                    <span class="material-icons icon-sm">functions</span>
+                                    Operator
+                                </button>
+                                <button id="btn-routing-add-widget" class="btn-secondary hidden">
+                                    <span class="material-icons icon-sm">widgets</span>
+                                    Widget
+                                </button>
+                                <button id="btn-routing-auto-layout" class="btn-secondary" title="Auto-arrange nodes" disabled>
+                                    <span class="material-icons icon-sm">grid_view</span>
+                                </button>
+                            </div>
+                        </div>
 
-                    <div id="routing-canvas" class="routing-canvas">
-                        <svg class="routing-wires" width="100%" height="100%" preserveAspectRatio="none">
-                            <g id="routing-wire-layer"></g>
-                        </svg>
-                        <div id="routing-node-layer"></div>
+                        <div id="routing-canvas" class="routing-canvas">
+                            <svg class="routing-wires" width="100%" height="100%" preserveAspectRatio="none">
+                                <g id="routing-wire-layer"></g>
+                            </svg>
+                            <div id="routing-node-layer"></div>
+                            <div id="routing-empty" class="routing-empty hidden">
+                                <p class="text-slate-400">No sheets yet. Adopt a controller node to start.</p>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
+
+            <!-- Add-input modal for routing page -->
+            <div id="routing-input-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="routingPage.closeInputModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Add input</h3>
+                            <button onclick="routingPage.closeInputModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
+                                <select id="routing-input-topic" class="input-field w-full"></select>
+                                <p id="routing-input-topic-desc" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
+                                <select id="routing-input-field" class="input-field w-full"></select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+                                <input id="routing-input-label" class="input-field w-full" placeholder="Defaults to topic.channel">
+                            </div>
+                            <div id="routing-input-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-6">
+                            <button onclick="routingPage.closeInputModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="routingPage.saveInputModal()" class="btn-primary flex-1">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add-operator modal for routing page -->
+            <div id="routing-operator-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="routingPage.closeOperatorModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Add operator</h3>
+                            <button onclick="routingPage.closeOperatorModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Operator</label>
+                                <select id="routing-operator-type" class="input-field w-full"></select>
+                                <p id="routing-operator-type-desc" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+                                <input id="routing-operator-label" class="input-field w-full" placeholder="Defaults to operator name">
+                            </div>
+                            <div id="routing-operator-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-6">
+                            <button onclick="routingPage.closeOperatorModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="routingPage.saveOperatorModal()" class="btn-primary flex-1">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
             <!-- Add-widget modal for routing page -->
             <div id="routing-widget-modal" class="fixed inset-0 z-50 hidden">
@@ -2234,17 +2314,74 @@
             box-shadow: 0 0 20px rgba(34, 211, 238, 0.2);
         }
 
-        /* Routing graph editor — see js/routing.js */
+        /* Routing graph editor — see js/routing.js
+           ──────────────────────────────────────────
+           The routing page wants the entire viewport under the nav. When
+           it's active, body.routing-fullwidth (toggled by app.js) makes
+           main shed its max-width and padding so the sheet UI fills the
+           window. */
+        body.routing-fullwidth main {
+            max-width: none !important;
+            padding: 0 !important;
+        }
+        .routing-page {
+            /* Fill all available height under the nav bar. */
+            height: calc(100vh - 6.5rem);
+            min-height: 32rem;
+        }
+        body.routing-fullwidth .routing-page {
+            height: calc(100vh - 6.5rem);
+        }
+        .routing-shell {
+            display: flex; height: 100%; gap: 0;
+            border-top: 1px solid #1e293b;
+        }
+        .routing-sidebar {
+            width: 14rem; min-width: 12rem; flex-shrink: 0;
+            background: #0f172a; border-right: 1px solid #1e293b;
+            display: flex; flex-direction: column;
+        }
+        .routing-sidebar-header {
+            padding: 0.75rem 1rem; border-bottom: 1px solid #1e293b;
+        }
+        .routing-sheet-list {
+            flex: 1; overflow-y: auto; padding: 0.5rem;
+        }
+        .routing-sheet-item {
+            display: flex; align-items: center; gap: 0.5rem;
+            padding: 0.5rem 0.75rem; border-radius: 0.375rem;
+            font-size: 0.8rem; color: #cbd5e1; cursor: pointer;
+            border: 1px solid transparent;
+        }
+        .routing-sheet-item:hover { background: #1e293b; }
+        .routing-sheet-item.active {
+            background: #0f4c5c; border-color: #06b6d4; color: #fff;
+        }
+        .routing-sheet-item .material-icons { font-size: 16px; color: #64748b; }
+        .routing-sheet-item.active .material-icons { color: #67e8f9; }
+        .routing-sheet-count {
+            margin-left: auto; font-size: 0.65rem; color: #64748b;
+        }
+        .routing-main {
+            flex: 1; display: flex; flex-direction: column; min-width: 0;
+        }
+        .routing-toolbar {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 1rem; padding: 0.75rem 1rem;
+            border-bottom: 1px solid #1e293b; background: #0f172a;
+        }
         .routing-canvas {
-            position: relative;
-            height: 640px;
+            position: relative; flex: 1; min-height: 0;
             background:
                 radial-gradient(circle at 1px 1px, #334155 1px, transparent 1px) 0 0 / 24px 24px,
                 #0b1220;
-            border: 1px solid #334155;
-            border-radius: 0.5rem;
-            overflow: hidden;
+            overflow: auto;
             user-select: none;
+        }
+        .routing-empty {
+            position: absolute; inset: 0;
+            display: flex; align-items: center; justify-content: center;
+            pointer-events: none;
         }
         .routing-canvas svg.routing-wires {
             position: absolute; inset: 0; pointer-events: none;
@@ -2253,7 +2390,7 @@
         .routing-canvas svg.routing-wires path { pointer-events: stroke; cursor: pointer; }
         .routing-canvas svg.routing-wires path:hover { stroke: #f87171 !important; }
         .routing-node {
-            position: absolute; min-width: 180px;
+            position: absolute; min-width: 200px;
             background: #1e293b; border: 1px solid #475569; border-radius: 0.5rem;
             z-index: 2; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
         }
@@ -2268,7 +2405,7 @@
         .routing-node-kind { font-size: 0.65rem; color: #94a3b8; font-weight: 400; }
         .routing-node-body { padding: 0.25rem 0; }
         .routing-pin-row {
-            display: flex; align-items: center; padding: 0.15rem 0.5rem;
+            display: flex; align-items: center; padding: 0.2rem 0.5rem;
             font-size: 0.7rem; gap: 0.35rem; position: relative;
         }
         .routing-pin-row.input  { justify-content: flex-start; }
@@ -2287,8 +2424,16 @@
         .routing-pin.connecting { background: #34d399; box-shadow: 0 0 8px #34d399; }
         .routing-pin-label-in  { margin-left: 0.75rem; color: #cbd5e1; }
         .routing-pin-label-out { margin-right: 0.75rem; color: #cbd5e1; }
+        .routing-pin-default {
+            margin-left: auto; width: 60px;
+            background: #0b1220; border: 1px solid #334155;
+            color: #cbd5e1; font-size: 0.65rem; padding: 1px 4px;
+            border-radius: 0.25rem; text-align: right;
+        }
+        .routing-pin-default:focus { outline: 1px solid #06b6d4; }
+        .routing-node[data-kind="input"]      .routing-node-header { background: #1e3a4a; color: #67e8f9; }
+        .routing-node[data-kind="operator"]   .routing-node-header { background: #2e1e4a; color: #c4b5fd; }
         .routing-node[data-kind="peripheral"] .routing-node-header { background: #0f4c5c; }
-        .routing-node[data-kind="signal"]     .routing-node-header { background: #4a3b5c; }
         .routing-node[data-kind="widget"]     .routing-node-header { background: #5c4a0f; }
         .routing-node[data-builtin="true"]    .routing-node-header { background: #1e3a4a; }
     </style>

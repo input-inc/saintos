@@ -169,8 +169,17 @@ class WebSocketHandler:
         # Callback for sending identify command to node (set by server_node)
         self._identify_node_callback: Optional[Callable[[str], None]] = None
 
-        # Callback for sending estop command to node (set by server_node)
-        self._estop_node_callback: Optional[Callable[[str], None]] = None
+        # Callback for sending estop command to node (set by server_node).
+        # Signature: (node_id: str, action: str) -> None where action is
+        # "engage" (assert e-stop / drive estop_pin HIGH / cut motor
+        # outputs) or "release" (clear the latch).
+        self._estop_node_callback: Optional[Callable[[str, str], None]] = None
+
+        # System-wide E-Stop latch state. Mutated by 'estop' command
+        # handlers; broadcast to subscribers on the 'estop' topic so
+        # multiple dashboards stay in sync.
+        self._estop_active: bool = False
+        self._estop_changed_at: float = 0.0
 
         # Throttle tracking: (node_id, gpio) -> last_send_time
         # Per-gpio throttling allows controlling multiple pins simultaneously
@@ -240,8 +249,9 @@ class WebSocketHandler:
         """Set callback for sending identify command to node. Callback takes (node_id)."""
         self._identify_node_callback = callback
 
-    def set_estop_node_callback(self, callback: Callable[[str], None]):
-        """Set callback for sending emergency stop to node. Callback takes (node_id)."""
+    def set_estop_node_callback(self, callback: Callable[[str, str], None]):
+        """Set callback for sending emergency stop to a node.
+        Callback takes (node_id, action) where action is 'engage' or 'release'."""
         self._estop_node_callback = callback
 
     def set_update_manager(self, update_manager):
@@ -632,10 +642,63 @@ class WebSocketHandler:
     async def _handle_command(self, client: WebSocketClient, action: str, params: dict) -> dict:
         """Handle command messages."""
         if action == 'estop':
+            # Latching toggle. Each press flips the system-wide state.
+            # An optional explicit `state` parameter ("engage"/"release")
+            # lets the client force a particular direction — useful for
+            # bringing a fresh dashboard into sync without an extra
+            # round-trip (clicking "release" on an already-released
+            # latch is a no-op rather than re-engaging).
+            requested = params.get('state')
+            if requested == 'engage':
+                new_state = True
+            elif requested == 'release':
+                new_state = False
+            else:
+                new_state = not self._estop_active
+
             target = params.get('target', 'all')
-            self.log('warn', f'E-STOP triggered by client {client.id}, target: {target}')
-            await self.broadcast_activity(f'E-STOP triggered (target: {target})', 'warn')
-            return {"status": "ok", "message": f"E-STOP sent to {target}"}
+            verb = 'ENGAGED' if new_state else 'RELEASED'
+            self.log('warn', f'E-STOP {verb} by client {client.id}, target: {target}')
+
+            # Fan out to every adopted node. We do this before mutating
+            # state and broadcasting so any partial failure surfaces
+            # immediately in the activity log.
+            engaged_count = 0
+            errored = []
+            if self._estop_node_callback:
+                adopted = self.state_manager.get_adopted_nodes()
+                wire_action = 'engage' if new_state else 'release'
+                for node in adopted:
+                    nid = node.get('node_id')
+                    if not nid:
+                        continue
+                    try:
+                        self._estop_node_callback(nid, wire_action)
+                        engaged_count += 1
+                    except Exception as e:
+                        errored.append(f'{nid}: {e}')
+            else:
+                return {"status": "error",
+                        "message": "Estop callback not configured"}
+
+            self._estop_active = new_state
+            self._estop_changed_at = time.time()
+            await self.broadcast_state('estop', {
+                'active': new_state,
+                'changed_at': self._estop_changed_at,
+                'node_count': engaged_count,
+            })
+            if errored:
+                await self.broadcast_activity(
+                    f'E-STOP {verb}: command failed on {len(errored)} node(s) — '
+                    + '; '.join(errored), 'warning')
+            else:
+                await self.broadcast_activity(
+                    f'E-STOP {verb} on {engaged_count} node(s)', 'warning')
+            return {"status": "ok", "data": {
+                "active": new_state,
+                "node_count": engaged_count,
+            }}
         else:
             return {"status": "error", "message": f"Unknown command action: {action}"}
 
@@ -809,13 +872,28 @@ class WebSocketHandler:
             node_id = params.get('node_id')
             if not node_id:
                 return {"status": "error", "message": "Missing node_id"}
+            # Per-node estop also uses engage/release. Default to engage
+            # for backwards-compatible callers that just want to stop one
+            # node without flipping the system-wide latch.
+            wire_action = params.get('state', 'engage')
+            if wire_action not in ('engage', 'release'):
+                return {"status": "error",
+                        "message": "state must be 'engage' or 'release'"}
 
             if self._estop_node_callback:
-                self._estop_node_callback(node_id)
-                await self.broadcast_activity(f'Emergency stop sent to node {node_id}', 'warning')
-                return {"status": "ok", "data": {"message": "Emergency stop command sent"}}
+                self._estop_node_callback(node_id, wire_action)
+                verb = 'engaged' if wire_action == 'engage' else 'released'
+                await self.broadcast_activity(
+                    f'Emergency stop {verb} on node {node_id}', 'warning')
+                return {"status": "ok", "data": {"message": f"Emergency stop {verb}"}}
             else:
                 return {"status": "error", "message": "Estop callback not configured"}
+
+        elif action == 'get_estop_state':
+            return {"status": "ok", "data": {
+                "active": self._estop_active,
+                "changed_at": self._estop_changed_at,
+            }}
 
         # Pin Configuration Actions
         elif action == 'get_roles':
@@ -860,6 +938,7 @@ class WebSocketHandler:
             return {"status": "ok", "data": {
                 "peripheral_types": self.state_manager.get_peripheral_catalog(),
                 "widget_types": self.state_manager.get_widget_catalog(),
+                "operator_types": self.state_manager.get_operator_catalog(),
             }}
 
         # ─── Per-node peripheral configuration ──────────────────────────────
@@ -948,34 +1027,85 @@ class WebSocketHandler:
                 return {"status": "ok", "data": {"message": "Sync initiated", "success": True}}
             return {"status": "error", "message": "Config sync not available"}
 
-        # ─── System routing (routes + widgets) ──────────────────────────────
+        # ─── System routing (sheets + widgets) ──────────────────────────────
         elif action == 'get_system_routing':
             return {"status": "ok", "data": self.state_manager.get_system_routing()}
 
-        elif action == 'add_route':
-            source = params.get('source')
-            sink = params.get('sink')
-            if not source or not sink:
-                return {"status": "error", "message": "Missing source or sink"}
-            result = self.state_manager.add_route(source, sink)
+        elif action == 'get_routing_sheet':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            return {"status": "ok",
+                    "data": self.state_manager.get_routing_sheet(node_id)}
+
+        elif action == 'add_routing_input':
+            node_id = params.get('node_id')
+            topic = params.get('topic')
+            if not node_id or not topic:
+                return {"status": "error", "message": "Missing node_id or topic"}
+            result = self.state_manager.add_routing_input(
+                node_id=node_id,
+                topic=topic,
+                field=params.get('field', ''),
+                label=params.get('label', ''),
+                position=params.get('position'),
+            )
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
 
-        elif action == 'update_route':
-            route_id = params.get('route_id')
-            source = params.get('source')
-            sink = params.get('sink')
-            if not route_id or not source or not sink:
-                return {"status": "error", "message": "Missing route_id, source, or sink"}
-            result = self.state_manager.update_route(route_id, source, sink)
+        elif action == 'add_routing_operator':
+            node_id = params.get('node_id')
+            op = params.get('op')
+            if not node_id or not op:
+                return {"status": "error", "message": "Missing node_id or op"}
+            result = self.state_manager.add_routing_operator(
+                node_id=node_id,
+                op=op,
+                label=params.get('label', ''),
+                params=params.get('params'),
+                defaults=params.get('defaults'),
+                position=params.get('position'),
+            )
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
 
-        elif action == 'remove_route':
-            route_id = params.get('route_id')
-            if not route_id:
-                return {"status": "error", "message": "Missing route_id"}
-            result = self.state_manager.remove_route(route_id)
+        elif action == 'add_routing_wire':
+            node_id = params.get('node_id')
+            source = params.get('source')
+            sink = params.get('sink')
+            if not node_id or not source or not sink:
+                return {"status": "error", "message": "Missing node_id, source, or sink"}
+            result = self.state_manager.add_routing_wire(node_id, source, sink)
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
+        elif action == 'update_sheet_node':
+            node_id = params.get('node_id')
+            sheet_node_id = params.get('sheet_node_id')
+            if not node_id or not sheet_node_id:
+                return {"status": "error", "message": "Missing node_id or sheet_node_id"}
+            changes = {k: v for k, v in params.items()
+                       if k in ('label', 'params', 'defaults', 'position',
+                                'topic', 'field')}
+            result = self.state_manager.update_sheet_node(node_id, sheet_node_id, **changes)
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
+        elif action == 'remove_sheet_node':
+            node_id = params.get('node_id')
+            sheet_node_id = params.get('sheet_node_id')
+            if not node_id or not sheet_node_id:
+                return {"status": "error", "message": "Missing node_id or sheet_node_id"}
+            result = self.state_manager.remove_sheet_node(node_id, sheet_node_id)
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
+        elif action == 'remove_routing_wire':
+            node_id = params.get('node_id')
+            wire_id = params.get('wire_id')
+            if not node_id or not wire_id:
+                return {"status": "error", "message": "Missing node_id or wire_id"}
+            result = self.state_manager.remove_routing_wire(node_id, wire_id)
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
 
@@ -1535,6 +1665,18 @@ class WebSocketHandler:
 
         elif action in ('list_endpoints', 'list_topics'):
             return self._ros_bridge.list_endpoints()
+
+        elif action == 'list_topic_channels':
+            return self._ros_bridge.list_topic_channels()
+
+        elif action == 'set_topic_channel':
+            endpoint = params.get('endpoint') or params.get('topic')
+            field = params.get('field') or params.get('channel')
+            if endpoint is None or field is None or 'value' not in params:
+                return {"status": "error",
+                        "message": "Missing endpoint/topic, field/channel, or value"}
+            return self._ros_bridge.set_topic_channel(
+                endpoint, field, params.get('value'), client.id)
 
         else:
             return {"status": "error", "message": f"Unknown ROS action: {action}"}

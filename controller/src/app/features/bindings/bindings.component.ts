@@ -156,7 +156,7 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
                   <div class="mt-3 pt-3 border-t border-saint-border grid grid-cols-4 gap-4 text-sm">
                     <div>
                       <span class="text-saint-text-muted">Target:</span>
-                      <span class="ml-1">{{ binding.action.target.name || (binding.action.target.role + ':' + binding.action.target.function) }}</span>
+                      <span class="ml-1">{{ binding.action.target.name || (binding.action.target.topic + ':' + binding.action.target.channel) }}</span>
                     </div>
                     <div>
                       <span class="text-saint-text-muted">Deadzone:</span>
@@ -339,22 +339,22 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
               @if (analogForm.actionType === 'direct_control') {
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label class="block text-sm text-saint-text-muted mb-1">Role</label>
-                    <select class="input w-full" [(ngModel)]="analogForm.targetRole"
-                            (ngModelChange)="onRoleChange()">
-                      <option value="">-- Select Role --</option>
-                      @for (role of availableRoles(); track role) {
-                        <option [value]="role">{{ role }}</option>
+                    <label class="block text-sm text-saint-text-muted mb-1">Topic</label>
+                    <select class="input w-full" [(ngModel)]="analogForm.targetTopic"
+                            (ngModelChange)="onTopicChange()">
+                      <option value="">-- Select Topic --</option>
+                      @for (topic of availableTopics(); track topic) {
+                        <option [value]="topic">{{ topic }}</option>
                       }
                     </select>
                   </div>
                   <div>
-                    <label class="block text-sm text-saint-text-muted mb-1">Function</label>
-                    <select class="input w-full" [(ngModel)]="analogForm.targetFunction"
-                            [disabled]="!analogForm.targetRole">
-                      <option value="">-- Select Function --</option>
-                      @for (fn of availableFunctionsForSelectedRole(); track fn) {
-                        <option [value]="fn">{{ fn }}</option>
+                    <label class="block text-sm text-saint-text-muted mb-1">Channel</label>
+                    <select class="input w-full" [(ngModel)]="analogForm.targetChannel"
+                            [disabled]="!analogForm.targetTopic">
+                      <option value="">-- Select Channel --</option>
+                      @for (ch of availableChannelsForSelectedTopic(); track ch.field) {
+                        <option [value]="ch.field">{{ ch.label }}</option>
                       }
                     </select>
                   </div>
@@ -520,22 +520,22 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
                 @case ('direct_control') {
                   <div class="grid grid-cols-2 gap-4">
                     <div>
-                      <label class="block text-sm text-saint-text-muted mb-1">Role</label>
-                      <select class="input w-full" [(ngModel)]="digitalForm.role"
-                              (ngModelChange)="onDigitalRoleChange()">
-                        <option value="">-- Select Role --</option>
-                        @for (role of availableRoles(); track role) {
-                          <option [value]="role">{{ role }}</option>
+                      <label class="block text-sm text-saint-text-muted mb-1">Topic</label>
+                      <select class="input w-full" [(ngModel)]="digitalForm.topic"
+                              (ngModelChange)="onDigitalTopicChange()">
+                        <option value="">-- Select Topic --</option>
+                        @for (topic of availableTopics(); track topic) {
+                          <option [value]="topic">{{ topic }}</option>
                         }
                       </select>
                     </div>
                     <div>
-                      <label class="block text-sm text-saint-text-muted mb-1">Function</label>
-                      <select class="input w-full" [(ngModel)]="digitalForm.function"
-                              [disabled]="!digitalForm.role">
-                        <option value="">-- Select Function --</option>
-                        @for (fn of availableFunctionsForDigitalRole(); track fn) {
-                          <option [value]="fn">{{ fn }}</option>
+                      <label class="block text-sm text-saint-text-muted mb-1">Channel</label>
+                      <select class="input w-full" [(ngModel)]="digitalForm.channel"
+                              [disabled]="!digitalForm.topic">
+                        <option value="">-- Select Channel --</option>
+                        @for (ch of availableChannelsForDigitalTopic(); track ch.field) {
+                          <option [value]="ch.field">{{ ch.label }}</option>
                         }
                       </select>
                     </div>
@@ -582,8 +582,8 @@ export class BindingsComponent {
     // 'modifier' — differential_drive bindings are configured
     // elsewhere — so loadAnalogForm early-returns for that case.
     actionType: 'direct_control' as 'direct_control' | 'modifier' | 'differential_drive',
-    targetRole: '',
-    targetFunction: '',
+    targetTopic: '',
+    targetChannel: '',
     targetName: '',
     deadzone: 0.1,
     scale: 1.0,
@@ -606,8 +606,8 @@ export class BindingsComponent {
     direction: 'next_item' as NavigateDirection,
     targetId: '',
     cycleValues: '',
-    role: '',
-    function: '',
+    topic: '',
+    channel: '',
     value: 1.0
   };
 
@@ -618,8 +618,10 @@ export class BindingsComponent {
   readonly digitalActionTypes = DIGITAL_ACTION_TYPES;
   readonly navigateDirections = NAVIGATE_DIRECTIONS;
 
-  // Discovery-based role/function lists
-  readonly availableRoles = computed(() => this.discoveryService.activeRoles());
+  // Topic/channel catalog from the server's list_topic_channels (and
+  // legacy role list, still surfaced for non-direct-control digital
+  // actions that reference roles).
+  readonly availableTopics = computed(() => this.discoveryService.availableTopics());
 
   constructor(
     public bindingsService: BindingsService,
@@ -629,26 +631,26 @@ export class BindingsComponent {
     this.discoveryService.refresh();
   }
 
-  // Get functions available for the currently selected role in analog form
-  availableFunctionsForSelectedRole(): string[] {
-    if (!this.analogForm.targetRole) return [];
-    return this.discoveryService.getFunctionsForRole(this.analogForm.targetRole);
+  // Channels available on the topic selected in the analog form.
+  availableChannelsForSelectedTopic() {
+    if (!this.analogForm.targetTopic) return [];
+    return this.discoveryService.getChannelsForTopic(this.analogForm.targetTopic);
   }
 
-  // Get functions available for the currently selected role in digital form
-  availableFunctionsForDigitalRole(): string[] {
-    if (!this.digitalForm.role) return [];
-    return this.discoveryService.getFunctionsForRole(this.digitalForm.role);
+  // Channels available on the topic selected in the digital form.
+  availableChannelsForDigitalTopic() {
+    if (!this.digitalForm.topic) return [];
+    return this.discoveryService.getChannelsForTopic(this.digitalForm.topic);
   }
 
-  // When analog role changes, reset function selection
-  onRoleChange(): void {
-    this.analogForm.targetFunction = '';
+  // When analog topic changes, reset channel selection.
+  onTopicChange(): void {
+    this.analogForm.targetChannel = '';
   }
 
-  // When digital role changes, reset function selection
-  onDigitalRoleChange(): void {
-    this.digitalForm.function = '';
+  // When digital topic changes, reset channel selection.
+  onDigitalTopicChange(): void {
+    this.digitalForm.channel = '';
   }
 
   // Computed helpers
@@ -682,7 +684,7 @@ export class BindingsComponent {
 
   formatAnalogAction(action: AnalogAction): string {
     if (action.type === 'direct_control') {
-      return `Direct Control → ${action.target.name || `${action.target.role}:${action.target.function}`}`;
+      return `Direct Control → ${action.target.name || `${action.target.topic}:${action.target.channel}`}`;
     }
     if (action.type === 'modifier') {
       switch (action.effect.type) {
@@ -703,7 +705,7 @@ export class BindingsComponent {
       case 'select_panel_item': return 'Select Panel Item';
       case 'toggle_output': return `Toggle: ${action.target_id}`;
       case 'cycle_output': return `Cycle: ${action.target_id} (${action.values.join(', ')})`;
-      case 'direct_control': return `Direct Control → ${action.target.role}:${action.target.function} = ${action.value}`;
+      case 'direct_control': return `Direct Control → ${action.target.topic}:${action.target.channel} = ${action.value}`;
       case 'e_stop': return 'Emergency Stop';
       case 'none': return 'None';
     }
@@ -736,8 +738,8 @@ export class BindingsComponent {
     this.analogForm = {
       input: 'left_stick_x',
       actionType: 'direct_control',
-      targetRole: '',
-      targetFunction: '',
+      targetTopic: '',
+      targetChannel: '',
       targetName: '',
       deadzone: 0.1,
       scale: 1.0,
@@ -769,8 +771,8 @@ export class BindingsComponent {
     }
 
     if (binding.action.type === 'direct_control') {
-      this.analogForm.targetRole = binding.action.target.role;
-      this.analogForm.targetFunction = binding.action.target.function;
+      this.analogForm.targetTopic = binding.action.target.topic;
+      this.analogForm.targetChannel = binding.action.target.channel;
       this.analogForm.targetName = binding.action.target.name || '';
       this.analogForm.deadzone = binding.action.transform.deadzone;
       this.analogForm.scale = binding.action.transform.scale;
@@ -796,8 +798,8 @@ export class BindingsComponent {
       action = {
         type: 'direct_control',
         target: {
-          role: this.analogForm.targetRole,
-          function: this.analogForm.targetFunction,
+          topic: this.analogForm.targetTopic,
+          channel: this.analogForm.targetChannel,
           name: this.analogForm.targetName || undefined
         },
         transform: {
@@ -871,8 +873,8 @@ export class BindingsComponent {
       direction: 'next_item',
       targetId: '',
       cycleValues: '',
-      role: '',
-      function: '',
+      topic: '',
+      channel: '',
       value: 1.0
     };
   }
@@ -900,8 +902,8 @@ export class BindingsComponent {
         this.digitalForm.cycleValues = binding.action.values.join(', ');
         break;
       case 'direct_control':
-        this.digitalForm.role = binding.action.target.role;
-        this.digitalForm.function = binding.action.target.function;
+        this.digitalForm.topic = binding.action.target.topic;
+        this.digitalForm.channel = binding.action.target.channel;
         this.digitalForm.value = binding.action.value;
         break;
     }
@@ -939,7 +941,7 @@ export class BindingsComponent {
       case 'direct_control':
         action = {
           type: 'direct_control',
-          target: { role: this.digitalForm.role, function: this.digitalForm.function },
+          target: { topic: this.digitalForm.topic, channel: this.digitalForm.channel },
           value: this.digitalForm.value
         };
         break;

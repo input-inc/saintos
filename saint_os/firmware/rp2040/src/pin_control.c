@@ -409,6 +409,22 @@ void pin_control_estop(void)
     printf("ESTOP: Complete\n");
 }
 
+void pin_control_clear_estop(void)
+{
+    // Release the latch. Pins controlled directly via PWM/servo/digital
+    // are NOT automatically restored to their pre-stop values — once
+    // we've forced them to safe defaults we don't know what the
+    // operator wanted them at, so the next set_value from the host
+    // will bring them back. The peripheral drivers' clear_estop hooks
+    // are the important part: they release hardware latches (e.g.
+    // RoboClaw's S3 estop_pin returns to LOW so motor commands work
+    // again) so motor controllers can be brought out of safety mode
+    // without a power cycle.
+    printf("ESTOP CLEAR: releasing peripheral latches\n");
+    peripheral_clear_estop_all();
+    printf("ESTOP CLEAR: Complete\n");
+}
+
 // Pull a quoted-string field value out of a JSON buffer. Returns true on
 // success; `out` is null-terminated. Mirrors extract_string_field() in
 // pin_config.c — duplicated rather than exposed because it's a small

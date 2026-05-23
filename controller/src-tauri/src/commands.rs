@@ -172,6 +172,27 @@ pub fn discover_controllable(state: State<'_, Arc<AppState>>) -> Result<(), Stri
     state.ws_client.request_discover_controllable()
 }
 
+/// Request enumeration of ROS topics + their scalar channels. Result
+/// is delivered out-of-band via the `discovery-topic-channels` Tauri
+/// event for the bindings UI.
+#[tauri::command]
+pub fn discover_topic_channels(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_discover_topic_channels()
+}
+
+/// Push a single scalar value onto a ROS topic channel via the server.
+/// Replaces send_function_control for bindings authored against the new
+/// topic/channel picker.
+#[tauri::command]
+pub fn send_topic_channel_value(
+    state: State<'_, Arc<AppState>>,
+    topic: String,
+    channel: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    state.ws_client.send_topic_channel_value(&topic, &channel, value)
+}
+
 /// Check if a gamepad is connected
 #[tauri::command]
 pub fn is_gamepad_connected(state: State<'_, Arc<AppState>>) -> bool {
@@ -199,11 +220,11 @@ pub fn activate_preset(state: State<'_, Arc<AppState>>, preset_id: String) -> Re
     // Execute the preset based on its type
     match &preset.data {
         crate::bindings::config::PresetData::Servo(servo_data) => {
-            // Send servo positions using role/function abstraction
+            // Send each servo position as a topic/channel scalar.
             for position in &servo_data.positions {
-                state.ws_client.send_function_control(
-                    &position.role,
-                    &position.function,
+                state.ws_client.send_topic_channel_value(
+                    &position.topic,
+                    &position.channel,
                     serde_json::Value::from(position.value),
                 )?;
             }
@@ -213,14 +234,14 @@ pub fn activate_preset(state: State<'_, Arc<AppState>>, preset_id: String) -> Re
             log::info!("Playing animation preset: {} ({} keyframes)", preset_id, anim_data.keyframes.len());
         }
         crate::bindings::config::PresetData::Sound(sound_data) => {
-            // Send sound play command using role/function abstraction
-            state.ws_client.send_function_control(
-                "sound",
+            // Sound presets publish onto /sound with a structured payload.
+            state.ws_client.send_topic_channel_value(
+                "/sound",
                 "play",
                 serde_json::json!({
                     "soundId": sound_data.sound_id,
                     "volume": sound_data.volume,
-                    "priority": sound_data.priority
+                    "priority": sound_data.priority,
                 }),
             )?;
         }

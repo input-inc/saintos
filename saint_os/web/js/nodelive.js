@@ -158,13 +158,15 @@ class NodeLiveManager {
         for (const ch of channels) {
             if (!ch.peripheral_id || !ch.channel_id) continue;
             const key = `${ch.peripheral_id}/${ch.channel_id}`;
-            // Live readings tab uses the server's `last_updated` if it
-            // looks like wall-clock (>10 years past epoch); otherwise the
-            // Pi probably has no RTC set and the field is boot-relative,
-            // in which case we fall back to the browser's wall-clock so
-            // sparkline timestamps stay sane.
-            let ts = ch.last_updated;
-            if (typeof ts !== 'number' || ts < 315532800) ts = Date.now() / 1000;
+            // ALWAYS use the browser's wall-clock for the in-RAM ring
+            // buffer. The server's `last_updated` is set from the Pi's
+            // time.time() — which, on a Pi without an RTC or NTP sync,
+            // can be off from the browser by hours. Mixing the two
+            // timebases means every fresh sample lands "older than 30s"
+            // by the browser-clock cutoff and gets shifted out of the
+            // ring immediately. Stamping with the browser clock makes
+            // the sparkline robust to whatever the Pi reports.
+            const ts = Date.now() / 1000;
             this._values.set(key, { value: ch.value, ts });
             // Sparkline ring buffer is always-on for numeric input
             // channels — the disk-logging toggle is independent.

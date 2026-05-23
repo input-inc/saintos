@@ -9,7 +9,7 @@ Uses unified endpoint paths - subscribe and publish use the same path:
 """
 
 import time
-from typing import Dict, Set, Any, Optional, Callable
+from typing import Dict, List, Set, Any, Optional, Callable
 from threading import Lock
 
 from rclpy.node import Node
@@ -19,6 +19,7 @@ from saint_server.ros_bridge.message_types import (
     load_endpoints,
     get_endpoint,
     get_all_endpoints,
+    introspect_message_channels,
     serialize_message,
     deserialize_message,
     EndpointInfo
@@ -57,6 +58,12 @@ class ROSBridge:
         # Callback for sending ROS messages to WebSocket
         self._message_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
+        # Listeners that observe ROS messages independently of WebSocket
+        # broadcast (e.g. the routing graph evaluator). Each callback
+        # receives the same (endpoint_path, serialized_data) as the
+        # WebSocket broadcaster.
+        self._routing_listeners: List[Callable[[str, Dict[str, Any]], None]] = []
+
         # Active ROS subscriptions: endpoint_path -> subscription object
         self._subscriptions: Dict[str, Any] = {}
 
@@ -68,6 +75,13 @@ class ROSBridge:
 
         # Throttle tracking: endpoint_path -> last_publish_time (ms)
         self._publish_throttle: Dict[str, float] = {}
+
+        # Per-topic channel buffer used by `set_topic_channel`. Lets a
+        # controller update a single scalar field (e.g. /tracks linear.x)
+        # without sending the whole message: we merge the field into the
+        # buffer and republish the merged dict each time.
+        # endpoint_path -> {field_path: scalar_value}
+        self._channel_buffers: Dict[str, Dict[str, Any]] = {}
 
         # Track initialization
         self._initialized = False
@@ -99,6 +113,16 @@ class ROSBridge:
                 self.log('debug', f'  {path}: {", ".join(capabilities)}')
 
         self._initialized = True
+
+    def add_routing_listener(self, callback: Callable[[str, Dict[str, Any]], None]):
+        """Register a listener that observes every ROS message we forward.
+
+        Independent of the WebSocket-broadcast callback, so the routing
+        evaluator can see messages even on topics no WS client is
+        subscribed to (it keeps its own bridge subscription open under
+        the reserved `_routing_evaluator` client id).
+        """
+        self._routing_listeners.append(callback)
 
     def set_message_callback(self, callback: Callable[[str, Dict[str, Any]], None]):
         """
@@ -284,6 +308,78 @@ class ROSBridge:
         """Alias for list_endpoints (backwards compatibility)."""
         return self.list_endpoints()
 
+    def set_topic_channel(self, endpoint_path: str, field: str,
+                          value: Any, client_id: str = "") -> Dict[str, Any]:
+        """Update a single scalar field on a topic and republish.
+
+        Bindings on the controller call this from the runtime axis-fire
+        path: instead of constructing a full ROS message they hand us
+        (topic, field, value). We keep a per-topic dict buffer, merge
+        the addressed field into it, and publish the merged message.
+        Field paths use the same syntax as input channels — dotted
+        segments plus `[N]` for arrays (e.g. `linear.x`, `axes[3]`).
+        """
+        endpoint = get_endpoint(endpoint_path)
+        if not endpoint:
+            return {'status': 'error',
+                    'message': f'Unknown endpoint: {endpoint_path}'}
+        if not endpoint.command_type:
+            return {'status': 'error',
+                    'message': f'Endpoint {endpoint_path} does not support publishing.'}
+
+        # Merge into buffer.
+        with self._lock:
+            buf = self._channel_buffers.setdefault(endpoint_path, {})
+            try:
+                _set_field_in_dict(buf, field, value)
+            except ValueError as e:
+                return {'status': 'error', 'message': str(e)}
+            # Reuse the existing throttle (per-endpoint).
+            now = time.time() * 1000
+            last_publish = self._publish_throttle.get(endpoint_path, 0)
+            if now - last_publish < CONTROL_THROTTLE_MS:
+                return {'status': 'ok',
+                        'message': 'Throttled',
+                        'data': {'throttled': True, 'buffered': True}}
+            if endpoint_path not in self._publishers:
+                self._create_publisher(endpoint)
+            publisher = self._publishers.get(endpoint_path)
+            if not publisher:
+                return {'status': 'error',
+                        'message': f'Failed to create publisher for {endpoint_path}'}
+            try:
+                msg = deserialize_message(buf, endpoint.command_type)
+                publisher.publish(msg)
+                self._publish_throttle[endpoint_path] = now
+            except Exception as e:
+                self.log('error',
+                         f'Failed to publish channel {field} to {endpoint_path}: {e}')
+                return {'status': 'error',
+                        'message': f'Failed to publish: {str(e)}'}
+        self.log('debug',
+                 f'set_topic_channel {endpoint_path} {field}={value} (client {client_id})')
+        return {'status': 'ok', 'data': {'throttled': False}}
+
+    def list_topic_channels(self) -> Dict[str, Any]:
+        """For each subscribable endpoint, flatten its msg type into
+        selectable scalar channels (e.g. /joy → axes[0..7], buttons[0..7]).
+
+        The routing UI uses this to populate the channel picker when the
+        operator adds a topic-input source on a sheet.
+        """
+        topics: List[Dict[str, Any]] = []
+        for path, endpoint in get_all_endpoints().items():
+            if endpoint.state_type is None:
+                continue
+            channels = introspect_message_channels(endpoint.state_type)
+            topics.append({
+                "topic": path,
+                "state_type": endpoint.state_type.__name__,
+                "channels": channels,
+            })
+        topics.sort(key=lambda t: t["topic"])
+        return {"status": "ok", "data": {"topics": topics}}
+
     def client_disconnected(self, client_id: str):
         """
         Clean up subscriptions when a WebSocket client disconnects.
@@ -343,19 +439,19 @@ class ROSBridge:
 
     def _on_ros_message(self, endpoint_path: str, msg: Any):
         """
-        Handle incoming ROS message and forward to WebSocket clients.
+        Handle incoming ROS message: forward to WebSocket clients and
+        notify any registered routing listeners.
 
         Args:
             endpoint_path: Unified endpoint path
             msg: ROS message
         """
-        if not self._message_callback:
-            return
-
-        # Check if anyone is subscribed
+        # Bail early only if nobody at all is interested.
         with self._lock:
-            if endpoint_path not in self._endpoint_clients or not self._endpoint_clients[endpoint_path]:
-                return
+            has_clients = bool(self._endpoint_clients.get(endpoint_path))
+        has_listeners = bool(self._routing_listeners)
+        if not has_clients and not has_listeners:
+            return
 
         # Serialize message using introspection
         try:
@@ -364,8 +460,83 @@ class ROSBridge:
             self.log('error', f'Failed to serialize message from {endpoint_path}: {e}')
             return
 
-        # Call the callback to broadcast to WebSocket
-        try:
-            self._message_callback(endpoint_path, data)
-        except Exception as e:
-            self.log('error', f'Failed to broadcast message from {endpoint_path}: {e}')
+        # Broadcast to WebSocket clients (if any).
+        if has_clients and self._message_callback:
+            try:
+                self._message_callback(endpoint_path, data)
+            except Exception as e:
+                self.log('error', f'Failed to broadcast message from {endpoint_path}: {e}')
+
+        # Notify routing listeners — they observe regardless of WS clients.
+        for listener in self._routing_listeners:
+            try:
+                listener(endpoint_path, data)
+            except Exception as e:
+                self.log('error', f'Routing listener failed for {endpoint_path}: {e}')
+
+
+def _set_field_in_dict(buf: Dict[str, Any], field: str, value: Any) -> None:
+    """Set `field` (dotted + [index] path) inside the nested-dict buffer.
+
+    Creates missing dict entries and grows lists with zero-padded entries
+    as needed so the buffer always materializes the path. Used by
+    set_topic_channel to merge partial channel updates into a single
+    serializable buffer per topic.
+    """
+    if not field:
+        raise ValueError("field is required")
+    segments = _parse_field_path(field)
+    cur: Any = buf
+    for i, (name, indices) in enumerate(segments):
+        is_last = (i == len(segments) - 1)
+        # Navigate (or create) the named container.
+        if name:
+            if not isinstance(cur, dict):
+                raise ValueError(f"Cannot descend into non-dict at '{name}'")
+            if is_last and not indices:
+                cur[name] = value
+                return
+            if name not in cur or (not indices and not isinstance(cur[name], dict)):
+                cur[name] = {} if not indices else []
+            cur = cur[name]
+        # Apply [N] index suffixes left-to-right.
+        for j, idx in enumerate(indices):
+            inner_last = is_last and j == len(indices) - 1
+            if not isinstance(cur, list):
+                raise ValueError(f"Cannot index non-list at '{field}'")
+            while len(cur) <= idx:
+                cur.append(0.0)
+            if inner_last:
+                cur[idx] = value
+                return
+            if not isinstance(cur[idx], (list, dict)):
+                cur[idx] = {}
+            cur = cur[idx]
+
+
+def _parse_field_path(field: str) -> List:
+    """Tokenize `field` into [(name, [indices]), …]."""
+    out = []
+    for seg in field.split('.'):
+        if not seg:
+            continue
+        name = seg
+        indices: List[int] = []
+        bracket = seg.find('[')
+        if bracket != -1:
+            name = seg[:bracket]
+            rest = seg[bracket:]
+            i = 0
+            while i < len(rest):
+                if rest[i] != '[':
+                    raise ValueError(f"Bad field syntax '{field}' near '{rest[i:]}'")
+                close = rest.find(']', i)
+                if close == -1:
+                    raise ValueError(f"Unterminated [] in field '{field}'")
+                try:
+                    indices.append(int(rest[i + 1:close]))
+                except ValueError:
+                    raise ValueError(f"Non-integer index in field '{field}'")
+                i = close + 1
+        out.append((name, indices))
+    return out

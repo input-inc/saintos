@@ -1,29 +1,31 @@
 /**
  * SAINT.OS Routing Page
  *
- * System-wide graph editor for connecting peripheral channels to logical
- * signals and dashboard widgets. Each graph node represents one of:
- *   - a peripheral instance on a node      (handle: p::<node>::<periph>)
- *   - a logical signal (operator-created)  (handle: s::<path>)
- *   - a dashboard widget                   (handle: w::<widget_id>)
+ * Per-controller graph editor. One sheet per adopted controller node
+ * plus a dashboard sheet for widgets. Each sheet contains:
+ *   - Input nodes     (ROS topic + scalar channel)
+ *   - Operator nodes  (server-evaluated transforms: Max/Min/Clamp/…)
+ *   - Wires           (input/operator output → operator pin / peripheral
+ *                      channel / widget input)
  *
- * Wires correspond to server-side Route objects. Positions live in
- * localStorage and are layout-only (not part of the wire semantics).
+ * Layout-only state (node positions, currently-selected sheet) lives in
+ * localStorage; the canonical graph lives in `system_routing.yaml`
+ * server-side.
  */
+
+const DASHBOARD_SHEET_ID = '_dashboard';
 
 class RoutingPage {
     constructor() {
-        this.catalog = null;          // peripheral_types + widget_types
-        this.nodes = [];              // adopted nodes (with peripherals)
-        this.routing = { version: 0, routes: [], widgets: [] };
+        this.catalog = null;          // peripheral_types + widget_types + operator_types
+        this.topicCatalog = [];       // list of {topic, state_type, channels[]}
+        this.nodes = [];              // adopted controller nodes (with peripherals)
+        this.routing = { version: 0, sheets: {}, widgets: [] };
 
-        // Graph state — built from server data on each refresh.
-        this.graphNodes = [];
-        // Map graphNodeId -> {x, y}  (persisted in localStorage)
+        this.activeSheetId = this._loadActiveSheet();
+        // Map "sheetId:nodeId" → {x, y}
         this.positions = this._loadPositions();
-        // Operator-created signal labels that don't yet have any routes.
-        // Persisted in localStorage so they survive page reloads.
-        this.pendingSignals = this._loadPendingSignals();
+        this.graphNodes = [];
 
         // Interaction state
         this._connecting = null;
@@ -32,32 +34,29 @@ class RoutingPage {
         this._mouseHandler = null;
         this._upHandler = null;
         this._canvasClickHandler = null;
+        this._active = false;
     }
 
     init() {
-        document.getElementById('btn-routing-add-signal')
-            ?.addEventListener('click', () => this.promptAddSignal());
+        document.getElementById('btn-routing-add-input')
+            ?.addEventListener('click', () => this.openInputModal());
+        document.getElementById('btn-routing-add-operator')
+            ?.addEventListener('click', () => this.openOperatorModal());
         document.getElementById('btn-routing-add-widget')
             ?.addEventListener('click', () => this.openWidgetModal());
         document.getElementById('btn-routing-auto-layout')
             ?.addEventListener('click', () => this.autoLayout());
 
-        // Listen for system_routing broadcasts so the graph keeps in sync
-        // when other clients edit it.
         const ws = window.saintWS;
         if (ws) {
             ws.on('state', (msg) => {
                 if (!msg || msg.node !== 'system_routing') return;
-                this.routing = msg.data || { version: 0, routes: [], widgets: [] };
-                if (this._active) this.rebuildGraph(/* keepPositions= */ true);
+                this.routing = msg.data || { version: 0, sheets: {}, widgets: [] };
+                if (this._active) this.render();
             });
         }
     }
 
-    /**
-     * Called when the Routing page becomes active. Lazy-fetches catalog
-     * + node list + routing graph and renders.
-     */
     async activate() {
         this._active = true;
         const ws = window.saintWS;
@@ -70,32 +69,35 @@ class RoutingPage {
         }
 
         try {
-            const [catalog, nodes, routing] = await Promise.all([
+            const [catalog, nodes, routing, topics] = await Promise.all([
                 this.ensureCatalog(),
                 ws.management('list_adopted', {}),
                 ws.management('get_system_routing', {}),
+                ws.send('ros', 'list_topic_channels', {}).catch(() => ({ topics: [] })),
             ]);
             this.catalog = catalog;
             this.nodes = await this._enrichNodesWithPeripherals(nodes?.nodes || []);
-            this.routing = routing || { version: 0, routes: [], widgets: [] };
+            this.routing = routing || { version: 0, sheets: {}, widgets: [] };
+            this.topicCatalog = (topics?.topics) || [];
 
-            this.rebuildGraph();
+            this._ensureActiveSheet();
             this._installMouseHandlers();
+            this.render();
         } catch (err) {
             console.error('Failed to activate routing page:', err);
         }
     }
 
+    deactivate() { this._active = false; }
+
     async ensureCatalog() {
         if (this.catalog) return this.catalog;
         const result = await window.saintWS.management('get_peripheral_catalog', {});
-        this.catalog = result || { peripheral_types: [], widget_types: [] };
+        this.catalog = result || { peripheral_types: [], widget_types: [], operator_types: [] };
         return this.catalog;
     }
 
     async _enrichNodesWithPeripherals(adoptedNodes) {
-        // `get_adopted_nodes` returns identity + counts but not peripherals.
-        // Fetch peripherals per-node in parallel.
         const ws = window.saintWS;
         const enriched = await Promise.all(adoptedNodes.map(async (n) => {
             try {
@@ -108,147 +110,223 @@ class RoutingPage {
         return enriched;
     }
 
-    // ─── Build the graph from server state ──────────────────────────────
+    // ── Sheet selection ───────────────────────────────────────────────
 
-    rebuildGraph(keepPositions = false) {
-        const oldPositions = keepPositions ? new Map(
-            this.graphNodes.map(n => [n.id, { x: n.x, y: n.y }])
-        ) : new Map();
-
-        const graphNodes = [];
-
-        // Peripheral nodes
-        for (const node of this.nodes) {
-            for (const p of (node.peripherals || [])) {
-                const id = `p::${node.node_id}::${p.id}`;
-                const stored = this.positions[id] || oldPositions.get(id);
-                graphNodes.push({
-                    id, kind: 'peripheral',
-                    nodeId: node.node_id,
-                    nodeLabel: node.display_name || node.node_id,
-                    peripheral: p,
-                    x: stored?.x ?? 0, y: stored?.y ?? 0,
-                });
-            }
+    _ensureActiveSheet() {
+        const sheetIds = this._sheetIds();
+        if (!sheetIds.includes(this.activeSheetId)) {
+            this.activeSheetId = sheetIds[0] || null;
+            this._saveActiveSheet();
         }
+    }
 
-        // Widget nodes
-        for (const w of (this.routing.widgets || [])) {
-            const id = `w::${w.id}`;
-            const stored = this.positions[id] || oldPositions.get(id);
-            graphNodes.push({
-                id, kind: 'widget', widget: w,
-                x: stored?.x ?? 0, y: stored?.y ?? 0,
-            });
-        }
+    _sheetIds() {
+        // Sheets in display order: each adopted controller, then dashboard.
+        const ids = this.nodes.map(n => n.node_id);
+        ids.push(DASHBOARD_SHEET_ID);
+        return ids;
+    }
 
-        // Signal nodes — union of (paths referenced by any route) + (pending signals)
-        const sigPaths = new Set(this.pendingSignals);
-        for (const r of (this.routing.routes || [])) {
-            if (r.source?.kind === 'signal') sigPaths.add(r.source.parts[0]);
-            if (r.sink?.kind === 'signal')   sigPaths.add(r.sink.parts[0]);
-        }
-        for (const path of sigPaths) {
-            const id = `s::${path}`;
-            const stored = this.positions[id] || oldPositions.get(id);
-            graphNodes.push({
-                id, kind: 'signal', signal: path,
-                x: stored?.x ?? 0, y: stored?.y ?? 0,
-            });
-        }
-
-        // Auto-layout any nodes that don't have a saved position.
-        this._layoutMissing(graphNodes);
-
-        this.graphNodes = graphNodes;
+    selectSheet(sheetId) {
+        this.activeSheetId = sheetId;
+        this._saveActiveSheet();
+        this._cancelConnecting();
         this.render();
     }
 
+    _sheetData(sheetId) {
+        return this.routing.sheets?.[sheetId] || { node_id: sheetId, inputs: [], operators: [], wires: [] };
+    }
+
+    _activeSheet() {
+        return this._sheetData(this.activeSheetId);
+    }
+
+    _activeNode() {
+        return this.nodes.find(n => n.node_id === this.activeSheetId) || null;
+    }
+
+    _isDashboard() { return this.activeSheetId === DASHBOARD_SHEET_ID; }
+
+    // ── Rendering ─────────────────────────────────────────────────────
+
+    render() {
+        this._renderSheetList();
+        this._renderToolbar();
+        this._renderCanvas();
+    }
+
+    _renderSheetList() {
+        const list = document.getElementById('routing-sheet-list');
+        if (!list) return;
+        const html = [];
+        for (const node of this.nodes) {
+            const sheet = this._sheetData(node.node_id);
+            const count = (sheet.wires || []).length;
+            const isActive = node.node_id === this.activeSheetId;
+            const label = node.display_name || node.node_id;
+            html.push(`
+                <div class="routing-sheet-item ${isActive ? 'active' : ''}"
+                     onclick="routingPage.selectSheet('${escapeAttr(node.node_id)}')">
+                    <span class="material-icons">memory</span>
+                    <span class="truncate">${escapeHtml(label)}</span>
+                    ${count ? `<span class="routing-sheet-count">${count}</span>` : ''}
+                </div>
+            `);
+        }
+        const dashboardSheet = this._sheetData(DASHBOARD_SHEET_ID);
+        const dashCount = (dashboardSheet.wires || []).length;
+        const dashActive = this.activeSheetId === DASHBOARD_SHEET_ID;
+        html.push(`
+            <div class="routing-sheet-item ${dashActive ? 'active' : ''}"
+                 onclick="routingPage.selectSheet('${DASHBOARD_SHEET_ID}')">
+                <span class="material-icons">dashboard</span>
+                <span class="truncate">Dashboard</span>
+                ${dashCount ? `<span class="routing-sheet-count">${dashCount}</span>` : ''}
+            </div>
+        `);
+        list.innerHTML = html.join('');
+    }
+
+    _renderToolbar() {
+        const title = document.getElementById('routing-sheet-title');
+        const subtitle = document.getElementById('routing-sheet-subtitle');
+        const addInput = document.getElementById('btn-routing-add-input');
+        const addOp = document.getElementById('btn-routing-add-operator');
+        const addWidget = document.getElementById('btn-routing-add-widget');
+        const autoBtn = document.getElementById('btn-routing-auto-layout');
+
+        const hasSheet = !!this.activeSheetId;
+        if (addInput) addInput.disabled = !hasSheet;
+        if (addOp)    addOp.disabled    = !hasSheet;
+        if (autoBtn)  autoBtn.disabled  = !hasSheet;
+
+        if (this._isDashboard()) {
+            if (title)    title.textContent    = 'Dashboard';
+            if (subtitle) subtitle.textContent = 'Drive widgets from routed inputs and operators.';
+            if (addWidget) addWidget.classList.remove('hidden');
+            return;
+        }
+        if (addWidget) addWidget.classList.add('hidden');
+        const node = this._activeNode();
+        if (!node) {
+            if (title)    title.textContent    = 'Routing';
+            if (subtitle) subtitle.textContent = 'Adopt a controller node to start.';
+            return;
+        }
+        if (title)    title.textContent    = node.display_name || node.node_id;
+        if (subtitle) {
+            const sheet = this._sheetData(node.node_id);
+            const periphCount = (node.peripherals || []).length;
+            subtitle.textContent =
+                `${periphCount} peripheral${periphCount === 1 ? '' : 's'} · `
+              + `${sheet.inputs.length} input${sheet.inputs.length === 1 ? '' : 's'} · `
+              + `${sheet.operators.length} operator${sheet.operators.length === 1 ? '' : 's'} · `
+              + `${sheet.wires.length} wire${sheet.wires.length === 1 ? '' : 's'}`;
+        }
+    }
+
+    _renderCanvas() {
+        const layer = document.getElementById('routing-node-layer');
+        const empty = document.getElementById('routing-empty');
+        if (!layer) return;
+        if (!this.activeSheetId) {
+            layer.innerHTML = '';
+            if (empty) empty.classList.remove('hidden');
+            this._renderWires();
+            return;
+        }
+        if (empty) empty.classList.add('hidden');
+        this.graphNodes = this._buildGraphNodes();
+        this._layoutMissing(this.graphNodes);
+        layer.innerHTML = this.graphNodes.map(g => this._renderNodeHtml(g)).join('');
+        requestAnimationFrame(() => this._renderWires());
+        this._attachNodeInteractions();
+    }
+
+    _buildGraphNodes() {
+        const out = [];
+        const sheet = this._activeSheet();
+        // Input nodes (left column).
+        for (const n of (sheet.inputs || [])) {
+            const id = `in::${n.id}`;
+            const pos = this._positionFor(id, n.position);
+            out.push({ id, kind: 'input', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
+        }
+        // Operator nodes (middle column).
+        for (const n of (sheet.operators || [])) {
+            const id = `op::${n.id}`;
+            const pos = this._positionFor(id, n.position);
+            out.push({ id, kind: 'operator', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
+        }
+        // Peripheral sinks (right column) — only for controller sheets.
+        if (!this._isDashboard()) {
+            const node = this._activeNode();
+            for (const p of ((node && node.peripherals) || [])) {
+                const id = `p::${node.node_id}::${p.id}`;
+                const pos = this._positionFor(id, null);
+                out.push({ id, kind: 'peripheral', nodeId: node.node_id,
+                           nodeLabel: node.display_name || node.node_id,
+                           peripheral: p, x: pos.x, y: pos.y });
+            }
+        } else {
+            // Widget sinks on the dashboard sheet.
+            for (const w of (this.routing.widgets || [])) {
+                const id = `w::${w.id}`;
+                const pos = this._positionFor(id, w.position);
+                out.push({ id, kind: 'widget', widget: w, x: pos.x, y: pos.y });
+            }
+        }
+        return out;
+    }
+
+    _positionFor(id, fallback) {
+        const key = `${this.activeSheetId}:${id}`;
+        const saved = this.positions[key];
+        if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+            return { x: saved.x, y: saved.y };
+        }
+        if (Array.isArray(fallback) && fallback.length >= 2
+            && (fallback[0] || fallback[1])) {
+            return { x: fallback[0], y: fallback[1] };
+        }
+        return { x: 0, y: 0 };
+    }
+
     _layoutMissing(graphNodes) {
-        // Snap missing nodes into a tidy three-column grid:
-        //   peripherals on the left, signals in the middle, widgets on the right.
-        const cols = { peripheral: 30, signal: 360, widget: 720 };
-        const cursorY = { peripheral: 20, signal: 20, widget: 20 };
-        const SPACING = 130;
+        const cols = { input: 30, operator: 320, peripheral: 700, widget: 700 };
+        const cursorY = { input: 30, operator: 30, peripheral: 30, widget: 30 };
+        const SPACING = 140;
         for (const g of graphNodes) {
             if (g.x === 0 && g.y === 0) {
                 g.x = cols[g.kind] ?? 30;
-                g.y = cursorY[g.kind] ?? 20;
-                cursorY[g.kind] = (cursorY[g.kind] ?? 20) + SPACING;
+                g.y = cursorY[g.kind] ?? 30;
+                cursorY[g.kind] = (cursorY[g.kind] ?? 30) + SPACING;
             }
         }
     }
 
     autoLayout() {
-        // Wipe stored positions and let _layoutMissing place everything.
-        this.positions = {};
+        const sheet = this.activeSheetId;
+        if (!sheet) return;
+        // Wipe positions for this sheet only.
+        const prefix = `${sheet}:`;
+        for (const key of Object.keys(this.positions)) {
+            if (key.startsWith(prefix)) delete this.positions[key];
+        }
         this._savePositions();
-        for (const g of this.graphNodes) { g.x = 0; g.y = 0; }
-        this._layoutMissing(this.graphNodes);
         this.render();
     }
 
-    // ─── Pin metadata: inputs/outputs for each graph node ───────────────
-
-    getNodeMeta(g) {
-        if (g.kind === 'peripheral') {
-            const p = g.peripheral;
-            const type = this.peripheralType(p.type);
-            // channel.dir == 'in'  → data flows out of the peripheral (source pin on the right)
-            // channel.dir == 'out' → data flows into the peripheral (sink pin on the left)
-            const channels = type?.channels || [];
-            return {
-                title: p.label || p.id,
-                subtitle: `${type?.label || p.type} on ${g.nodeLabel}`,
-                builtin: !!p.builtin,
-                removable: false,
-                inputs:  channels.filter(c => c.dir === 'out')
-                                 .map(c => ({ id: c.id, label: c.display, cap: c.cap })),
-                outputs: channels.filter(c => c.dir === 'in')
-                                 .map(c => ({ id: c.id, label: c.display, cap: c.cap })),
-            };
-        }
-        if (g.kind === 'signal') {
-            return {
-                title: g.signal, subtitle: 'logical signal',
-                builtin: false, removable: true,
-                inputs:  [{ id: 'in',  label: 'in',  cap: 'any' }],
-                outputs: [{ id: 'out', label: 'out', cap: 'any' }],
-            };
-        }
-        if (g.kind === 'widget') {
-            const w = g.widget;
-            const type = this.widgetType(w.type);
-            return {
-                title: w.label || w.id,
-                subtitle: `${type?.label || w.type} widget`,
-                builtin: false, removable: true,
-                inputs:  (type?.inputs || []).map(i => ({ id: i.id, label: i.display, cap: i.cap })),
-                outputs: [],
-            };
-        }
-        return null;
-    }
-
-    // ─── Rendering ──────────────────────────────────────────────────────
-
-    render() {
-        const layer = document.getElementById('routing-node-layer');
-        if (!layer) return;
-        layer.innerHTML = this.graphNodes.map(g => this._renderNodeHtml(g)).join('');
-        // Draw wires after the DOM updates so we can read pin positions.
-        requestAnimationFrame(() => this.renderWires());
-        this._attachNodeInteractions();
-    }
-
     _renderNodeHtml(g) {
-        const meta = this.getNodeMeta(g);
+        const meta = this._getNodeMeta(g);
         if (!meta) return '';
         const inputsHtml = meta.inputs.map(p => `
             <div class="routing-pin-row input">
                 <div class="routing-pin dir-in" data-node="${escapeAttr(g.id)}"
                      data-pin="${escapeAttr(p.id)}" data-dir="in"></div>
                 <span class="routing-pin-label-in">${escapeHtml(p.label)}</span>
+                ${this._renderDefaultInput(g, p)}
             </div>`).join('');
         const outputsHtml = meta.outputs.map(p => `
             <div class="routing-pin-row output">
@@ -258,8 +336,8 @@ class RoutingPage {
             </div>`).join('');
         const removeBtn = meta.removable
             ? `<span class="text-slate-400 hover:text-red-400 cursor-pointer text-base"
-                     onclick="routingPage.removeGraphNode('${escapeAttr(g.id)}')"
-                     title="Remove from graph">✕</span>`
+                     onclick="routingPage.removeSheetNode('${escapeAttr(g.id)}')"
+                     title="Remove from sheet">✕</span>`
             : '';
         return `
             <div class="routing-node" data-kind="${g.kind}"
@@ -279,23 +357,106 @@ class RoutingPage {
             </div>`;
     }
 
-    renderWires() {
+    _renderDefaultInput(g, pin) {
+        // Operator inputs get an inline default-constant field, used as
+        // the input value when no wire is connected.
+        if (g.kind !== 'operator' || !pin.editable) return '';
+        const wired = this._isPinWired(g.id, pin.id);
+        if (wired) return '';
+        const op = g.data;
+        const cur = (op.defaults && op.defaults[pin.id] !== undefined)
+            ? op.defaults[pin.id]
+            : (pin.default ?? 0);
+        return `<input type="number" step="0.01"
+                       class="routing-pin-default"
+                       value="${escapeAttr(String(cur))}"
+                       onclick="event.stopPropagation()"
+                       onmousedown="event.stopPropagation()"
+                       onchange="routingPage.setOperatorDefault('${escapeAttr(op.id)}', '${escapeAttr(pin.id)}', this.value)">`;
+    }
+
+    _isPinWired(graphNodeId, pinId) {
+        const sheet = this._activeSheet();
+        for (const w of (sheet.wires || [])) {
+            if (w.sink.kind === 'operator'
+                && w.sink.parts && w.sink.parts.length >= 2
+                && `op::${w.sink.parts[0]}` === graphNodeId
+                && w.sink.parts[1] === pinId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    _getNodeMeta(g) {
+        if (g.kind === 'input') {
+            const inp = g.data;
+            const topicMeta = this.topicCatalog.find(t => t.topic === inp.topic);
+            return {
+                title: inp.label || `${inp.topic}${inp.field ? '.' + inp.field : ''}`,
+                subtitle: `${inp.topic}${inp.field ? ' · ' + inp.field : ''}`
+                          + (topicMeta ? ` (${topicMeta.state_type})` : ''),
+                builtin: false, removable: true,
+                inputs: [],
+                outputs: [{ id: 'out', label: 'value' }],
+            };
+        }
+        if (g.kind === 'operator') {
+            const op = g.data;
+            const type = this._operatorType(op.op);
+            const ins = (type?.inputs || []).map(spec => ({
+                id: spec.id, label: spec.label,
+                editable: true, default: spec.default,
+            }));
+            return {
+                title: op.label || (type?.label || op.op),
+                subtitle: type ? type.description : `operator: ${op.op}`,
+                builtin: false, removable: true,
+                inputs:  ins,
+                outputs: [{ id: 'out', label: 'out' }],
+            };
+        }
+        if (g.kind === 'peripheral') {
+            const p = g.peripheral;
+            const type = this._peripheralType(p.type);
+            const channels = type?.channels || [];
+            return {
+                title: p.label || p.id,
+                subtitle: `${type?.label || p.type} on ${g.nodeLabel}`,
+                builtin: !!p.builtin, removable: false,
+                inputs:  channels.filter(c => c.dir === 'out').map(c => ({ id: c.id, label: c.display })),
+                outputs: channels.filter(c => c.dir === 'in').map(c => ({ id: c.id, label: c.display })),
+            };
+        }
+        if (g.kind === 'widget') {
+            const w = g.widget;
+            const type = this._widgetType(w.type);
+            return {
+                title: w.label || w.id,
+                subtitle: `${type?.label || w.type} widget`,
+                builtin: false, removable: true,
+                inputs:  (type?.inputs || []).map(i => ({ id: i.id, label: i.display })),
+                outputs: [],
+            };
+        }
+        return null;
+    }
+
+    _renderWires() {
         const layer = document.getElementById('routing-wire-layer');
         if (!layer) return;
         const paths = [];
-        for (const route of (this.routing.routes || [])) {
-            const fromHandle = this.endpointToHandle(route.source, /* dir= */ 'out');
-            const toHandle   = this.endpointToHandle(route.sink,   /* dir= */ 'in');
-            if (!fromHandle || !toHandle) continue;
-            const a = this._pinPosition(fromHandle);
-            const b = this._pinPosition(toHandle);
+        const sheet = this._activeSheet();
+        for (const w of (sheet.wires || [])) {
+            const a = this._pinPositionFromEndpoint(w.source, 'out');
+            const b = this._pinPositionFromEndpoint(w.sink, 'in');
             if (!a || !b) continue;
             paths.push(`<path d="${this._bezier(a, b)}" fill="none" stroke="#06b6d4" stroke-width="2"
-                              data-route-id="${escapeAttr(route.id)}"
-                              onclick="routingPage.removeRoute('${escapeAttr(route.id)}')"/>`);
+                              data-wire-id="${escapeAttr(w.id)}"
+                              onclick="routingPage.removeWire('${escapeAttr(w.id)}')"/>`);
         }
         if (this._connecting?.cursor) {
-            const a = this._pinPosition(this._connecting.fromHandle);
+            const a = this._pinPositionByHandle(this._connecting.fromHandle);
             if (a) {
                 paths.push(`<path d="${this._bezier(a, this._connecting.cursor)}"
                                   fill="none" stroke="#34d399" stroke-width="2"
@@ -305,7 +466,12 @@ class RoutingPage {
         layer.innerHTML = paths.join('');
     }
 
-    _pinPosition(handle) {
+    _pinPositionFromEndpoint(ep, dirHint) {
+        const handle = this._endpointToHandle(ep, dirHint);
+        return handle ? this._pinPositionByHandle(handle) : null;
+    }
+
+    _pinPositionByHandle(handle) {
         const [nodeId, pinId] = handle.split('/');
         const pin = document.querySelector(
             `.routing-pin[data-node="${cssEscape(nodeId)}"][data-pin="${cssEscape(pinId)}"]`
@@ -315,8 +481,8 @@ class RoutingPage {
         const cr = canvas.getBoundingClientRect();
         const pr = pin.getBoundingClientRect();
         return {
-            x: pr.left + pr.width / 2 - cr.left,
-            y: pr.top + pr.height / 2 - cr.top,
+            x: pr.left + pr.width / 2 - cr.left + canvas.scrollLeft,
+            y: pr.top + pr.height / 2 - cr.top + canvas.scrollTop,
         };
     }
 
@@ -325,40 +491,30 @@ class RoutingPage {
         return `M ${a.x},${a.y} C ${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`;
     }
 
-    // ─── Endpoint <-> graph-handle translation ──────────────────────────
+    // ── Endpoint ↔ DOM-handle translation ────────────────────────────
 
-    // graph handle = "<graphNodeId>/<pinId>"
-    //   graphNodeId starts with "p::", "s::", or "w::"
-    //
-    // Map a Route source/sink endpoint to the handle on the graph. The
-    // dir tells us which side of a signal node to point at (signals have
-    // both an `in` and an `out` pin).
-    endpointToHandle(ep, dir) {
+    _endpointToHandle(ep, dirHint) {
         if (!ep) return null;
-        if (ep.kind === 'peripheral') {
-            const [nodeId, peripheralId, channelId] = ep.parts;
-            return `p::${nodeId}::${peripheralId}/${channelId}`;
-        }
-        if (ep.kind === 'signal') {
-            return `s::${ep.parts[0]}/${dir}`;
-        }
-        if (ep.kind === 'widget') {
-            return `w::${ep.parts[0]}/${ep.parts[1]}`;
-        }
+        if (ep.kind === 'input')      return `in::${ep.parts[0]}/out`;
+        if (ep.kind === 'operator')   return `op::${ep.parts[0]}/${ep.parts[1] || 'out'}`;
+        if (ep.kind === 'peripheral') return `p::${ep.parts[0]}::${ep.parts[1]}/${ep.parts[2]}`;
+        if (ep.kind === 'widget')     return `w::${ep.parts[0]}/${ep.parts[1]}`;
         return null;
     }
 
-    handleToEndpoint(handle) {
+    _handleToEndpoint(handle) {
         const [graphNodeId, pinId] = handle.split('/');
+        if (graphNodeId.startsWith('in::')) {
+            return { kind: 'input', parts: [graphNodeId.slice(4)] };
+        }
+        if (graphNodeId.startsWith('op::')) {
+            return { kind: 'operator', parts: [graphNodeId.slice(4), pinId] };
+        }
         if (graphNodeId.startsWith('p::')) {
             const rest = graphNodeId.slice(3);
             const idx = rest.lastIndexOf('::');
-            const nodeId = rest.slice(0, idx);
-            const peripheralId = rest.slice(idx + 2);
-            return { kind: 'peripheral', parts: [nodeId, peripheralId, pinId] };
-        }
-        if (graphNodeId.startsWith('s::')) {
-            return { kind: 'signal', parts: [graphNodeId.slice(3)] };
+            return { kind: 'peripheral',
+                     parts: [rest.slice(0, idx), rest.slice(idx + 2), pinId] };
         }
         if (graphNodeId.startsWith('w::')) {
             return { kind: 'widget', parts: [graphNodeId.slice(3), pinId] };
@@ -366,7 +522,7 @@ class RoutingPage {
         return null;
     }
 
-    // ─── Mouse / pin interactions ───────────────────────────────────────
+    // ── Interactions ─────────────────────────────────────────────────
 
     _attachNodeInteractions() {
         document.querySelectorAll('.routing-node-header').forEach(h => {
@@ -422,15 +578,18 @@ class RoutingPage {
                         node.style.left = g.x + 'px';
                         node.style.top  = g.y + 'px';
                     }
-                    this.renderWires();
+                    this._renderWires();
                 }
             }
             if (this._connecting) {
                 const canvas = document.getElementById('routing-canvas');
                 if (canvas) {
                     const cr = canvas.getBoundingClientRect();
-                    this._connecting.cursor = { x: e.clientX - cr.left, y: e.clientY - cr.top };
-                    this.renderWires();
+                    this._connecting.cursor = {
+                        x: e.clientX - cr.left + canvas.scrollLeft,
+                        y: e.clientY - cr.top + canvas.scrollTop,
+                    };
+                    this._renderWires();
                 }
             }
         };
@@ -440,8 +599,22 @@ class RoutingPage {
                 if (node) node.classList.remove('dragging');
                 const g = this.graphNodes.find(n => n.id === this._draggingNode);
                 if (g) {
-                    this.positions[g.id] = { x: g.x, y: g.y };
+                    const key = `${this.activeSheetId}:${g.id}`;
+                    this.positions[key] = { x: g.x, y: g.y };
                     this._savePositions();
+                    // Persist sheet-node positions to the server too so
+                    // they survive on other clients.
+                    if (g.kind === 'input' || g.kind === 'operator') {
+                        window.saintWS.management('update_sheet_node', {
+                            node_id: this.activeSheetId,
+                            sheet_node_id: g.sheetNodeId,
+                            position: [g.x, g.y],
+                        }).catch(() => {});
+                    } else if (g.kind === 'widget') {
+                        window.saintWS.management('update_widget', {
+                            widget_id: g.widget.id, position: [g.x, g.y],
+                        }).catch(() => {});
+                    }
                 }
                 this._draggingNode = null;
             }
@@ -460,119 +633,203 @@ class RoutingPage {
     _cancelConnecting() {
         document.querySelectorAll('.routing-pin').forEach(p => p.classList.remove('connecting'));
         this._connecting = null;
-        this.renderWires();
+        this._renderWires();
     }
 
-    // ─── Graph mutations (server round-trip) ────────────────────────────
+    // ── Graph mutations (server round-trip) ──────────────────────────
 
     async _submitWire(fromHandle, toHandle) {
-        const source = this.handleToEndpoint(fromHandle);
-        const sink   = this.handleToEndpoint(toHandle);
+        const source = this._handleToEndpoint(fromHandle);
+        const sink   = this._handleToEndpoint(toHandle);
         if (!source || !sink) return;
-
         try {
-            const result = await window.saintWS.management('add_route', { source, sink });
+            const result = await window.saintWS.management('add_routing_wire', {
+                node_id: this.activeSheetId, source, sink,
+            });
             if (result && result.success === false) {
-                alert('Cannot add route: ' + (result.message || 'unknown error'));
-                return;
+                alert('Cannot add wire: ' + (result.message || 'unknown error'));
             }
-            // Server will broadcast system_routing; if we don't get it, refresh.
-            await this._refreshRouting();
         } catch (err) {
-            console.error('Add route failed:', err);
+            console.error('Add wire failed:', err);
         }
     }
 
-    async removeRoute(routeId) {
-        if (!confirm('Remove this route?')) return;
+    async removeWire(wireId) {
+        if (!confirm('Remove this wire?')) return;
         try {
-            await window.saintWS.management('remove_route', { route_id: routeId });
-            await this._refreshRouting();
+            await window.saintWS.management('remove_routing_wire', {
+                node_id: this.activeSheetId, wire_id: wireId,
+            });
         } catch (err) {
-            console.error('Remove route failed:', err);
+            console.error('Remove wire failed:', err);
         }
     }
 
-    async removeGraphNode(graphNodeId) {
-        if (graphNodeId.startsWith('s::')) {
-            // Signals only exist as long as routes reference them; remove
-            // any pending entry + drop routes touching this signal.
-            if (!confirm('Remove this signal and all routes touching it?')) return;
-            const path = graphNodeId.slice(3);
-            this.pendingSignals = this.pendingSignals.filter(s => s !== path);
-            this._savePendingSignals();
-            // Drop touching routes server-side.
-            const touching = (this.routing.routes || []).filter(r =>
-                (r.source.kind === 'signal' && r.source.parts[0] === path) ||
-                (r.sink.kind === 'signal'   && r.sink.parts[0] === path));
-            for (const r of touching) {
-                try { await window.saintWS.management('remove_route', { route_id: r.id }); }
-                catch (e) { console.warn('Failed to drop route', r.id, e); }
-            }
-            await this._refreshRouting();
-            return;
-        }
+    async removeSheetNode(graphNodeId) {
         if (graphNodeId.startsWith('w::')) {
-            if (!confirm('Remove this widget? Any routes wired to it will be deleted too.')) return;
-            const widgetId = graphNodeId.slice(3);
+            if (!confirm('Remove this widget? Wires touching it will be deleted.')) return;
             try {
-                await window.saintWS.management('remove_widget', { widget_id: widgetId });
-            } catch (e) {
-                console.error('Remove widget failed:', e);
-                return;
-            }
-            await this._refreshRouting();
+                await window.saintWS.management('remove_widget', { widget_id: graphNodeId.slice(3) });
+            } catch (e) { console.error('Remove widget failed:', e); }
             return;
         }
-        // Peripheral nodes can't be removed from the graph — they're
-        // removed from the Peripherals tab instead.
+        if (graphNodeId.startsWith('in::') || graphNodeId.startsWith('op::')) {
+            if (!confirm('Remove this node? Wires touching it will be deleted.')) return;
+            const sheetNodeId = graphNodeId.slice(4);
+            try {
+                await window.saintWS.management('remove_sheet_node', {
+                    node_id: this.activeSheetId, sheet_node_id: sheetNodeId,
+                });
+            } catch (e) { console.error('Remove sheet node failed:', e); }
+        }
     }
 
-    async _refreshRouting() {
+    async setOperatorDefault(opId, pinId, valueStr) {
+        const value = Number(valueStr);
+        if (!Number.isFinite(value)) return;
+        const sheet = this._activeSheet();
+        const op = (sheet.operators || []).find(o => o.id === opId);
+        if (!op) return;
+        const defaults = { ...(op.defaults || {}), [pinId]: value };
         try {
-            const routing = await window.saintWS.management('get_system_routing', {});
-            this.routing = routing || { version: 0, routes: [], widgets: [] };
-            this.rebuildGraph(/* keepPositions= */ true);
-        } catch (e) {
-            console.warn('Failed to refresh routing:', e);
+            await window.saintWS.management('update_sheet_node', {
+                node_id: this.activeSheetId, sheet_node_id: opId, defaults,
+            });
+        } catch (e) { console.error('Update operator defaults failed:', e); }
+    }
+
+    // ── Add Input modal ──────────────────────────────────────────────
+
+    openInputModal() {
+        if (!this.activeSheetId) return;
+        const topicSel = document.getElementById('routing-input-topic');
+        const fieldSel = document.getElementById('routing-input-field');
+        const desc = document.getElementById('routing-input-topic-desc');
+        const labelInput = document.getElementById('routing-input-label');
+        if (!topicSel || !fieldSel) return;
+
+        topicSel.innerHTML = this.topicCatalog.map(t =>
+            `<option value="${escapeAttr(t.topic)}">${escapeHtml(t.topic)}</option>`
+        ).join('') || '<option value="">(no ROS topics discovered)</option>';
+
+        const refreshFields = () => {
+            const t = this.topicCatalog.find(x => x.topic === topicSel.value);
+            desc.textContent = t ? `${t.state_type} · ${t.channels.length} channel(s)` : '';
+            fieldSel.innerHTML = (t?.channels || []).map(c =>
+                `<option value="${escapeAttr(c.field)}">${escapeHtml(c.label)} (${escapeHtml(c.type || 'num')})</option>`
+            ).join('') || '<option value="">(message has no scalar fields)</option>';
+        };
+        topicSel.onchange = refreshFields;
+        refreshFields();
+
+        labelInput.value = '';
+        document.getElementById('routing-input-error').classList.add('hidden');
+        document.getElementById('routing-input-modal').classList.remove('hidden');
+    }
+
+    closeInputModal() {
+        document.getElementById('routing-input-modal')?.classList.add('hidden');
+    }
+
+    async saveInputModal() {
+        const topic = document.getElementById('routing-input-topic').value;
+        const field = document.getElementById('routing-input-field').value;
+        const label = document.getElementById('routing-input-label').value.trim();
+        const errEl = document.getElementById('routing-input-error');
+        errEl.classList.add('hidden');
+        if (!topic) {
+            errEl.textContent = 'Pick a ROS topic';
+            errEl.classList.remove('hidden');
+            return;
+        }
+        try {
+            const result = await window.saintWS.management('add_routing_input', {
+                node_id: this.activeSheetId, topic, field, label,
+            });
+            if (result && result.success === false) {
+                errEl.textContent = result.message || 'Failed to add input';
+                errEl.classList.remove('hidden');
+                return;
+            }
+            this.closeInputModal();
+        } catch (err) {
+            errEl.textContent = String(err.message || err);
+            errEl.classList.remove('hidden');
         }
     }
 
-    // ─── Add signal / widget ───────────────────────────────────────────
+    // ── Add Operator modal ───────────────────────────────────────────
 
-    promptAddSignal() {
-        const name = prompt('Logical signal name (e.g. /battery/main/current):');
-        if (!name) return;
-        const path = name.trim();
-        if (!path) return;
-        if (this.pendingSignals.includes(path)) return;
-        // Verify it's not already implied by a route — that means the node
-        // is already on the graph; nothing to do.
-        const inUse = (this.routing.routes || []).some(r =>
-            (r.source.kind === 'signal' && r.source.parts[0] === path) ||
-            (r.sink.kind   === 'signal' && r.sink.parts[0]   === path));
-        if (!inUse) {
-            this.pendingSignals.push(path);
-            this._savePendingSignals();
-        }
-        this.rebuildGraph(/* keepPositions= */ true);
-    }
-
-    openWidgetModal() {
-        if (!this.catalog) return;
-        const sel = document.getElementById('routing-widget-type');
-        const desc = document.getElementById('routing-widget-type-desc');
-        const labelInput = document.getElementById('routing-widget-label');
-        sel.innerHTML = (this.catalog.widget_types || [])
-            .map(t => `<option value="${escapeAttr(t.id)}">${escapeHtml(t.label)}</option>`).join('');
+    openOperatorModal() {
+        if (!this.activeSheetId) return;
+        const sel = document.getElementById('routing-operator-type');
+        const desc = document.getElementById('routing-operator-type-desc');
+        const labelInput = document.getElementById('routing-operator-label');
+        sel.innerHTML = (this.catalog?.operator_types || [])
+            .map(t => `<option value="${escapeAttr(t.id)}">${escapeHtml(t.label)}</option>`)
+            .join('');
         sel.onchange = () => {
-            const t = this.widgetType(sel.value);
+            const t = this._operatorType(sel.value);
             desc.textContent = t?.description || '';
         };
         sel.onchange();
         labelInput.value = '';
-        document.getElementById('routing-widget-error').classList.add('hidden');
-        document.getElementById('routing-widget-modal').classList.remove('hidden');
+        document.getElementById('routing-operator-error').classList.add('hidden');
+        document.getElementById('routing-operator-modal').classList.remove('hidden');
+    }
+
+    closeOperatorModal() {
+        document.getElementById('routing-operator-modal')?.classList.add('hidden');
+    }
+
+    async saveOperatorModal() {
+        const op = document.getElementById('routing-operator-type').value;
+        const label = document.getElementById('routing-operator-label').value.trim();
+        const errEl = document.getElementById('routing-operator-error');
+        errEl.classList.add('hidden');
+        if (!op) {
+            errEl.textContent = 'Pick an operator';
+            errEl.classList.remove('hidden');
+            return;
+        }
+        try {
+            const result = await window.saintWS.management('add_routing_operator', {
+                node_id: this.activeSheetId, op, label,
+            });
+            if (result && result.success === false) {
+                errEl.textContent = result.message || 'Failed to add operator';
+                errEl.classList.remove('hidden');
+                return;
+            }
+            this.closeOperatorModal();
+        } catch (err) {
+            errEl.textContent = String(err.message || err);
+            errEl.classList.remove('hidden');
+        }
+    }
+
+    // ── Add Widget modal (dashboard only) ────────────────────────────
+
+    openWidgetModal() {
+        if (!this.catalog) return;
+        // Reuse the legacy widget modal markup if available; otherwise
+        // a prompt() fallback so the dashboard sheet stays usable.
+        const modal = document.getElementById('routing-widget-modal');
+        if (modal) {
+            const sel = document.getElementById('routing-widget-type');
+            const desc = document.getElementById('routing-widget-type-desc');
+            const labelInput = document.getElementById('routing-widget-label');
+            sel.innerHTML = (this.catalog.widget_types || [])
+                .map(t => `<option value="${escapeAttr(t.id)}">${escapeHtml(t.label)}</option>`).join('');
+            sel.onchange = () => {
+                const t = this._widgetType(sel.value);
+                desc.textContent = t?.description || '';
+            };
+            sel.onchange();
+            labelInput.value = '';
+            document.getElementById('routing-widget-error').classList.add('hidden');
+            modal.classList.remove('hidden');
+        }
     }
 
     closeWidgetModal() {
@@ -583,7 +840,7 @@ class RoutingPage {
         const sel = document.getElementById('routing-widget-type');
         const labelEl = document.getElementById('routing-widget-label');
         const type = sel.value;
-        const label = labelEl.value.trim() || this.widgetType(type)?.label || type;
+        const label = labelEl.value.trim() || this._widgetType(type)?.label || type;
         const errEl = document.getElementById('routing-widget-error');
         errEl.classList.add('hidden');
         try {
@@ -596,14 +853,25 @@ class RoutingPage {
                 return;
             }
             this.closeWidgetModal();
-            await this._refreshRouting();
         } catch (err) {
             errEl.textContent = String(err.message || err);
             errEl.classList.remove('hidden');
         }
     }
 
-    // ─── localStorage helpers ──────────────────────────────────────────
+    // ── Catalog helpers ─────────────────────────────────────────────
+
+    _peripheralType(id) {
+        return (this.catalog?.peripheral_types || []).find(t => t.id === id);
+    }
+    _widgetType(id) {
+        return (this.catalog?.widget_types || []).find(t => t.id === id);
+    }
+    _operatorType(id) {
+        return (this.catalog?.operator_types || []).find(t => t.id === id);
+    }
+
+    // ── localStorage helpers ────────────────────────────────────────
 
     _loadPositions() {
         try { return JSON.parse(localStorage.getItem('saint.routing.positions') || '{}'); }
@@ -611,26 +879,19 @@ class RoutingPage {
     }
     _savePositions() {
         try { localStorage.setItem('saint.routing.positions', JSON.stringify(this.positions)); }
-        catch (e) { /* ignore quota errors */ }
-    }
-    _loadPendingSignals() {
-        try { return JSON.parse(localStorage.getItem('saint.routing.signals') || '[]'); }
-        catch (e) { return []; }
-    }
-    _savePendingSignals() {
-        try { localStorage.setItem('saint.routing.signals', JSON.stringify(this.pendingSignals)); }
         catch (e) { /* ignore */ }
     }
-
-    peripheralType(id) {
-        return (this.catalog?.peripheral_types || []).find(t => t.id === id);
+    _loadActiveSheet() {
+        try { return localStorage.getItem('saint.routing.active_sheet') || null; }
+        catch (e) { return null; }
     }
-    widgetType(id) {
-        return (this.catalog?.widget_types || []).find(t => t.id === id);
+    _saveActiveSheet() {
+        try { localStorage.setItem('saint.routing.active_sheet', this.activeSheetId || ''); }
+        catch (e) { /* ignore */ }
     }
 }
 
-// ─── escape helpers (peripherals.js declares these too; keep guarded) ───
+// ── escape helpers (peripherals.js declares these too; keep guarded) ──
 if (typeof escapeHtml === 'undefined') {
     window.escapeHtml = function (s) {
         if (s === null || s === undefined) return '';
@@ -643,8 +904,6 @@ if (typeof escapeAttr === 'undefined') {
     window.escapeAttr = window.escapeHtml;
 }
 function cssEscape(s) {
-    // CSS attribute selector escape. Browser's CSS.escape is widely
-    // available, but our identifiers can contain `::`, `/`, etc.
     return (window.CSS && window.CSS.escape) ? CSS.escape(s) : String(s).replace(/(["'\\])/g, '\\$1');
 }
 

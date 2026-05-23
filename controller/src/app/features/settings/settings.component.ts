@@ -2,6 +2,7 @@ import { Component, OnDestroy, OnInit, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ConnectionService, ConnectionStatus, ConnectionConfig } from '../../core/services/connection.service';
+import { KeyboardService } from '../../core/services/keyboard.service';
 import { invoke } from '@tauri-apps/api/core';
 
 /** Mirrors crate::discovery::DiscoveredServer. The Rust backend
@@ -119,6 +120,25 @@ interface DiscoveredServer {
               Increase scale for better visibility on Steam Deck and other high DPI displays
             </p>
           </div>
+
+          <!-- In-app virtual keyboard toggle. Default off so the
+               platform OSK (Steam OSK in Game Mode, KDE virtual
+               keyboard in Desktop Mode) handles text entry. Turn on
+               in environments without a working platform OSK. -->
+          <div>
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input type="checkbox" class="mt-1 w-4 h-4 rounded"
+                     [checked]="keyboardEnabled()"
+                     (change)="onKeyboardEnabledChange($any($event.target).checked)">
+              <span>
+                <span class="block text-sm">In-app virtual keyboard</span>
+                <span class="block text-xs text-saint-text-muted mt-0.5">
+                  When off, focus a text field and press Steam + X (Game Mode)
+                  or use your system keyboard (Desktop Mode) instead.
+                </span>
+              </span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -228,7 +248,19 @@ export class SettingsComponent implements OnInit, OnDestroy {
     { value: 2.0, label: '200%' },
   ];
 
-  constructor(public connectionService: ConnectionService) {
+  /** Mirror of KeyboardService.enabled exposed for the template's
+   *  checkbox. Read via the signal so toggles elsewhere (or in a
+   *  future hotkey) re-render the checkbox without manual sync. */
+  keyboardEnabled = () => this.keyboardService.enabled();
+
+  onKeyboardEnabledChange(value: boolean): void {
+    this.keyboardService.setEnabled(value);
+  }
+
+  constructor(
+    public connectionService: ConnectionService,
+    private keyboardService: KeyboardService,
+  ) {
     // Check initial devtools state
     this.checkDevtoolsState();
 

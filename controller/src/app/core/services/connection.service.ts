@@ -136,19 +136,19 @@ export class ConnectionService implements OnDestroy {
   }
 
   /**
-   * Send a function control command using role + function (preferred)
+   * Send a single scalar onto a ROS topic channel. Replaces
+   * sendFunctionControl as the binding evaluator's runtime path: the
+   * server merges the field into a per-topic buffer and republishes.
    */
-  async sendFunctionControl(role: string, functionName: string, value: unknown): Promise<void> {
+  async sendTopicChannelValue(topic: string, channel: string, value: unknown): Promise<void> {
     if (!this.isConnected()) {
-      console.warn('[ConnectionService] sendFunctionControl called but not connected');
+      console.warn('[ConnectionService] sendTopicChannelValue called but not connected');
       throw new Error('Not connected');
     }
-    console.log('[ConnectionService] sendFunctionControl:', { role, function: functionName, value });
     try {
-      await this.tauri.invoke('send_function_control', { role, function: functionName, value });
-      console.log('[ConnectionService] sendFunctionControl success');
+      await this.tauri.invoke('send_topic_channel_value', { topic, channel, value });
     } catch (err) {
-      console.error('[ConnectionService] sendFunctionControl error:', err);
+      console.error('[ConnectionService] sendTopicChannelValue error:', err);
       throw err;
     }
   }
@@ -167,6 +167,23 @@ export class ConnectionService implements OnDestroy {
       console.log('[ConnectionService] discoverRoles request sent');
     } catch (err) {
       console.error('[ConnectionService] discoverRoles error:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Request enumeration of ROS topics + scalar channels. Response is
+   * delivered out-of-band via the `discovery-topic-channels` Tauri
+   * event and captured by DiscoveryService.
+   */
+  async discoverTopicChannels(): Promise<void> {
+    if (!this.isConnected()) {
+      throw new Error('Not connected');
+    }
+    try {
+      await this.tauri.invoke('discover_topic_channels');
+    } catch (err) {
+      console.error('[ConnectionService] discoverTopicChannels error:', err);
       throw err;
     }
   }

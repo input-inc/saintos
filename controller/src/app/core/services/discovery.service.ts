@@ -32,12 +32,29 @@ export interface RoleDefinition {
   pins: Record<string, unknown>;
 }
 
+/**
+ * A single scalar channel inside a ROS topic message (flattened from
+ * the message's field tree by the server's introspection pass).
+ */
+export interface TopicChannel {
+  field: string;
+  label: string;
+  type?: string;
+}
+
+export interface TopicChannelTopic {
+  topic: string;
+  state_type?: string;
+  channels: TopicChannel[];
+}
+
 @Injectable({
   providedIn: 'root'
 })
 export class DiscoveryService {
   private _controllable = signal<ControllableNode[]>([]);
   private _roles = signal<RoleDefinition[]>([]);
+  private _topics = signal<TopicChannelTopic[]>([]);
   private _loading = signal(false);
   private _lastFetched = signal<Date | null>(null);
 
@@ -46,6 +63,20 @@ export class DiscoveryService {
 
   /** All role definitions */
   readonly roles = this._roles.asReadonly();
+
+  /** ROS topics with their scalar channels — drives the bindings
+   *  Topic/Channel picker. */
+  readonly topics = this._topics.asReadonly();
+
+  /** Just the topic names, sorted, for the Topic dropdown. */
+  readonly availableTopics = computed(() =>
+    this._topics().map(t => t.topic).sort()
+  );
+
+  /** Channels available on a given topic. */
+  getChannelsForTopic(topic: string): TopicChannel[] {
+    return this._topics().find(t => t.topic === topic)?.channels ?? [];
+  }
 
   /** Loading state */
   readonly loading = this._loading.asReadonly();
@@ -107,6 +138,13 @@ export class DiscoveryService {
       }
     });
 
+    this.tauri.listen<{ topics: TopicChannelTopic[] }>('discovery-topic-channels').subscribe(data => {
+      console.log('[DiscoveryService] Received discovery-topic-channels event:', data);
+      if (data && Array.isArray(data.topics)) {
+        this._topics.set(data.topics);
+      }
+    });
+
     // Auto-refresh when connection status changes to connected
     this.tauri.listen<{ status: string }>('connection-status').subscribe(state => {
       console.log('[DiscoveryService] Connection status event received:', state.status);
@@ -143,6 +181,14 @@ export class DiscoveryService {
       console.log('[DiscoveryService] Calling discoverRoles...');
       await this.connection.discoverRoles();
       console.log('[DiscoveryService] discoverRoles request sent');
+
+      // Topic/channel catalog — used by the new bindings picker.
+      console.log('[DiscoveryService] Calling discoverTopicChannels...');
+      try {
+        await this.connection.discoverTopicChannels();
+      } catch (err) {
+        console.warn('[DiscoveryService] discoverTopicChannels failed:', err);
+      }
 
       // The actual data will arrive via Tauri events and be handled by the listeners in constructor
       // Set a timeout to set default data if server doesn't respond

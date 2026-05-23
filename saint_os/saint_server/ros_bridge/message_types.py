@@ -296,6 +296,95 @@ def get_all_endpoints() -> Dict[str, EndpointInfo]:
     return _ENDPOINT_REGISTRY.copy()
 
 
+def introspect_message_channels(msg_class: type,
+                                array_slots: int = 8,
+                                max_depth: int = 3) -> List[Dict[str, Any]]:
+    """Flatten a ROS message class into a list of selectable scalar channels.
+
+    Each returned entry is {"field": "axes[0]", "label": "axes[0]",
+    "type": "float"}. The routing UI uses these to populate the per-topic
+    channel picker. For dynamic-length arrays (sequences), exposes
+    `array_slots` entries by default so the operator can pick any of the
+    first N elements.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        sample = msg_class()
+    except Exception:
+        return out
+    _walk_msg(sample, prefix="", out=out, array_slots=array_slots, depth=0,
+              max_depth=max_depth)
+    return out
+
+
+def _walk_msg(value: Any, prefix: str, out: List[Dict[str, Any]],
+              array_slots: int, depth: int, max_depth: int) -> None:
+    if depth > max_depth:
+        return
+    if hasattr(value, "__slots__") and hasattr(value, "_fields_and_field_types"):
+        for slot_name in value.__slots__:
+            # ROS2 Python message slots are prefixed with '_'. The public
+            # attribute name is the slot without the leading underscore.
+            attr = slot_name[1:] if slot_name.startswith("_") else slot_name
+            try:
+                sub = getattr(value, attr)
+            except AttributeError:
+                continue
+            path = f"{prefix}{attr}"
+            _walk_value(sub, path, out, array_slots, depth, max_depth)
+    else:
+        _walk_value(value, prefix.rstrip("."), out, array_slots, depth, max_depth)
+
+
+def _walk_value(value: Any, path: str, out: List[Dict[str, Any]],
+                array_slots: int, depth: int, max_depth: int) -> None:
+    if isinstance(value, bool):
+        out.append({"field": path, "label": path, "type": "bool"})
+    elif isinstance(value, (int, float)):
+        out.append({"field": path, "label": path, "type": type(value).__name__})
+    elif isinstance(value, (str, bytes)):
+        # Strings can't be routed as floats; skip.
+        return
+    elif isinstance(value, (list, tuple)) or _is_array_like(value):
+        # Pick a count: live length if non-empty, otherwise array_slots.
+        try:
+            n = len(value)
+        except TypeError:
+            n = 0
+        n = max(n, array_slots) if n == 0 else min(n, array_slots)
+        if n == 0:
+            return
+        # Probe element type. Use first element if present; otherwise
+        # default to "float" — every numeric ROS array type ends up as
+        # a Python float or int when read.
+        elem = value[0] if hasattr(value, "__getitem__") and len(value) > 0 else 0.0
+        elem_type = type(elem).__name__ if not isinstance(elem, bool) else "bool"
+        if isinstance(elem, (bool, int, float)):
+            for i in range(n):
+                out.append({"field": f"{path}[{i}]",
+                            "label": f"{path}[{i}]",
+                            "type": elem_type})
+        elif hasattr(elem, "__slots__"):
+            # Array of nested messages — flatten the first slot only to
+            # avoid combinatorial explosion. (Rare in practice.)
+            for i in range(min(n, 4)):
+                _walk_msg(value[i] if i < len(value) else type(elem)(),
+                          prefix=f"{path}[{i}].", out=out,
+                          array_slots=array_slots,
+                          depth=depth + 1, max_depth=max_depth)
+    elif hasattr(value, "__slots__"):
+        # Nested ROS message — recurse.
+        _walk_msg(value, prefix=f"{path}.", out=out,
+                  array_slots=array_slots,
+                  depth=depth + 1, max_depth=max_depth)
+
+
+def _is_array_like(value: Any) -> bool:
+    """ROS messages use numpy arrays for fixed-size primitive arrays."""
+    return hasattr(value, "__iter__") and hasattr(value, "__len__") \
+        and not isinstance(value, (str, bytes, dict))
+
+
 def get_endpoint_for_topic(topic: str) -> Optional[EndpointInfo]:
     """
     Find endpoint that handles a given ROS topic.

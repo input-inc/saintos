@@ -37,5 +37,6 @@ bool pin_control_apply_json(const char* json, size_t json_len);
 int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node_id);
 void pin_control_update_state(void);
 void pin_control_estop(void);
+void pin_control_clear_estop(void);
 
 #endif // PIN_CONTROL_TYPES_H

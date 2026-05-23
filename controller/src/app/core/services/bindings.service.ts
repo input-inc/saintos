@@ -31,8 +31,13 @@ export type NavigateDirection = 'up' | 'down' | 'left' | 'right' | 'next_item' |
 // ============================================================================
 
 export interface ControlTarget {
-  role: string;
-  function: string;
+  /** ROS topic this binding writes to (e.g. "/tracks", "/saint/head"). */
+  topic: string;
+  /** Scalar field inside the topic's message — dotted + [N] syntax
+   *  (e.g. "linear.x", "axes[2]"). The server's set_topic_channel
+   *  handler merges this into a per-topic buffer and republishes. */
+  channel: string;
+  /** Operator-visible label. Falls back to "topic.channel" in the UI. */
   name?: string;
 }
 
@@ -51,10 +56,12 @@ export type ModifierEffect =
 export type AnalogAction =
   | { type: 'direct_control'; target: ControlTarget; transform: InputTransform }
   | {
+      /** Differential drive feeds two channels on the same topic from
+       *  a single throttle + turn pair. */
       type: 'differential_drive';
-      role: string;
-      left_function: string;
-      right_function: string;
+      topic: string;
+      left_channel: string;
+      right_channel: string;
       throttle_transform: InputTransform;
       turn_transform: InputTransform;
     }
@@ -98,8 +105,8 @@ export type EasingType = 'linear' | 'ease_in' | 'ease_out' | 'ease_in_out';
 export type PanelLayout = 'grid' | 'list';
 
 export interface ServoPosition {
-  role: string;
-  function: string;
+  topic: string;
+  channel: string;
   value: number;
 }
 
@@ -181,8 +188,8 @@ export interface BindingProfile {
 // ============================================================================
 
 export interface MappedCommand {
-  role: string;
-  function: string;
+  topic: string;
+  channel: string;
   value: unknown;
 }
 
@@ -542,9 +549,9 @@ export class BindingsService {
           input: 'left_stick_y',
           action: {
             type: 'differential_drive',
-            role: 'tracks',
-            left_function: 'left_velocity',
-            right_function: 'right_velocity',
+            topic: '/tracks',
+            left_channel: 'left_velocity',
+            right_channel: 'right_velocity',
             throttle_transform: { deadzone: 0.1, scale: 1.0, expo: 1.0, invert: false },
             turn_transform: { deadzone: 0.1, scale: 1.0, expo: 1.0, invert: false }
           },
@@ -554,7 +561,7 @@ export class BindingsService {
           input: 'right_stick_x',
           action: {
             type: 'direct_control',
-            target: { role: 'head', function: 'pan', name: 'Head Pan' },
+            target: { topic: '/saint/head', channel: 'pan', name: 'Head Pan' },
             transform: { deadzone: 0.05, scale: 0.8, expo: 1.0, invert: false }
           },
           enabled: true
@@ -563,7 +570,7 @@ export class BindingsService {
           input: 'right_stick_y',
           action: {
             type: 'direct_control',
-            target: { role: 'head', function: 'tilt', name: 'Head Tilt' },
+            target: { topic: '/saint/head', channel: 'tilt', name: 'Head Tilt' },
             transform: { deadzone: 0.05, scale: 0.8, expo: 1.0, invert: false }
           },
           enabled: true

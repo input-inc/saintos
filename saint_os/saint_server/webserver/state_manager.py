@@ -17,16 +17,20 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable, Tuple
 
 from saint_server.peripheral_model import (
+    DASHBOARD_SHEET_ID,
     DEFAULT_CATALOG,
     DEFAULT_WIDGET_CATALOG,
+    InputNode,
     NodePeripheralConfig,
+    OPERATOR_CATALOG,
+    OperatorNode,
     PeripheralInstance,
     PeripheralType,
-    Route,
     RouteEndpoint,
     SystemRouting,
     WidgetInstance,
     WidgetType,
+    Wire,
     detect_pin_conflicts,
 )
 from saint_server.board_config import BoardConfigManager, derive_capabilities
@@ -603,6 +607,11 @@ class StateManager:
         # rehydrate the enabled set without a separate pass — see the
         # set_peripheral_logger() seeding logic.
         self.peripheral_logger = None
+
+        # Optional routing graph evaluator. Set by server_node once the
+        # ROS bridge is up. Whenever sheets change we call .reconcile()
+        # on it so it can refresh its subscriptions.
+        self._routing_evaluator = None
 
         # Chip + board YAML catalog. Replaces the firmware-emitted
         # capability JSON as the source of truth for "what pins this
@@ -1407,6 +1416,10 @@ class StateManager:
         """Return the list of known widget types, JSON-serializable."""
         return [t.to_dict() for t in self.widget_catalog.values()]
 
+    def get_operator_catalog(self) -> List[Dict[str, Any]]:
+        """Return the list of routing-graph operators (Max/Min/Clamp/…)."""
+        return [t.to_dict() for t in OPERATOR_CATALOG.values()]
+
     # =========================================================================
     # Per-node peripherals (the things attached to a node)
     # =========================================================================
@@ -1550,11 +1563,9 @@ class StateManager:
         if not node.peripheral_config.remove(peripheral_id):
             return {"success": False, "message": f"Peripheral {peripheral_id} not found"}
 
-        # Cascade: drop any routes referencing this peripheral
-        touched = self.state.system_routing.routes_touching_peripheral(node_id, peripheral_id)
-        for r in touched:
-            self.state.system_routing.remove_route(r.id)
-        if touched:
+        # Cascade: drop any wires referencing this peripheral across every sheet.
+        dropped = self.state.system_routing.drop_wires_touching_peripheral(node_id, peripheral_id)
+        if dropped:
             self._save_system_routing()
 
         self._save_node_config(node_id)
@@ -1617,47 +1628,153 @@ class StateManager:
     def get_system_routing(self) -> Dict[str, Any]:
         return self.state.system_routing.to_dict()
 
-    def add_route(self, source: Dict[str, Any], sink: Dict[str, Any]) -> Dict[str, Any]:
-        src = RouteEndpoint.from_dict(source)
-        snk = RouteEndpoint.from_dict(sink)
-        err = self._validate_route_endpoints(src, snk)
+    # ── Sheet-scoped graph ops ────────────────────────────────────────
+
+    def get_routing_sheet(self, node_id: str) -> Dict[str, Any]:
+        """Return the sheet for `node_id` (creates an empty one on demand)."""
+        return self.state.system_routing.get_sheet(node_id).to_dict()
+
+    def add_routing_input(self, node_id: str, topic: str, field: str,
+                          label: str = "",
+                          position: Optional[List[int]] = None) -> Dict[str, Any]:
+        if not topic:
+            return {"success": False, "message": "Missing topic"}
+        err = self._validate_sheet_owner(node_id)
         if err:
             return {"success": False, "message": err}
-        route = self.state.system_routing.add_route(src, snk)
+        pos = self._coerce_position(position)
+        sheet = self.state.system_routing.get_sheet(node_id)
+        node = sheet.add_input(topic=topic, field=field or "", label=label, position=pos)
+        self.state.system_routing.bump_version()
         self._save_system_routing()
-        self._log_activity(
-            f"Added route {route.id}: {src.describe()} → {snk.describe()}", "info"
-        )
-        return {"success": True, "route": route.to_dict()}
+        return {"success": True, "input": node.to_dict()}
 
-    def update_route(self, route_id: str, source: Dict[str, Any],
-                     sink: Dict[str, Any]) -> Dict[str, Any]:
-        src = RouteEndpoint.from_dict(source)
-        snk = RouteEndpoint.from_dict(sink)
-        err = self._validate_route_endpoints(src, snk)
+    def add_routing_operator(self, node_id: str, op: str, label: str = "",
+                             params: Optional[Dict[str, Any]] = None,
+                             defaults: Optional[Dict[str, float]] = None,
+                             position: Optional[List[int]] = None) -> Dict[str, Any]:
+        if op not in OPERATOR_CATALOG:
+            return {"success": False, "message": f"Unknown operator '{op}'"}
+        err = self._validate_sheet_owner(node_id)
         if err:
             return {"success": False, "message": err}
-        route = self.state.system_routing.update_route(route_id, src, snk)
-        if not route:
-            return {"success": False, "message": f"Route {route_id} not found"}
+        pos = self._coerce_position(position)
+        sheet = self.state.system_routing.get_sheet(node_id)
+        node = sheet.add_operator(op=op, label=label, params=params,
+                                  defaults=defaults, position=pos)
+        self.state.system_routing.bump_version()
         self._save_system_routing()
-        return {"success": True, "route": route.to_dict()}
+        return {"success": True, "operator": node.to_dict()}
 
-    def remove_route(self, route_id: str) -> Dict[str, Any]:
-        if self.state.system_routing.remove_route(route_id):
-            self._save_system_routing()
-            return {"success": True}
-        return {"success": False, "message": f"Route {route_id} not found"}
+    def add_routing_wire(self, node_id: str, source: Dict[str, Any],
+                         sink: Dict[str, Any]) -> Dict[str, Any]:
+        err = self._validate_sheet_owner(node_id)
+        if err:
+            return {"success": False, "message": err}
+        sheet = self.state.system_routing.get_sheet(node_id)
+        src = RouteEndpoint.from_dict(source)
+        snk = RouteEndpoint.from_dict(sink)
+        err = self._validate_wire(node_id, src, snk)
+        if err:
+            return {"success": False, "message": err}
+        wire = sheet.add_wire(src, snk)
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True, "wire": wire.to_dict()}
 
-    def _validate_route_endpoints(self, source: RouteEndpoint,
-                                  sink: RouteEndpoint) -> Optional[str]:
-        """Validate that both endpoints reference live targets. Returns
-        an error string if invalid, or None on success."""
+    def update_sheet_node(self, node_id: str, sheet_node_id: str,
+                          **changes) -> Dict[str, Any]:
+        """Mutate an InputNode or OperatorNode in place (label/params/defaults/position)."""
+        err = self._validate_sheet_owner(node_id)
+        if err:
+            return {"success": False, "message": err}
+        sheet = self.state.system_routing.get_sheet(node_id)
+        target = sheet.find_input(sheet_node_id) or sheet.find_operator(sheet_node_id)
+        if target is None:
+            return {"success": False, "message": f"Sheet node '{sheet_node_id}' not found"}
+        for k, v in changes.items():
+            if k == "position" and isinstance(v, (list, tuple)) and len(v) >= 2:
+                target.position = (int(v[0]), int(v[1]))
+            elif k == "label" and isinstance(v, str):
+                target.label = v
+            elif k == "params" and isinstance(target, OperatorNode):
+                target.params = dict(v or {})
+            elif k == "defaults" and isinstance(target, OperatorNode):
+                target.defaults = {dk: float(dv) for dk, dv in (v or {}).items()}
+            elif k == "topic" and isinstance(target, InputNode) and isinstance(v, str):
+                target.topic = v
+            elif k == "field" and isinstance(target, InputNode) and isinstance(v, str):
+                target.field = v
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True}
+
+    def remove_sheet_node(self, node_id: str, sheet_node_id: str) -> Dict[str, Any]:
+        sheet = self.state.system_routing.sheets.get(node_id)
+        if sheet is None:
+            return {"success": False, "message": f"Sheet '{node_id}' not found"}
+        if not (sheet.remove_input(sheet_node_id) or sheet.remove_operator(sheet_node_id)):
+            return {"success": False, "message": f"Sheet node '{sheet_node_id}' not found"}
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True}
+
+    def remove_routing_wire(self, node_id: str, wire_id: str) -> Dict[str, Any]:
+        sheet = self.state.system_routing.sheets.get(node_id)
+        if sheet is None or not sheet.remove_wire(wire_id):
+            return {"success": False, "message": f"Wire '{wire_id}' not found"}
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True}
+
+    def _coerce_position(self, position) -> Tuple[int, int]:
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            try:
+                return (int(position[0]), int(position[1]))
+            except (TypeError, ValueError):
+                pass
+        return (0, 0)
+
+    def _validate_sheet_owner(self, node_id: str) -> Optional[str]:
+        """A sheet must belong to a known controller, or be the dashboard."""
+        if node_id == DASHBOARD_SHEET_ID:
+            return None
+        if node_id in self.state.adopted_nodes:
+            return None
+        return f"Unknown sheet owner '{node_id}'"
+
+    def _validate_wire(self, sheet_node_id: str,
+                       source: RouteEndpoint,
+                       sink: RouteEndpoint) -> Optional[str]:
+        """Verify that both endpoints exist on `sheet_node_id` or system-wide."""
         for ep, role in ((source, "source"), (sink, "sink")):
-            if ep.kind == "peripheral":
+            if ep.kind == "input":
+                if not ep.parts:
+                    return f"{role}: input endpoint needs [input_id]"
+                sheet = self.state.system_routing.get_sheet(sheet_node_id)
+                if not sheet.find_input(ep.parts[0]):
+                    return f"{role}: input '{ep.parts[0]}' not on this sheet"
+            elif ep.kind == "operator":
+                if len(ep.parts) < 2:
+                    return f"{role}: operator endpoint needs [op_id, pin]"
+                sheet = self.state.system_routing.get_sheet(sheet_node_id)
+                op_node = sheet.find_operator(ep.parts[0])
+                if not op_node:
+                    return f"{role}: operator '{ep.parts[0]}' not on this sheet"
+                op_type = OPERATOR_CATALOG.get(op_node.op)
+                pin = ep.parts[1]
+                if op_type:
+                    valid_pins = {"out"} | {i.id for i in op_type.inputs}
+                    if pin not in valid_pins:
+                        return f"{role}: operator '{op_node.op}' has no pin '{pin}'"
+            elif ep.kind == "peripheral":
                 if len(ep.parts) < 3:
                     return f"{role}: peripheral endpoint needs [node_id, peripheral_id, channel_id]"
                 node_id, pid, channel_id = ep.parts[0], ep.parts[1], ep.parts[2]
+                # Hard-scope: peripheral sinks must live on the sheet owner.
+                if role == "sink" and node_id != sheet_node_id:
+                    return ("sink: peripheral sink must be on the sheet's controller "
+                            f"(got '{node_id}', sheet is '{sheet_node_id}')")
                 node = self.state.adopted_nodes.get(node_id)
                 if not node or not node.peripheral_config:
                     return f"{role}: unknown node '{node_id}'"
@@ -1668,6 +1785,8 @@ class StateManager:
                 if t and not any(c.id == channel_id for c in t.channels):
                     return f"{role}: channel '{channel_id}' not on peripheral type '{peripheral.type}'"
             elif ep.kind == "widget":
+                if sheet_node_id != DASHBOARD_SHEET_ID:
+                    return f"{role}: widget endpoints only allowed on the dashboard sheet"
                 if len(ep.parts) < 2:
                     return f"{role}: widget endpoint needs [widget_id, input_id]"
                 widget_id = ep.parts[0]
@@ -1678,11 +1797,37 @@ class StateManager:
                 t = self.widget_catalog.get(widget.type)
                 if t and not any(i.id == ep.parts[1] for i in t.inputs):
                     return f"{role}: input '{ep.parts[1]}' not on widget type '{widget.type}'"
-            elif ep.kind == "signal":
-                if not ep.parts or not ep.parts[0]:
-                    return f"{role}: signal endpoint needs a path"
             else:
                 return f"{role}: unknown endpoint kind '{ep.kind}'"
+        # Source pins must be outputs; sink pins must be inputs.
+        if source.kind == "peripheral":
+            # Outgoing peripheral data: channel must have dir == "in" (peripheral produces it).
+            err = self._check_peripheral_dir(source, expected_dir="in", role="source")
+            if err:
+                return err
+        if sink.kind == "peripheral":
+            err = self._check_peripheral_dir(sink, expected_dir="out", role="sink")
+            if err:
+                return err
+        return None
+
+    def _check_peripheral_dir(self, ep: RouteEndpoint, expected_dir: str,
+                              role: str) -> Optional[str]:
+        node = self.state.adopted_nodes.get(ep.parts[0])
+        if not node or not node.peripheral_config:
+            return None
+        peripheral = node.peripheral_config.get(ep.parts[1])
+        if not peripheral:
+            return None
+        t = self.peripheral_catalog.get(peripheral.type)
+        if not t:
+            return None
+        chan = next((c for c in t.channels if c.id == ep.parts[2]), None)
+        if not chan:
+            return None
+        if chan.dir != expected_dir:
+            actual = "sensor reading" if chan.dir == "in" else "actuator command"
+            return f"{role}: '{chan.display}' is a {actual}; cannot wire it that way"
         return None
 
     def add_widget(self, type_id: str, label: Optional[str] = None,
@@ -1727,6 +1872,33 @@ class StateManager:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Failed to save system routing: {e}")
+        # Let the live evaluator refresh its subscriptions + graph snapshot.
+        if self._routing_evaluator is not None:
+            try:
+                self._routing_evaluator.reconcile(self.state.system_routing)
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Routing evaluator reconcile failed: {e}")
+
+    def set_routing_evaluator(self, evaluator) -> None:
+        """Wire the live routing evaluator (set by server_node once the
+        ROS bridge is up). Triggers an initial reconcile so the evaluator
+        picks up sheets persisted on disk."""
+        self._routing_evaluator = evaluator
+        if evaluator is not None:
+            try:
+                evaluator.reconcile(self.state.system_routing)
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Initial routing reconcile failed: {e}")
+
+    def lookup_peripheral_type(self, node_id: str, peripheral_id: str) -> str:
+        """Resolve a peripheral type id for the firmware command payload."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.peripheral_config:
+            return ""
+        peripheral = node.peripheral_config.get(peripheral_id)
+        return peripheral.type if peripheral else ""
 
     def _load_system_routing(self) -> None:
         if not os.path.exists(self.system_routing_path):
@@ -1736,9 +1908,11 @@ class StateManager:
                 data = yaml.safe_load(f) or {}
             self.state.system_routing = SystemRouting.from_dict(data)
             if self.logger:
+                routing = self.state.system_routing
+                wire_count = sum(len(s.wires) for s in routing.sheets.values())
                 self.logger.info(
-                    f"Loaded system routing: {len(self.state.system_routing.routes)} routes, "
-                    f"{len(self.state.system_routing.widgets)} widgets"
+                    f"Loaded system routing: {len(routing.sheets)} sheets, "
+                    f"{wire_count} wires, {len(routing.widgets)} widgets"
                 )
         except Exception as e:
             if self.logger:

@@ -70,15 +70,15 @@ pub enum AnalogAction {
         transform: InputTransform,
     },
     /// Differential drive - channel mixing for tank drive
-    /// Takes stick X (turn) and Y (throttle) and outputs to left/right motors
-    /// Mixing: left = throttle + turn, right = throttle - turn
+    /// Takes stick X (turn) and Y (throttle) and outputs to left/right channels
+    /// of the same topic. Mixing: left = throttle + turn, right = throttle - turn
     DifferentialDrive {
-        /// Role name (e.g., "tracks")
-        role: String,
-        /// Function name for left motor (e.g., "left_velocity")
-        left_function: String,
-        /// Function name for right motor (e.g., "right_velocity")
-        right_function: String,
+        /// ROS topic (e.g., "/tracks")
+        topic: String,
+        /// Channel field for the left motor (e.g., "left_velocity")
+        left_channel: String,
+        /// Channel field for the right motor (e.g., "right_velocity")
+        right_channel: String,
         /// Transform applied to throttle (Y axis)
         throttle_transform: InputTransform,
         /// Transform applied to turn (X axis)
@@ -154,8 +154,10 @@ pub enum ModifierEffect {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlTarget {
-    pub role: String,
-    pub function: String,
+    /// ROS topic this binding writes to.
+    pub topic: String,
+    /// Scalar field within the topic message (e.g. "linear.x", "axes[3]").
+    pub channel: String,
     /// Human-readable name
     pub name: Option<String>,
 }
@@ -246,8 +248,8 @@ pub struct ServoPresetData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServoPosition {
-    pub role: String,
-    pub function: String,
+    pub topic: String,
+    pub channel: String,
     pub value: f32,
 }
 

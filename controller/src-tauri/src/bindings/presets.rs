@@ -13,9 +13,9 @@ pub fn create_default_profile() -> BindingProfile {
         AnalogBinding {
             input: AnalogInput::LeftStickY,  // Bind to Y axis, both X and Y are used
             action: AnalogAction::DifferentialDrive {
-                role: "tracks".to_string(),
-                left_function: "left_velocity".to_string(),
-                right_function: "right_velocity".to_string(),
+                topic: "/tracks".to_string(),
+                left_channel: "left_velocity".to_string(),
+                right_channel: "right_velocity".to_string(),
                 throttle_transform: InputTransform {
                     deadzone: 0.1,
                     scale: 1.0,
@@ -36,8 +36,8 @@ pub fn create_default_profile() -> BindingProfile {
             input: AnalogInput::RightStickX,
             action: AnalogAction::DirectControl {
                 target: ControlTarget {
-                    role: "head".to_string(),
-                    function: "pan".to_string(),
+                    topic: "/saint/head".to_string(),
+                    channel: "pan".to_string(),
                     name: Some("Head Pan".to_string()),
                 },
                 transform: InputTransform {
@@ -53,8 +53,8 @@ pub fn create_default_profile() -> BindingProfile {
             input: AnalogInput::RightStickY,
             action: AnalogAction::DirectControl {
                 target: ControlTarget {
-                    role: "head".to_string(),
-                    function: "tilt".to_string(),
+                    topic: "/saint/head".to_string(),
+                    channel: "tilt".to_string(),
                     name: Some("Head Tilt".to_string()),
                 },
                 transform: InputTransform {

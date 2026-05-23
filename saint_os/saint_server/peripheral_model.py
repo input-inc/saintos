@@ -389,18 +389,32 @@ class NodePeripheralConfig:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# System-wide state (routes + widgets)
+# System-wide routing: per-node sheets + dashboard widgets
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# A routing sheet is owned by a controller node and contains everything
+# needed to compute that node's peripheral inputs from external sources.
+# Each sheet holds:
+#
+#   - InputNodes      ROS topic sources (topic + scalar field)
+#   - OperatorNodes   server-evaluated transforms (Max/Min/Clamp/Lerp/…)
+#   - Wires           edges from (input|operator) output → (operator pin |
+#                                                            peripheral channel |
+#                                                            widget input)
+#
+# Sheets are hard-scoped to one controller node: if the same topic feeds
+# two controllers, it appears as an InputNode on each sheet. The special
+# pseudo-sheet "dashboard" hosts the widget sinks. Endpoint kinds are:
+#
+#   kind == "input":      parts = [sheet_node_id]       (output pin always "out")
+#   kind == "operator":   parts = [sheet_node_id, pin]  (pin = "out" or input id)
+#   kind == "peripheral": parts = [node_id, peripheral_id, channel_id]
+#   kind == "widget":     parts = [widget_id, input_id]
 
 
 @dataclass
 class RouteEndpoint:
-    """One end of a route.
-
-    kind == "peripheral": parts = [node_id, peripheral_id, channel_id]
-    kind == "signal":     parts = [signal_path]
-    kind == "widget":     parts = [widget_id, input_id]
-    """
+    """One end of a wire."""
     kind: str
     parts: List[str]
 
@@ -416,7 +430,86 @@ class RouteEndpoint:
 
 
 @dataclass
-class Route:
+class InputNode:
+    """A ROS topic source on a sheet.
+
+    `topic` is the canonical endpoint path (e.g. "/joy", "/cmd_vel"),
+    `field` is a flattened scalar path into the message (e.g. "axes[0]",
+    "linear.x", "value"). The evaluator subscribes once per (topic, field)
+    pair across all sheets that reference it.
+    """
+    id: str
+    topic: str
+    field: str
+    label: str = ""
+    position: Tuple[int, int] = (0, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "topic": self.topic,
+            "field": self.field,
+            "label": self.label,
+            "position": list(self.position),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "InputNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            topic=d["topic"],
+            field=d.get("field", "value"),
+            label=d.get("label", ""),
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+        )
+
+
+@dataclass
+class OperatorNode:
+    """A server-evaluated transform on a sheet.
+
+    `op` selects an entry from OPERATOR_CATALOG. `params` are static
+    config (e.g. the curve exponent). `defaults` are per-input fallback
+    constants used when no wire is connected to that input pin — this is
+    how the operator lets the operator type in literal min/max values
+    directly on the node card.
+    """
+    id: str
+    op: str
+    label: str = ""
+    params: Dict[str, Any] = field(default_factory=dict)
+    defaults: Dict[str, float] = field(default_factory=dict)
+    position: Tuple[int, int] = (0, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "op": self.op,
+            "label": self.label,
+            "params": dict(self.params),
+            "defaults": {k: float(v) for k, v in self.defaults.items()},
+            "position": list(self.position),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "OperatorNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            op=d["op"],
+            label=d.get("label", ""),
+            params=dict(d.get("params", {})),
+            defaults={k: float(v) for k, v in (d.get("defaults") or {}).items()},
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+        )
+
+
+@dataclass
+class Wire:
+    """One edge on a sheet — a value flowing from source to sink."""
     id: str
     source: RouteEndpoint
     sink: RouteEndpoint
@@ -429,12 +522,237 @@ class Route:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Route":
+    def from_dict(cls, d: Dict[str, Any]) -> "Wire":
         return cls(
             id=d["id"],
             source=RouteEndpoint.from_dict(d["source"]),
             sink=RouteEndpoint.from_dict(d["sink"]),
         )
+
+
+# Sentinel node_id for the dashboard sheet (widgets only — no peripherals).
+DASHBOARD_SHEET_ID = "_dashboard"
+
+
+@dataclass
+class NodeSheet:
+    """All routing state owned by one controller node (or the dashboard)."""
+    node_id: str
+    inputs: List[InputNode] = field(default_factory=list)
+    operators: List[OperatorNode] = field(default_factory=list)
+    wires: List[Wire] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "inputs": [n.to_dict() for n in self.inputs],
+            "operators": [n.to_dict() for n in self.operators],
+            "wires": [w.to_dict() for w in self.wires],
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "NodeSheet":
+        return cls(
+            node_id=d["node_id"],
+            inputs=[InputNode.from_dict(x) for x in d.get("inputs", [])],
+            operators=[OperatorNode.from_dict(x) for x in d.get("operators", [])],
+            wires=[Wire.from_dict(x) for x in d.get("wires", [])],
+        )
+
+    def _next_id(self, prefix: str, existing_ids) -> str:
+        n = 1
+        while f"{prefix}{n}" in existing_ids:
+            n += 1
+        return f"{prefix}{n}"
+
+    def add_input(self, topic: str, field: str, label: str = "",
+                  position: Tuple[int, int] = (0, 0)) -> InputNode:
+        existing = {n.id for n in self.inputs}
+        node = InputNode(
+            id=self._next_id("in", existing),
+            topic=topic, field=field,
+            label=label or f"{topic}{('.' + field) if field else ''}",
+            position=position,
+        )
+        self.inputs.append(node)
+        return node
+
+    def add_operator(self, op: str, label: str = "",
+                     params: Optional[Dict[str, Any]] = None,
+                     defaults: Optional[Dict[str, float]] = None,
+                     position: Tuple[int, int] = (0, 0)) -> OperatorNode:
+        existing = {n.id for n in self.operators}
+        node = OperatorNode(
+            id=self._next_id("op", existing),
+            op=op, label=label,
+            params=dict(params or {}),
+            defaults=dict(defaults or {}),
+            position=position,
+        )
+        self.operators.append(node)
+        return node
+
+    def add_wire(self, source: RouteEndpoint, sink: RouteEndpoint) -> Wire:
+        existing = {w.id for w in self.wires}
+        # Replace any existing wire feeding the same sink — sinks accept
+        # one value, last writer wins.
+        self.wires = [w for w in self.wires
+                      if not (w.sink.kind == sink.kind and w.sink.parts == sink.parts)]
+        wire = Wire(id=self._next_id("w", existing), source=source, sink=sink)
+        self.wires.append(wire)
+        return wire
+
+    def remove_input(self, input_id: str) -> bool:
+        before = len(self.inputs)
+        self.inputs = [n for n in self.inputs if n.id != input_id]
+        if len(self.inputs) == before:
+            return False
+        self.wires = [w for w in self.wires
+                      if not (w.source.kind == "input" and w.source.parts and w.source.parts[0] == input_id)]
+        return True
+
+    def remove_operator(self, op_id: str) -> bool:
+        before = len(self.operators)
+        self.operators = [n for n in self.operators if n.id != op_id]
+        if len(self.operators) == before:
+            return False
+        self.wires = [
+            w for w in self.wires
+            if not ((w.source.kind == "operator" and w.source.parts and w.source.parts[0] == op_id)
+                    or (w.sink.kind == "operator" and w.sink.parts and w.sink.parts[0] == op_id))
+        ]
+        return True
+
+    def remove_wire(self, wire_id: str) -> bool:
+        before = len(self.wires)
+        self.wires = [w for w in self.wires if w.id != wire_id]
+        return len(self.wires) < before
+
+    def find_input(self, input_id: str) -> Optional[InputNode]:
+        return next((n for n in self.inputs if n.id == input_id), None)
+
+    def find_operator(self, op_id: str) -> Optional[OperatorNode]:
+        return next((n for n in self.operators if n.id == op_id), None)
+
+
+# ── Operator catalog ──────────────────────────────────────────────────
+
+
+@dataclass
+class OperatorInputSpec:
+    id: str
+    label: str
+    default: float = 0.0
+
+
+@dataclass
+class OperatorParamSpec:
+    id: str
+    label: str
+    type: str          # "float" | "int" | "bool"
+    default: Any
+
+
+@dataclass
+class OperatorType:
+    id: str
+    label: str
+    description: str
+    inputs: List[OperatorInputSpec]
+    params: List[OperatorParamSpec] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "description": self.description,
+            "inputs": [asdict(i) for i in self.inputs],
+            "params": [asdict(p) for p in self.params],
+        }
+
+
+# Catalog of pure float→float operators. The evaluator computes each
+# operator's single output value from its input pins; inputs without a
+# wired source fall back to the OperatorNode.defaults map, or to the
+# spec default if absent.
+OPERATOR_CATALOG: Dict[str, OperatorType] = {
+    "add": OperatorType(
+        "add", "Add", "out = a + b",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "subtract": OperatorType(
+        "subtract", "Subtract", "out = a − b",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "multiply": OperatorType(
+        "multiply", "Multiply", "out = a × b",
+        inputs=[OperatorInputSpec("a", "A", 1.0), OperatorInputSpec("b", "B", 1.0)],
+    ),
+    "scale": OperatorType(
+        "scale", "Scale", "out = value × factor",
+        inputs=[OperatorInputSpec("value", "Value"), OperatorInputSpec("factor", "Factor", 1.0)],
+    ),
+    "max": OperatorType(
+        "max", "Max", "out = max(a, b)",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "min": OperatorType(
+        "min", "Min", "out = min(a, b)",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "clamp": OperatorType(
+        "clamp", "Clamp", "Clamp value into [min, max].",
+        inputs=[
+            OperatorInputSpec("value", "Value"),
+            OperatorInputSpec("min",   "Min", -1.0),
+            OperatorInputSpec("max",   "Max",  1.0),
+        ],
+    ),
+    "map_range": OperatorType(
+        "map_range", "Map Range",
+        "Linearly remap value from [in_min, in_max] to [out_min, out_max].",
+        inputs=[
+            OperatorInputSpec("value",   "Value"),
+            OperatorInputSpec("in_min",  "In Min", -1.0),
+            OperatorInputSpec("in_max",  "In Max",  1.0),
+            OperatorInputSpec("out_min", "Out Min", 0.0),
+            OperatorInputSpec("out_max", "Out Max", 1.0),
+        ],
+        params=[OperatorParamSpec("clamp_output", "Clamp output to range", "bool", True)],
+    ),
+    "lerp": OperatorType(
+        "lerp", "Lerp", "out = a + (b − a) × t",
+        inputs=[
+            OperatorInputSpec("a", "A"),
+            OperatorInputSpec("b", "B"),
+            OperatorInputSpec("t", "T", 0.5),
+        ],
+    ),
+    "invert": OperatorType(
+        "invert", "Invert", "out = −value",
+        inputs=[OperatorInputSpec("value", "Value")],
+    ),
+    "abs": OperatorType(
+        "abs", "Absolute", "out = |value|",
+        inputs=[OperatorInputSpec("value", "Value")],
+    ),
+    "deadband": OperatorType(
+        "deadband", "Deadband",
+        "Pass through value if |value| > threshold; else 0.",
+        inputs=[
+            OperatorInputSpec("value",     "Value"),
+            OperatorInputSpec("threshold", "Threshold", 0.05),
+        ],
+    ),
+    "curve": OperatorType(
+        "curve", "Curve (Expo)",
+        "out = sign(value) × |value|^exponent — common joystick expo curve.",
+        inputs=[
+            OperatorInputSpec("value",    "Value"),
+            OperatorInputSpec("exponent", "Exponent", 2.0),
+        ],
+    ),
+}
 
 
 @dataclass
@@ -501,13 +819,15 @@ class WidgetType:
 
 DEFAULT_WIDGET_CATALOG: Dict[str, WidgetType] = {
     "battery_monitor": WidgetType(
-        id="battery_monitor", label="Battery Monitor",
-        description="Current, voltage, and up to two temperature readings.",
+        id="battery_monitor", label="FAS100 Power Monitor",
+        description="FrSky FAS100 battery telemetry: current, voltage, and "
+                    "two temperature sensors. Rendered as the dashboard's "
+                    "amber-accented power card.",
         inputs=[
-            WidgetInputSpec("current", "Current", "analog"),
-            WidgetInputSpec("voltage", "Voltage", "analog"),
-            WidgetInputSpec("temp1",   "Temp 1",  "analog"),
-            WidgetInputSpec("temp2",   "Temp 2",  "analog"),
+            WidgetInputSpec("current", "Current Draw",    "analog"),
+            WidgetInputSpec("voltage", "Battery Voltage", "analog"),
+            WidgetInputSpec("temp1",   "Temp 1",          "analog"),
+            WidgetInputSpec("temp2",   "Temp 2",          "analog"),
         ],
     ),
     "estop_indicator": WidgetType(
@@ -536,77 +856,94 @@ DEFAULT_WIDGET_CATALOG: Dict[str, WidgetType] = {
 @dataclass
 class SystemRouting:
     version: int = 0
-    routes: List[Route] = field(default_factory=list)
+    # Sheets keyed by owning node_id (controller id, or DASHBOARD_SHEET_ID
+    # for the widgets-only pseudo-sheet).
+    sheets: Dict[str, NodeSheet] = field(default_factory=dict)
     widgets: List[WidgetInstance] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "version": self.version,
-            "routes":  [r.to_dict() for r in self.routes],
+            "sheets":  {nid: s.to_dict() for nid, s in self.sheets.items()},
             "widgets": [w.to_dict() for w in self.widgets],
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SystemRouting":
+        sheets_in = d.get("sheets") or {}
+        sheets: Dict[str, NodeSheet] = {}
+        for nid, sd in sheets_in.items():
+            # Stored sheet dicts may omit node_id; trust the key.
+            sd = dict(sd)
+            sd.setdefault("node_id", nid)
+            sheets[nid] = NodeSheet.from_dict(sd)
         return cls(
             version=int(d.get("version", 0)),
-            routes=[Route.from_dict(r) for r in d.get("routes", [])],
+            sheets=sheets,
             widgets=[WidgetInstance.from_dict(w) for w in d.get("widgets", [])],
         )
 
-    # ── Routes ────────────────────────────────────────────────────────
+    # ── Sheet access ──────────────────────────────────────────────────
 
-    def _next_route_id(self) -> str:
-        existing = {r.id for r in self.routes}
-        n = len(self.routes) + 1
-        while f"r{n}" in existing:
-            n += 1
-        return f"r{n}"
+    def get_sheet(self, node_id: str) -> NodeSheet:
+        """Return the sheet for `node_id`, creating an empty one if needed."""
+        sheet = self.sheets.get(node_id)
+        if sheet is None:
+            sheet = NodeSheet(node_id=node_id)
+            self.sheets[node_id] = sheet
+        return sheet
 
-    def add_route(self, source: RouteEndpoint, sink: RouteEndpoint,
-                  route_id: Optional[str] = None) -> Route:
-        rid = route_id or self._next_route_id()
-        route = Route(id=rid, source=source, sink=sink)
-        self.routes.append(route)
-        self.version += 1
-        return route
-
-    def update_route(self, route_id: str, source: RouteEndpoint,
-                     sink: RouteEndpoint) -> Optional[Route]:
-        for r in self.routes:
-            if r.id == route_id:
-                r.source = source
-                r.sink = sink
-                self.version += 1
-                return r
-        return None
-
-    def remove_route(self, route_id: str) -> bool:
-        before = len(self.routes)
-        self.routes = [r for r in self.routes if r.id != route_id]
-        if len(self.routes) < before:
+    def drop_sheet(self, node_id: str) -> bool:
+        if node_id in self.sheets:
+            del self.sheets[node_id]
             self.version += 1
             return True
         return False
 
-    def routes_touching_peripheral(self, node_id: str, peripheral_id: str) -> List[Route]:
-        out = []
-        for r in self.routes:
-            for ep in (r.source, r.sink):
-                if ep.kind == "peripheral" and len(ep.parts) >= 2 \
-                        and ep.parts[0] == node_id and ep.parts[1] == peripheral_id:
-                    out.append(r)
-                    break
+    def bump_version(self) -> None:
+        self.version += 1
+
+    # ── Cascade helpers ──────────────────────────────────────────────
+
+    def wires_touching_peripheral(self, node_id: str, peripheral_id: str) -> List[Wire]:
+        """All wires across all sheets that reference (node_id, peripheral_id)."""
+        out: List[Wire] = []
+        for sheet in self.sheets.values():
+            for w in sheet.wires:
+                for ep in (w.source, w.sink):
+                    if ep.kind == "peripheral" and len(ep.parts) >= 2 \
+                            and ep.parts[0] == node_id and ep.parts[1] == peripheral_id:
+                        out.append(w)
+                        break
         return out
 
-    def routes_touching_widget(self, widget_id: str) -> List[Route]:
-        out = []
-        for r in self.routes:
-            for ep in (r.source, r.sink):
-                if ep.kind == "widget" and ep.parts and ep.parts[0] == widget_id:
-                    out.append(r)
-                    break
+    def wires_touching_widget(self, widget_id: str) -> List[Wire]:
+        out: List[Wire] = []
+        for sheet in self.sheets.values():
+            for w in sheet.wires:
+                for ep in (w.source, w.sink):
+                    if ep.kind == "widget" and ep.parts and ep.parts[0] == widget_id:
+                        out.append(w)
+                        break
         return out
+
+    def drop_wires_touching_peripheral(self, node_id: str, peripheral_id: str) -> int:
+        """Remove every wire that mentions the given peripheral. Returns count dropped."""
+        dropped = 0
+        for sheet in self.sheets.values():
+            before = len(sheet.wires)
+            sheet.wires = [
+                w for w in sheet.wires
+                if not any(
+                    ep.kind == "peripheral" and len(ep.parts) >= 2
+                    and ep.parts[0] == node_id and ep.parts[1] == peripheral_id
+                    for ep in (w.source, w.sink)
+                )
+            ]
+            dropped += before - len(sheet.wires)
+        if dropped:
+            self.version += 1
+        return dropped
 
     # ── Widgets ───────────────────────────────────────────────────────
 
@@ -640,10 +977,13 @@ class SystemRouting:
 
     def remove_widget(self, widget_id: str) -> bool:
         before = len(self.widgets)
-        # Cascade: drop routes touching this widget
-        self.routes = [r for r in self.routes
-                       if not any(ep.kind == "widget" and ep.parts and ep.parts[0] == widget_id
-                                  for ep in (r.source, r.sink))]
+        # Cascade: drop wires across every sheet that target this widget.
+        for sheet in self.sheets.values():
+            sheet.wires = [
+                w for w in sheet.wires
+                if not any(ep.kind == "widget" and ep.parts and ep.parts[0] == widget_id
+                           for ep in (w.source, w.sink))
+            ]
         self.widgets = [w for w in self.widgets if w.id != widget_id]
         if len(self.widgets) < before:
             self.version += 1
