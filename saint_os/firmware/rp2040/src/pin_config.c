@@ -659,7 +659,19 @@ bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
         cfg->logical_name[0] = '\0';
     }
 
-    // Set default parameters based on mode
+    // Set default parameters for built-in modes whose params live in
+    // this struct. Peripheral driver modes intentionally DO NOT get a
+    // set_defaults call here — set_defaults populates fields like
+    // address/deadband to non-zero "default" values, which then look
+    // identical to a fresh JSON-sync payload to apply_config. That
+    // confused the boot-reload path (pin_config_load → pin_config_set
+    // → set_defaults → apply_hardware → apply_config) into thinking it
+    // had real per-channel params and clobbering whatever drv_load just
+    // restored from flash — manifesting as "RoboClaw doesn't talk
+    // until I sync from the dashboard" after every reboot. The JSON-
+    // sync code path (apply_one_peripheral) calls drv->set_defaults
+    // explicitly right before parse_json_params, so removing it here
+    // doesn't change that path's behavior.
     switch (mode) {
         case PIN_MODE_PWM:
             cfg->params.pwm.frequency = PIN_CONFIG_DEFAULT_PWM_FREQ;
@@ -678,14 +690,11 @@ bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
             cfg->params.digital_out.initial_state = false;
             break;
         default:
-        {
-            const peripheral_driver_t* drv = peripheral_find_by_mode(mode);
-            if (drv && drv->set_defaults) {
-                uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
-                drv->set_defaults(ch, cfg);
-            }
+            // Peripheral driver modes leave params zero-initialized;
+            // either drv_load (boot reload) or apply_one_peripheral's
+            // explicit set_defaults + parse_json_params (JSON sync)
+            // fills them.
             break;
-        }
     }
 
     return true;

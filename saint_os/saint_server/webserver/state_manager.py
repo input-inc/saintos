@@ -1765,9 +1765,7 @@ class StateManager:
         return (0, 0)
 
     def _validate_sheet_owner(self, node_id: str) -> Optional[str]:
-        """A sheet must belong to a known controller, or be the dashboard."""
-        if node_id == DASHBOARD_SHEET_ID:
-            return None
+        """A sheet must belong to a known adopted controller node."""
         if node_id in self.state.adopted_nodes:
             return None
         return f"Unknown sheet owner '{node_id}'"

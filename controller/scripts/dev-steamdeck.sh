@@ -158,9 +158,8 @@ sync_files() {
         --exclude 'dist' \
         --exclude '.angular' \
         --exclude '.git' \
-        --exclude 'flatpak-build' \
-        --exclude 'flatpak-repo' \
-        --exclude '.flatpak-builder' \
+        --exclude '.flatpak-cache' \
+        --exclude 'SAINT-Controller.flatpak' \
         -e "$(ssh_cmd_string)" \
         "$LOCAL_DIR/" "$DECK:$REMOTE_DIR/"
     echo "[$(date +%H:%M:%S)] sync complete"
@@ -180,8 +179,7 @@ if command -v fswatch >/dev/null 2>&1; then
         --exclude 'dist'
         --exclude '.angular'
         --exclude '.git'
-        --exclude 'flatpak-build'
-        --exclude 'flatpak-repo'
+        --exclude '.flatpak-cache'
         "$LOCAL_DIR/src"
         "$LOCAL_DIR/src-tauri/src"
         "$LOCAL_DIR/src-tauri/Cargo.toml"
@@ -195,7 +193,7 @@ elif command -v inotifywait >/dev/null 2>&1; then
     echo "fswatch missing on Linux — install with: sudo apt install fswatch" >&2
     echo "Falling back to inotifywait..."
     WATCHER=(inotifywait -m -r -e modify,create,delete,move
-        --exclude '(node_modules|target|dist|\.angular|\.git|flatpak-build|flatpak-repo)'
+        --exclude '(node_modules|target|dist|\.angular|\.git|\.flatpak-cache)'
         "$LOCAL_DIR/src"
         "$LOCAL_DIR/src-tauri/src"
         "$LOCAL_DIR/src-tauri/Cargo.toml"

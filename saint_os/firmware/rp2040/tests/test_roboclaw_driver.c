@@ -647,6 +647,47 @@ static int test_save_load_roundtrip(void)
     return 1;
 }
 
+/* Regression: at boot reload the apply_hardware sweep calls
+ * apply_config(ch, cfg) for every channel of the loaded peripheral
+ * with cfg.params zero-initialized (pin_config_set used to call
+ * set_defaults internally, which populated a non-zero default address
+ * — that broke the guard below and caused the apply_config field-copy
+ * branch to clobber units[0].uart_swap with zero, which then forced
+ * roboclaw_init() to bind the HW UART instead of PIO. Manifested as
+ * "RoboClaw doesn't talk after reboot until I re-sync from the
+ * dashboard"). Asserts that apply_config with a zero-address cfg
+ * leaves the previously-loaded uart_swap alone. */
+static int test_apply_config_boot_reload_preserves_uart_swap(void)
+{
+    reset_state();
+
+    // Stand in for what drv_load would have just done: populate
+    // units[0] with the saved flash values, including uart_swap=1.
+    roboclaw_tx_pin = 0;
+    roboclaw_rx_pin = 1;
+    configured_serial_port = 0;
+    units[0].address = 0x80;
+    units[0].deadband = 3;
+    units[0].uart_swap = 1;
+    units[0].invert_direction = 0;
+    unit_count = 1;
+
+    // Simulate apply_hardware's sweep: a pin_config_t for channel 0
+    // with params zero-initialized — i.e. address == 0.
+    pin_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.mode = PIN_MODE_ROBOCLAW_MOTOR;
+
+    CHECK(roboclaw_drv_apply_config(0, &cfg));
+
+    // The critical assertion: uart_swap was NOT zeroed by the
+    // apply_config field-copy branch.
+    CHECK_EQ(units[0].uart_swap, 1);
+    CHECK_EQ(units[0].address, 0x80);
+    CHECK_EQ(units[0].deadband, 3);
+    return 1;
+}
+
 /* Loading flash with an invalid (rejected) pin pair should fall back
  * to defaults AND emit a warn log so the operator sees that saved
  * pins didn't survive. */
@@ -1036,6 +1077,8 @@ static const test_entry_t TESTS[] = {
 
     /* Persistence */
     { "save_load_roundtrip",                     test_save_load_roundtrip },
+    { "apply_config_boot_reload_preserves_uart_swap",
+                                                 test_apply_config_boot_reload_preserves_uart_swap },
     { "load_invalid_pin_pair_warns",             test_load_invalid_pin_pair_warns },
 
     /* PIO UART (uart_swap) plumbing */

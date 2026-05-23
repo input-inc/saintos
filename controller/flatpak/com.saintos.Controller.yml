@@ -125,6 +125,14 @@ modules:
       # copies this into the build sandbox. We skip the heavy build
       # outputs so the copy is fast — those'll be regenerated inside
       # the sandbox anyway.
+      #
+      # CRITICAL: skip ALL flatpak-builder state directories under
+      # controller/. Without these the source copy recursively pulls
+      # in the previous build's nested copy of itself, doubling disk
+      # usage every invocation and eventually exhausting /home. The
+      # symptom is "no space left on device" with a path like
+      # .../saint-controller-1/controller/.flatpak-builder/.../
+      # saint-controller-2/controller/.flatpak-builder/...
       - type: dir
         path: ../..
         skip:
@@ -133,6 +141,11 @@ modules:
           - controller/.angular
           - controller/src-tauri/target
           - controller/src-tauri/gen
+          - controller/.flatpak-cache
+          - controller/.flatpak-builder      # legacy state dir from earlier script revs
+          - controller/flatpak-build         # legacy positional build dir
+          - controller/flatpak-repo          # legacy --bundle output repo
+          - controller/SAINT-Controller.flatpak
           - dist
           - build
           - install

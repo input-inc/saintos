@@ -1,15 +1,15 @@
 {
     "type": "rpi5",
-    "latest_version": "0.5.0-local.bd77bfb",
-    "latest_package": "saint_firmware_rpi5_0.5.0-local.bd77bfb.zip",
-    "latest_checksum": "f0f25f5636131c19e00f45e6a06934b2271d070f844b62be7ba455ddab5ddc24",
-    "updated": "2026-05-23T03:12:31Z",
+    "latest_version": "0.5.0-local.5c55b8f",
+    "latest_package": "saint_firmware_rpi5_0.5.0-local.5c55b8f.zip",
+    "latest_checksum": "e7424afd9413ac89f8ceca385819f6bcc8aa37216952305b335218f9205645c4",
+    "updated": "2026-05-23T04:02:45Z",
     "packages": [
         {
-            "version": "0.5.0-local.bd77bfb",
-            "filename": "saint_firmware_rpi5_0.5.0-local.bd77bfb.zip",
-            "checksum": "f0f25f5636131c19e00f45e6a06934b2271d070f844b62be7ba455ddab5ddc24",
-            "size": 20936
+            "version": "0.5.0-local.5c55b8f",
+            "filename": "saint_firmware_rpi5_0.5.0-local.5c55b8f.zip",
+            "checksum": "e7424afd9413ac89f8ceca385819f6bcc8aa37216952305b335218f9205645c4",
+            "size": 20935
         }
     ]
 }
