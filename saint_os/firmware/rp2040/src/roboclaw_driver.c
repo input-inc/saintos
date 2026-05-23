@@ -296,6 +296,26 @@ static inline bool wire_ready(void)
     return use_pio_uart ? pio_uart_is_active() : (hw_uart != NULL);
 }
 
+/* Build and send a WRITE command — appends CRC16 and (caller-side)
+ * expects a single 0xFF ACK byte. Used for M1DUTY, RESETENC,
+ * SETM1MAXCURRENT, settings writes, etc.
+ *
+ *   wire layout: [addr] [cmd] [data...] [crc_hi] [crc_lo]
+ *   response:    1 byte = 0xFF on success, no byte on validation failure
+ *
+ * NOT for read commands — those use send_read_request below, which
+ * matches what the official BasicMicro Arduino and Python libraries
+ * do: only [addr, cmd] go on the wire for a read, and the receiver
+ * accumulates CRC over the request bytes plus the response data
+ * bytes, comparing against the trailing 2 CRC bytes the controller
+ * sends back.
+ *
+ * Previous behaviour appended CRC to read requests too, which is
+ * harmless on the wire (the controller's 10 ms inter-byte timeout
+ * eventually discards the 2 orphan bytes when they don't form a
+ * valid next-packet address) but wastes bandwidth AND introduces a
+ * narrow window where the controller's parser is mid-discard while
+ * our read code is waiting for the response. */
 static void send_command(uint8_t address, uint8_t command,
                          const uint8_t* data, uint8_t data_len)
 {
@@ -317,6 +337,20 @@ static void send_command(uint8_t address, uint8_t command,
     wire_write_blocking(packet, idx);
     wire_tx_packets++;
     wire_tx_bytes += idx;
+}
+
+/* Send a READ request — just [address, command], no CRC bytes on the
+ * wire. The receiver (read_response / probe_unit / temp_probe) is
+ * already structured to compute its own CRC over [addr, cmd,
+ * response_data] and validate against the controller's trailing CRC. */
+static void send_read_request(uint8_t address, uint8_t command)
+{
+    if (!wire_ready()) return;
+
+    uint8_t packet[2] = { address, command };
+    wire_write_blocking(packet, 2);
+    wire_tx_packets++;
+    wire_tx_bytes += 2;
 }
 
 static bool read_response(uint8_t* buffer, uint8_t expected_len,
@@ -443,7 +477,7 @@ static void temp_probe_diagnostic(uint32_t now)
             buf);
     }
 
-    send_command(addr, ROBOCLAW_CMD_GETTEMP, NULL, 0);
+    send_read_request(addr, ROBOCLAW_CMD_GETTEMP);
 
     // Collect up to 4 bytes (Temp_hi, Temp_lo, CRC_hi, CRC_lo) with the
     // same timeouts the normal read_response uses. If fewer arrive,
@@ -593,7 +627,7 @@ static bool probe_unit(uint8_t unit_idx, char* version_out, size_t version_out_s
     // version parser doesn't latch onto leftover garbage.
     while (wire_is_readable()) (void)wire_getc();
 
-    send_command(units[unit_idx].address, ROBOCLAW_CMD_GETVERSION, NULL, 0);
+    send_read_request(units[unit_idx].address, ROBOCLAW_CMD_GETVERSION);
 
     uint8_t resp[ROBOCLAW_VERSION_MAX_LEN + 2];
     uint32_t start = PLATFORM_MILLIS();
@@ -1035,7 +1069,7 @@ void roboclaw_update(void)
     // notice when a previously-good controller goes quiet.
     switch (poll_register) {
     case 0: // Encoder
-        send_command(addr, ROBOCLAW_CMD_GETM1ENC, NULL, 0);
+        send_read_request(addr, ROBOCLAW_CMD_GETM1ENC);
         if (read_response(resp, 5, addr, ROBOCLAW_CMD_GETM1ENC)) {
             units[u].encoder = ((int32_t)resp[0] << 24) |
                                ((int32_t)resp[1] << 16) |
@@ -1046,7 +1080,7 @@ void roboclaw_update(void)
         break;
 
     case 1: // Battery voltage
-        send_command(addr, ROBOCLAW_CMD_GETMBATT, NULL, 0);
+        send_read_request(addr, ROBOCLAW_CMD_GETMBATT);
         if (read_response(resp, 2, addr, ROBOCLAW_CMD_GETMBATT)) {
             uint16_t raw = ((uint16_t)resp[0] << 8) | resp[1];
             units[u].voltage_mv = raw * 100;  // raw/10 = volts -> raw*100 = mV
@@ -1055,7 +1089,7 @@ void roboclaw_update(void)
         break;
 
     case 2: // Motor current
-        send_command(addr, ROBOCLAW_CMD_GETCURRENTS, NULL, 0);
+        send_read_request(addr, ROBOCLAW_CMD_GETCURRENTS);
         if (read_response(resp, 4, addr, ROBOCLAW_CMD_GETCURRENTS)) {
             // M1 current is first 2 bytes (value/100 = amps)
             int16_t raw = (int16_t)(((uint16_t)resp[0] << 8) | resp[1]);
@@ -1065,7 +1099,7 @@ void roboclaw_update(void)
         break;
 
     case 3: // Temperature
-        send_command(addr, ROBOCLAW_CMD_GETTEMP, NULL, 0);
+        send_read_request(addr, ROBOCLAW_CMD_GETTEMP);
         if (read_response(resp, 2, addr, ROBOCLAW_CMD_GETTEMP)) {
             units[u].temp_tenths = (int16_t)(((uint16_t)resp[0] << 8) | resp[1]);
             success = true;
