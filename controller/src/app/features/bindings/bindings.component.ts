@@ -677,9 +677,17 @@ export class BindingsComponent {
   }
 
   // WS inputs declared on the sheet selected in the analog form.
+  // Filter to kind === "command" — a controller binding only makes
+  // sense for command targets (joystick → motor, button → setpoint).
+  // The other case, kind === "state", is an echo node produced by
+  // the server's migration of state-only ROS endpoints; binding a
+  // controller to one of those would mean trying to drive a sensor
+  // reading, which is nonsense. Server tags them; we hide them.
   availableInputsForSelectedSheet() {
     if (!this.analogForm.targetSheetId) return [];
-    return this.discoveryService.getWsInputsForSheet(this.analogForm.targetSheetId);
+    return this.discoveryService
+      .getWsInputsForSheet(this.analogForm.targetSheetId)
+      .filter(slot => slot.kind === 'command');
   }
 
   // Channels available on the topic selected in the digital form.

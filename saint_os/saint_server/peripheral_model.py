@@ -478,16 +478,33 @@ class WebSocketInputNode:
     evaluator's source cache. Used for joystick/gamepad axes whose only
     purpose is to drive operators and peripheral channels — no need to
     round-trip through ROS or pretend they're state topics.
+
+    The ``kind`` field distinguishes two flavors of WS input:
+
+      * ``"command"`` — a target a controller binding writes TO. Default
+        for operator-added inputs; what the binding picker should
+        offer. These are the actual "drive this motor" slots.
+      * ``"state"`` — an echo node, produced by the migration of
+        state-only ROS endpoints (``endpoints.yaml`` entries with
+        ``state_type`` and no ``command_type``). These exist so wires
+        downstream can still tap the value, but binding a CONTROLLER
+        to one doesn't make sense — controllers don't produce state,
+        sensors do. The binding picker filters these out.
+
+    Default ``"command"`` so anything added in code paths that don't
+    set it explicitly behaves as before (operator-added inputs).
     """
     id: str
     label: str = ""
     position: Tuple[int, int] = (0, 0)
+    kind: str = "command"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "label": self.label,
             "position": list(self.position),
+            "kind": self.kind,
         }
 
     @classmethod
@@ -498,6 +515,9 @@ class WebSocketInputNode:
             label=d.get("label", ""),
             position=(int(pos[0]) if len(pos) > 0 else 0,
                       int(pos[1]) if len(pos) > 1 else 0),
+            # Default "command" preserves the meaning of existing
+            # persisted sheets that pre-date the kind field.
+            kind=d.get("kind", "command"),
         )
 
 

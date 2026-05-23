@@ -305,7 +305,20 @@ float pathfinder_bms_get_cell_voltage(uint8_t cell)
 
 static bool bms_drv_init(void)
 {
-    pathfinder_bms_init();
+    // Intentional no-op. peripheral_init_all() calls this during boot
+    // BEFORE the operator has signalled whether a BMS is present. The
+    // default UART pins are GP0/GP1 — which on this hardware are also
+    // the RoboClaw's PIO UART pins — so unconditionally calling
+    // pathfinder_bms_init() here clobbers GPIO_FUNC_PIO1 back to
+    // GPIO_FUNC_UART on those pads, silently breaking the RoboClaw
+    // link the moment peripheral_init_all runs (which is right after
+    // pin_config_load → roboclaw_drv_load → roboclaw_init has
+    // successfully bound the PIO and probed).
+    //
+    // Real init now runs from drv_load (restored from flash with
+    // enabled=1) or drv_apply_config (fresh JSON sync). Until one of
+    // those runs, pathfinder_bms_update() bails on !port_initialized
+    // — same dormant-until-configured pattern fas100_drv_init uses.
     return true;
 }
 
@@ -352,6 +365,10 @@ static bool bms_drv_apply_config(uint8_t channel, const pin_config_t* config)
     if (interval >= 100) {
         poll_interval_ms = interval;
     }
+    // Operator has explicitly added/synced a BMS peripheral — now it's
+    // safe to bind the UART. pathfinder_bms_init() is effectively
+    // idempotent w.r.t. port_initialized so repeat calls are fine.
+    pathfinder_bms_init();
     return true;
 }
 
@@ -424,6 +441,11 @@ static bool bms_drv_load(const void* storage_ptr)
 
     PLATFORM_PRINTF("Pathfinder BMS: restored config from flash (poll %dms)\n",
                     poll_interval_ms);
+
+    // Only now is it safe to bind the UART — we know a BMS is actually
+    // configured and which pins it should land on. See bms_drv_init's
+    // comment for why this can't run earlier.
+    pathfinder_bms_init();
     return true;
 }
 

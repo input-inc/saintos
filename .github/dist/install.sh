@@ -472,9 +472,64 @@ fi
 
 # --- WiFi access point -------------------------------------------------------
 
+# Returns 0 (success) when the named NM connection profile exists, is
+# currently activated, AND every field matches what we'd write below.
+# Used as a fast-path: if the AP is already up the way we want it,
+# we want to bail before running ANY of the disruptive steps in
+# setup_wifi_ap — package installs, netplan apply, iw reg set,
+# rfkill unblock — each of which can flap the radio and drop
+# connected clients (operators SSH'd over WiFi, the controller, etc).
+_wifi_ap_already_matches() {
+    local conn=$1
+    nmcli -g connection.id connection show "$conn" >/dev/null 2>&1 || return 1
+
+    local state
+    state=$(nmcli -g GENERAL.STATE connection show "$conn" 2>/dev/null || true)
+    [[ "$state" == "activated" ]] || return 1
+
+    local cur_ssid cur_mode cur_band cur_keymgmt cur_psk
+    local cur_proto cur_pairwise cur_group cur_ipmethod cur_powersave
+    cur_ssid=$(nmcli -g 802-11-wireless.ssid connection show "$conn" 2>/dev/null || true)
+    cur_mode=$(nmcli -g 802-11-wireless.mode connection show "$conn" 2>/dev/null || true)
+    cur_band=$(nmcli -g 802-11-wireless.band connection show "$conn" 2>/dev/null || true)
+    cur_powersave=$(nmcli -g 802-11-wireless.powersave connection show "$conn" 2>/dev/null || true)
+    cur_keymgmt=$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$conn" 2>/dev/null || true)
+    cur_psk=$(nmcli -s -g 802-11-wireless-security.psk connection show "$conn" 2>/dev/null || true)
+    cur_proto=$(nmcli -g 802-11-wireless-security.proto connection show "$conn" 2>/dev/null || true)
+    cur_pairwise=$(nmcli -g 802-11-wireless-security.pairwise connection show "$conn" 2>/dev/null || true)
+    cur_group=$(nmcli -g 802-11-wireless-security.group connection show "$conn" 2>/dev/null || true)
+    cur_ipmethod=$(nmcli -g ipv4.method connection show "$conn" 2>/dev/null || true)
+
+    [[ "$cur_ssid"      == "$WIFI_SSID" ]] || return 1
+    [[ "$cur_mode"      == "ap" ]]         || return 1
+    [[ "$cur_band"      == "bg" ]]         || return 1
+    [[ "$cur_powersave" == "2" ]]          || return 1
+    [[ "$cur_keymgmt"   == "wpa-psk" ]]    || return 1
+    [[ "$cur_psk"       == "$WIFI_PASS" ]] || return 1
+    [[ "$cur_proto"     == "rsn" ]]        || return 1
+    [[ "$cur_pairwise"  == "ccmp" ]]       || return 1
+    [[ "$cur_group"     == "ccmp" ]]       || return 1
+    [[ "$cur_ipmethod"  == "shared" ]]     || return 1
+    return 0
+}
+
 setup_wifi_ap() {
     if (( NO_WIFI )); then
         log "Skipping WiFi AP setup (--no-wifi)"
+        return
+    fi
+
+    # Fast path: AP is already up exactly the way we'd configure it.
+    # Skip ALL the setup steps below — including netplan apply and
+    # iw reg set, which restart the WiFi interface and drop every
+    # connected client even when the profile is unchanged. The
+    # existing "profile differs" comparison further down already
+    # avoids the nmcli teardown when settings match, but the early
+    # disruptive steps run regardless. This guard cuts the whole
+    # function off so a re-run of install.sh on a working rover
+    # leaves WiFi (and its operator SSH session) completely alone.
+    if _wifi_ap_already_matches saint-os-ap; then
+        log "WiFi AP 'saint-os-ap' is up and matches desired config — leaving it untouched"
         return
     fi
 

@@ -110,19 +110,36 @@ class RoutingEvaluator:
         """
         routing = self._routing
         if routing is None:
+            self._log("warn",
+                      f"set_ws_input {sheet_id}/{input_id}: evaluator has no "
+                      "routing snapshot yet (reconcile not run?)")
             return False
         sheet = routing.sheets.get(sheet_id)
         if sheet is None:
+            self._log("warn",
+                      f"set_ws_input: sheet '{sheet_id}' not found "
+                      f"(have: {list(routing.sheets.keys())})")
             return False
         if sheet.find_ws_input(input_id) is None:
+            ws_ids = [w.id for w in sheet.ws_inputs]
+            self._log("warn",
+                      f"set_ws_input: ws_input '{input_id}' not on sheet "
+                      f"'{sheet_id}' (have: {ws_ids})")
             return False
         try:
             scalar = float(value)
         except (TypeError, ValueError):
+            self._log("warn", f"set_ws_input: non-numeric value {value!r}")
             return False
 
         with self._lock:
             self._ws_input_values[(sheet_id, input_id)] = scalar
+
+        # Visible-by-default so the operator can see WS-input pushes in
+        # the live log alongside set_topic_channel events. Throttled
+        # downstream by the routing-values broadcast.
+        self._log("info",
+                  f"set_ws_input {sheet_id}/{input_id} = {scalar}")
 
         try:
             self._evaluate_sheet(sheet)

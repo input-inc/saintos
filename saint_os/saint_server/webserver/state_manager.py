@@ -1758,6 +1758,11 @@ class StateManager:
                     "sheet_label": sheet_label,
                     "input_id": ws.id,
                     "label": ws.label,
+                    # "command" or "state". Frontend binding picker
+                    # filters to "command" only — state nodes are
+                    # migration-only echoes of state-only ROS
+                    # endpoints, not real controller targets.
+                    "kind": ws.kind,
                 })
         return out
 
@@ -2138,10 +2143,15 @@ class StateManager:
             for inp in to_migrate:
                 # Reuse the original id so existing wires keep pointing
                 # at the same node — only their source.kind flips.
+                # kind="state" tags this as an echo of a state-only
+                # ROS endpoint, NOT a real controller target. The
+                # binding picker filters these out so operators don't
+                # accidentally bind a joystick to a sensor reading.
                 label = inp.label or f"{inp.topic}{('.' + inp.field) if inp.field else ''}"
                 from saint_server.peripheral_model import WebSocketInputNode
                 sheet.ws_inputs.append(WebSocketInputNode(
                     id=inp.id, label=label, position=inp.position,
+                    kind="state",
                 ))
                 migrated += 1
             sheet.inputs = keep_inputs

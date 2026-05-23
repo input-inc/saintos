@@ -197,6 +197,11 @@ async def run_repl(client, node_id):
         parts = line.split()
         cmd = parts[0]
 
+        # Drain time for the firmware reply — proportional to the
+        # firmware-side blocking duration of each op so the reply lands
+        # before we drop back to the prompt.
+        drain_secs = 1.5
+
         if cmd == "raw":
             if len(parts) < 4:
                 print("usage: raw <hex> <read_len> <timeout_ms>")
@@ -204,6 +209,7 @@ async def run_repl(client, node_id):
             tx_hex = parts[1]
             read_len = int(parts[2])
             timeout_ms = int(parts[3])
+            drain_secs = timeout_ms / 1000.0 + 1.5
             resp = await client.call("management", "roboclaw_debug", {
                 "node_id": node_id, "op": "raw",
                 "tx_hex": tx_hex, "read_len": read_len,
@@ -217,6 +223,7 @@ async def run_repl(client, node_id):
                 print("usage: sniff <duration_ms>")
                 continue
             duration_ms = int(parts[1])
+            drain_secs = duration_ms / 1000.0 + 1.5
             resp = await client.call("management", "roboclaw_debug", {
                 "node_id": node_id, "op": "sniff",
                 "duration_ms": duration_ms,
@@ -248,8 +255,8 @@ async def run_repl(client, node_id):
             print(f"unknown: {cmd}")
             continue
 
-        # Give the firmware ~1s to publish its reply, then drain.
-        await drain_logs(client, node_id, deadline_secs=1.0)
+        # Wait long enough for the firmware to finish the op and publish.
+        await drain_logs(client, node_id, deadline_secs=drain_secs)
 
 
 async def main():

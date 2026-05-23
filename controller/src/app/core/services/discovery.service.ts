@@ -63,6 +63,13 @@ export interface WsInputSlot {
   sheet_label: string;
   input_id: string;
   label: string;
+  /** "command" = real controller target (joystick → motor). "state"
+   *  = echo of a migrated state-only ROS endpoint, exists only so
+   *  downstream wires can tap the value. The binding picker filters
+   *  to "command" since you can't meaningfully drive a sensor
+   *  reading from a controller. Default "command" for any payload
+   *  the server emitted before this field existed. */
+  kind: 'command' | 'state';
 }
 
 @Injectable({
