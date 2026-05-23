@@ -1087,12 +1087,46 @@ void roboclaw_init(void)
     // this, every drv_apply_config call (which fires per channel — up
     // to ROBOCLAW_MAX_CHANNELS times per sync) would tear down and
     // reinit the UART, dropping any bytes in flight.
+    // Idempotent fast-path: same internal config + the GPIO pads still
+    // actually point at the transport we last bound. The pad check is
+    // load-bearing: at boot, some other peripheral's init (or a legacy
+    // pin_config entry going through pin_config_apply_hardware) can
+    // gpio_set_function() our pads to UART/SIO/etc AFTER we've bound
+    // them to PIO. Our internal "active_*" tracking still says PIO, so
+    // a config sync arriving later finds active_* matching and returns
+    // early — leaving the PIO state machine running into pads that are
+    // routed somewhere else entirely. The link looks dead until a
+    // reboot or until the debugger's roboclaw_debug:reconfigure forces
+    // active_* to 0xFF. Cross-checking the actual GPIO function on
+    // both pads makes the recovery automatic: when they don't match
+    // what they should be, fall through to the full re-bind below.
     if (active_tx_pin == roboclaw_tx_pin
         && active_rx_pin == roboclaw_rx_pin
         && active_uart   == configured_serial_port
         && port_initialized
         && was_pio == want_pio) {
-        return;
+        uint expected_fn = want_pio ? GPIO_FUNC_PIO1 : GPIO_FUNC_UART;
+        // Physical PIO pin layout is SWAPPED — see pio_uart_init call
+        // below. We check the actual wires (roboclaw_tx_pin =
+        // physical RX, roboclaw_rx_pin = physical TX) which both
+        // share the same GPIO_FUNC_* on the PIO path.
+        uint fn_tx = gpio_get_function(roboclaw_tx_pin);
+        uint fn_rx = gpio_get_function(roboclaw_rx_pin);
+        if (fn_tx == expected_fn && fn_rx == expected_fn) {
+            return;
+        }
+        saint_log_publish("warn",
+            "RoboClaw: PIO pad function was externally clobbered "
+            "(GP%u=%u, GP%u=%u, expected %u) — forcing re-bind",
+            (unsigned)roboclaw_tx_pin, (unsigned)fn_tx,
+            (unsigned)roboclaw_rx_pin, (unsigned)fn_rx,
+            (unsigned)expected_fn);
+        // Force the deinit path below to actually release the stale
+        // PIO state machines before we try to re-bind.
+        if (want_pio) pio_uart_deinit();
+        active_tx_pin = 0xFF;
+        active_rx_pin = 0xFF;
+        active_uart   = 0xFF;
     }
 
     // Detach the previously-bound pins. Two transport paths to tear

@@ -63,6 +63,16 @@ class RoutingPage {
                     if (this._active) this.render();
                 } else if (msg.node === 'routing_values') {
                     this.values = msg.data || { sheets: {} };
+                    // Diagnostic: surface every value snapshot so the
+                    // operator can confirm in devtools whether the
+                    // routing evaluator is broadcasting at all and
+                    // which buckets are populated. Trim once stable.
+                    if (window.__SAINT_DEBUG_ROUTING__ !== false) {
+                        const keys = Object.keys(this.values.sheets || {});
+                        console.debug('[routing] routing_values',
+                            { active: this.activeSheetId, sheets: keys,
+                              sheet_data: this.values.sheets?.[this.activeSheetId] });
+                    }
                     if (this._active) this._renderValueOverlays();
                 }
             });
@@ -294,44 +304,55 @@ class RoutingPage {
     _buildGraphNodes() {
         const out = [];
         const sheet = this._activeSheet();
+        // De-dupe by graph node id. We've seen sheets persisted with
+        // the same ws_input id appearing in both `inputs` and
+        // `ws_inputs` (or twice in one list) after a buggy migration —
+        // emit duplicate ids and the DOM ends up with two same-id divs
+        // stacked on top of each other.
+        const seen = new Set();
+        const push = (entry) => {
+            if (seen.has(entry.id)) return;
+            seen.add(entry.id);
+            out.push(entry);
+        };
         // Input nodes (left column) — subscribed to a real ROS topic.
         for (const n of (sheet.inputs || [])) {
             const id = `in::${n.id}`;
             const pos = this._positionFor(id, n.position);
-            out.push({ id, kind: 'input', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
+            push({ id, kind: 'input', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
         }
         // WebSocket-input nodes (left column) — controller writes the value.
         for (const n of (sheet.ws_inputs || [])) {
             const id = `ws::${n.id}`;
             const pos = this._positionFor(id, n.position);
-            out.push({ id, kind: 'ws_input', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
+            push({ id, kind: 'ws_input', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
         }
         // Operator nodes (middle column).
         for (const n of (sheet.operators || [])) {
             const id = `op::${n.id}`;
             const pos = this._positionFor(id, n.position);
-            out.push({ id, kind: 'operator', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
+            push({ id, kind: 'operator', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
         }
         // Output nodes (right column) — publish back into ROS topics.
         for (const n of (sheet.outputs || [])) {
             const id = `out::${n.id}`;
             const pos = this._positionFor(id, n.position);
-            out.push({ id, kind: 'output', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
+            push({ id, kind: 'output', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y });
         }
         // Widget sinks — attached to this controller's dashboard surface.
         for (const w of (sheet.widgets || [])) {
             const id = `w::${w.id}`;
             const pos = this._positionFor(id, w.position);
-            out.push({ id, kind: 'widget', sheetNodeId: w.id, widget: w, x: pos.x, y: pos.y });
+            push({ id, kind: 'widget', sheetNodeId: w.id, widget: w, x: pos.x, y: pos.y });
         }
         // Peripheral sinks (right-most column) — this controller's peripherals.
         const node = this._activeNode();
         for (const p of ((node && node.peripherals) || [])) {
             const id = `p::${node.node_id}::${p.id}`;
             const pos = this._positionFor(id, null);
-            out.push({ id, kind: 'peripheral', nodeId: node.node_id,
-                       nodeLabel: node.display_name || node.node_id,
-                       peripheral: p, x: pos.x, y: pos.y });
+            push({ id, kind: 'peripheral', nodeId: node.node_id,
+                   nodeLabel: node.display_name || node.node_id,
+                   peripheral: p, x: pos.x, y: pos.y });
         }
         return out;
     }
