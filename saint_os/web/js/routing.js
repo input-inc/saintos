@@ -24,6 +24,13 @@ class RoutingPage {
         // Map "sheetId:nodeId" → {x, y}
         this.positions = this._loadPositions();
         this.graphNodes = [];
+        // Live per-sheet values pushed from the server's routing
+        // evaluator (`routing_values` topic). Shape:
+        //   { sheets: { <sheet_id>: { inputs: {id: value},
+        //                              operators: {id: value},
+        //                              outputs: {id: value},
+        //                              widgets: {"wid/inp": value} } } }
+        this.values = { sheets: {} };
 
         // Interaction state
         this._connecting = null;
@@ -50,9 +57,14 @@ class RoutingPage {
         const ws = window.saintWS;
         if (ws) {
             ws.on('state', (msg) => {
-                if (!msg || msg.node !== 'system_routing') return;
-                this.routing = msg.data || { version: 0, sheets: {} };
-                if (this._active) this.render();
+                if (!msg) return;
+                if (msg.node === 'system_routing') {
+                    this.routing = msg.data || { version: 0, sheets: {} };
+                    if (this._active) this.render();
+                } else if (msg.node === 'routing_values') {
+                    this.values = msg.data || { sheets: {} };
+                    if (this._active) this._renderValueOverlays();
+                }
             });
         }
     }
@@ -63,7 +75,7 @@ class RoutingPage {
         if (!ws) return;
 
         try {
-            await ws.subscribe(['system_routing']);
+            await ws.subscribe(['system_routing', 'routing_values']);
         } catch (e) {
             console.warn('Failed to subscribe to system_routing:', e);
         }
@@ -224,8 +236,52 @@ class RoutingPage {
         this.graphNodes = this._buildGraphNodes();
         this._layoutMissing(this.graphNodes);
         layer.innerHTML = this.graphNodes.map(g => this._renderNodeHtml(g)).join('');
-        requestAnimationFrame(() => this._renderWires());
+        requestAnimationFrame(() => {
+            this._renderWires();
+            this._renderValueOverlays();
+        });
         this._attachNodeInteractions();
+    }
+
+    /** Update the per-pin value pills from the latest `routing_values`
+     *  snapshot. Cheap to call on every update — only mutates the
+     *  textContent of pre-rendered <span>s, no DOM rebuild. */
+    _renderValueOverlays() {
+        if (!this.activeSheetId) return;
+        const sheetVals = this.values?.sheets?.[this.activeSheetId];
+        if (!sheetVals) return;
+        const idFor = (graphNodeId, pinId, dir) =>
+            `val-${dir}-${graphNodeId.replace(/[^a-zA-Z0-9_-]/g, '_')}-${pinId}`;
+        const fmt = (v) => {
+            if (typeof v !== 'number' || !Number.isFinite(v)) return '';
+            // Three sig figs is plenty for a live overlay.
+            const a = Math.abs(v);
+            if (a === 0)    return '0';
+            if (a < 0.01)   return v.toExponential(1);
+            if (a < 100)    return v.toFixed(2);
+            return v.toFixed(0);
+        };
+        const set = (elId, value) => {
+            const el = document.getElementById(elId);
+            if (!el) return;
+            el.textContent = value === undefined || value === null ? '' : fmt(value);
+        };
+
+        for (const g of this.graphNodes) {
+            if (g.kind === 'input') {
+                set(idFor(g.id, 'out', 'out'), sheetVals.inputs?.[g.sheetNodeId]);
+            } else if (g.kind === 'operator') {
+                set(idFor(g.id, 'out', 'out'), sheetVals.operators?.[g.sheetNodeId]);
+            } else if (g.kind === 'output') {
+                set(idFor(g.id, 'value', 'in'), sheetVals.outputs?.[g.sheetNodeId]);
+            } else if (g.kind === 'widget' && g.widget) {
+                const wType = this._widgetType(g.widget.type);
+                for (const inp of (wType?.inputs || [])) {
+                    const key = `${g.widget.id}/${inp.id}`;
+                    set(idFor(g.id, inp.id, 'in'), sheetVals.widgets?.[key]);
+                }
+            }
+        }
     }
 
     _buildGraphNodes() {
@@ -310,15 +366,19 @@ class RoutingPage {
     _renderNodeHtml(g) {
         const meta = this._getNodeMeta(g);
         if (!meta) return '';
+        const valId = (pinId, dir) =>
+            `val-${dir}-${g.id.replace(/[^a-zA-Z0-9_-]/g, '_')}-${pinId}`;
         const inputsHtml = meta.inputs.map(p => `
             <div class="routing-pin-row input">
                 <div class="routing-pin dir-in" data-node="${escapeAttr(g.id)}"
                      data-pin="${escapeAttr(p.id)}" data-dir="in"></div>
                 <span class="routing-pin-label-in">${escapeHtml(p.label)}</span>
+                <span id="${valId(p.id, 'in')}" class="routing-pin-value"></span>
                 ${this._renderDefaultInput(g, p)}
             </div>`).join('');
         const outputsHtml = meta.outputs.map(p => `
             <div class="routing-pin-row output">
+                <span id="${valId(p.id, 'out')}" class="routing-pin-value"></span>
                 <span class="routing-pin-label-out">${escapeHtml(p.label)}</span>
                 <div class="routing-pin dir-out" data-node="${escapeAttr(g.id)}"
                      data-pin="${escapeAttr(p.id)}" data-dir="out"></div>

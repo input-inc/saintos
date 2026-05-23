@@ -773,6 +773,28 @@ class WebSocketHandler:
                 )
             return {"status": "ok" if result['success'] else "error", "data": result}
 
+        elif action == 'update_node':
+            # Edit role / board / chip / display_name on an already-
+            # adopted node. Mirror of adopt_node for post-adoption
+            # edits. All fields optional; only the ones supplied get
+            # changed. Same broadcast semantics so the activity log
+            # records the change for everyone.
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            result = self.state_manager.update_node(
+                node_id,
+                role=params.get('role'),
+                display_name=params.get('display_name'),
+                board_id=params.get('board_id'),
+                chip_family=params.get('chip_family'),
+            )
+            if result.get('success'):
+                await self.broadcast_activity(
+                    f'Node {node_id} updated', 'info'
+                )
+            return {"status": "ok" if result['success'] else "error", "data": result}
+
         elif action == 'list_chips':
             return {"status": "ok", "data": {"chips": self.state_manager.list_chips()}}
 

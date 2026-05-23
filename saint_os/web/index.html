@@ -350,7 +350,19 @@
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         <!-- Node Info Card -->
                         <div class="card">
-                            <h3 class="text-lg font-semibold text-white mb-4">Node Information</h3>
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Node Information</h3>
+                                <!-- Opens the same fields the adopt
+                                     modal offered (role, board, chip,
+                                     display name), pre-filled with
+                                     current values. Submits via the
+                                     update_node management action. -->
+                                <button id="btn-node-edit" onclick="app.openEditNodeModal()"
+                                        class="btn-secondary text-sm">
+                                    <span class="material-icons icon-sm">edit</span>
+                                    Edit
+                                </button>
+                            </div>
                             <div id="node-info-grid" class="grid grid-cols-2 gap-4">
                                 <div class="stat-item">
                                     <span class="stat-label">Node ID</span>
@@ -705,6 +717,78 @@
                             <button onclick="app.submitAdoption()" class="btn-primary flex-1">
                                 <span class="material-icons icon-sm">check</span>
                                 Adopt
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Edit Node Modal -->
+            <!-- Same fields as the Adopt modal, but populated with
+                 the node's current role/board/chip/display_name and
+                 wired to the update_node management action. Kept as
+                 a separate modal (rather than parametrising the
+                 adopt one) because the title, button text, and
+                 close handler differ; the marginal duplication is
+                 cheaper than a flag-driven render path. -->
+            <div id="edit-node-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="app.closeEditNodeModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Edit Node</h3>
+                            <button onclick="app.closeEditNodeModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons">close</span>
+                            </button>
+                        </div>
+
+                        <div class="space-y-4">
+                            <!-- Node ID (read-only) -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Node ID</label>
+                                <div id="edit-node-id" class="input-field w-full bg-slate-900/50 text-slate-400 font-mono">--</div>
+                            </div>
+
+                            <!-- Chip -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Chip</label>
+                                <select id="edit-node-chip-select" class="input-field w-full">
+                                    <option value="">-- Loading chips… --</option>
+                                </select>
+                            </div>
+
+                            <!-- Board -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Board</label>
+                                <select id="edit-node-board-select" class="input-field w-full">
+                                    <option value="">-- Select Board --</option>
+                                </select>
+                                <p class="text-xs text-slate-500 mt-1">
+                                    Changing the board re-derives pin layout and re-seeds built-in peripherals.
+                                </p>
+                            </div>
+
+                            <!-- Role -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Role</label>
+                                <select id="edit-node-role-select" class="input-field w-full">
+                                    <option value="">-- Select Role --</option>
+                                </select>
+                                <p id="edit-node-role-description" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+
+                            <!-- Display Name -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Display Name <span class="text-slate-500">(optional)</span></label>
+                                <input type="text" id="edit-node-display-name" class="input-field w-full" placeholder="e.g., Left Arm Controller">
+                            </div>
+                        </div>
+
+                        <div class="flex gap-3 mt-6">
+                            <button onclick="app.closeEditNodeModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="app.submitNodeEdit()" class="btn-primary flex-1">
+                                <span class="material-icons icon-sm">check</span>
+                                Save
                             </button>
                         </div>
                     </div>
@@ -2472,6 +2556,16 @@
             border-radius: 0.25rem; text-align: right;
         }
         .routing-pin-default:focus { outline: 1px solid #06b6d4; }
+        /* Live value pill — populated by routing.js from `routing_values`. */
+        .routing-pin-value {
+            margin: 0 0.35rem; min-width: 2.5rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.65rem;
+            color: #34d399;
+            text-align: right;
+        }
+        .routing-pin-row.output .routing-pin-value { margin-left: auto; }
+        .routing-pin-row.input  .routing-pin-value { margin-left: auto; margin-right: 0.35rem; }
         .routing-node[data-kind="input"]      .routing-node-header { background: #1e3a4a; color: #67e8f9; }
         .routing-node[data-kind="output"]     .routing-node-header { background: #4a1e1e; color: #fda4af; }
         .routing-node[data-kind="operator"]   .routing-node-header { background: #2e1e4a; color: #c4b5fd; }

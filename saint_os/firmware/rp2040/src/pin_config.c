@@ -804,7 +804,29 @@ void pin_config_apply_hardware(void)
 
             case PIN_MODE_UART_TX:
             case PIN_MODE_UART_RX:
-                gpio_set_function(gpio, GPIO_FUNC_UART);
+                // Don't clobber a PIO peripheral that's already bound
+                // to this pin (e.g. RoboClaw's PIO UART when the
+                // operator picked the swapped TX/RX layout). The
+                // peripheral driver got there first via
+                // drv_load → roboclaw_init; trampling it back to
+                // GPIO_FUNC_UART would silently break the link until
+                // the next sync.
+                //
+                // How GPIO 0/1 entries end up in pin_configs at all is
+                // a legacy flash artifact — the peripheral-first JSON
+                // sync stores its UART pin pair in flash_uart_pins_t,
+                // not as standalone pin_configs. Older config formats
+                // saved them directly though, so the entries survive
+                // forever on devices that were ever provisioned with
+                // the old format.
+#ifndef SIMULATION
+                {
+                    uint fn = gpio_get_function(gpio);
+                    if (fn != GPIO_FUNC_PIO0 && fn != GPIO_FUNC_PIO1) {
+                        gpio_set_function(gpio, GPIO_FUNC_UART);
+                    }
+                }
+#endif
                 break;
 
             default:

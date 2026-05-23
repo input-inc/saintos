@@ -1157,6 +1157,7 @@ class SaintServerNode(Node):
                             send_channel=self.send_channel_command,
                             peripheral_type_lookup=self.state_manager.lookup_peripheral_type,
                             logger=self.get_logger(),
+                            on_values_changed=self._broadcast_routing_values,
                         )
                         self.ros_bridge.add_routing_listener(
                             self.routing_evaluator.on_topic_message
@@ -1254,6 +1255,33 @@ class SaintServerNode(Node):
                         self.web_server.ws_handler.broadcast_ros_state(t, d)
                     )
                 )
+
+    # Throttle state for the routing-evaluator value broadcast. We want
+    # live values on the routing UI but a Joy stream at 30Hz drags too
+    # much over the WebSocket — clamp to 20Hz / 50ms.
+    _ROUTING_VALUES_INTERVAL_S = 0.05
+    _last_routing_values_emit: float = 0.0
+
+    def _broadcast_routing_values(self, snapshot: Dict[str, Any]):
+        """Forward the routing evaluator's value snapshot to subscribers.
+
+        Called from the ROS callback thread on every sheet evaluation;
+        bounces onto the async loop via call_soon_threadsafe and skips
+        emits that come in faster than 20Hz so we don't flood clients.
+        """
+        if not (self.web_server and self.web_server.ws_handler and self._async_loop):
+            return
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_routing_values_emit < self._ROUTING_VALUES_INTERVAL_S:
+            return
+        self._last_routing_values_emit = now
+        handler = self.web_server.ws_handler
+        self._async_loop.call_soon_threadsafe(
+            lambda s=snapshot: asyncio.create_task(
+                handler.broadcast_state('routing_values', s)
+            )
+        )
 
     async def stop_async_services(self):
         """Stop async services gracefully."""

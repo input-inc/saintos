@@ -1162,6 +1162,82 @@ class StateManager:
         """Delete an operator-authored board. Forbids built-in deletion."""
         return self.board_config.delete_operator_board(board_id)
 
+    def update_node(self, node_id: str, *,
+                    role: Optional[str] = None,
+                    display_name: Optional[str] = None,
+                    board_id: Optional[str] = None,
+                    chip_family: Optional[str] = None) -> Dict[str, Any]:
+        """Edit an already-adopted node's metadata.
+
+        Symmetric counterpart to ``adopt_node`` for nodes that are
+        already in ``adopted_nodes`` — lets the operator fix role,
+        board, chip, or display name after adoption without going
+        through factory-reset → re-adopt (which would also wipe
+        peripheral configs, a heavy hammer when all you want to do
+        is correct a typo).
+
+        Any subset of fields may be passed; unspecified fields (None)
+        are left as-is. Passing the same value as already set is a
+        no-op for that field. The same board/chip authority rule as
+        adopt_node applies: an explicit board choice overrides
+        chip_family to match the board, since the board YAML defines
+        the chip — letting these diverge would silently break the
+        pin layout. Setting board re-seeds builtin peripherals from
+        the new board's YAML, the same way adopt_node does.
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return {"success": False, "message": f"Node {node_id} not found"}
+
+        changes: List[str] = []
+
+        if role is not None and role != node.role:
+            node.role = role
+            changes.append(f"role={role}")
+
+        if display_name is not None and display_name != (node.display_name or ""):
+            node.display_name = display_name
+            changes.append(f"display_name={display_name!r}")
+
+        if chip_family is not None and chip_family != node.chip_family:
+            node.chip_family = chip_family
+            changes.append(f"chip_family={chip_family}")
+
+        if board_id is not None and board_id != node.board_id:
+            board = self.board_config.get_board(board_id)
+            if not board:
+                return {"success": False,
+                        "message": f"Unknown board_id '{board_id}'"}
+            node.board_id = board_id
+            # Operator's board pick is authoritative — same rule as
+            # adopt_node. Don't allow chip_family / board.chip_family
+            # to diverge.
+            node.chip_family = board.chip_family
+            self._seed_builtin_peripherals_from_board(node)
+            changes.append(f"board_id={board_id}")
+
+        if not changes:
+            return {"success": True, "message": "No changes",
+                    "node_id": node_id,
+                    "role": node.role,
+                    "display_name": node.display_name,
+                    "board_id": node.board_id,
+                    "chip_family": node.chip_family}
+
+        self._save_node_config(node_id)
+        self._log_activity(
+            f"Updated: {', '.join(changes)}", "info", node_id=node_id,
+        )
+        return {
+            "success": True,
+            "message": "Node updated",
+            "node_id": node_id,
+            "role": node.role,
+            "display_name": node.display_name,
+            "board_id": node.board_id,
+            "chip_family": node.chip_family,
+        }
+
     def set_node_board(self, node_id: str, board_id: str) -> Dict[str, Any]:
         """Change which board a node is assigned to. Re-derives capabilities."""
         node = self.state.adopted_nodes.get(node_id)

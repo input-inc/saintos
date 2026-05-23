@@ -19,7 +19,7 @@ const WIDGET_SPARK_H = 24;
 class WidgetsDashboard {
     constructor() {
         this.catalog = null;
-        this.routing = { version: 0, routes: [], widgets: [] };
+        this.routing = { version: 0, sheets: {} };
         this.nodesById = new Map();           // node_id -> {peripherals:[], display_name}
         this._lastValues = new Map();         // "widget_id/input_id" -> {value, lastUpdate}
         // Rolling 30s history per (widget_id, input_id) for the inline
@@ -43,7 +43,7 @@ class WidgetsDashboard {
             this._stateHandler = (msg) => {
                 if (!msg || !msg.node) return;
                 if (msg.node === 'system_routing') {
-                    this.routing = msg.data || { version: 0, routes: [], widgets: [] };
+                    this.routing = msg.data || { version: 0, sheets: {} };
                     if (this._active) this.render();
                 } else if (msg.node.startsWith('pin_state/')) {
                     const nodeId = msg.node.slice('pin_state/'.length);
@@ -70,7 +70,7 @@ class WidgetsDashboard {
                 ws.management('get_system_routing', {}),
             ]);
             this.catalog = catalog;
-            this.routing = routing || { version: 0, routes: [], widgets: [] };
+            this.routing = routing || { version: 0, sheets: {} };
             await this._refreshNodes(adoptedNodes);
             await this._subscribePinStateForAllNodes();
             this.render();
@@ -132,12 +132,39 @@ class WidgetsDashboard {
 
     // ─── Routing — given a widget input, find the source endpoint ────
 
+    /** Flatten widgets across every controller sheet, tagging each with
+     *  its owning sheet so wire lookups can stay scoped. */
+    _allWidgets() {
+        const out = [];
+        const sheets = this.routing.sheets || {};
+        for (const sheetId of Object.keys(sheets)) {
+            const sheet = sheets[sheetId];
+            for (const w of (sheet.widgets || [])) {
+                out.push({ widget: w, sheetId, sheet });
+            }
+        }
+        return out;
+    }
+
+    _findWidgetSheet(widgetId) {
+        const sheets = this.routing.sheets || {};
+        for (const sheetId of Object.keys(sheets)) {
+            const sheet = sheets[sheetId];
+            if ((sheet.widgets || []).some(w => w.id === widgetId)) {
+                return sheet;
+            }
+        }
+        return null;
+    }
+
     sourceForInput(widgetId, inputId) {
-        for (const r of (this.routing.routes || [])) {
-            if (r.sink?.kind === 'widget'
-                && r.sink.parts[0] === widgetId
-                && r.sink.parts[1] === inputId) {
-                return r.source;
+        const sheet = this._findWidgetSheet(widgetId);
+        if (!sheet) return null;
+        for (const w of (sheet.wires || [])) {
+            if (w.sink?.kind === 'widget'
+                && w.sink.parts[0] === widgetId
+                && w.sink.parts[1] === inputId) {
+                return w.source;
             }
         }
         return null;
@@ -152,8 +179,8 @@ class WidgetsDashboard {
             const label = p?.label || periphId;
             return `${label}.${channelId} on ${n?.display_name || nodeId}`;
         }
-        if (source.kind === 'signal') return source.parts[0];
-        if (source.kind === 'peripheral') return source.parts.join('/');
+        if (source.kind === 'input')    return source.parts[0];
+        if (source.kind === 'operator') return source.parts.join('/');
         return source.parts.join('/');
     }
 
@@ -186,22 +213,29 @@ class WidgetsDashboard {
         if (touched && this._active) this.renderValues();
     }
 
-    /** Push a channel reading to every widget input that routes from it. */
+    /** Push a channel reading to every widget input that wires from it.
+     *  Walks each controller sheet's wires; only direct peripheral→widget
+     *  connections light up here. Wires that pass through an operator
+     *  are computed server-side by the routing evaluator and don't yet
+     *  surface to the dashboard. */
     _dispatchChannelValue(nodeId, peripheralId, channelId, value) {
         let any = false;
         const tsMs = Date.now();
-        for (const r of (this.routing.routes || [])) {
-            if (r.source?.kind !== 'peripheral') continue;
-            if (r.source.parts[0] !== nodeId) continue;
-            if (r.source.parts[1] !== peripheralId) continue;
-            if (r.source.parts[2] !== channelId) continue;
-            if (r.sink?.kind !== 'widget') continue;
-            const key = `${r.sink.parts[0]}/${r.sink.parts[1]}`;
-            this._lastValues.set(key, { value, ts: tsMs });
-            if (typeof value === 'number') {
-                this._appendHistory(key, tsMs / 1000, value);
+        const sheets = this.routing.sheets || {};
+        for (const sheetId of Object.keys(sheets)) {
+            for (const w of (sheets[sheetId].wires || [])) {
+                if (w.source?.kind !== 'peripheral') continue;
+                if (w.source.parts[0] !== nodeId) continue;
+                if (w.source.parts[1] !== peripheralId) continue;
+                if (w.source.parts[2] !== channelId) continue;
+                if (w.sink?.kind !== 'widget') continue;
+                const key = `${w.sink.parts[0]}/${w.sink.parts[1]}`;
+                this._lastValues.set(key, { value, ts: tsMs });
+                if (typeof value === 'number') {
+                    this._appendHistory(key, tsMs / 1000, value);
+                }
+                any = true;
             }
-            any = true;
         }
         return any;
     }
@@ -222,7 +256,7 @@ class WidgetsDashboard {
     render() {
         const grid = document.getElementById('widget-grid');
         if (!grid) return;
-        const widgets = this.routing.widgets || [];
+        const widgets = this._allWidgets().map(entry => entry.widget);
         if (widgets.length === 0) {
             grid.innerHTML = `
                 <p class="text-slate-500 col-span-full italic">
@@ -376,7 +410,7 @@ class WidgetsDashboard {
         // Per-input ranges for the FAS100 progress bars. Kept in sync
         // with the same table in _renderFas100Card.
         const fas100Max = { voltage: 30, current: 100, temp1: 80, temp2: 80 };
-        for (const w of (this.routing.widgets || [])) {
+        for (const { widget: w } of this._allWidgets()) {
             const type = this._widgetType(w.type);
             if (!type) continue;
             for (const input of (type.inputs || [])) {

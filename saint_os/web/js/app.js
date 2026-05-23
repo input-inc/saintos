@@ -2442,6 +2442,161 @@ class SaintApp {
     }
 
     /**
+     * Open the Edit Node modal pre-filled with the current node's
+     * role / board / chip / display name. Mirrors adoptNode's
+     * dropdown-loading pattern but doesn't move the node between
+     * adopted/unadopted state — it just edits in-place via the
+     * update_node management action.
+     */
+    async openEditNodeModal() {
+        if (!this.currentNodeId || !this.currentNodeInfo) return;
+
+        const node = this.currentNodeInfo;
+        const ws = window.saintWS;
+        const modal = document.getElementById('edit-node-modal');
+        modal.classList.remove('hidden');
+
+        document.getElementById('edit-node-id').textContent = node.node_id;
+        document.getElementById('edit-node-display-name').value =
+            node.display_name || '';
+
+        const chipSelect = document.getElementById('edit-node-chip-select');
+        const boardSelect = document.getElementById('edit-node-board-select');
+        const roleSelect = document.getElementById('edit-node-role-select');
+        const roleDesc = document.getElementById('edit-node-role-description');
+
+        // Cascade: when the operator changes chip, re-populate board
+        // dropdown filtered to that chip's boards. Identical pattern
+        // to the adopt modal.
+        const repopulateBoards = async (chipFamily, preselect) => {
+            try {
+                const boardResult = await ws.management(
+                    'list_boards', chipFamily ? { chip_family: chipFamily } : {}
+                );
+                const boards = boardResult?.boards || [];
+                boardSelect.innerHTML = '<option value="">-- Select Board --</option>';
+                for (const b of boards) {
+                    const opt = document.createElement('option');
+                    opt.value = b.board_id;
+                    opt.textContent = `${b.display_name}${b.builtin ? '' : '  (custom)'}`;
+                    boardSelect.appendChild(opt);
+                }
+                if (preselect && boards.some(b => b.board_id === preselect)) {
+                    boardSelect.value = preselect;
+                }
+            } catch (e) {
+                console.warn('list_boards failed:', e);
+            }
+        };
+
+        try {
+            const chipResult = await ws.management('list_chips', {});
+            const chips = chipResult?.chips || [];
+            chipSelect.innerHTML = '<option value="">-- Select Chip --</option>';
+            for (const c of chips) {
+                const opt = document.createElement('option');
+                opt.value = c.chip_family;
+                opt.textContent = `${c.display_name} (${c.chip_family})`;
+                chipSelect.appendChild(opt);
+            }
+            chipSelect.value = node.chip_family || '';
+        } catch (e) {
+            console.warn('list_chips failed:', e);
+            chipSelect.innerHTML = '<option value="">-- (failed to load chips) --</option>';
+        }
+
+        // Wire the cascade AND pre-select the current board.
+        chipSelect.onchange = () => repopulateBoards(chipSelect.value, null);
+        await repopulateBoards(chipSelect.value, node.board_id);
+
+        // Role dropdown — same loader as adopt modal.
+        try {
+            const result = await ws.management('get_roles');
+            const roles = result.roles || [];
+            roleSelect.innerHTML = '<option value="">-- Select Role --</option>';
+            for (const role of roles) {
+                const option = document.createElement('option');
+                option.value = role.role;
+                option.textContent = role.display_name || role.role;
+                roleSelect.appendChild(option);
+            }
+            roleSelect.value = node.role || '';
+
+            const renderDesc = () => {
+                const selected = roles.find(r => r.role === roleSelect.value);
+                roleDesc.textContent = selected?.description || '';
+            };
+            roleSelect.onchange = renderDesc;
+            renderDesc();
+        } catch (error) {
+            console.error('Failed to fetch roles:', error);
+            roleSelect.innerHTML = `
+                <option value="">-- Select Role --</option>
+                <option value="head">head</option>
+                <option value="arms">arms</option>
+                <option value="tracks">tracks</option>
+                <option value="console">console</option>
+            `;
+            roleSelect.value = node.role || '';
+        }
+    }
+
+    closeEditNodeModal() {
+        const modal = document.getElementById('edit-node-modal');
+        modal.classList.add('hidden');
+    }
+
+    async submitNodeEdit() {
+        if (!this.currentNodeId || !this.currentNodeInfo) return;
+
+        const role = document.getElementById('edit-node-role-select').value;
+        const chipFamily = document.getElementById('edit-node-chip-select').value;
+        const boardId = document.getElementById('edit-node-board-select').value;
+        const displayName = document.getElementById('edit-node-display-name').value.trim();
+
+        if (!role) { alert('Please select a role'); return; }
+        if (!chipFamily) { alert('Please select a chip'); return; }
+        if (!boardId) { alert('Please select a board'); return; }
+
+        const params = {
+            node_id: this.currentNodeId,
+            role,
+            chip_family: chipFamily,
+            board_id: boardId,
+            // Always send display_name even when empty — that lets the
+            // operator clear a previously-set name. The server's
+            // update_node only mutates a field when the incoming value
+            // differs from current, so this is a no-op in the unchanged
+            // case.
+            display_name: displayName,
+        };
+
+        const ws = window.saintWS;
+        try {
+            const result = await ws.management('update_node', params);
+            if (result && result.success === false) {
+                alert(result.message || 'Update failed');
+                return;
+            }
+            this.addActivityLogEntry({
+                text: `Node ${this.currentNodeId} updated`,
+                level: 'info',
+            });
+            this.closeEditNodeModal();
+            // Reload the detail page so the new values appear in the
+            // info card AND any board-change re-seed of builtin
+            // peripherals lands in the Peripherals tab.
+            await this.loadNodeDetailData();
+        } catch (error) {
+            console.error('Update failed:', error);
+            this.addActivityLogEntry({
+                text: `Failed to update ${this.currentNodeId}`,
+                level: 'error',
+            });
+        }
+    }
+
+    /**
      * Close the adoption modal.
      */
     closeAdoptModal() {

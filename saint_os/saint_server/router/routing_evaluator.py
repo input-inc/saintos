@@ -44,11 +44,17 @@ class RoutingEvaluator:
         send_channel: Callable[[str, str, str, float, str], None],
         peripheral_type_lookup: Callable[[str, str], str],
         logger: Optional[Any] = None,
+        on_values_changed: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         self._bridge = ros_bridge
         self._send_channel = send_channel
         self._peripheral_type_lookup = peripheral_type_lookup
         self._logger = logger
+        # Optional sink for per-evaluation value snapshots. Called from
+        # the ROS callback thread; the websocket handler wraps it with a
+        # throttle + async-loop bounce so the routing UI can live-display
+        # values flowing through each node.
+        self._on_values_changed = on_values_changed
 
         self._lock = Lock()
         # Latest scalar value seen for each (topic, field).
@@ -61,6 +67,11 @@ class RoutingEvaluator:
         # Latest widget input values — exposed for the dashboard sheet
         # so widgets can render server-evaluated readings.
         self._widget_values: Dict[Tuple[str, str], float] = {}
+        # Per-sheet value snapshot: sheet_node_id → {kind: {id: value}}
+        # where `kind` is one of "inputs", "operators", "outputs",
+        # "widgets". Refreshed on each _evaluate_sheet pass and shipped
+        # to the UI via _on_values_changed.
+        self._sheet_values: Dict[str, Dict[str, Dict[str, float]]] = {}
 
     # ── public API ──────────────────────────────────────────────────
 
@@ -115,6 +126,22 @@ class RoutingEvaluator:
                 self._log("error",
                           f"Sheet '{sheet.node_id}' evaluation failed: {e}")
 
+        # Hand the freshly computed snapshot off to the UI broadcaster.
+        if touched_sheets and self._on_values_changed is not None:
+            try:
+                self._on_values_changed(self.get_value_snapshot())
+            except Exception as e:
+                self._log("error", f"routing_values broadcast failed: {e}")
+
+    def get_value_snapshot(self) -> Dict[str, Any]:
+        """Most recent per-sheet values, formatted for the UI."""
+        # Shallow-copy each sheet's value buckets so the consumer can
+        # serialize without worrying about concurrent mutation.
+        out: Dict[str, Any] = {"sheets": {}}
+        for sheet_id, kinds in self._sheet_values.items():
+            out["sheets"][sheet_id] = {k: dict(v) for k, v in kinds.items()}
+        return out
+
     def widget_value(self, widget_id: str, input_id: str) -> Optional[float]:
         """Last server-evaluated value seen for a dashboard widget input."""
         return self._widget_values.get((widget_id, input_id))
@@ -126,6 +153,17 @@ class RoutingEvaluator:
         # once per evaluation pass. `visiting` doubles as a cycle guard.
         op_cache: Dict[str, float] = {}
         visiting: Set[str] = set()
+        # Per-evaluation buckets — copied into self._sheet_values at the
+        # end so the UI snapshot reflects this pass atomically.
+        sheet_input_vals: Dict[str, float] = {}
+        sheet_output_vals: Dict[str, float] = {}
+        sheet_widget_vals: Dict[str, float] = {}
+
+        # Capture input values so the UI can show what's flowing in.
+        for inp in sheet.inputs:
+            v = self._sources.get((inp.topic, inp.field))
+            if v is not None:
+                sheet_input_vals[inp.id] = v
 
         def eval_operator(op_id: str) -> float:
             if op_id in op_cache:
@@ -157,6 +195,21 @@ class RoutingEvaluator:
             if value is None:
                 continue
             self._dispatch_sink(sheet, wire, value)
+            # Record sink values for UI display.
+            if wire.sink.kind == "output" and wire.sink.parts:
+                sheet_output_vals[wire.sink.parts[0]] = float(value)
+            elif wire.sink.kind == "widget" and len(wire.sink.parts) >= 2:
+                sheet_widget_vals[f"{wire.sink.parts[0]}/{wire.sink.parts[1]}"] = float(value)
+
+        # Atomically swap the per-sheet snapshot — operator values come
+        # from the memoized cache so even operators that weren't pulled
+        # by a sink (orphaned ops) are not surfaced.
+        self._sheet_values[sheet.node_id] = {
+            "inputs":    sheet_input_vals,
+            "operators": {k: float(v) for k, v in op_cache.items()},
+            "outputs":   sheet_output_vals,
+            "widgets":   sheet_widget_vals,
+        }
 
     def _collect_operator_inputs(self, sheet: NodeSheet, op_node: OperatorNode,
                                  eval_operator: Callable[[str], float]
