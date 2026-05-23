@@ -154,18 +154,21 @@ class NodeLiveManager {
         if (!data) return;
         if (data.last_feedback) this._lastFeedback = data.last_feedback;
         const channels = Array.isArray(data.channels) ? data.channels : [];
-        // Build a quick lookup of which peripherals are log-enabled so we
-        // don't waste memory keeping history for the rest.
-        const logSet = new Set(
-            this._peripherals.filter(p => p.log_enabled).map(p => p.id)
-        );
         let touched = false;
         for (const ch of channels) {
             if (!ch.peripheral_id || !ch.channel_id) continue;
             const key = `${ch.peripheral_id}/${ch.channel_id}`;
-            const ts = ch.last_updated || (Date.now() / 1000);
+            // Live readings tab uses the server's `last_updated` if it
+            // looks like wall-clock (>10 years past epoch); otherwise the
+            // Pi probably has no RTC set and the field is boot-relative,
+            // in which case we fall back to the browser's wall-clock so
+            // sparkline timestamps stay sane.
+            let ts = ch.last_updated;
+            if (typeof ts !== 'number' || ts < 315532800) ts = Date.now() / 1000;
             this._values.set(key, { value: ch.value, ts });
-            if (logSet.has(ch.peripheral_id) && typeof ch.value === 'number') {
+            // Sparkline ring buffer is always-on for numeric input
+            // channels — the disk-logging toggle is independent.
+            if (typeof ch.value === 'number') {
                 this._appendHistory(key, ts, ch.value);
             }
             touched = true;
@@ -268,12 +271,18 @@ class NodeLiveManager {
         const valStr = (v === undefined || v.value === null || v.value === undefined)
             ? '<span class="text-slate-500">—</span>'
             : `<span class="${ch.dir === 'in' ? 'text-cyan-300' : 'text-amber-300'}">${this._formatValue(v.value)}</span>`;
+        // v.ts has already been corrected in _ingest to a browser-clock
+        // value when the Pi has no RTC. Cap the printed age at "stale"
+        // so a few-second drift doesn't look like hours.
+        const age = v ? Math.max(0, (Date.now() / 1000) - v.ts) : 0;
         const ageStr = v
-            ? `${Math.max(0, (Date.now() / 1000 - v.ts)).toFixed(1)}s ago`
+            ? (age > 600 ? 'stale' : `${age.toFixed(1)}s ago`)
             : '';
-        // Sparkline only for input channels on log-enabled peripherals
-        // — output channels' setpoints aren't recorded by the logger.
-        const spark = (p.log_enabled && ch.dir === 'in')
+        // Sparkline for every input channel; output channels' setpoints
+        // are not interesting to graph. The disk-logging toggle is
+        // separate from the visual ring buffer — this draws as soon as
+        // samples arrive from pin_state.
+        const spark = (ch.dir === 'in')
             ? this._sparkline(this._history.get(key))
             : '';
         return `

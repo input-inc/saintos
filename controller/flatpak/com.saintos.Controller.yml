@@ -82,14 +82,22 @@ modules:
   - name: saint-controller
     buildsystem: simple
     build-commands:
-      # Frontend (Angular) — produces the bundle Tauri serves.
+      # Build via the Tauri CLI rather than bare cargo. Reason: the
+      # CLI's release flow runs `beforeBuildCommand` (npm run build),
+      # then invokes `tauri-codegen` with the right env vars to embed
+      # the production frontend bundle and switch the webview from
+      # devUrl to the `tauri://` custom protocol. Bare `cargo build`
+      # skips that, producing a release-profile binary that still
+      # tries to fetch the frontend from http://localhost:4200 — the
+      # symptom is "connection refused" in the webview when launching
+      # the released app.
+      #
+      # `--no-bundle` skips Tauri's .deb/.rpm/.AppImage step (we don't
+      # want those layered under the Flatpak — and AppImage in
+      # particular needs linuxdeploy + FUSE which doesn't play well
+      # inside flatpak-builder's nested sandbox).
       - cd controller && npm ci --no-audit --no-fund
-      - cd controller && npm run build
-
-      # Backend (Rust) — release binary. We hit cargo directly rather
-      # than `tauri build` because Tauri's bundler would try to make
-      # .deb/.rpm/.AppImage on top of the Flatpak, which we don't want.
-      - cd controller/src-tauri && cargo build --release --bins
+      - cd controller && npx tauri build --no-bundle
 
       # Install paths follow the Flatpak conventions so KDE Discover
       # / Game Mode find the app properly.

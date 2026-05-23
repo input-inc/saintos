@@ -66,7 +66,9 @@ build_and_install() {
     echo "  flatpak run $APP_ID"
     echo
     echo "Or add it to Steam (Desktop Mode):"
-    echo "  Steam → Games → Add a Non-Steam Game → Browse → /var/lib/flatpak/exports/bin/$APP_ID"
+    echo "  Steam → Games → Add a Non-Steam Game → Browse →"
+    echo "  $HOME/.local/share/flatpak/exports/bin/$APP_ID"
+    echo "  (per-user install — system installs would be under /var/lib/flatpak/exports/bin/)"
 }
 
 bundle() {
