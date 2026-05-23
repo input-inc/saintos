@@ -211,6 +211,22 @@ export class DiscoveryService {
   }
 
   /**
+   * Re-fetch just the WS-input slot catalog. Called when the bindings
+   * editor opens so the picker reflects the current server routing
+   * graph — the server only pushes this on explicit request, not on
+   * sheet edits, so without this the dropdown shows whatever was
+   * fetched at connect time.
+   */
+  async refreshWsInputs(): Promise<void> {
+    if (!this.connection.isConnected()) return;
+    try {
+      await this.connection.discoverWsInputs();
+    } catch (err) {
+      console.warn('[DiscoveryService] refreshWsInputs failed:', err);
+    }
+  }
+
+  /**
    * Fetch discovery data from the server
    */
   async refresh(): Promise<void> {

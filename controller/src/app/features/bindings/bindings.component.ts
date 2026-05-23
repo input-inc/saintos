@@ -798,6 +798,7 @@ export class BindingsComponent {
     this.isNewBinding.set(true);
     this.editingAnalogIndex = -1;
     this.resetAnalogForm();
+    this.discoveryService.refreshWsInputs();
     this.showAnalogEditor.set(true);
   }
 
@@ -805,6 +806,7 @@ export class BindingsComponent {
     this.isNewBinding.set(false);
     this.editingAnalogIndex = index;
     this.loadAnalogForm(binding);
+    this.discoveryService.refreshWsInputs();
     this.showAnalogEditor.set(true);
   }
 
@@ -944,6 +946,7 @@ export class BindingsComponent {
     this.isNewBinding.set(true);
     this.editingDigitalIndex = -1;
     this.resetDigitalForm();
+    this.discoveryService.refreshWsInputs();
     this.showDigitalEditor.set(true);
   }
 
@@ -951,6 +954,7 @@ export class BindingsComponent {
     this.isNewBinding.set(false);
     this.editingDigitalIndex = index;
     this.loadDigitalForm(binding);
+    this.discoveryService.refreshWsInputs();
     this.showDigitalEditor.set(true);
   }
 

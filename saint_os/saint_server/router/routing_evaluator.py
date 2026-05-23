@@ -224,6 +224,11 @@ class RoutingEvaluator:
         sheet_ws_input_vals: Dict[str, float] = {}
         sheet_output_vals: Dict[str, float] = {}
         sheet_widget_vals: Dict[str, float] = {}
+        # Peripheral input-pin values — the value the routing graph just
+        # commanded onto each (node_id, peripheral_id, channel_id) sink.
+        # Keyed by "<node_id>/<peripheral_id>/<channel_id>" so the UI
+        # can light up the actual receiving pin on the peripheral card.
+        sheet_peripheral_vals: Dict[str, float] = {}
 
         # Capture input values so the UI can show what's flowing in.
         for inp in sheet.inputs:
@@ -282,16 +287,34 @@ class RoutingEvaluator:
             self._dispatch_sink(sheet, wire, value)
             if wire.sink.kind == "widget" and len(wire.sink.parts) >= 2:
                 sheet_widget_vals[f"{wire.sink.parts[0]}/{wire.sink.parts[1]}"] = float(value)
+            elif wire.sink.kind == "peripheral" and len(wire.sink.parts) >= 3:
+                key = (f"{wire.sink.parts[0]}/"
+                       f"{wire.sink.parts[1]}/"
+                       f"{wire.sink.parts[2]}")
+                sheet_peripheral_vals[key] = float(value)
+
+        # Pass 3: eagerly evaluate every operator on the sheet so the
+        # UI can show intermediate values even when nothing downstream
+        # is pulling them yet. eval_operator memoizes via op_cache, so
+        # operators already reached by a sink in Pass 1/2 are no-ops
+        # here.
+        for op in sheet.operators:
+            try:
+                eval_operator(op.id)
+            except Exception as e:
+                self._log("error",
+                          f"Operator '{op.id}' eager-eval failed: {e}")
 
         # Atomically swap the per-sheet snapshot — operator values come
         # from the memoized cache so even operators that weren't pulled
         # by a sink (orphaned ops) are not surfaced.
         self._sheet_values[sheet.node_id] = {
-            "inputs":    sheet_input_vals,
-            "ws_inputs": sheet_ws_input_vals,
-            "operators": {k: float(v) for k, v in op_cache.items()},
-            "outputs":   sheet_output_vals,
-            "widgets":   sheet_widget_vals,
+            "inputs":      sheet_input_vals,
+            "ws_inputs":   sheet_ws_input_vals,
+            "operators":   {k: float(v) for k, v in op_cache.items()},
+            "outputs":     sheet_output_vals,
+            "widgets":     sheet_widget_vals,
+            "peripherals": sheet_peripheral_vals,
         }
 
     def _collect_operator_inputs(self, sheet: NodeSheet, op_node: OperatorNode,

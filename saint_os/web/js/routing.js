@@ -297,6 +297,16 @@ class RoutingPage {
                     const key = `${g.widget.id}/${inp.id}`;
                     set(idFor(g.id, inp.id, 'in'), sheetVals.widgets?.[key]);
                 }
+            } else if (g.kind === 'peripheral' && g.peripheral) {
+                // Each peripheral input pin gets the last value the
+                // routing graph drove onto it — visible confirmation
+                // that the math chain is reaching the hardware.
+                const type = this._peripheralType(g.peripheral.type);
+                for (const ch of (type?.channels || [])) {
+                    if (ch.dir !== 'out') continue;  // 'out'=consumed by peripheral (= sheet input pin)
+                    const key = `${g.nodeId}/${g.peripheral.id}/${ch.id}`;
+                    set(idFor(g.id, ch.id, 'in'), sheetVals.peripherals?.[key]);
+                }
             }
         }
     }
@@ -835,22 +845,47 @@ class RoutingPage {
             `<option value="${escapeAttr(t.topic)}">${escapeHtml(t.topic)}</option>`
         ).join('') || '<option value="">(no ROS topics discovered)</option>';
 
+        // Tracks whether the operator has typed a custom label. As long
+        // as it's false, picking a different topic/channel rewrites the
+        // label to "topic.channel"; once they edit the label by hand we
+        // stop clobbering it.
+        let labelEdited = false;
+        const defaultLabel = () => {
+            const t = topicSel.value || '';
+            const f = fieldSel.value || '';
+            return t ? (f ? `${t}.${f}` : t) : '';
+        };
+
         const refreshFields = () => {
             const t = this.topicCatalog.find(x => x.topic === topicSel.value);
             desc.textContent = t ? `${t.state_type} · ${t.channels.length} channel(s)` : '';
             fieldSel.innerHTML = (t?.channels || []).map(c =>
                 `<option value="${escapeAttr(c.field)}">${escapeHtml(c.label)} (${escapeHtml(c.type || 'num')})</option>`
             ).join('') || '<option value="">(message has no scalar fields)</option>';
+            if (!labelEdited) labelInput.value = defaultLabel();
         };
         topicSel.onchange = refreshFields;
+        fieldSel.onchange = () => { if (!labelEdited) labelInput.value = defaultLabel(); };
+        labelInput.oninput = () => { labelEdited = !!labelInput.value.trim(); };
         refreshFields();
 
         const refreshKindUI = () => {
             const isWs = kindSel.value === 'ws_input';
-            topicRow.classList.toggle('hidden', isWs);
-            fieldRow.classList.toggle('hidden', isWs);
+            // Same topic/channel picker for both kinds — for WS Input
+            // it's a shortcut that prefills the label from the picked
+            // topic.channel; for ROS Topic it's the real subscription
+            // address. Keep the rows visible so the operator can pick
+            // from familiar names instead of hand-typing.
+            topicRow.classList.remove('hidden');
+            fieldRow.classList.remove('hidden');
+            const topicLabel = topicRow.querySelector('label');
+            const fieldLabel = fieldRow.querySelector('label');
+            if (topicLabel) topicLabel.textContent =
+                isWs ? 'Pick a topic to copy its name (optional)' : 'ROS topic';
+            if (fieldLabel) fieldLabel.textContent =
+                isWs ? 'Channel' : 'Channel';
             labelInput.placeholder = isWs
-                ? 'e.g. "Left stick X"'
+                ? 'Defaults to topic.channel — or type a custom name'
                 : 'Defaults to topic.channel';
         };
         kindSel.onchange = refreshKindUI;
@@ -859,7 +894,8 @@ class RoutingPage {
         kindSel.value = 'ws_input';
         refreshKindUI();
 
-        labelInput.value = '';
+        labelEdited = false;
+        labelInput.value = defaultLabel();
         document.getElementById('routing-input-error').classList.add('hidden');
         document.getElementById('routing-input-modal').classList.remove('hidden');
     }
@@ -870,7 +906,15 @@ class RoutingPage {
 
     async saveInputModal() {
         const kind = document.getElementById('routing-input-kind').value;
-        const label = document.getElementById('routing-input-label').value.trim();
+        const topic = document.getElementById('routing-input-topic').value;
+        const field = document.getElementById('routing-input-field').value;
+        let label = document.getElementById('routing-input-label').value.trim();
+        // Belt-and-suspenders: if the operator cleared the label after
+        // picking a topic/channel, fall back to the derived name so the
+        // node card still reads usefully (e.g. "/saint/track.left_velocity").
+        if (!label && topic) {
+            label = field ? `${topic}.${field}` : topic;
+        }
         const errEl = document.getElementById('routing-input-error');
         errEl.classList.add('hidden');
         try {
@@ -880,8 +924,6 @@ class RoutingPage {
                     node_id: this.activeSheetId, label,
                 });
             } else {
-                const topic = document.getElementById('routing-input-topic').value;
-                const field = document.getElementById('routing-input-field').value;
                 if (!topic) {
                     errEl.textContent = 'Pick a ROS topic';
                     errEl.classList.remove('hidden');
