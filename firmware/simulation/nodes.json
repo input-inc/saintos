@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "tracks": {
+      "id": "tracks",
+      "type": "rp2040",
+      "role": null,
+      "display_name": "tracks",
+      "created": "2026-01-31T11:33:26.579453",
+      "pid": null,
+      "status": "stopped",
+      "udp_port": 9999,
+      "started": "2026-01-31T20:47:26.227762"
+    }
+  },
+  "next_udp_port": 9998
+}

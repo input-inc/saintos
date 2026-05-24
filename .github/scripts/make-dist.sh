@@ -5,7 +5,7 @@
 # Expects (relative to repo root):
 #   - ./install/       saint_os colcon install tree (--merge-install output)
 #   - ./_ros2/opt/ros/<distro>/install/   bundled ROS2 install tree
-#   - saint_os/resources/firmware/{rp2040,teensy41,rpi5}/   staged firmware
+#   - server/resources/firmware/{rp2040,teensy41,rpi5}/   staged firmware
 #
 # Usage: make-dist.sh <version> <arch> <ros_distro>
 # Output: dist/saint-os_<version>_<arch>_<ros_distro>.tar.zst
@@ -55,9 +55,9 @@ cp -a install "${PKG_DIR}/saint_install"
 cp -a "${ROS2_BUNDLED_DIR}" "${PKG_DIR}/ros2_install"
 
 # Bundled node firmware for the OTA endpoint.
-if [[ -d saint_os/resources/firmware ]]; then
+if [[ -d server/resources/firmware ]]; then
     mkdir -p "${PKG_DIR}/firmware"
-    cp -a saint_os/resources/firmware/. "${PKG_DIR}/firmware/"
+    cp -a server/resources/firmware/. "${PKG_DIR}/firmware/"
 fi
 
 # Bundled apt runtime deps (.deb cache + Packages.gz). Lets install.sh

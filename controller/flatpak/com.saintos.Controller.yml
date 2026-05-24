@@ -273,7 +273,10 @@ modules:
           - _ros2_src
           - _debs
           - pico-sdk
-          - saint_os/firmware/rp2040/build
-          - saint_os/firmware/rp2040/build_sim
-          - saint_os/firmware/teensy41/.pio
+          - firmware/rp2040/build
+          - firmware/rp2040/build_sim
+          - firmware/teensy41/.pio
+          - server/build
+          - server/install
+          - server/log
           - .git

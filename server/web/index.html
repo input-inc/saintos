@@ -1,0 +1,2612 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAINT.OS Administration</title>
+    <link rel="stylesheet" href="css/fonts.css">
+    <link rel="stylesheet" href="js/lib/xterm/xterm.css">
+    <script src="css/tailwind.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        surface: {
+                            900: '#0f172a',
+                            800: '#1e293b',
+                            700: '#334155',
+                            600: '#475569',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+        /* Pulse animation for status dot */
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .animate-pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+        /* Page transitions */
+        .page { display: none; }
+        .page.active { display: block; animation: fadeIn 0.2s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans min-h-screen">
+    <!-- Login Screen -->
+    <div id="login-screen" class="min-h-screen flex items-center justify-center p-4">
+        <div class="w-full max-w-md">
+            <!-- Logo -->
+            <div class="text-center mb-8">
+                <div class="w-20 h-20 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center mx-auto mb-4">
+                    <span class="material-icons text-white text-4xl">computer</span>
+                </div>
+                <h1 class="text-3xl font-bold text-white">SAINT.OS</h1>
+                <p class="text-slate-400 mt-1">Administration Console</p>
+            </div>
+
+            <!-- Login Form -->
+            <div class="bg-slate-800 rounded-xl border border-slate-700 p-6">
+                <h2 class="text-lg font-semibold text-white mb-4">Connect to Server</h2>
+
+                <div id="login-error" class="hidden mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm"></div>
+
+                <form id="login-form" class="space-y-4">
+                    <div>
+                        <label for="login-host" class="block text-sm font-medium text-slate-300 mb-1">Server Address</label>
+                        <input type="text" id="login-host" placeholder="localhost:80"
+                            class="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent">
+                        <p class="text-xs text-slate-500 mt-1">Leave empty to use current page host</p>
+                    </div>
+
+                    <div>
+                        <label for="login-password" class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+                        <input type="password" id="login-password" placeholder="Enter password"
+                            class="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent">
+                        <p class="text-xs text-slate-500 mt-1">Leave empty if server has no password</p>
+                    </div>
+
+                    <button type="submit" id="login-btn"
+                        class="w-full py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-medium rounded-lg hover:from-cyan-600 hover:to-blue-700 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-slate-800 transition-all">
+                        Connect
+                    </button>
+                </form>
+
+                <div id="login-status" class="mt-4 text-center text-sm text-slate-400 hidden">
+                    <span class="inline-block w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mr-2"></span>
+                    Connecting...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Application (hidden until authenticated) -->
+    <div id="app" class="flex flex-col min-h-screen hidden">
+        <!-- Header -->
+        <header class="sticky top-0 z-50 bg-slate-900/80 backdrop-blur-lg border-b border-slate-700/50">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex items-center justify-between h-16">
+                    <!-- Logo -->
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
+                            <span class="material-icons text-white icon-md">computer</span>
+                        </div>
+                        <div>
+                            <h1 class="text-xl font-bold text-white">SAINT.OS</h1>
+                            <p class="text-xs text-slate-400">Administration Console</p>
+                        </div>
+                    </div>
+
+                    <!-- Connection Status -->
+                    <div id="connection-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+                        <span class="status-dot w-2 h-2 rounded-full bg-amber-500 animate-pulse-dot"></span>
+                        <span class="status-text text-sm text-slate-300">Connecting...</span>
+                        <button id="btn-connection-settings" class="ml-1 p-0.5 rounded hover:bg-slate-700 transition-colors" title="Disconnect">
+                            <span class="material-icons text-slate-400 text-base">logout</span>
+                        </button>
+                    </div>
+
+                    <!-- Global E-Stop (latching toggle — visual state
+                         updates from the server's 'estop' broadcast) -->
+                    <button id="btn-estop" class="btn-danger" data-estop-active="false">
+                        <span id="btn-estop-icon" class="material-icons icon-sm">warning</span>
+                        <span id="btn-estop-label">E-Stop</span>
+                    </button>
+                </div>
+            </div>
+            <!-- Accent line -->
+            <div class="h-px bg-gradient-to-r from-transparent via-cyan-500 to-transparent"></div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="bg-slate-800/50 border-b border-slate-700/50">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex items-center gap-1 overflow-x-auto py-2">
+                    <a href="#dashboard" class="nav-link active" data-page="dashboard">
+                        <span class="material-icons icon-sm">dashboard</span>
+                        Dashboard
+                    </a>
+                    <a href="#nodes" class="nav-link" data-page="nodes">
+                        <span class="material-icons icon-sm">dns</span>
+                        Nodes
+                    </a>
+                    <a href="#routes" class="nav-link" data-page="routes">
+                        <span class="material-icons icon-sm">bolt</span>
+                        Routes
+                    </a>
+                    <a href="#control" class="nav-link" data-page="control">
+                        <span class="material-icons icon-sm">tune</span>
+                        Control
+                    </a>
+                    <a href="#inputs" class="nav-link" data-page="inputs">
+                        <span class="material-icons icon-sm">sensors</span>
+                        Inputs
+                    </a>
+                    <a href="#settings" class="nav-link" data-page="settings">
+                        <span class="material-icons icon-sm">settings</span>
+                        Settings
+                    </a>
+                    <a href="#logs" class="nav-link" data-page="logs">
+                        <span class="material-icons icon-sm">description</span>
+                        Logs
+                    </a>
+                    <a href="#terminal" class="nav-link" data-page="terminal">
+                        <span class="material-icons icon-sm">terminal</span>
+                        Terminal
+                    </a>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+            <!-- Dashboard Page -->
+            <section id="page-dashboard" class="page active">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold text-white">Dashboard</h2>
+                    <button id="btn-scan-nodes" class="btn-secondary">
+                        <span class="material-icons icon-sm">search</span>
+                        Scan Nodes
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- System Status Card -->
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">System Status</h3>
+                            <span id="server-status" class="px-2 py-1 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400">Online</span>
+                        </div>
+                        <div id="system-status" class="grid grid-cols-2 gap-4">
+                            <div class="stat-item">
+                                <span class="stat-label">Uptime</span>
+                                <span id="server-uptime" class="stat-value">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Server Name</span>
+                                <span id="server-name" class="stat-value">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">CPU Usage</span>
+                                <div class="flex items-center gap-2">
+                                    <div class="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                                        <div id="cpu-bar" class="h-full bg-cyan-500 transition-all duration-300" style="width: 0%"></div>
+                                    </div>
+                                    <span id="server-cpu" class="stat-value text-sm">--%</span>
+                                </div>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Memory Usage</span>
+                                <div class="flex items-center gap-2">
+                                    <div class="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                                        <div id="memory-bar" class="h-full bg-violet-500 transition-all duration-300" style="width: 0%"></div>
+                                    </div>
+                                    <span id="server-memory" class="stat-value text-sm">--%</span>
+                                </div>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">CPU Temp</span>
+                                <span id="server-cpu-temp" class="stat-value">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Throttle</span>
+                                <span id="server-throttle" class="stat-value text-sm" title="">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Nodes Summary Card -->
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Nodes</h3>
+                            <button onclick="app.showPage('nodes')" class="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">
+                                View All →
+                            </button>
+                        </div>
+                        <div id="nodes-summary" class="space-y-3">
+                            <p class="text-slate-400">Loading...</p>
+                        </div>
+                    </div>
+
+                    <!-- Activity Log Card -->
+                    <div class="card lg:col-span-2">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Activity Log</h3>
+                            <button id="btn-view-logs" class="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">
+                                View Full Logs →
+                            </button>
+                        </div>
+                        <div id="activity-log" class="log-container h-48 overflow-y-auto space-y-1 font-mono text-sm">
+                            <p class="text-slate-500">Waiting for connection...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Operator widgets — populated from system_routing.widgets -->
+                <div id="widget-section" class="mt-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold text-slate-400">Widgets</h3>
+                        <button id="btn-dashboard-add-widget" class="btn-secondary text-sm">
+                            <span class="material-icons icon-sm">add</span>
+                            Configure on Routing page
+                        </button>
+                    </div>
+                    <div id="widget-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        <p class="text-slate-500 col-span-full italic">No widgets yet — add one on the Routing page.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Nodes Page -->
+            <section id="page-nodes" class="page">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold text-white">Nodes</h2>
+                    <button id="btn-update-all-nodes" class="btn-secondary hidden" title="Update firmware on all adopted nodes that have a newer version available">
+                        <span class="material-icons icon-sm">system_update</span>
+                        <span class="update-all-text">Update All</span>
+                        <span id="update-all-count" class="ml-1 px-1.5 py-0.5 text-xs font-medium rounded-full bg-cyan-500/20 text-cyan-300"></span>
+                    </button>
+                </div>
+
+                <div class="space-y-8">
+                    <!-- Adopted Nodes -->
+                    <div>
+                        <div class="flex items-center gap-2 mb-4">
+                            <div class="w-3 h-3 rounded-full bg-emerald-500"></div>
+                            <h3 class="text-lg font-semibold text-white">Adopted Nodes</h3>
+                        </div>
+                        <div id="adopted-nodes" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <p class="text-slate-400 col-span-full">Loading...</p>
+                        </div>
+                    </div>
+
+                    <!-- Unadopted Nodes -->
+                    <div>
+                        <div class="flex items-center gap-2 mb-4">
+                            <div class="w-3 h-3 rounded-full bg-amber-500"></div>
+                            <h3 class="text-lg font-semibold text-white">Unadopted Nodes</h3>
+                        </div>
+                        <div id="unadopted-nodes" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <p class="text-slate-400 col-span-full">Loading...</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Node Detail Page -->
+            <section id="page-node-detail" class="page">
+                <!-- Header with back button -->
+                <div class="flex items-center gap-4 mb-6">
+                    <button onclick="app.showPage('nodes')" class="btn-secondary">
+                        <span class="material-icons icon-sm">arrow_back</span>
+                        Back
+                    </button>
+                    <div class="flex-1">
+                        <h2 id="node-detail-title" class="text-2xl font-bold text-white">Node Details</h2>
+                        <p id="node-detail-subtitle" class="text-sm text-slate-400">Loading...</p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <!-- Sync Status -->
+                        <div id="node-sync-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+                            <span class="sync-dot w-2 h-2 rounded-full bg-slate-500"></span>
+                            <span class="sync-text text-sm text-slate-400">--</span>
+                        </div>
+                        <!-- Online Status -->
+                        <div id="node-online-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+                            <span class="w-2 h-2 rounded-full bg-slate-500"></span>
+                            <span class="text-sm text-slate-400">Offline</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Navigation -->
+                <div class="flex items-center gap-1 mb-6 border-b border-slate-700">
+                    <button class="node-tab active" data-tab="overview">Overview</button>
+                    <button class="node-tab" data-tab="pins">Peripherals</button>
+                    <button class="node-tab" data-tab="live">Live readings</button>
+                    <button class="node-tab" data-tab="state">State</button>
+                    <button class="node-tab" data-tab="logs">Logs</button>
+                    <button class="node-tab" data-tab="control">Control</button>
+                </div>
+
+                <!-- Tab Content: Overview -->
+                <div id="node-tab-overview" class="node-tab-content active">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Node Info Card -->
+                        <div class="card">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Node Information</h3>
+                                <!-- Opens the same fields the adopt
+                                     modal offered (role, board, chip,
+                                     display name), pre-filled with
+                                     current values. Submits via the
+                                     update_node management action. -->
+                                <button id="btn-node-edit" onclick="app.openEditNodeModal()"
+                                        class="btn-secondary text-sm">
+                                    <span class="material-icons icon-sm">edit</span>
+                                    Edit
+                                </button>
+                            </div>
+                            <div id="node-info-grid" class="grid grid-cols-2 gap-4">
+                                <div class="stat-item">
+                                    <span class="stat-label">Node ID</span>
+                                    <span id="node-info-id" class="stat-value text-sm font-mono">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Role</span>
+                                    <span id="node-info-role" class="stat-value">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Hardware</span>
+                                    <span id="node-info-hardware" class="stat-value text-sm">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Firmware</span>
+                                    <div class="flex items-center gap-2">
+                                        <span id="node-info-firmware" class="stat-value text-sm">--</span>
+                                        <span id="node-firmware-update-badge" class="hidden px-2 py-0.5 text-xs font-medium rounded-full bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 cursor-pointer hover:bg-cyan-500/30" title="Click to update">
+                                            Update Available
+                                        </span>
+                                    </div>
+                                    <span id="node-info-firmware-build" class="text-xs text-slate-500 block"></span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Bootloader</span>
+                                    <span id="node-info-bootloader" class="stat-value text-sm">--</span>
+                                    <span class="text-xs text-slate-500 block">Not OTA-updatable</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">IP Address</span>
+                                    <span id="node-info-ip" class="stat-value text-sm font-mono">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Uptime</span>
+                                    <span id="node-info-uptime" class="stat-value text-sm">--</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Quick Stats Card -->
+                        <div class="card">
+                            <h3 class="text-lg font-semibold text-white mb-4">Status</h3>
+                            <div id="node-stats" class="space-y-4">
+                                <div class="stat-item">
+                                    <span class="stat-label">CPU Temperature</span>
+                                    <span id="node-stat-temp" class="stat-value">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">State</span>
+                                    <span id="node-stat-state" class="stat-value">--</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Last Seen</span>
+                                    <span id="node-stat-lastseen" class="stat-value text-sm">--</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: Peripherals -->
+                <div id="node-tab-pins" class="node-tab-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                        <!-- Peripherals list (main column) -->
+                        <div class="lg:col-span-2">
+                            <div class="card">
+                                <div class="flex items-center justify-between mb-3">
+                                    <h3 class="text-lg font-semibold text-white">Peripherals on this node</h3>
+                                    <div class="flex items-center gap-2">
+                                        <button id="btn-refresh-capabilities" class="btn-secondary text-sm">
+                                            <span class="material-icons icon-sm">refresh</span>
+                                            Refresh
+                                        </button>
+                                        <button id="btn-sync-config" class="btn-primary">
+                                            <span class="material-icons icon-sm">sync</span>
+                                            Sync to Node
+                                        </button>
+                                        <button id="btn-add-peripheral" class="btn-primary">
+                                            <span class="material-icons icon-sm">add</span>
+                                            Add peripheral
+                                        </button>
+                                    </div>
+                                </div>
+                                <p class="text-xs text-slate-400 mb-4">
+                                    Everything attached to this node — from a single-pin button to a multi-channel
+                                    sensor — is a peripheral. Each one owns the pins it needs and exposes channels
+                                    you can route to widgets and other peripherals.
+                                </p>
+
+                                <div id="peripheral-list" class="space-y-3">
+                                    <p class="text-slate-400 text-sm">Loading peripherals...</p>
+                                </div>
+
+                                <div id="peripheral-conflicts"
+                                     class="hidden mt-4 p-3 rounded bg-red-900/40 border border-red-700 text-red-200 text-sm space-y-1"></div>
+                            </div>
+                        </div>
+
+                        <!-- Pin availability sidebar -->
+                        <div class="lg:col-span-1">
+                            <div class="card">
+                                <h3 class="text-sm font-semibold text-white mb-2">Pin availability</h3>
+                                <p class="text-xs text-slate-500 mb-3">
+                                    Which pins are claimed and which are still free.
+                                </p>
+                                <div class="mb-3">
+                                    <div class="stat-label">Free</div>
+                                    <div id="peripheral-free-pins" class="mt-1 flex flex-wrap"></div>
+                                </div>
+                                <div>
+                                    <div class="stat-label">Claimed</div>
+                                    <div id="peripheral-claimed-pins" class="mt-1 text-xs text-slate-400 space-y-1"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: State -->
+                <div id="node-tab-state" class="node-tab-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <!-- Peripheral Controls -->
+                        <div class="lg:col-span-2">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Peripheral Controls</h3>
+                                <div id="state-stale-indicator" class="hidden flex items-center gap-2 text-sm text-amber-400">
+                                    <span class="material-icons icon-sm animate-pulse">warning</span>
+                                    No recent data
+                                </div>
+                            </div>
+                            <div id="peripheral-controls-container" class="space-y-4">
+                                <p class="text-slate-400 text-sm">Loading controls…</p>
+                            </div>
+                        </div>
+
+                        <!-- State Summary -->
+                        <div class="lg:col-span-1">
+                            <div class="card">
+                                <h3 class="text-lg font-semibold text-white mb-4">State Summary</h3>
+                                <div id="node-state-summary" class="space-y-3">
+                                    <div class="stat-item">
+                                        <span class="stat-label">Node Status</span>
+                                        <span id="state-node-status" class="stat-value text-sm">--</span>
+                                    </div>
+                                    <div class="stat-item">
+                                        <span class="stat-label">Peripherals</span>
+                                        <span id="state-pin-count" class="stat-value text-sm">--</span>
+                                    </div>
+                                    <div class="stat-item">
+                                        <span class="stat-label">Last Update</span>
+                                        <span id="state-last-update" class="stat-value text-sm">--</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Quick Actions -->
+                            <div class="card mt-4">
+                                <h3 class="text-lg font-semibold text-white mb-4">Quick Actions</h3>
+                                <div class="space-y-2">
+                                    <button id="btn-all-outputs-neutral" class="btn-secondary w-full justify-center text-sm">
+                                        <span class="material-icons icon-sm">center_focus_strong</span>
+                                        Reset all outputs
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: Logs -->
+                <div id="node-tab-logs" class="node-tab-content hidden">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Node Logs</h3>
+                            <button id="btn-clear-node-logs" class="btn-secondary text-sm">Clear</button>
+                        </div>
+                        <div id="node-logs" class="log-container h-96 overflow-y-auto space-y-1 font-mono text-sm">
+                            <p class="text-slate-500">No logs available.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: Live readings -->
+                <div id="node-tab-live" class="node-tab-content hidden">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="text-lg font-semibold text-white">Live readings</h3>
+                        <span id="node-live-status" class="text-xs text-slate-500">--</span>
+                    </div>
+                    <p class="text-xs text-slate-400 mb-4">
+                        Raw per-channel values streaming from the firmware via the
+                        routing system. If a peripheral's card shows <span class="font-mono">—</span>,
+                        either the firmware isn't sampling that channel yet or the
+                        driver reports the peripheral as disconnected.
+                    </p>
+                    <div id="node-live-grid" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <p class="text-slate-500 italic text-sm">Loading…</p>
+                    </div>
+                </div>
+
+                <!-- Tab Content: Control -->
+                <div id="node-tab-control" class="node-tab-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div class="card">
+                            <h3 class="text-lg font-semibold text-white mb-4">Node Commands</h3>
+                            <div class="space-y-3">
+                                <!-- Firmware Update Button (hidden by default) -->
+                                <button id="btn-firmware-update" class="btn-primary w-full justify-center hidden">
+                                    <span class="material-icons icon-sm">system_update</span>
+                                    <span class="update-text">Update Firmware</span>
+                                    <span id="firmware-update-version" class="text-xs opacity-75 ml-1"></span>
+                                </button>
+                                <button id="btn-node-restart" class="btn-secondary w-full justify-center">
+                                    <span class="material-icons icon-sm">restart_alt</span>
+                                    Restart Node
+                                </button>
+                                <button id="btn-node-identify" class="btn-secondary w-full justify-center">
+                                    <span class="material-icons icon-sm">lightbulb</span>
+                                    Identify (Blink LED)
+                                </button>
+                                <button id="btn-node-estop" class="btn-danger w-full justify-center">
+                                    <span class="material-icons icon-sm">warning</span>
+                                    Emergency Stop
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h3 class="text-lg font-semibold text-white mb-4">Danger Zone</h3>
+                            <div class="space-y-3">
+                                <button id="btn-force-firmware-update" class="btn-secondary w-full justify-center text-cyan-400 border-cyan-500/50 hover:bg-cyan-500/20">
+                                    <span class="material-icons icon-sm">system_update</span>
+                                    Force Firmware Update
+                                </button>
+                                <button id="btn-node-factory-reset" class="btn-secondary w-full justify-center text-amber-400 border-amber-500/50 hover:bg-amber-500/20">
+                                    <span class="material-icons icon-sm">delete_forever</span>
+                                    Factory Reset
+                                </button>
+                                <button id="btn-node-unadopt" class="btn-secondary w-full justify-center text-red-400 border-red-500/50 hover:bg-red-500/20">
+                                    <span class="material-icons icon-sm">person_remove</span>
+                                    Unadopt Node
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Force Firmware Update Modal -->
+            <div id="firmware-update-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="app.closeFirmwareModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Force Firmware Update</h3>
+                            <button onclick="app.closeFirmwareModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons">close</span>
+                            </button>
+                        </div>
+
+                        <p class="text-slate-400 text-sm mb-4">
+                            Select which firmware build to upload to this node. Use <strong>Simulation</strong> for Renode nodes and <strong>Hardware</strong> for physical devices.
+                        </p>
+
+                        <div class="space-y-3 mb-6">
+                            <button id="btn-fw-simulation" class="w-full p-4 rounded-lg border border-slate-700 hover:border-cyan-500 hover:bg-cyan-500/10 transition-all text-left">
+                                <div class="flex items-center gap-3">
+                                    <span class="material-icons text-cyan-400">computer</span>
+                                    <div>
+                                        <div class="font-medium text-white">Simulation Build</div>
+                                        <div id="fw-sim-info" class="text-xs text-slate-400">Checking...</div>
+                                    </div>
+                                </div>
+                            </button>
+                            <button id="btn-fw-hardware" class="w-full p-4 rounded-lg border border-slate-700 hover:border-violet-500 hover:bg-violet-500/10 transition-all text-left">
+                                <div class="flex items-center gap-3">
+                                    <span class="material-icons text-violet-400">memory</span>
+                                    <div>
+                                        <div class="font-medium text-white">Hardware Build</div>
+                                        <div id="fw-hw-info" class="text-xs text-slate-400">Checking...</div>
+                                    </div>
+                                </div>
+                            </button>
+                        </div>
+
+                        <div class="flex gap-3">
+                            <button onclick="app.closeFirmwareModal()" class="btn-secondary flex-1">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Node Adoption Modal -->
+            <div id="adopt-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="app.closeAdoptModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Adopt Node</h3>
+                            <button onclick="app.closeAdoptModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons">close</span>
+                            </button>
+                        </div>
+
+                        <div class="space-y-4">
+                            <!-- Node ID (read-only) -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Node ID</label>
+                                <div id="adopt-node-id" class="input-field w-full bg-slate-900/50 text-slate-400 font-mono">--</div>
+                            </div>
+
+                            <!-- Chip (defaults to whatever the firmware
+                                 announced; falls back to operator choice
+                                 when the firmware didn't recognize itself). -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Chip</label>
+                                <select id="adopt-chip-select" class="input-field w-full">
+                                    <option value="">-- Loading chips… --</option>
+                                </select>
+                                <p id="adopt-chip-detected" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+
+                            <!-- Board Selection -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Board</label>
+                                <select id="adopt-board-select" class="input-field w-full">
+                                    <option value="">-- Select Board --</option>
+                                </select>
+                                <p id="adopt-board-description" class="text-xs text-slate-500 mt-1">
+                                    Determines pin layout, reserved pins, and built-in peripherals.
+                                </p>
+                            </div>
+
+                            <!-- Role Selection -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Role</label>
+                                <select id="adopt-role-select" class="input-field w-full">
+                                    <option value="">-- Select Role --</option>
+                                </select>
+                                <p id="adopt-role-description" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+
+                            <!-- Display Name (optional) -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Display Name <span class="text-slate-500">(optional)</span></label>
+                                <input type="text" id="adopt-display-name" class="input-field w-full" placeholder="e.g., Left Arm Controller">
+                            </div>
+                        </div>
+
+                        <div class="flex gap-3 mt-6">
+                            <button onclick="app.closeAdoptModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="app.submitAdoption()" class="btn-primary flex-1">
+                                <span class="material-icons icon-sm">check</span>
+                                Adopt
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Edit Node Modal -->
+            <!-- Same fields as the Adopt modal, but populated with
+                 the node's current role/board/chip/display_name and
+                 wired to the update_node management action. Kept as
+                 a separate modal (rather than parametrising the
+                 adopt one) because the title, button text, and
+                 close handler differ; the marginal duplication is
+                 cheaper than a flag-driven render path. -->
+            <div id="edit-node-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="app.closeEditNodeModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Edit Node</h3>
+                            <button onclick="app.closeEditNodeModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons">close</span>
+                            </button>
+                        </div>
+
+                        <div class="space-y-4">
+                            <!-- Node ID (read-only) -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Node ID</label>
+                                <div id="edit-node-id" class="input-field w-full bg-slate-900/50 text-slate-400 font-mono">--</div>
+                            </div>
+
+                            <!-- Chip -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Chip</label>
+                                <select id="edit-node-chip-select" class="input-field w-full">
+                                    <option value="">-- Loading chips… --</option>
+                                </select>
+                            </div>
+
+                            <!-- Board -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Board</label>
+                                <select id="edit-node-board-select" class="input-field w-full">
+                                    <option value="">-- Select Board --</option>
+                                </select>
+                                <p class="text-xs text-slate-500 mt-1">
+                                    Changing the board re-derives pin layout and re-seeds built-in peripherals.
+                                </p>
+                            </div>
+
+                            <!-- Role -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Role</label>
+                                <select id="edit-node-role-select" class="input-field w-full">
+                                    <option value="">-- Select Role --</option>
+                                </select>
+                                <p id="edit-node-role-description" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+
+                            <!-- Display Name -->
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Display Name <span class="text-slate-500">(optional)</span></label>
+                                <input type="text" id="edit-node-display-name" class="input-field w-full" placeholder="e.g., Left Arm Controller">
+                            </div>
+                        </div>
+
+                        <div class="flex gap-3 mt-6">
+                            <button onclick="app.closeEditNodeModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="app.submitNodeEdit()" class="btn-primary flex-1">
+                                <span class="material-icons icon-sm">check</span>
+                                Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Peripheral add/edit modal -->
+            <div id="peripheral-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="peripheralManager.closeModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-lg">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 id="peripheral-modal-title" class="text-lg font-semibold text-white">Add peripheral</h3>
+                            <button onclick="peripheralManager.closeModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Peripheral type</label>
+                                <select id="peripheral-modal-type" class="input-field w-full"></select>
+                                <p id="peripheral-modal-type-desc" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+
+                            <div id="peripheral-modal-pin-section"></div>
+                            <div id="peripheral-modal-params-section"></div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label</label>
+                                <input id="peripheral-modal-label" class="input-field w-full" placeholder="Auto-generated if blank">
+                            </div>
+
+                            <div id="peripheral-modal-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        </div>
+
+                        <div class="flex items-center gap-3 mt-6">
+                            <button onclick="peripheralManager.closeModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button id="peripheral-modal-save" onclick="peripheralManager.saveModal()" class="btn-primary flex-1">Save</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Routing Page -->
+            <section id="page-routes" class="page routing-page">
+                <div class="routing-shell">
+                    <!-- Left rail: one entry per controller node sheet -->
+                    <aside class="routing-sidebar">
+                        <div class="routing-sidebar-header">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Sheets</span>
+                        </div>
+                        <div id="routing-sheet-list" class="routing-sheet-list"></div>
+                    </aside>
+
+                    <!-- Main area: per-sheet toolbar + canvas -->
+                    <div class="routing-main">
+                        <div class="routing-toolbar">
+                            <div class="min-w-0">
+                                <h2 id="routing-sheet-title" class="text-lg font-semibold text-white truncate">Routing</h2>
+                                <p id="routing-sheet-subtitle" class="text-xs text-slate-400 truncate">
+                                    Pick a sheet on the left to wire its peripherals.
+                                </p>
+                            </div>
+                            <div class="flex gap-2 items-center">
+                                <button id="btn-routing-add-input" class="btn-secondary" disabled>
+                                    <span class="material-icons icon-sm">login</span>
+                                    Input
+                                </button>
+                                <button id="btn-routing-add-output" class="btn-secondary" disabled>
+                                    <span class="material-icons icon-sm">logout</span>
+                                    Output
+                                </button>
+                                <button id="btn-routing-add-operator" class="btn-secondary" disabled>
+                                    <span class="material-icons icon-sm">functions</span>
+                                    Operator
+                                </button>
+                                <button id="btn-routing-add-widget" class="btn-secondary" disabled>
+                                    <span class="material-icons icon-sm">widgets</span>
+                                    Widget
+                                </button>
+                                <button id="btn-routing-auto-layout" class="btn-secondary" title="Auto-arrange nodes" disabled>
+                                    <span class="material-icons icon-sm">grid_view</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div id="routing-canvas" class="routing-canvas">
+                            <svg class="routing-wires" width="100%" height="100%" preserveAspectRatio="none">
+                                <g id="routing-wire-layer"></g>
+                            </svg>
+                            <div id="routing-node-layer"></div>
+                            <div id="routing-empty" class="routing-empty hidden">
+                                <p class="text-slate-400">No sheets yet. Adopt a controller node to start.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Add-input modal for routing page -->
+            <div id="routing-input-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="routingPage.closeInputModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Add input node</h3>
+                            <button onclick="routingPage.closeInputModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Kind</label>
+                                <select id="routing-input-kind" class="input-field w-full">
+                                    <option value="ws_input">WebSocket Input (controller-driven)</option>
+                                    <option value="topic">ROS Topic (subscribe to state)</option>
+                                </select>
+                            </div>
+                            <div id="routing-input-topic-row">
+                                <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
+                                <select id="routing-input-topic" class="input-field w-full"></select>
+                                <p id="routing-input-topic-desc" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+                            <div id="routing-input-field-row">
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
+                                <select id="routing-input-field" class="input-field w-full"></select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+                                <input id="routing-input-label" class="input-field w-full" placeholder="Defaults to topic.channel">
+                            </div>
+                            <div id="routing-input-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-6">
+                            <button onclick="routingPage.closeInputModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="routingPage.saveInputModal()" class="btn-primary flex-1">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add-output modal for routing page -->
+            <div id="routing-output-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="routingPage.closeOutputModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Add output</h3>
+                            <button onclick="routingPage.closeOutputModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
+                                <select id="routing-output-topic" class="input-field w-full"></select>
+                                <p id="routing-output-topic-desc" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
+                                <select id="routing-output-field" class="input-field w-full"></select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+                                <input id="routing-output-label" class="input-field w-full" placeholder="Defaults to topic.channel">
+                            </div>
+                            <div id="routing-output-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-6">
+                            <button onclick="routingPage.closeOutputModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="routingPage.saveOutputModal()" class="btn-primary flex-1">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add-operator modal for routing page -->
+            <div id="routing-operator-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="routingPage.closeOperatorModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Add operator</h3>
+                            <button onclick="routingPage.closeOperatorModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Operator</label>
+                                <select id="routing-operator-type" class="input-field w-full"></select>
+                                <p id="routing-operator-type-desc" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+                                <input id="routing-operator-label" class="input-field w-full" placeholder="Defaults to operator name">
+                            </div>
+                            <div id="routing-operator-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-6">
+                            <button onclick="routingPage.closeOperatorModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="routingPage.saveOperatorModal()" class="btn-primary flex-1">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add-widget modal for routing page -->
+            <div id="routing-widget-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="routingPage.closeWidgetModal()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Add widget</h3>
+                            <button onclick="routingPage.closeWidgetModal()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Widget type</label>
+                                <select id="routing-widget-type" class="input-field w-full"></select>
+                                <p id="routing-widget-type-desc" class="text-xs text-slate-500 mt-1"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Label</label>
+                                <input id="routing-widget-label" class="input-field w-full" placeholder="Auto-generated if blank">
+                            </div>
+                            <div id="routing-widget-error"
+                                 class="hidden p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-6">
+                            <button onclick="routingPage.closeWidgetModal()" class="btn-secondary flex-1">Cancel</button>
+                            <button onclick="routingPage.saveWidgetModal()" class="btn-primary flex-1">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Control Page - Global Pin Control -->
+            <section id="page-control" class="page">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold text-white">Control Panel</h2>
+                </div>
+
+                <!-- Control Sub-tabs -->
+                <div class="flex items-center gap-1 mb-6 border-b border-slate-700">
+                    <button class="control-tab active" data-tab="nodes" onclick="controlPage.switchTab('nodes')">Nodes</button>
+                    <button class="control-tab" data-tab="moods" onclick="controlPage.switchTab('moods')">Moods</button>
+                </div>
+
+                <!-- Tab Content: Nodes -->
+                <div id="control-tab-nodes" class="control-tab-content">
+                    <div id="control-nodes-container" class="space-y-4">
+                        <div class="card">
+                            <p class="text-slate-400 text-sm">Loading adopted nodes...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: Moods -->
+                <div id="control-tab-moods" class="control-tab-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <!-- Mood List -->
+                        <div class="card">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Available Moods</h3>
+                                <button onclick="moodsManager.refresh()" class="btn-icon" title="Refresh">
+                                    <span class="material-icons md-20">refresh</span>
+                                </button>
+                            </div>
+                            <div id="moods-list" class="space-y-2">
+                                <p class="text-slate-400 text-sm">Loading moods...</p>
+                            </div>
+                        </div>
+
+                        <!-- Mood Details -->
+                        <div class="lg:col-span-2 card">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Mood Properties</h3>
+                                <button id="btn-apply-mood" onclick="moodsManager.applyMood()"
+                                        class="btn-primary" disabled>
+                                    <span class="material-icons icon-sm">play_arrow</span>
+                                    Apply to Head
+                                </button>
+                            </div>
+                            <div id="mood-details" class="space-y-4">
+                                <div class="flex flex-col items-center justify-center py-8 text-center">
+                                    <span class="material-icons text-slate-600 mb-4" style="font-size: 48px;">mood</span>
+                                    <p class="text-slate-500">Select a mood to view its properties</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Upload Section -->
+                    <div class="card mt-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">Upload Mood</h3>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <input type="file" id="mood-file-input" accept=".uasset"
+                                   class="hidden" onchange="moodsManager.handleFileSelect(event)">
+                            <button onclick="document.getElementById('mood-file-input').click()"
+                                    class="btn-secondary">
+                                <span class="material-icons icon-sm">upload_file</span>
+                                Select .uasset File
+                            </button>
+                            <span id="mood-upload-status" class="text-sm text-slate-400"></span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Inputs Page -->
+            <section id="page-inputs" class="page">
+                <h2 class="text-2xl font-bold text-white mb-6">Inputs</h2>
+
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <!-- LiveLink Face Card -->
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">LiveLink Face</h3>
+                            <span id="livelink-status-badge" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-500/20 text-slate-400">
+                                Disconnected
+                            </span>
+                        </div>
+                        <div id="livelink-summary" class="space-y-3">
+                            <div class="stat-item">
+                                <span class="stat-label">Status</span>
+                                <span id="livelink-receiver-status" class="stat-value text-sm">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Port</span>
+                                <span id="livelink-port" class="stat-value text-sm font-mono">11111</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Packets</span>
+                                <span id="livelink-packet-count" class="stat-value text-sm">0</span>
+                            </div>
+                        </div>
+                        <div class="mt-4 pt-4 border-t border-slate-700">
+                            <button onclick="app.showLiveLinkDetail()" class="btn-secondary w-full justify-center">
+                                <span class="material-icons icon-sm">visibility</span>
+                                View Details
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- WebSocket Clients Card -->
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white">WebSocket Clients</h3>
+                            <button id="btn-refresh-clients" class="p-1.5 rounded hover:bg-slate-700 transition-colors" title="Refresh">
+                                <span class="material-icons icon-sm text-slate-400">refresh</span>
+                            </button>
+                        </div>
+                        <div id="ws-clients" class="space-y-2 max-h-64 overflow-y-auto">
+                            <p class="text-slate-400 text-sm">No clients connected</p>
+                        </div>
+                    </div>
+
+                    <!-- RC Receiver Card -->
+                    <div class="card">
+                        <h3 class="text-lg font-semibold text-white mb-4">RC Receiver</h3>
+                        <div id="rc-status" class="space-y-2">
+                            <p class="text-slate-400 text-sm">Disabled</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- LiveLink Detail Page -->
+            <section id="page-livelink-detail" class="page">
+                <!-- Header with back button -->
+                <div class="flex items-center gap-4 mb-6">
+                    <button onclick="app.showPage('inputs')" class="btn-secondary">
+                        <span class="material-icons icon-sm">arrow_back</span>
+                        Back
+                    </button>
+                    <div class="flex-1">
+                        <h2 class="text-2xl font-bold text-white">LiveLink Face</h2>
+                    </div>
+                    <div id="livelink-connection-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+                        <span class="w-2 h-2 rounded-full bg-slate-500"></span>
+                        <span class="text-sm text-slate-400">Disconnected</span>
+                    </div>
+                </div>
+
+                <!-- Row 1: Stats, Head Pose, Eye Tracking -->
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- Stats Card -->
+                    <div class="card">
+                        <h3 class="text-lg font-semibold text-white mb-4">Connection Stats</h3>
+                        <div class="space-y-3">
+                            <div class="stat-item">
+                                <span class="stat-label">Receiver Port</span>
+                                <span id="livelink-detail-port" class="stat-value text-sm font-mono">11111</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Total Packets</span>
+                                <span id="livelink-detail-packets" class="stat-value text-sm">0</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Errors</span>
+                                <span id="livelink-detail-errors" class="stat-value text-sm">0</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Last Update</span>
+                                <span id="livelink-detail-last-update" class="stat-value text-sm">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Head Pose Visualization -->
+                    <div class="card">
+                        <h3 class="text-lg font-semibold text-white mb-4">Head Pose</h3>
+                        <div class="flex flex-col items-center">
+                            <!-- Head visualization container -->
+                            <div class="relative w-32 h-32 mb-4">
+                                <!-- Head circle (top-down view) -->
+                                <div id="head-pose-visual" class="absolute inset-0 flex items-center justify-center">
+                                    <!-- Outer ring -->
+                                    <div class="absolute w-full h-full rounded-full border-2 border-slate-600"></div>
+                                    <!-- Head shape (oval) -->
+                                    <div id="head-shape" class="w-20 h-24 bg-slate-700 rounded-full border-2 border-cyan-500/50 transition-transform duration-75" style="transform: rotate(0deg)">
+                                        <!-- Nose indicator (forward direction) -->
+                                        <div class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1 w-3 h-3 bg-cyan-500 rounded-full"></div>
+                                        <!-- Eyes -->
+                                        <div class="absolute top-6 left-3 w-2 h-3 bg-slate-500 rounded-full"></div>
+                                        <div class="absolute top-6 right-3 w-2 h-3 bg-slate-500 rounded-full"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Values -->
+                            <div class="w-full space-y-2">
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">Yaw (L/R)</span>
+                                    <span id="head-yaw-value" class="font-mono text-cyan-400">0.00</span>
+                                </div>
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">Pitch (U/D)</span>
+                                    <span id="head-pitch-value" class="font-mono text-violet-400">0.00</span>
+                                </div>
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">Roll (Tilt)</span>
+                                    <span id="head-roll-value" class="font-mono text-amber-400">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Eye Visualization -->
+                    <div class="card">
+                        <h3 class="text-lg font-semibold text-white mb-4">Eye Tracking</h3>
+                        <div class="flex items-center justify-around">
+                            <!-- Left Eye -->
+                            <div class="text-center">
+                                <p class="text-sm text-slate-400 mb-2">Left Eye</p>
+                                <div class="relative w-24 h-24 bg-slate-900 rounded-full border-2 border-slate-600">
+                                    <div id="eye-left-pupil" class="absolute w-8 h-8 bg-cyan-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 transition-all duration-75" style="left: 50%; top: 50%;"></div>
+                                    <div class="absolute w-3 h-3 bg-white rounded-full transform -translate-x-1/2 -translate-y-1/2 pointer-events-none" style="left: 55%; top: 40%;"></div>
+                                </div>
+                                <p id="eye-left-blink" class="text-xs text-slate-400 mt-2">Blink: 0%</p>
+                            </div>
+                            <!-- Right Eye -->
+                            <div class="text-center">
+                                <p class="text-sm text-slate-400 mb-2">Right Eye</p>
+                                <div class="relative w-24 h-24 bg-slate-900 rounded-full border-2 border-slate-600">
+                                    <div id="eye-right-pupil" class="absolute w-8 h-8 bg-cyan-500 rounded-full transform -translate-x-1/2 -translate-y-1/2 transition-all duration-75" style="left: 50%; top: 50%;"></div>
+                                    <div class="absolute w-3 h-3 bg-white rounded-full transform -translate-x-1/2 -translate-y-1/2 pointer-events-none" style="left: 55%; top: 40%;"></div>
+                                </div>
+                                <p id="eye-right-blink" class="text-xs text-slate-400 mt-2">Blink: 0%</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Row 2: Blend Shapes Preview -->
+                <div class="card mt-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold text-white">Blend Shapes Preview</h3>
+                        <div class="flex items-center gap-2">
+                            <button id="btn-livelink-pause" class="btn-secondary text-sm" onclick="window.liveLinkManager?.togglePause()">
+                                <span id="livelink-pause-icon" class="material-icons icon-sm">pause_circle</span>
+                                <span id="livelink-pause-text">Pause</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="livelink-blend-shapes" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2 max-h-[400px] overflow-y-auto">
+                        <p class="text-slate-400 col-span-full text-center py-8">Waiting for data...</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Settings Page -->
+            <section id="page-settings" class="page">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold text-white">Settings</h2>
+                    <div class="flex items-center gap-3">
+                        <span id="settings-save-status" class="text-sm text-slate-500"></span>
+                        <button id="settings-save-btn" class="btn-primary flex items-center gap-2 opacity-50 cursor-not-allowed" disabled>
+                            <span class="material-icons text-sm">save</span>
+                            Save Changes
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Settings Sub-tabs -->
+                <div class="border-b border-slate-700 mb-6">
+                    <nav class="flex gap-1" id="settings-tabs">
+                        <button class="settings-tab active" data-settings-tab="server">
+                            <span class="material-icons text-sm">dns</span>
+                            Server
+                        </button>
+                        <button class="settings-tab" data-settings-tab="interface">
+                            <span class="material-icons text-sm">display_settings</span>
+                            Interface
+                        </button>
+                        <button class="settings-tab" data-settings-tab="livelink">
+                            <span class="material-icons text-sm">face</span>
+                            LiveLink
+                        </button>
+                        <button class="settings-tab" data-settings-tab="firmware">
+                            <span class="material-icons text-sm">memory</span>
+                            Firmware
+                        </button>
+                        <button class="settings-tab" data-settings-tab="boards">
+                            <span class="material-icons text-sm">developer_board</span>
+                            Boards
+                        </button>
+                    </nav>
+                </div>
+
+                <!-- Server Settings Tab -->
+                <div id="settings-panel-server" class="settings-panel active">
+                    <!-- Server Identity -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-cyan-400">badge</span>
+                            Identity
+                        </h3>
+                        <div>
+                            <label for="settings-server-name" class="block text-sm font-medium text-slate-300 mb-1">Server Name</label>
+                            <input type="text" id="settings-server-name" class="input-field w-full max-w-md" placeholder="SAINT-01">
+                            <p class="text-xs text-slate-500 mt-1">Display name for this server instance</p>
+                        </div>
+                    </div>
+
+                    <!-- WebSocket, Network, ROS Bridge - horizontal layout -->
+                    <div class="flex flex-wrap gap-6 mb-6">
+                        <!-- WebSocket Settings -->
+                        <div class="card flex-1 min-w-[280px]">
+                            <h3 class="text-base font-semibold text-white mb-4 flex items-center gap-2">
+                                <span class="material-icons text-violet-400 text-lg">lock</span>
+                                WebSocket
+                            </h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label for="settings-ws-password" class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+                                    <input type="password" id="settings-ws-password" class="input-field w-full" placeholder="Empty = disabled">
+                                    <p class="text-xs text-slate-500 mt-1">Clients must authenticate with this password. Leave empty to disable.</p>
+                                </div>
+                                <div>
+                                    <label for="settings-ws-auth-timeout" class="block text-sm font-medium text-slate-300 mb-1">Auth Timeout (sec)</label>
+                                    <input type="number" id="settings-ws-auth-timeout" class="input-field w-24" min="1" max="60" step="1" value="10">
+                                    <p class="text-xs text-slate-500 mt-1">How long clients have to authenticate after connecting</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Network Settings -->
+                        <div class="card flex-1 min-w-[280px]">
+                            <h3 class="text-base font-semibold text-white mb-4 flex items-center gap-2">
+                                <span class="material-icons text-emerald-400 text-lg">language</span>
+                                Network
+                            </h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label for="settings-web-port" class="block text-sm font-medium text-slate-300 mb-1">Web Port</label>
+                                    <input type="number" id="settings-web-port" class="input-field w-24" min="1" max="65535" value="80">
+                                    <p class="text-xs text-slate-500 mt-1">Port for the web UI and API (requires restart)</p>
+                                </div>
+                                <div>
+                                    <label for="settings-ws-port" class="block text-sm font-medium text-slate-300 mb-1">WebSocket Port</label>
+                                    <input type="number" id="settings-ws-port" class="input-field w-24" min="1" max="65535" placeholder="Same">
+                                    <p class="text-xs text-slate-500 mt-1">Separate port for WebSocket connections. Leave empty to use web port.</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- ROS Bridge Settings -->
+                        <div class="card flex-1 min-w-[280px]">
+                            <h3 class="text-base font-semibold text-white mb-4 flex items-center gap-2">
+                                <span class="material-icons text-orange-400 text-lg">sync_alt</span>
+                                ROS Bridge
+                            </h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label for="settings-ros-throttle" class="block text-sm font-medium text-slate-300 mb-1">Command Throttle (ms)</label>
+                                    <input type="number" id="settings-ros-throttle" class="input-field w-24" min="10" max="1000" step="10" value="50">
+                                    <p class="text-xs text-slate-500 mt-1">Minimum interval between control commands (prevents flooding)</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Software Update -->
+                    <div class="card mb-6" id="update-card">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-cyan-400">system_update</span>
+                            Software Update
+                        </h3>
+
+                        <div class="flex items-center justify-between flex-wrap gap-3">
+                            <div class="flex items-center gap-3">
+                                <div>
+                                    <div class="text-xs text-slate-500">Installed version</div>
+                                    <div class="text-base font-mono text-white" id="update-installed-version">--</div>
+                                </div>
+                                <span id="update-status-pill" class="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-700 text-slate-400">Unknown</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button id="update-check-btn" class="btn-secondary text-sm hidden">
+                                    <span class="material-icons text-sm">refresh</span>
+                                    Check for Updates
+                                </button>
+                                <button id="update-download-btn" class="btn-primary text-sm hidden">
+                                    <span class="material-icons text-sm">download</span>
+                                    Download Update
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Available state details -->
+                        <div id="update-available-info" class="mt-4 hidden">
+                            <div class="flex items-baseline gap-2">
+                                <span class="text-sm text-slate-400">Available:</span>
+                                <span id="update-available-version" class="text-sm font-mono text-cyan-300">--</span>
+                                <a id="update-release-link" href="#" target="_blank" rel="noopener" class="text-xs text-slate-400 hover:text-cyan-300 ml-2">
+                                    <span class="material-icons text-xs align-middle">open_in_new</span>
+                                    View release on GitHub
+                                </a>
+                            </div>
+                        </div>
+
+                        <!-- Download progress -->
+                        <div id="update-progress" class="mt-4 hidden">
+                            <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
+                                <span>Downloading…</span>
+                                <span id="update-progress-pct">0%</span>
+                            </div>
+                            <div class="h-2 bg-slate-700 rounded-full overflow-hidden">
+                                <div id="update-progress-bar" class="h-full bg-cyan-500 transition-all" style="width: 0%"></div>
+                            </div>
+                        </div>
+
+                        <!-- Last error -->
+                        <div id="update-error" class="mt-4 hidden p-3 rounded bg-red-900/40 border border-red-700 text-red-200 text-sm"></div>
+
+                        <!-- USB section -->
+                        <div id="update-usb-section" class="mt-6 pt-4 border-t border-slate-700">
+                            <div class="flex items-center justify-between mb-2">
+                                <h4 class="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                                    <span class="material-icons text-amber-400 text-base">usb</span>
+                                    Install from USB
+                                </h4>
+                                <button id="update-scan-usb-btn" class="text-xs text-slate-400 hover:text-cyan-300">
+                                    <span class="material-icons text-xs align-middle">refresh</span>
+                                    Scan
+                                </button>
+                            </div>
+                            <div id="update-usb-results" class="text-sm text-slate-400">
+                                No USB media scanned yet.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Install confirmation modal -->
+                <div id="update-install-modal" class="fixed inset-0 z-50 hidden">
+                    <div class="absolute inset-0 bg-black/70" onclick="updateManager.closeInstallModal()"></div>
+                    <div class="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
+                        <div class="card max-w-2xl w-full pointer-events-auto">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">Install Update</h3>
+                                <button onclick="updateManager.closeInstallModal()" class="text-slate-400 hover:text-white">
+                                    <span class="material-icons">close</span>
+                                </button>
+                            </div>
+                            <div class="mb-4">
+                                <div class="text-xs text-slate-500">Version</div>
+                                <div class="text-lg font-mono text-cyan-300" id="update-modal-version">--</div>
+                                <div id="update-modal-source" class="text-xs text-slate-500 mt-1"></div>
+                            </div>
+                            <div class="mb-4">
+                                <div class="text-xs text-slate-500 mb-1">Release notes</div>
+                                <div id="update-modal-notes" class="text-sm text-slate-300 bg-slate-900 border border-slate-700 rounded p-3 max-h-96 overflow-y-auto whitespace-pre-wrap font-mono">No release notes available.</div>
+                            </div>
+                            <div class="p-3 rounded bg-amber-900/30 border border-amber-700/50 text-xs text-amber-200 mb-4">
+                                <span class="material-icons text-sm align-middle">warning</span>
+                                The server will restart during installation (~60 seconds). The web interface will reconnect automatically.
+                            </div>
+                            <div class="flex items-center justify-end gap-3">
+                                <button onclick="updateManager.closeInstallModal()" class="btn-secondary">Cancel</button>
+                                <button id="update-modal-install-btn" onclick="updateManager.confirmInstall()" class="btn-primary">
+                                    <span class="material-icons text-sm">system_update</span>
+                                    Install
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Installing overlay -->
+                <div id="update-installing-overlay" class="fixed inset-0 z-50 hidden bg-black/80 flex items-center justify-center">
+                    <div class="text-center text-white">
+                        <div class="material-icons text-6xl text-cyan-400 mb-4 animate-spin">autorenew</div>
+                        <h3 class="text-xl font-semibold mb-2">Installing update…</h3>
+                        <p class="text-slate-400 mb-4">The server is restarting. This page will reload when it's back online.</p>
+                        <div class="text-sm text-slate-500" id="update-installing-detail">Waiting for server…</div>
+                    </div>
+                </div>
+
+                <!-- Interface Settings Tab -->
+                <div id="settings-panel-interface" class="settings-panel">
+                    <!-- Display Preferences -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-amber-400">thermostat</span>
+                            Temperature Display
+                        </h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Temperature Unit</label>
+                                <div class="flex items-center gap-4">
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="temp-unit" id="temp-unit-celsius" value="celsius" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500" checked>
+                                        <span class="text-sm text-slate-300">Celsius (°C)</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="temp-unit" id="temp-unit-fahrenheit" value="fahrenheit" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500">
+                                        <span class="text-sm text-slate-300">Fahrenheit (°F)</span>
+                                    </label>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1">How temperatures are displayed throughout the interface</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Theme Settings (placeholder for future) -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-purple-400">palette</span>
+                            Appearance
+                        </h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-2">Theme</label>
+                                <div class="flex items-center gap-4">
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="theme" value="dark" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500" checked>
+                                        <span class="text-sm text-slate-300">Dark</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer opacity-50">
+                                        <input type="radio" name="theme" value="light" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500" disabled>
+                                        <span class="text-sm text-slate-300">Light (coming soon)</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- LiveLink Settings Tab -->
+                <div id="settings-panel-livelink" class="settings-panel">
+                    <!-- LiveLink Connection -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-pink-400">face</span>
+                            LiveLink Receiver
+                        </h3>
+                        <p class="text-sm text-slate-400 mb-4">Receive face animation data from Unreal Engine LiveLink sources</p>
+                        <div class="space-y-4">
+                            <div class="flex items-center gap-3">
+                                <label class="relative inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" id="settings-livelink-enabled" class="sr-only peer">
+                                    <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600"></div>
+                                </label>
+                                <span class="text-sm font-medium text-slate-300">Enable LiveLink Receiver</span>
+                            </div>
+                            <div>
+                                <label for="settings-livelink-port" class="block text-sm font-medium text-slate-300 mb-1">UDP Port</label>
+                                <input type="number" id="settings-livelink-port" class="input-field w-32" min="1024" max="65535" value="11111">
+                                <p class="text-xs text-slate-500 mt-1">Port for receiving LiveLink packets (requires restart)</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- LiveLink Status -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-pink-400">monitoring</span>
+                            Status
+                        </h3>
+                        <div class="space-y-3">
+                            <div class="flex items-center justify-between py-2 border-b border-slate-700">
+                                <span class="text-sm text-slate-400">Connection</span>
+                                <span id="settings-livelink-status" class="text-sm text-slate-300">--</span>
+                            </div>
+                            <div class="flex items-center justify-between py-2 border-b border-slate-700">
+                                <span class="text-sm text-slate-400">Active Sources</span>
+                                <span id="settings-livelink-sources" class="text-sm text-slate-300">--</span>
+                            </div>
+                            <div class="flex items-center justify-between py-2">
+                                <span class="text-sm text-slate-400">Packets/sec</span>
+                                <span id="settings-livelink-rate" class="text-sm text-slate-300">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Firmware Settings Tab -->
+                <div id="settings-panel-firmware" class="settings-panel">
+                    <!-- RP2040 Firmware Section -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-cyan-400">memory</span>
+                            RP2040 Firmware
+                        </h3>
+                        <p class="text-sm text-slate-400 mb-4">Firmware for Feather RP2040 + Ethernet FeatherWing nodes</p>
+
+                        <div class="space-y-4">
+                            <!-- Simulation Build -->
+                            <div class="bg-slate-800/50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <span class="material-icons text-cyan-400">computer</span>
+                                        <h4 class="font-medium text-white">Simulation Build</h4>
+                                    </div>
+                                    <span id="settings-fw-sim-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
+                                        Checking...
+                                    </span>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1 ml-8">For Renode simulated nodes</p>
+                                <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                                    <div>
+                                        <span class="text-slate-500">Version:</span>
+                                        <span id="settings-fw-sim-version" class="text-white ml-2">--</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-slate-500">Build ID:</span>
+                                        <span id="settings-fw-sim-hash" class="text-white ml-2 font-mono text-xs">--</span>
+                                    </div>
+                                    <div class="col-span-2">
+                                        <span class="text-slate-500">Build Date:</span>
+                                        <span id="settings-fw-sim-build" class="text-white ml-2">--</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Hardware Build -->
+                            <div class="bg-slate-800/50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <span class="material-icons text-violet-400">developer_board</span>
+                                        <h4 class="font-medium text-white">Hardware Build</h4>
+                                    </div>
+                                    <span id="settings-fw-hw-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
+                                        Checking...
+                                    </span>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1 ml-8">For physical RP2040 devices</p>
+                                <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                                    <div>
+                                        <span class="text-slate-500">Version:</span>
+                                        <span id="settings-fw-hw-version" class="text-white ml-2">--</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-slate-500">Build ID:</span>
+                                        <span id="settings-fw-hw-hash" class="text-white ml-2 font-mono text-xs">--</span>
+                                    </div>
+                                    <div class="col-span-2">
+                                        <span class="text-slate-500">Build Date:</span>
+                                        <span id="settings-fw-hw-build" class="text-white ml-2">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Pi 5 Firmware Section -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-rose-400">memory</span>
+                            Raspberry Pi 5 Firmware
+                        </h3>
+                        <p class="text-sm text-slate-400 mb-4">Firmware for Raspberry Pi 5 nodes with GPIO control</p>
+
+                        <div class="space-y-4">
+                            <!-- Pi 5 Build -->
+                            <div class="bg-slate-800/50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <span class="material-icons text-rose-400">developer_board</span>
+                                        <h4 class="font-medium text-white">Production Build</h4>
+                                    </div>
+                                    <span id="settings-fw-rpi5-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
+                                        Checking...
+                                    </span>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1 ml-8">For Raspberry Pi 5 devices</p>
+                                <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                                    <div>
+                                        <span class="text-slate-500">Version:</span>
+                                        <span id="settings-fw-rpi5-version" class="text-white ml-2">--</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-slate-500">Package:</span>
+                                        <span id="settings-fw-rpi5-package" class="text-white ml-2 font-mono text-xs">--</span>
+                                    </div>
+                                    <div class="col-span-2">
+                                        <span class="text-slate-500">Build Date:</span>
+                                        <span id="settings-fw-rpi5-build" class="text-white ml-2">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Boards Settings Tab -->
+                <div id="settings-panel-boards" class="settings-panel">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+                                <span class="material-icons text-cyan-400">developer_board</span>
+                                Board Configurations
+                            </h3>
+                            <button id="boards-add-btn" class="btn-primary text-sm">
+                                <span class="material-icons icon-sm">add</span>
+                                New Board
+                            </button>
+                        </div>
+                        <p class="text-sm text-slate-400 mb-4">
+                            Pin layouts and built-in peripherals per board. Built-in entries ship
+                            with SAINT.OS and can be viewed but not edited. Operator-authored
+                            entries are stored as YAML under
+                            <code class="text-cyan-300">server/config/boards/&lt;chip&gt;/</code>
+                            and can be created, edited, or deleted from here.
+                        </p>
+                        <div id="boards-list" class="space-y-3">
+                            <p class="text-slate-500 text-sm italic">Loading…</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Board Editor / Viewer Modal -->
+            <div id="board-editor-modal" class="fixed inset-0 z-50 hidden">
+                <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                     onclick="boardsManager.closeEditor()"></div>
+                <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-3xl">
+                    <div class="card">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 id="board-editor-title" class="text-lg font-semibold text-white">Board</h3>
+                            <button onclick="boardsManager.closeEditor()" class="text-slate-400 hover:text-white">
+                                <span class="material-icons md-20">close</span>
+                            </button>
+                        </div>
+                        <p id="board-editor-help" class="text-xs text-slate-500 mb-2">
+                            Edit the YAML directly. Required keys:
+                            <code>board_id</code>, <code>display_name</code>,
+                            <code>chip_family</code>. Lists:
+                            <code>available_pins</code>, <code>reserved_pins</code>,
+                            <code>builtin_peripherals</code>.
+                        </p>
+                        <textarea id="board-editor-yaml"
+                                  class="input-field w-full font-mono text-xs"
+                                  style="min-height: 50vh;"
+                                  spellcheck="false"></textarea>
+                        <div id="board-editor-error"
+                             class="hidden mt-2 p-2 rounded bg-red-900/40 border border-red-700 text-red-200 text-xs"></div>
+                        <div class="flex justify-end gap-2 mt-4">
+                            <button onclick="boardsManager.closeEditor()" class="btn-secondary">Close</button>
+                            <button id="board-editor-save-btn" onclick="boardsManager.saveEditor()" class="btn-primary">Save</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Terminal Page -->
+            <section id="page-terminal" class="page">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-2xl font-bold text-white">Terminal</h2>
+                    <div class="flex items-center gap-3">
+                        <span id="terminal-status" class="text-xs text-slate-400">Not connected</span>
+                        <button id="terminal-restart-btn" class="btn-secondary text-sm hidden">
+                            <span class="material-icons text-sm">refresh</span>
+                            Restart shell
+                        </button>
+                    </div>
+                </div>
+                <p class="text-sm text-slate-400 mb-3">
+                    Shell runs as the <code class="text-cyan-300">saint</code> user. Use
+                    <code class="text-cyan-300">sudo</code> for privileged operations
+                    (e.g., <code class="text-cyan-300">sudo systemctl status saint-os</code>).
+                    Every command is logged to journald: <code class="text-cyan-300">journalctl -t saint-os-terminal -f</code>.
+                </p>
+                <div id="terminal-mount" class="rounded border border-slate-700 bg-black p-2" style="height: 70vh;"></div>
+            </section>
+
+            <!-- Logs Page -->
+            <section id="page-logs" class="page">
+                <h2 class="text-2xl font-bold text-white mb-6">System Logs</h2>
+
+                <div class="card">
+                    <div class="flex flex-col sm:flex-row gap-4 mb-4">
+                        <select id="log-level" class="input-field w-full sm:w-48">
+                            <option value="all">All Levels</option>
+                            <option value="debug">Debug</option>
+                            <option value="info">Info</option>
+                            <option value="warn">Warning</option>
+                            <option value="error">Error</option>
+                        </select>
+                        <input type="text" id="log-search" placeholder="Search logs..." class="input-field flex-1">
+                    </div>
+                    <div id="log-entries" class="log-container h-96 overflow-y-auto space-y-1 font-mono text-sm">
+                        <p class="text-slate-500">Loading logs...</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="border-t border-slate-800 bg-slate-900/50">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+                <div class="flex items-center justify-between text-sm text-slate-500">
+                    <span>
+                        SAINT.OS v<span id="version">0.5.0</span>
+                        <span id="version-hash" class="ml-2 font-mono text-xs text-slate-600"></span>
+                    </span>
+                    <span>System for Articulated Intelligence and Navigation Tasks</span>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Component styles (plain CSS for reliability) -->
+    <style>
+        /* Navigation */
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #94a3b8;
+            border-radius: 0.5rem;
+            transition: all 0.2s;
+            border-bottom: 2px solid transparent;
+        }
+        .nav-link:hover {
+            color: white;
+            background-color: rgba(51, 65, 85, 0.5);
+        }
+        .nav-link.active {
+            color: #22d3ee;
+            background-color: rgba(30, 41, 59, 0.5);
+            border-bottom-color: #22d3ee;
+        }
+
+        /* Settings Sub-tabs */
+        .settings-tab {
+            display: flex;
+            align-items: center;
+            gap: 0.375rem;
+            padding: 0.625rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #94a3b8;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            margin-bottom: -1px;
+        }
+        .settings-tab:hover {
+            color: white;
+            background-color: rgba(51, 65, 85, 0.3);
+        }
+        .settings-tab.active {
+            color: #22d3ee;
+            border-bottom-color: #22d3ee;
+        }
+        .settings-panel {
+            display: none;
+        }
+        .settings-panel.active {
+            display: block;
+            animation: fadeIn 0.2s ease-out;
+        }
+
+        /* Cards */
+        .card {
+            background-color: rgba(30, 41, 59, 0.5);
+            border-radius: 0.75rem;
+            border: 1px solid rgba(51, 65, 85, 0.5);
+            padding: 1.5rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(4px);
+        }
+
+        /* Buttons */
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            background-color: #0891b2;
+            color: white;
+            border-radius: 0.5rem;
+            transition: all 0.2s;
+            box-shadow: 0 10px 15px -3px rgba(6, 182, 212, 0.2);
+        }
+        .btn-primary:hover {
+            background-color: #06b6d4;
+        }
+
+        .btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            background-color: #334155;
+            color: #e2e8f0;
+            border-radius: 0.5rem;
+            transition: all 0.2s;
+            border: 1px solid #475569;
+        }
+        .btn-secondary:hover {
+            background-color: #475569;
+        }
+
+        .btn-danger {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            background-color: #dc2626;
+            color: white;
+            border-radius: 0.5rem;
+            transition: all 0.2s;
+            box-shadow: 0 10px 15px -3px rgba(239, 68, 68, 0.2);
+        }
+        .btn-danger:hover {
+            background-color: #ef4444;
+        }
+
+        .btn-sm {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.375rem;
+            padding: 0.375rem 0.75rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            border-radius: 0.375rem;
+            transition: all 0.2s;
+        }
+
+        /* Stats */
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+        .stat-label {
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .stat-value {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: white;
+        }
+
+        /* Form elements */
+        .input-field {
+            background-color: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 0.5rem;
+            padding: 0.5rem 1rem;
+            color: #e2e8f0;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+        .input-field:focus {
+            outline: none;
+            box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.5);
+            border-color: #06b6d4;
+        }
+
+        /* Node cards */
+        .node-card {
+            background-color: #1e293b;
+            border-radius: 0.5rem;
+            border: 1px solid #334155;
+            padding: 1rem;
+            transition: border-color 0.2s;
+        }
+        .node-card:hover {
+            border-color: #475569;
+        }
+        /* Ensure buttons inside node cards capture hover properly */
+        .node-card button {
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Log entries */
+        .log-entry {
+            padding: 0.375rem 0.75rem;
+            border-radius: 0.25rem;
+            color: #cbd5e1;
+        }
+        .log-entry.info {
+            background-color: rgba(30, 41, 59, 0.5);
+            border-left: 2px solid #06b6d4;
+        }
+        .log-entry.warn {
+            background-color: rgba(120, 53, 15, 0.2);
+            border-left: 2px solid #f59e0b;
+            color: #fcd34d;
+        }
+        .log-entry.error {
+            background-color: rgba(127, 29, 29, 0.2);
+            border-left: 2px solid #ef4444;
+            color: #fca5a5;
+        }
+        .log-entry.debug {
+            background-color: rgba(30, 41, 59, 0.3);
+            border-left: 2px solid #475569;
+            color: #94a3b8;
+        }
+
+        /* Pin Config */
+        .pin-card {
+            background-color: #1e293b;
+            border-radius: 0.5rem;
+            border: 1px solid #334155;
+            padding: 0.75rem;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .pin-card:hover {
+            border-color: #475569;
+        }
+        .pin-card.configured {
+            border-color: rgba(6, 182, 212, 0.5);
+            background-color: rgba(30, 41, 59, 0.8);
+        }
+        .pin-card.required-missing {
+            border-color: rgba(245, 158, 11, 0.5);
+            background-color: rgba(120, 53, 15, 0.1);
+        }
+
+        .function-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            background-color: rgba(15, 23, 42, 0.5);
+            border: 1px solid rgba(51, 65, 85, 0.5);
+        }
+        .function-item.required {
+            border-left: 2px solid #06b6d4;
+        }
+        .function-item.assigned {
+            border-color: rgba(16, 185, 129, 0.5);
+            background-color: rgba(6, 78, 59, 0.1);
+        }
+
+        /* Node Detail Tabs */
+        .node-tab {
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #94a3b8;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            background: none;
+            border-top: none;
+            border-left: none;
+            border-right: none;
+            cursor: pointer;
+        }
+        .node-tab:hover {
+            color: white;
+        }
+        .node-tab.active {
+            color: #22d3ee;
+            border-bottom-color: #22d3ee;
+        }
+        .node-tab-content {
+            display: block;
+        }
+        .node-tab-content.hidden {
+            display: none;
+        }
+
+        /* Control Page Sub-tabs */
+        .control-tab {
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #94a3b8;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            background: none;
+            border-top: none;
+            border-left: none;
+            border-right: none;
+            cursor: pointer;
+        }
+        .control-tab:hover {
+            color: white;
+        }
+        .control-tab.active {
+            color: #22d3ee;
+            border-bottom-color: #22d3ee;
+        }
+        .control-tab-content {
+            display: block;
+        }
+        .control-tab-content.hidden {
+            display: none;
+        }
+
+        /* Mood list item */
+        .mood-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem;
+            background: rgba(30, 41, 59, 0.5);
+            border: 1px solid #334155;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .mood-item:hover {
+            background: rgba(30, 41, 59, 0.8);
+            border-color: #475569;
+        }
+        .mood-item.selected {
+            background: rgba(6, 182, 212, 0.1);
+            border-color: #22d3ee;
+        }
+        .mood-property {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #334155;
+        }
+        .mood-property:last-child {
+            border-bottom: none;
+        }
+
+        /* Pin Control Sliders */
+        .pin-slider {
+            -webkit-appearance: none;
+            appearance: none;
+            height: 8px;
+            border-radius: 4px;
+            background: #334155;
+            cursor: pointer;
+        }
+        .pin-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #22d3ee;
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+            transition: transform 0.15s;
+        }
+        .pin-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.1);
+        }
+        .pin-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #22d3ee;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+        }
+        .pin-slider:focus {
+            outline: none;
+        }
+        .pin-slider:focus::-webkit-slider-thumb {
+            box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.3);
+        }
+
+        .servo-slider::-webkit-slider-thumb {
+            background: #8b5cf6;
+        }
+        .servo-slider::-moz-range-thumb {
+            background: #8b5cf6;
+        }
+        .servo-slider:focus::-webkit-slider-thumb {
+            box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.3);
+        }
+
+        /* Digital Toggle Button */
+        .digital-toggle {
+            cursor: pointer;
+        }
+        .digital-toggle:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.3);
+        }
+
+        /* Control Section Animation */
+        .control-item {
+            transition: all 0.2s ease;
+        }
+        .control-item:hover {
+            border-color: rgba(51, 65, 85, 0.8);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        /* ADC Bar Animation */
+        .adc-bar {
+            transition: width 0.1s ease-out;
+        }
+
+        /* Virtual Stick Visualization */
+        .stick-container {
+            position: relative;
+            width: 120px;
+            height: 120px;
+            background: #0f172a;
+            border-radius: 50%;
+            border: 2px solid #334155;
+        }
+        .stick-container.active {
+            border-color: #22d3ee;
+        }
+        .stick-knob {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background: #475569;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            transition: all 0.05s ease-out;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        .stick-knob.active {
+            background: #22d3ee;
+        }
+        .stick-crosshair {
+            position: absolute;
+            background: #334155;
+        }
+        .stick-crosshair.horizontal {
+            width: 100%;
+            height: 1px;
+            top: 50%;
+            left: 0;
+        }
+        .stick-crosshair.vertical {
+            width: 1px;
+            height: 100%;
+            top: 0;
+            left: 50%;
+        }
+        .stick-label {
+            position: absolute;
+            font-size: 10px;
+            color: #64748b;
+        }
+        .stick-label.top { top: 4px; left: 50%; transform: translateX(-50%); }
+        .stick-label.bottom { bottom: 4px; left: 50%; transform: translateX(-50%); }
+        .stick-label.left { left: 4px; top: 50%; transform: translateY(-50%); }
+        .stick-label.right { right: 4px; top: 50%; transform: translateY(-50%); }
+
+        /* Track Drive Control */
+        .track-stick-container {
+            position: relative;
+            width: 140px;
+            height: 140px;
+            background: #0f172a;
+            border-radius: 50%;
+            border: 2px solid #334155;
+            cursor: pointer;
+        }
+        .track-stick-container.active {
+            border-color: #22d3ee;
+        }
+        .track-stick-knob {
+            position: absolute;
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #475569, #334155);
+            border-radius: 50%;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            transition: left 0.05s ease-out, top 0.05s ease-out;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(255,255,255,0.1);
+        }
+        .track-stick-knob.active {
+            background: linear-gradient(135deg, #22d3ee, #0891b2);
+            transition: none;
+        }
+        .track-stick-crosshair {
+            position: absolute;
+            background: #334155;
+        }
+        .track-stick-crosshair.horizontal {
+            width: 100%;
+            height: 1px;
+            top: 50%;
+            left: 0;
+        }
+        .track-stick-crosshair.vertical {
+            width: 1px;
+            height: 100%;
+            top: 0;
+            left: 50%;
+        }
+        .track-bar-fill {
+            transition: height 0.075s ease-out, background-color 0.1s;
+        }
+
+        /* Control Node Panel */
+        .control-node-panel {
+            transition: all 0.2s ease;
+        }
+        .control-node-content {
+            animation: slideDown 0.2s ease-out;
+        }
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Stale/Offline indicator */
+        .control-item.opacity-60 {
+            opacity: 0.6;
+            pointer-events: auto;
+        }
+
+        /* Sync indicator pulse */
+        .pin-sync-indicator.animate-pulse {
+            animation: syncPulse 1s ease-in-out infinite;
+        }
+        @keyframes syncPulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.6; transform: scale(1.2); }
+        }
+
+        /* LiveLink blend shape items */
+        .blend-shape-item {
+            transition: all 0.15s ease;
+        }
+        .blend-shape-item:hover {
+            background-color: rgba(30, 41, 59, 0.8);
+            border-color: rgba(71, 85, 105, 0.8);
+        }
+
+        /* Telemetry widgets */
+        .telemetry-accent-bar {
+            height: 2px;
+            border-radius: 1px;
+            opacity: 0.6;
+        }
+        .telemetry-bar {
+            height: 100%;
+            border-radius: 9999px;
+            transition: width 0.5s ease;
+        }
+        .telemetry-temp-green { color: #34d399; }
+        .telemetry-temp-amber { color: #fbbf24; }
+        .telemetry-temp-red { color: #f87171; }
+        .servo-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.5rem;
+        }
+        .servo-indicator {
+            background-color: rgba(15, 23, 42, 0.5);
+            border: 1px solid rgba(51, 65, 85, 0.5);
+            border-radius: 0.375rem;
+            padding: 0.375rem 0.5rem;
+            text-align: center;
+        }
+        .servo-indicator .servo-label {
+            font-size: 0.625rem;
+            font-weight: 500;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .servo-indicator .servo-value {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: white;
+            margin-top: 0.125rem;
+        }
+        .servo-bar-track {
+            height: 3px;
+            background-color: #334155;
+            border-radius: 2px;
+            margin-top: 0.25rem;
+            overflow: hidden;
+        }
+        .servo-bar-fill {
+            height: 100%;
+            background-color: #a78bfa;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+
+        /* Eye visualization */
+        #eye-left-pupil, #eye-right-pupil {
+            box-shadow: 0 0 15px rgba(34, 211, 238, 0.5);
+        }
+
+        /* Head pose visualization */
+        #head-shape {
+            box-shadow: 0 0 20px rgba(34, 211, 238, 0.2);
+        }
+
+        /* Routing graph editor — see js/routing.js
+           ──────────────────────────────────────────
+           The routing page wants the entire viewport under the nav. When
+           it's active, body.routing-fullwidth (toggled by app.js) makes
+           main shed its max-width and padding so the sheet UI fills the
+           window. */
+        body.routing-fullwidth main {
+            max-width: none !important;
+            padding: 0 !important;
+        }
+        .routing-page {
+            /* Fill all available height under the nav bar. */
+            height: calc(100vh - 6.5rem);
+            min-height: 32rem;
+        }
+        body.routing-fullwidth .routing-page {
+            height: calc(100vh - 6.5rem);
+        }
+        .routing-shell {
+            display: flex; height: 100%; gap: 0;
+            border-top: 1px solid #1e293b;
+        }
+        .routing-sidebar {
+            width: 14rem; min-width: 12rem; flex-shrink: 0;
+            background: #0f172a; border-right: 1px solid #1e293b;
+            display: flex; flex-direction: column;
+        }
+        .routing-sidebar-header {
+            padding: 0.75rem 1rem; border-bottom: 1px solid #1e293b;
+        }
+        .routing-sheet-list {
+            flex: 1; overflow-y: auto; padding: 0.5rem;
+        }
+        .routing-sheet-item {
+            display: flex; align-items: center; gap: 0.5rem;
+            padding: 0.5rem 0.75rem; border-radius: 0.375rem;
+            font-size: 0.8rem; color: #cbd5e1; cursor: pointer;
+            border: 1px solid transparent;
+        }
+        .routing-sheet-item:hover { background: #1e293b; }
+        .routing-sheet-item.active {
+            background: #0f4c5c; border-color: #06b6d4; color: #fff;
+        }
+        .routing-sheet-item .material-icons { font-size: 16px; color: #64748b; }
+        .routing-sheet-item.active .material-icons { color: #67e8f9; }
+        /* Orphan sheets — persisted but no adopted owner. Dimmed so
+           they don't compete with live sheets, but still selectable. */
+        .routing-sheet-item.orphan { color: #94a3b8; font-style: italic; }
+        .routing-sheet-item.orphan .material-icons { color: #475569; }
+        .routing-sheet-count {
+            margin-left: auto; font-size: 0.65rem; color: #64748b;
+        }
+        .routing-main {
+            flex: 1; display: flex; flex-direction: column; min-width: 0;
+        }
+        .routing-toolbar {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 1rem; padding: 0.75rem 1rem;
+            border-bottom: 1px solid #1e293b; background: #0f172a;
+        }
+        .routing-canvas {
+            position: relative; flex: 1; min-height: 0;
+            background:
+                radial-gradient(circle at 1px 1px, #334155 1px, transparent 1px) 0 0 / 24px 24px,
+                #0b1220;
+            overflow: auto;
+            user-select: none;
+        }
+        .routing-empty {
+            position: absolute; inset: 0;
+            display: flex; align-items: center; justify-content: center;
+            pointer-events: none;
+        }
+        /* Tailwind's `.hidden { display: none }` is defined earlier in
+           the cascade than `.routing-empty` so without this override the
+           flex layout wins and the placeholder stays painted on top of
+           the canvas even when sheets are present. */
+        .routing-empty.hidden { display: none; }
+        .routing-canvas svg.routing-wires {
+            position: absolute; inset: 0; pointer-events: none;
+            z-index: 1; width: 100%; height: 100%; overflow: visible;
+        }
+        .routing-canvas svg.routing-wires path { pointer-events: stroke; cursor: pointer; }
+        .routing-canvas svg.routing-wires path:hover { stroke: #f87171 !important; }
+        .routing-node {
+            position: absolute; min-width: 200px;
+            background: #1e293b; border: 1px solid #475569; border-radius: 0.5rem;
+            z-index: 2; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
+        .routing-node.dragging { z-index: 10; opacity: 0.9; }
+        .routing-node-header {
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid #334155;
+            font-size: 0.75rem; font-weight: 600;
+            cursor: move; display: flex; align-items: center;
+            justify-content: space-between; gap: 0.25rem;
+        }
+        .routing-node-kind { font-size: 0.65rem; color: #94a3b8; font-weight: 400; }
+        .routing-node-body { padding: 0.25rem 0; }
+        .routing-pin-row {
+            display: flex; align-items: center; padding: 0.2rem 0.5rem;
+            font-size: 0.7rem; gap: 0.35rem; position: relative;
+        }
+        .routing-pin-row.input  { justify-content: flex-start; }
+        .routing-pin-row.output { justify-content: flex-end; }
+        .routing-pin {
+            width: 12px; height: 12px; border-radius: 50%;
+            background: #475569; border: 2px solid #1e293b;
+            cursor: pointer; position: absolute;
+            top: 50%; transform: translateY(-50%);
+        }
+        .routing-pin-row.input  .routing-pin { left: -6px; }
+        .routing-pin-row.output .routing-pin { right: -6px; }
+        .routing-pin.dir-in  { background: #06b6d4; }
+        .routing-pin.dir-out { background: #f59e0b; }
+        .routing-pin:hover    { transform: translateY(-50%) scale(1.3); }
+        .routing-pin.connecting { background: #34d399; box-shadow: 0 0 8px #34d399; }
+        .routing-pin-label-in  { margin-left: 0.75rem; color: #cbd5e1; }
+        .routing-pin-label-out { margin-right: 0.75rem; color: #cbd5e1; }
+        .routing-pin-default {
+            margin-left: auto; width: 60px;
+            background: #0b1220; border: 1px solid #334155;
+            color: #cbd5e1; font-size: 0.65rem; padding: 1px 4px;
+            border-radius: 0.25rem; text-align: right;
+        }
+        .routing-pin-default:focus { outline: 1px solid #06b6d4; }
+        /* Live value pill — populated by routing.js from `routing_values`. */
+        .routing-pin-value {
+            margin: 0 0.35rem; min-width: 2.5rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.65rem;
+            color: #34d399;
+            text-align: right;
+        }
+        .routing-pin-row.output .routing-pin-value { margin-left: auto; }
+        .routing-pin-row.input  .routing-pin-value { margin-left: auto; margin-right: 0.35rem; }
+        .routing-node[data-kind="input"]      .routing-node-header { background: #1e3a4a; color: #67e8f9; }
+        .routing-node[data-kind="ws_input"]   .routing-node-header { background: #14532d; color: #86efac; }
+        .routing-node[data-kind="output"]     .routing-node-header { background: #4a1e1e; color: #fda4af; }
+        .routing-node[data-kind="operator"]   .routing-node-header { background: #2e1e4a; color: #c4b5fd; }
+        .routing-node[data-kind="peripheral"] .routing-node-header { background: #0f4c5c; }
+        .routing-node[data-kind="widget"]     .routing-node-header { background: #5c4a0f; }
+        .routing-node[data-builtin="true"]    .routing-node-header { background: #1e3a4a; }
+    </style>
+
+    <script src="js/lib/xterm/xterm.js"></script>
+    <script src="js/lib/xterm/addon-fit.js"></script>
+    <script src="js/websocket.js"></script>
+    <script src="js/peripherals.js"></script>
+    <script src="js/nodelogs.js"></script>
+    <script src="js/nodelive.js"></script>
+    <script src="js/routing.js"></script>
+    <script src="js/widgets.js"></script>
+    <script src="js/boards.js"></script>
+    <script src="js/pincontrol.js"></script>
+    <script src="js/controlpage.js"></script>
+    <script src="js/statecontrols.js"></script>
+    <script src="js/moods.js"></script>
+    <script src="js/livelink.js"></script>
+    <script src="js/updates.js"></script>
+    <script src="js/terminal.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

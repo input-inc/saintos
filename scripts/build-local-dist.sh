@@ -23,7 +23,7 @@
 #   --fetch-firmware      Pull the latest CI firmware artifacts from GitHub via `gh`
 #                         instead of building locally (requires `gh auth login`)
 #   --skip-firmware-build Use whatever firmware is already staged under
-#                         saint_os/resources/firmware/ — fastest server-only iteration
+#                         server/resources/firmware/ — fastest server-only iteration
 #   --skip-firmware       Don't stage any firmware (smallest tarball, server-only)
 #   --clean               Remove the local build dirs (_ros2/, _debs/, install/) first
 #   -h, --help            Show this help
@@ -102,13 +102,13 @@ log "Building version: ${VERSION}"
 if (( CLEAN )); then
     log "Cleaning local build artifacts"
     # Top-level extract / colcon outputs / staged firmware
-    rm -rf _ros2 _debs install build dist saint_os/resources/firmware
+    rm -rf _ros2 _debs install build dist server/resources/firmware
     # Per-firmware build dirs (CMake out-of-source trees). Incremental
     # builds normally keep these between runs; --clean is the only path
     # that wipes them.
-    rm -rf saint_os/firmware/rp2040/build
-    rm -rf saint_os/firmware/teensy41/.pio
-    rm -rf saint_os/firmware/rpi5/dist
+    rm -rf firmware/rp2040/build
+    rm -rf firmware/teensy41/.pio
+    rm -rf firmware/rpi5/dist
 fi
 
 # colcon `build/` and `install/` at the repo root persist between runs
@@ -176,7 +176,7 @@ fi
 # (omit firmware entirely).
 
 build_firmware_rp2040() {
-    if [[ ! -x "saint_os/firmware/rp2040/build.sh" ]]; then
+    if [[ ! -x "firmware/rp2040/build.sh" ]]; then
         warn "RP2040 build script missing — skipping"
         return
     fi
@@ -191,80 +191,80 @@ build_firmware_rp2040() {
     # could leave stale state — but cmake is robust to re-running on an
     # existing tree, and our config (-DSIMULATION + -DSAINT_OS_OTA_BOOTLOADER)
     # doesn't change run-to-run unless someone edits this script.
-    ( cd saint_os/firmware/rp2040 \
+    ( cd firmware/rp2040 \
         && mkdir -p build && cd build \
         && cmake -DSIMULATION=OFF -DSAINT_OS_OTA_BOOTLOADER=ON .. > /dev/null \
         && make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
                saint_node saint_ota_bootloader saint_node_combined ) \
         || { warn "RP2040 firmware build failed — leaving existing staged files"; return; }
 
-    local fw_out=saint_os/firmware/rp2040/build
-    local fw_bl=saint_os/firmware/rp2040/build/bootloader
+    local fw_out=firmware/rp2040/build
+    local fw_bl=firmware/rp2040/build/bootloader
 
     if [[ ! -f "${fw_out}/saint_node.uf2" ]]; then
         warn "RP2040 build produced no saint_node.uf2 — staged files unchanged"
         return
     fi
-    mkdir -p saint_os/resources/firmware/rp2040
+    mkdir -p server/resources/firmware/rp2040
     # App artifacts: .uf2 (legacy first-flash), .elf (debug), .bin (OTA fetch).
     find "${fw_out}" -maxdepth 1 -type f \
         \( -name 'saint_node.uf2' -o -name 'saint_node.elf' -o -name 'saint_node.bin' \) \
-        -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+        -exec cp -v {} server/resources/firmware/rp2040/ \;
     # Combined .uf2 = bootloader + app, for first-time BOOTSEL flash.
     if [[ -f "${fw_out}/saint_node_combined.uf2" ]]; then
         cp -v "${fw_out}/saint_node_combined.uf2" \
-            saint_os/resources/firmware/rp2040/
+            server/resources/firmware/rp2040/
     fi
     # Bootloader-only .uf2, for ad-hoc bootloader reflashing.
     if [[ -f "${fw_bl}/saint_ota_bootloader.uf2" ]]; then
         cp -v "${fw_bl}/saint_ota_bootloader.uf2" \
-            saint_os/resources/firmware/rp2040/
+            server/resources/firmware/rp2040/
     fi
     # version.h carries FIRMWARE_VERSION_STRING / FIRMWARE_VERSION_FULL /
     # FIRMWARE_GIT_HASH / FIRMWARE_BUILD_TIMESTAMP. The server reads it
     # to display the build version + decide whether an update is needed.
     if [[ -f "${fw_out}/generated/version.h" ]]; then
-        mkdir -p saint_os/resources/firmware/rp2040/generated
+        mkdir -p server/resources/firmware/rp2040/generated
         cp -v "${fw_out}/generated/version.h" \
-            saint_os/resources/firmware/rp2040/generated/version.h
+            server/resources/firmware/rp2040/generated/version.h
     fi
 }
 
 build_firmware_teensy41() {
-    if [[ ! -x "saint_os/firmware/teensy41/build.sh" ]]; then
+    if [[ ! -x "firmware/teensy41/build.sh" ]]; then
         warn "Teensy build script missing — skipping"
         return
     fi
     log "Building Teensy 4.1 hardware firmware (best-effort; needs PlatformIO + binutils)"
-    if ! ( cd saint_os/firmware/teensy41 && ./build.sh hw 2>&1 ); then
+    if ! ( cd firmware/teensy41 && ./build.sh hw 2>&1 ); then
         warn "Teensy firmware build failed — leaving existing staged files (run 'brew install binutils' if missing)"
         return
     fi
-    local hex=saint_os/firmware/teensy41/.pio/build/hardware/firmware.hex
+    local hex=firmware/teensy41/.pio/build/hardware/firmware.hex
     if [[ -f "$hex" ]]; then
-        mkdir -p saint_os/resources/firmware/teensy41
-        cp -v "$hex" saint_os/resources/firmware/teensy41/
+        mkdir -p server/resources/firmware/teensy41
+        cp -v "$hex" server/resources/firmware/teensy41/
     fi
 }
 
 build_firmware_rpi5() {
-    local pkg=saint_os/firmware/rpi5/scripts/package.sh
+    local pkg=firmware/rpi5/scripts/package.sh
     if [[ ! -x "$pkg" ]]; then
         warn "Pi5 package script missing — skipping"
         return
     fi
     log "Packaging Pi5 firmware"
-    ( cd saint_os/firmware/rpi5/scripts && ./package.sh "${VERSION}" ) \
+    ( cd firmware/rpi5/scripts && ./package.sh "${VERSION}" ) \
         || { warn "Pi5 firmware package failed — leaving existing staged files"; return; }
-    if [[ -d saint_os/firmware/rpi5/dist ]]; then
-        mkdir -p saint_os/resources/firmware/rpi5
-        cp -rv saint_os/firmware/rpi5/dist/. saint_os/resources/firmware/rpi5/
+    if [[ -d firmware/rpi5/dist ]]; then
+        mkdir -p server/resources/firmware/rpi5
+        cp -rv firmware/rpi5/dist/. server/resources/firmware/rpi5/
     fi
 }
 
 if (( SKIP_FIRMWARE )); then
     log "Skipping firmware staging (--skip-firmware)"
-    rm -rf saint_os/resources/firmware/*
+    rm -rf server/resources/firmware/*
 elif (( FETCH_FIRMWARE )); then
     command -v gh >/dev/null || die "--fetch-firmware needs the gh CLI"
     log "Fetching latest CI firmware artifacts from main"
@@ -276,15 +276,15 @@ elif (( FETCH_FIRMWARE )); then
     log "Using run ${RUN_ID}"
     gh run download "$RUN_ID" --dir _fw \
         --name firmware-rp2040 --name firmware-teensy41 --name firmware-rpi5
-    mkdir -p saint_os/resources/firmware/{rp2040,teensy41,rpi5}
+    mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5}
     [[ -d _fw/firmware-rp2040 ]] && find _fw/firmware-rp2040 -type f \
         \( -name '*.uf2' -o -name '*.elf' \) \
-        -exec cp {} saint_os/resources/firmware/rp2040/ \;
+        -exec cp {} server/resources/firmware/rp2040/ \;
     [[ -d _fw/firmware-teensy41 ]] && find _fw/firmware-teensy41 -type f \
-        -name '*.hex' -exec cp {} saint_os/resources/firmware/teensy41/ \;
-    [[ -d _fw/firmware-rpi5 ]] && cp -r _fw/firmware-rpi5/. saint_os/resources/firmware/rpi5/
+        -name '*.hex' -exec cp {} server/resources/firmware/teensy41/ \;
+    [[ -d _fw/firmware-rpi5 ]] && cp -r _fw/firmware-rpi5/. server/resources/firmware/rpi5/
 elif (( SKIP_FIRMWARE_BUILD )); then
-    log "Using existing saint_os/resources/firmware/ (--skip-firmware-build)"
+    log "Using existing server/resources/firmware/ (--skip-firmware-build)"
 else
     log "Building firmware locally so the server tarball contains the latest"
     build_firmware_rp2040

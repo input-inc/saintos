@@ -74,16 +74,16 @@ jobs:
         env:
           PICO_SDK_PATH: /home/runner/pico-sdk
         run: |
-          cd saint_os/firmware/rp2040
+          cd firmware/rp2040
           ./build.sh hw
 
       - uses: actions/upload-artifact@v6
         with:
           name: firmware-rp2040
           path: |
-            saint_os/firmware/rp2040/build/*.uf2
-            saint_os/firmware/rp2040/build/*.elf
-            saint_os/firmware/rp2040/build/generated/version.h
+            firmware/rp2040/build/*.uf2
+            firmware/rp2040/build/*.elf
+            firmware/rp2040/build/generated/version.h
           if-no-files-found: error
           retention-days: 30
 
@@ -104,7 +104,7 @@ jobs:
             ~/.platformio/packages
             ~/.platformio/platforms
             ~/.platformio/penv
-          key: pio-${{ hashFiles('saint_os/firmware/teensy41/platformio.ini') }}
+          key: pio-${{ hashFiles('firmware/teensy41/platformio.ini') }}
           restore-keys: pio-
 
       # micro_ros_platformio's build script sources ~/.platformio/penv/bin/activate,
@@ -121,13 +121,13 @@ jobs:
 
       - name: Build firmware (hardware)
         run: |
-          cd saint_os/firmware/teensy41
+          cd firmware/teensy41
           pio run -e hardware
 
       - uses: actions/upload-artifact@v6
         with:
           name: firmware-teensy41
-          path: saint_os/firmware/teensy41/.pio/build/hardware/firmware.hex
+          path: firmware/teensy41/.pio/build/hardware/firmware.hex
           if-no-files-found: error
           retention-days: 30
 
@@ -140,13 +140,13 @@ jobs:
 
       - name: Package Pi 5 node firmware
         run: |
-          cd saint_os/firmware/rpi5/scripts
+          cd firmware/rpi5/scripts
           ./package.sh "${{ needs.meta.outputs.version }}"
 
       - uses: actions/upload-artifact@v6
         with:
           name: firmware-rpi5
-          path: saint_os/firmware/rpi5/dist/
+          path: firmware/rpi5/dist/
           if-no-files-found: error
           retention-days: 30
 
@@ -218,26 +218,26 @@ jobs:
       - name: Stage firmware into resources
         run: |
           set -eo pipefail
-          mkdir -p saint_os/resources/firmware/{rp2040,teensy41,rpi5}
+          mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5}
           if [[ -d _fw/firmware-rp2040 ]]; then
             find _fw/firmware-rp2040 -type f \( -name '*.uf2' -o -name '*.elf' \) \
-              -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+              -exec cp -v {} server/resources/firmware/rp2040/ \;
             # version.h sits alongside the artifacts in the build dir;
             # the upload artifact preserves its `generated/` subpath.
             if [[ -f _fw/firmware-rp2040/generated/version.h ]]; then
-              mkdir -p saint_os/resources/firmware/rp2040/generated
+              mkdir -p server/resources/firmware/rp2040/generated
               cp -v _fw/firmware-rp2040/generated/version.h \
-                saint_os/resources/firmware/rp2040/generated/version.h
+                server/resources/firmware/rp2040/generated/version.h
             fi
           fi
           if [[ -d _fw/firmware-teensy41 ]]; then
             find _fw/firmware-teensy41 -type f -name '*.hex' \
-              -exec cp -v {} saint_os/resources/firmware/teensy41/ \;
+              -exec cp -v {} server/resources/firmware/teensy41/ \;
           fi
           if [[ -d _fw/firmware-rpi5 ]]; then
-            cp -rv _fw/firmware-rpi5/. saint_os/resources/firmware/rpi5/
+            cp -rv _fw/firmware-rpi5/. server/resources/firmware/rpi5/
           fi
-          ls -la saint_os/resources/firmware/*/
+          ls -la server/resources/firmware/*/
 
       # ------------------------------------------------------------------------
       # Download all runtime apt deps as .deb files into _debs/ so the dist

@@ -8,7 +8,7 @@ It assumes:
 - At least one peripheral node (RP2040 / Teensy / Pi-5) has been adopted
   and has a peripheral installed — e.g. a RoboClaw motor controller, a
   servo, a NeoPixel. If you haven't done that yet, see
-  [`saint_os/docs/SERVER_GUIDE.md`](../../saint_os/docs/SERVER_GUIDE.md).
+  [`server/docs/SERVER_GUIDE.md`](../../server/docs/SERVER_GUIDE.md).
 - The controller Flatpak is installed on the Deck (see
   [`../README.md`](../README.md)).
 
@@ -209,6 +209,6 @@ shared with another operator. The format is documented at the top of
 
 - [`BINDINGS_SYSTEM.md`](BINDINGS_SYSTEM.md) — full data model
   (input sources, action types, preset panels)
-- [`../../saint_os/docs/SERVER_GUIDE.md`](../../saint_os/docs/SERVER_GUIDE.md) —
+- [`../../server/docs/SERVER_GUIDE.md`](../../server/docs/SERVER_GUIDE.md) —
   server install, node adoption, peripheral install, routing-sheet
   authoring
