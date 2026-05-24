@@ -109,9 +109,20 @@ See [INSTALL.md](INSTALL.md) for detailed installation instructions.
 
 ## Documentation
 
-- [SAINT_OS_SPEC.md](SAINT_OS_SPEC.md) - Full system specification
-- [HARDWARE.md](HARDWARE.md) - Hardware requirements and supported platforms
-- [INSTALL.md](INSTALL.md) - Installation guide
+- [SAINT_OS_SPEC.md](SAINT_OS_SPEC.md) — Full system specification
+- [HARDWARE.md](HARDWARE.md) — Hardware requirements and supported platforms
+- [INSTALL.md](INSTALL.md) — Source-build installation guide (dev machines)
+- [saint_os/docs/SERVER_GUIDE.md](saint_os/docs/SERVER_GUIDE.md) — Operator
+  guide: install, flash initial nodes, apply OTA updates, add peripherals,
+  author routing sheets
+- [saint_os/docs/DEPLOYMENT.md](saint_os/docs/DEPLOYMENT.md) — Lower-level
+  deployment reference (systemd, netplan, monitoring, security)
+- [controller/README.md](controller/README.md) — Controller build &
+  deployment (Steam Deck Flatpak path + native dev mode)
+- [controller/docs/SHEETS_BINDINGS.md](controller/docs/SHEETS_BINDINGS.md) —
+  Binding controller inputs to server routing-sheet WebSocket inputs
+- [controller/docs/BINDINGS_SYSTEM.md](controller/docs/BINDINGS_SYSTEM.md) —
+  Bindings data model (input sources, action types, preset panels)
 
 ## Hardware Support
 

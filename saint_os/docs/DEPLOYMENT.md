@@ -1,5 +1,15 @@
 # SAINT.OS Raspberry Pi Deployment Guide
 
+> **Looking for the end-to-end operator walkthrough?** See
+> [`SERVER_GUIDE.md`](SERVER_GUIDE.md) — it covers install → flashing
+> initial nodes → applying OTA updates → adding peripherals → building
+> routing sheets, in that order.
+>
+> This document is the lower-level reference: every systemd unit, netplan
+> path, and firewall rule the install touches, plus the operational
+> details (logs, monitoring, security hardening) the operator guide
+> doesn't repeat.
+
 This guide covers deploying SAINT.OS on a Raspberry Pi for production use.
 
 ## Hardware Requirements
