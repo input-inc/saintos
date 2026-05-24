@@ -34,7 +34,7 @@ class WidgetsDashboard {
 
     init() {
         const btn = document.getElementById('btn-dashboard-add-widget');
-        if (btn) btn.addEventListener('click', () => window.app.showPage('routes'));
+        if (btn) btn.addEventListener('click', () => app.showPage('routes'));
 
         // Listen for system_routing broadcasts (a remote operator edits
         // a widget, we want to reflect it).
@@ -330,9 +330,15 @@ class WidgetsDashboard {
         // Per-input range + accent color. Ranges are generous defaults
         // — they're only used to scale the progress fill, never as
         // clamps on the displayed value. Temperature unit follows the
-        // operator's preference (window.app.temperatureUnitSymbol()).
-        const tempUnit = (window.app && window.app.temperatureUnitSymbol)
-            ? window.app.temperatureUnitSymbol() : '°C';
+        // operator's preference via SaintApp.temperatureUnitSymbol().
+        //
+        // Use bare `app`, not `window.app`: the page has
+        // `<div id="app">` which the browser auto-exposes on window,
+        // shadowing the SaintApp instance. Bare `app` resolves through
+        // the script's lexical environment to the `const app` in app.js.
+        const a = (typeof app !== 'undefined') ? app : null;
+        const tempUnit = (a && a.temperatureUnitSymbol)
+            ? a.temperatureUnitSymbol() : '°C';
         const meta = {
             voltage: { max: 30,  unit: 'V',  color: 'bg-amber-500',
                        barText: 'text-amber-400' },
@@ -498,15 +504,18 @@ class WidgetsDashboard {
     }
 
     /** Input-aware formatter. Routes temperature inputs through
-     *  window.app.formatTemperatureValue (which converts to the
+     *  SaintApp.formatTemperatureValue (which converts to the
      *  operator's preferred unit and returns the number only — the
      *  unit symbol is rendered in a sibling span by _renderFas100Card,
-     *  using window.app.temperatureUnitSymbol() so the two stay in
-     *  sync). Falls back to the generic numeric format otherwise. */
+     *  using SaintApp.temperatureUnitSymbol() so the two stay in
+     *  sync). Falls back to the generic numeric format otherwise.
+     *
+     *  Bare `app`, not `window.app`: see _renderFas100Card for why
+     *  (`<div id="app">` shadows the SaintApp instance on window). */
     _formatValueForInput(input, value) {
-        if (typeof value === 'number' && window.app
-            && window.app.isTemperatureChannel(input)) {
-            return window.app.formatTemperatureValue(value);
+        const a = (typeof app !== 'undefined') ? app : null;
+        if (typeof value === 'number' && a && a.isTemperatureChannel(input)) {
+            return a.formatTemperatureValue(value);
         }
         return this._formatValue(input, value);
     }
