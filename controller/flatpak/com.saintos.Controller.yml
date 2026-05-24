@@ -167,7 +167,33 @@ modules:
             && cmp -s package-lock.json node_modules/.package-lock.json; then
           echo "node_modules matches package-lock.json — skipping npm ci"
         else
-          npm ci --no-audit --no-fund --prefer-offline
+          # `npm ci` is strict: it refuses to install when package.json
+          # and package-lock.json disagree, even on a single missing
+          # dep. That's catching a real workflow bug (someone edited
+          # package.json without re-running `npm install` + committing
+          # the new lockfile), but the operator running the flatpak
+          # build can't fix it from here. Fall back to `npm install`
+          # (which regenerates the lockfile in the build-dir copy) so
+          # this build still goes through, and surface a LOUD warning
+          # pointing at the real fix: regenerate the lockfile in the
+          # source tree and commit it.
+          if ! npm ci --no-audit --no-fund --prefer-offline; then
+            echo
+            echo "================================================================"
+            echo "WARN  npm ci failed — package.json and package-lock.json are out"
+            echo "      of sync in the source tree. Falling back to 'npm install'"
+            echo "      so this build can proceed."
+            echo
+            echo "      Permanent fix (run from the host, NOT the flatpak sandbox):"
+            echo "          cd controller && npm install"
+            echo "          git add package-lock.json && git commit"
+            echo
+            echo "      Every fresh checkout will hit this until the regenerated"
+            echo "      lockfile is committed."
+            echo "================================================================"
+            echo
+            npm install --no-audit --no-fund --prefer-offline
+          fi
         fi
       - cd controller && npx tauri build --no-bundle
 

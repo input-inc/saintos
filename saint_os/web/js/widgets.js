@@ -330,9 +330,9 @@ class WidgetsDashboard {
         // Per-input range + accent color. Ranges are generous defaults
         // — they're only used to scale the progress fill, never as
         // clamps on the displayed value. Temperature unit follows the
-        // operator's preference (saintApp.temperatureUnitSymbol()).
-        const tempUnit = (window.saintApp && window.saintApp.temperatureUnitSymbol)
-            ? window.saintApp.temperatureUnitSymbol() : '°C';
+        // operator's preference (window.app.temperatureUnitSymbol()).
+        const tempUnit = (window.app && window.app.temperatureUnitSymbol)
+            ? window.app.temperatureUnitSymbol() : '°C';
         const meta = {
             voltage: { max: 30,  unit: 'V',  color: 'bg-amber-500',
                        barText: 'text-amber-400' },
@@ -498,15 +498,15 @@ class WidgetsDashboard {
     }
 
     /** Input-aware formatter. Routes temperature inputs through
-     *  saintApp.formatTemperatureValue (which converts to the
+     *  window.app.formatTemperatureValue (which converts to the
      *  operator's preferred unit and returns the number only — the
      *  unit symbol is rendered in a sibling span by _renderFas100Card,
-     *  using saintApp.temperatureUnitSymbol() so the two stay in
+     *  using window.app.temperatureUnitSymbol() so the two stay in
      *  sync). Falls back to the generic numeric format otherwise. */
     _formatValueForInput(input, value) {
-        if (typeof value === 'number' && window.saintApp
-            && window.saintApp.isTemperatureChannel(input)) {
-            return window.saintApp.formatTemperatureValue(value);
+        if (typeof value === 'number' && window.app
+            && window.app.isTemperatureChannel(input)) {
+            return window.app.formatTemperatureValue(value);
         }
         return this._formatValue(input, value);
     }

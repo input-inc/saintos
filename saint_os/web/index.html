@@ -2519,6 +2519,11 @@
             display: flex; align-items: center; justify-content: center;
             pointer-events: none;
         }
+        /* Tailwind's `.hidden { display: none }` is defined earlier in
+           the cascade than `.routing-empty` so without this override the
+           flex layout wins and the placeholder stays painted on top of
+           the canvas even when sheets are present. */
+        .routing-empty.hidden { display: none; }
         .routing-canvas svg.routing-wires {
             position: absolute; inset: 0; pointer-events: none;
             z-index: 1; width: 100%; height: 100%; overflow: visible;

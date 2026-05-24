@@ -89,12 +89,23 @@ pub struct InputMapper {
     profiles: Vec<BindingProfile>,
     active_profile_id: String,
     last_analog_values: HashMap<String, f32>,
+    /// Wall-clock of the last send per analog key. Drives the heartbeat
+    /// re-send so a dropped dead-stick packet doesn't permanently strand
+    /// the motor — every `HEARTBEAT_MS` we re-emit the current value
+    /// regardless of change detection.
+    last_send_times: HashMap<String, std::time::Instant>,
     last_button_states: HashMap<String, bool>,
     panel_state: PanelState,
     cycle_indices: HashMap<String, usize>,
     toggle_states: HashMap<String, bool>,
     modifier_values: HashMap<String, f32>,
 }
+
+/// Force re-send each analog target this often even if change detection
+/// says nothing new — protects against dropped dead-stick (return-to-zero)
+/// packets, post-reconnect drift, and the firmware coming back from a
+/// brown-out reset while the operator's hands are off the stick.
+const HEARTBEAT_MS: u64 = 500;
 
 impl InputMapper {
     pub fn new() -> Self {
@@ -109,6 +120,7 @@ impl InputMapper {
             profiles,
             active_profile_id,
             last_analog_values: HashMap::new(),
+            last_send_times: HashMap::new(),
             last_button_states: HashMap::new(),
             panel_state: PanelState::default(),
             cycle_indices: HashMap::new(),
@@ -236,22 +248,45 @@ impl InputMapper {
                     // Apply modifiers
                     let modified = self.apply_modifiers(transformed);
 
-                    let key = format!("{:?}", binding.input);
+                    // Key the change-detection cache by (input, target) —
+                    // not just by input. Tank-style setups bind the same
+                    // gamepad axis to two targets (one per track-drive
+                    // sheet), and if both share a single "LeftStickY"
+                    // cache entry, the first iteration's stick-release
+                    // event clobbers `last` to 0 and the second target
+                    // sees no change → never sends its zero → its motor
+                    // sticks at the last commanded velocity.
+                    let target_key = match target {
+                        super::config::ControlTarget::Topic { topic, channel, .. } =>
+                            format!("topic::{}::{}", topic, channel),
+                        super::config::ControlTarget::WsInput { sheet_id, input_id, .. } =>
+                            format!("ws::{}::{}", sheet_id, input_id),
+                    };
+                    let key = format!("{:?}::{}", binding.input, target_key);
                     let last = self.last_analog_values.get(&key).copied().unwrap_or(0.0);
                     let delta = (modified - last).abs();
 
                     // Send command if:
                     // 1. Value changed significantly (delta > 0.001), OR
                     // 2. Value is non-zero (keep sending for continuous control), OR
-                    // 3. Value just returned to zero (send final stop command)
-                    // The WebSocket client throttles at 50ms to prevent flooding
+                    // 3. Value just returned to zero (send final stop command), OR
+                    // 4. Heartbeat — re-assert current value periodically so a
+                    //    dropped packet (Wi-Fi blip, firmware brown-out reboot,
+                    //    server reconnect, etc.) can't permanently strand the
+                    //    motor at a non-zero value.
+                    // The WebSocket client throttles at 50ms to prevent flooding.
                     let value_changed = delta > 0.001;
                     let value_active = modified.abs() > 0.001;
                     let returned_to_zero = last.abs() > 0.001 && modified.abs() <= 0.001;
-                    let should_send = value_changed || value_active || returned_to_zero;
+                    let heartbeat_due = match self.last_send_times.get(&key) {
+                        Some(t) => t.elapsed() >= std::time::Duration::from_millis(HEARTBEAT_MS),
+                        None => true,
+                    };
+                    let should_send = value_changed || value_active || returned_to_zero || heartbeat_due;
 
                     if should_send {
-                        self.last_analog_values.insert(key, modified);
+                        self.last_analog_values.insert(key.clone(), modified);
+                        self.last_send_times.insert(key, std::time::Instant::now());
 
                         events.push(ActionEvent::Command(MappedCommand::from_target(
                             target,

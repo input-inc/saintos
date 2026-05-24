@@ -472,44 +472,57 @@ fi
 
 # --- WiFi access point -------------------------------------------------------
 
-# Returns 0 (success) when the named NM connection profile exists, is
-# currently activated, AND every field matches what we'd write below.
-# Used as a fast-path: if the AP is already up the way we want it,
-# we want to bail before running ANY of the disruptive steps in
-# setup_wifi_ap — package installs, netplan apply, iw reg set,
-# rfkill unblock — each of which can flap the radio and drop
-# connected clients (operators SSH'd over WiFi, the controller, etc).
+# Returns 0 (success) when the AP is LIVE and serving the expected
+# SSID — meaning a re-run of install.sh should leave it alone.
+#
+# We used to compare ten nmcli stored property fields for exact
+# string match (ssid/mode/band/powersave/keymgmt/psk/proto/pairwise/
+# group/ipmethod). That broke too easily: nmcli normalizes those
+# values inconsistently across versions (band can come back as "bg"
+# or "BG", powersave as "2" or "default", PSK as raw or hashed), so
+# a single field drifting would fail the fast-path and the function
+# would fall through to `netplan apply` + `iw reg set` — both of
+# which flap the radio and drop every connected client, including
+# the operator's SSH session over WiFi.
+#
+# Live-state check is what actually matters: if NM reports the
+# connection activated AND `iw dev` shows the interface in AP mode
+# with our SSID, clients are connected and traffic is flowing. No
+# matter what nmcli's stored representation looks like, there's
+# nothing to fix.
+#
+# Trade-off: if someone changes WIFI_SSID/WIFI_PASS in env and
+# re-runs install, the SSID change is still caught (drives the
+# fast-path miss) but a pure password change is NOT. If you need
+# to rotate the PSK, delete the saint-os-ap connection first or
+# run with --no-wifi and reconfigure by hand.
 _wifi_ap_already_matches() {
     local conn=$1
+
+    # 1. Connection profile exists in NM.
     nmcli -g connection.id connection show "$conn" >/dev/null 2>&1 || return 1
 
+    # 2. Connection is currently activated.
     local state
     state=$(nmcli -g GENERAL.STATE connection show "$conn" 2>/dev/null || true)
     [[ "$state" == "activated" ]] || return 1
 
-    local cur_ssid cur_mode cur_band cur_keymgmt cur_psk
-    local cur_proto cur_pairwise cur_group cur_ipmethod cur_powersave
-    cur_ssid=$(nmcli -g 802-11-wireless.ssid connection show "$conn" 2>/dev/null || true)
-    cur_mode=$(nmcli -g 802-11-wireless.mode connection show "$conn" 2>/dev/null || true)
-    cur_band=$(nmcli -g 802-11-wireless.band connection show "$conn" 2>/dev/null || true)
-    cur_powersave=$(nmcli -g 802-11-wireless.powersave connection show "$conn" 2>/dev/null || true)
-    cur_keymgmt=$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$conn" 2>/dev/null || true)
-    cur_psk=$(nmcli -s -g 802-11-wireless-security.psk connection show "$conn" 2>/dev/null || true)
-    cur_proto=$(nmcli -g 802-11-wireless-security.proto connection show "$conn" 2>/dev/null || true)
-    cur_pairwise=$(nmcli -g 802-11-wireless-security.pairwise connection show "$conn" 2>/dev/null || true)
-    cur_group=$(nmcli -g 802-11-wireless-security.group connection show "$conn" 2>/dev/null || true)
-    cur_ipmethod=$(nmcli -g ipv4.method connection show "$conn" 2>/dev/null || true)
+    # 3. Find which wifi interface the activated connection is bound
+    #    to. nmcli reports this in GENERAL.DEVICES for activated
+    #    connections.
+    local device
+    device=$(nmcli -g GENERAL.DEVICES connection show "$conn" 2>/dev/null || true)
+    [[ -n "$device" ]] || return 1
 
-    [[ "$cur_ssid"      == "$WIFI_SSID" ]] || return 1
-    [[ "$cur_mode"      == "ap" ]]         || return 1
-    [[ "$cur_band"      == "bg" ]]         || return 1
-    [[ "$cur_powersave" == "2" ]]          || return 1
-    [[ "$cur_keymgmt"   == "wpa-psk" ]]    || return 1
-    [[ "$cur_psk"       == "$WIFI_PASS" ]] || return 1
-    [[ "$cur_proto"     == "rsn" ]]        || return 1
-    [[ "$cur_pairwise"  == "ccmp" ]]       || return 1
-    [[ "$cur_group"     == "ccmp" ]]       || return 1
-    [[ "$cur_ipmethod"  == "shared" ]]     || return 1
+    # 4. Live radio state: interface in AP mode broadcasting our SSID.
+    #    `iw dev <iface> info` output (varies slightly between
+    #    versions) includes both `ssid <NAME>` and `type AP` lines.
+    command -v iw >/dev/null 2>&1 || return 1
+    local iw_info
+    iw_info=$(iw dev "$device" info 2>/dev/null || true)
+    [[ "$iw_info" == *"type AP"* ]]              || return 1
+    [[ "$iw_info" == *"ssid ${WIFI_SSID}"* ]]    || return 1
+
     return 0
 }
 
@@ -764,31 +777,54 @@ setup_internal_dhcp() {
         return
     fi
 
-    # Idempotent reconfigure: only touch eth0 if the desired state differs
-    # from what's already there. Avoids briefly dropping nodes that are
-    # currently leased through this interface.
+    # Idempotent reconfigure: only touch the interface if the LIVE
+    # state differs from what we want. The earlier version of this
+    # check compared nmcli's stored properties (ipv4.method,
+    # ipv4.addresses, connection.interface-name) for an exact string
+    # match, which broke whenever nmcli normalized one of those
+    # values differently between versions — need_apply ended up =1
+    # on every re-install, the delete/add/up cycle bounced eth0, and
+    # every node leased through this interface lost its DHCP grant.
+    #
+    # Live-state check is what actually matters: if the desired
+    # CIDR is already assigned to the interface and the link is up,
+    # the network is functional regardless of what nmcli's stored
+    # representation looks like. Skip the bounce in that case.
     local conn=saint-os-internal
     local desired_addr="${SAINT_INTERNAL_IP}/${SAINT_INTERNAL_CIDR}"
     local need_apply=1
-    if command -v nmcli >/dev/null 2>&1; then
-        if nmcli -g connection.id connection show "$conn" >/dev/null 2>&1; then
-            local cur_method cur_addrs cur_iface
-            cur_method=$(nmcli -g ipv4.method connection show "$conn" 2>/dev/null || true)
-            cur_addrs=$(nmcli -g ipv4.addresses connection show "$conn" 2>/dev/null || true)
-            cur_iface=$(nmcli -g connection.interface-name connection show "$conn" 2>/dev/null || true)
-            if [[ "$cur_method" == "manual" \
-               && "$cur_addrs"  == "$desired_addr" \
-               && "$cur_iface"  == "$SAINT_INTERNAL_IFACE" ]]; then
-                log "Internal interface ${SAINT_INTERNAL_IFACE} already at ${desired_addr} — not reconfiguring"
-                need_apply=0
-            else
-                log "Internal interface config differs — reconfiguring (briefly drops node leases)"
-            fi
-        else
-            log "Configuring ${SAINT_INTERNAL_IFACE} with static IP ${desired_addr}"
-        fi
 
+    # `ip -4 -o addr show dev eth0` prints something like:
+    #   3: eth0    inet 192.168.10.1/24 brd 192.168.10.255 scope global eth0\       valid_lft forever preferred_lft forever
+    # The 4th whitespace-separated field is the CIDR. Loop in case
+    # the interface has multiple v4 addrs; match any of them against
+    # the desired one.
+    local have_desired=0
+    while read -r live_addr; do
+        if [[ "$live_addr" == "$desired_addr" ]]; then
+            have_desired=1
+            break
+        fi
+    done < <(ip -4 -o addr show dev "$SAINT_INTERNAL_IFACE" 2>/dev/null \
+             | awk '{print $4}')
+
+    local link_up=0
+    if [[ "$(cat "/sys/class/net/${SAINT_INTERNAL_IFACE}/operstate" 2>/dev/null)" == "up" ]]; then
+        link_up=1
+    fi
+
+    if (( have_desired )) && (( link_up )); then
+        log "Internal interface ${SAINT_INTERNAL_IFACE} already at ${desired_addr} and up — not reconfiguring (leases preserved)"
+        need_apply=0
+    fi
+
+    if command -v nmcli >/dev/null 2>&1; then
         if (( need_apply )); then
+            if nmcli -g connection.id connection show "$conn" >/dev/null 2>&1; then
+                log "Internal interface needs reconfigure (have='$(ip -4 -o addr show dev "$SAINT_INTERNAL_IFACE" 2>/dev/null | awk '{print $4}' | paste -sd, -)', want='${desired_addr}') — briefly drops node leases"
+            else
+                log "Configuring ${SAINT_INTERNAL_IFACE} with static IP ${desired_addr}"
+            fi
             run nmcli connection delete "$conn" 2>/dev/null || true
             run nmcli connection add type ethernet ifname "${SAINT_INTERNAL_IFACE}" \
                 con-name "$conn" autoconnect yes \
@@ -799,6 +835,17 @@ setup_internal_dhcp() {
                 run nmcli connection up "$conn" \
                     || warn "Failed to bring up internal interface now (will retry on boot)"
             fi
+        elif ! nmcli -g connection.id connection show "$conn" >/dev/null 2>&1; then
+            # Live state is good but no persistent nmcli record exists —
+            # someone configured the IP by hand. Add the connection profile
+            # WITHOUT bringing it up so reboots stick, while leaving the
+            # current live link (and its leases) undisturbed.
+            log "Adding persistent nmcli profile for ${SAINT_INTERNAL_IFACE} (current link left in place)"
+            run nmcli connection add type ethernet ifname "${SAINT_INTERNAL_IFACE}" \
+                con-name "$conn" autoconnect yes \
+                ipv4.method manual \
+                ipv4.addresses "${desired_addr}" \
+                ipv6.method ignore
         fi
     else
         warn "nmcli not available — set ${SAINT_INTERNAL_IFACE}'s IP manually"

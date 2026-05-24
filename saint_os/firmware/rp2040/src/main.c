@@ -16,6 +16,8 @@
 #include "pico/unique_id.h"
 #include "hardware/watchdog.h"
 #include "hardware/structs/watchdog.h"
+#include "hardware/structs/vreg_and_chip_reset.h"
+#include "hardware/regs/vreg_and_chip_reset.h"
 
 /* Bootloader sentinel: when an OTA fails MAX_OTA_RETRIES times, the
  * bootloader writes this to scratch[3] before booting the old app
@@ -1377,6 +1379,29 @@ int main(void)
     // Initialize stdio (USB serial for hardware, UART for simulation)
     stdio_init_all();
 
+    // Snapshot the chip-level reset reason BEFORE anything else has a
+    // chance to influence it. The HAD_POR / HAD_RUN / HAD_PSM_RESTART
+    // bits in VREG_AND_CHIP_RESET.CHIP_RESET are latched at reset and
+    // tell us which path the silicon took:
+    //   HAD_POR         — power-on or brown-out (BOR; indistinguishable in HW)
+    //   HAD_RUN         — RUN pin pulled low externally (host-issued
+    //                     reset over USB enumerates as a RUN reset on
+    //                     many host stacks)
+    //   HAD_PSM_RESTART — power-state-machine restart (debug, picotool)
+    // Prior to this snapshot the only signal we had was "everything
+    // else falls through to Boot OK with a generic brown-out hint",
+    // which is wrong about half the time. We also capture the watchdog
+    // REASON register to separate "watchdog timer fired" (TIMER) from
+    // "we asked to reboot via watchdog_reboot()" (FORCE) — the latter
+    // happens on our crash handler's clean exit path.
+    uint32_t chip_reset_reg = vreg_and_chip_reset_hw->chip_reset;
+    uint32_t watchdog_reason = watchdog_hw->reason;
+    bool had_por           = (chip_reset_reg & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_POR_BITS)           != 0;
+    bool had_run           = (chip_reset_reg & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_RUN_BITS)           != 0;
+    bool had_psm_restart   = (chip_reset_reg & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_PSM_RESTART_BITS)   != 0;
+    bool wdg_reason_timer  = (watchdog_reason & WATCHDOG_REASON_TIMER_BITS) != 0;
+    bool wdg_reason_force  = (watchdog_reason & WATCHDOG_REASON_FORCE_BITS) != 0;
+
     // Capture the reset cause before anything else touches the
     // watchdog. watchdog_enable_caused_reboot() returns true only when
     // the *timeout* fired — not for the watchdog_reboot()-triggered
@@ -1627,16 +1652,36 @@ int main(void)
             "Recovered from watchdog reset — main loop hung "
             "(no hard-fault PC captured)");
     } else {
-        // Neither hard fault nor watchdog timeout. On RP2040 the
-        // remaining candidate is HAD_POR (power-on / brown-out — these
-        // are indistinguishable in hardware), so a "Boot OK" line that
-        // follows a previous run's last log without either of the
-        // error lines above is the brown-out fingerprint. Worth noting
-        // in the message so the operator doesn't read "OK" as "fine."
+        // Neither hard fault nor watchdog timeout. Use the chip-reset
+        // reason bits we snapshotted at the top of main() to pin down
+        // which path the silicon took — HAD_POR vs HAD_RUN vs
+        // HAD_PSM_RESTART. This replaces the previous "suspect
+        // brown-out" guess with an actual answer:
+        //   HAD_RUN          → RUN pin reset (commonly: USB host
+        //                      enumeration kicked the device; check
+        //                      `dmesg -w | grep usb` on the host)
+        //   HAD_PSM_RESTART  → debugger / picotool / cold reset chain
+        //   HAD_POR alone    → POR or brown-out (still ambiguous in HW)
+        //   nothing          → reset reason latch was cleared before
+        //                      we could read it (shouldn't happen)
+        const char* reset_label;
+        if (had_run && !had_por) {
+            reset_label = "RUN-pin reset (USB host re-enum?)";
+        } else if (had_psm_restart && !had_por) {
+            reset_label = "PSM restart (debugger or cold-reset chain)";
+        } else if (had_por) {
+            reset_label = "POR/brown-out";
+        } else {
+            reset_label = "unknown (no chip-reset bits set)";
+        }
         boot_log_queue("info",
-            "Boot OK — fw %s, bl %s, watchdog armed at %d ms "
-            "(if this is unexpected, suspect power-rail brown-out)",
-            FIRMWARE_VERSION_FULL, g_bl_version, WATCHDOG_TIMEOUT_MS);
+            "Boot OK — fw %s, bl %s, watchdog armed at %d ms · "
+            "reset cause: %s [CHIP_RESET=0x%08lX, WATCHDOG.REASON=0x%lX%s%s]",
+            FIRMWARE_VERSION_FULL, g_bl_version, WATCHDOG_TIMEOUT_MS,
+            reset_label,
+            (unsigned long)chip_reset_reg, (unsigned long)watchdog_reason,
+            wdg_reason_timer ? " TIMER" : "",
+            wdg_reason_force ? " FORCE" : "");
     }
     // The bootloader sets the OTA-gave-up sentinel when it exhausts
     // its retry budget and falls back to this app. Tell the operator

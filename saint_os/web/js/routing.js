@@ -288,10 +288,12 @@ class RoutingPage {
             `val-${dir}-${graphNodeId.replace(/[^a-zA-Z0-9_-]/g, '_')}-${pinId}`;
         const fmt = (v) => {
             if (typeof v !== 'number' || !Number.isFinite(v)) return '';
-            // Three sig figs is plenty for a live overlay.
+            // Fixed-point throughout — scientific notation ("1.4e-02")
+            // reads as a math error in this context. Anything near zero
+            // displays as "0" so a deadstick chain looks clearly idle
+            // rather than "almost zero with noise".
             const a = Math.abs(v);
-            if (a === 0)    return '0';
-            if (a < 0.01)   return v.toExponential(1);
+            if (a < 0.005)  return '0';
             if (a < 100)    return v.toFixed(2);
             return v.toFixed(0);
         };

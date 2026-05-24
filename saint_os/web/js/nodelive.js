@@ -351,15 +351,15 @@ class NodeLiveManager {
     }
 
     /** Channel-aware formatter. For temperature channels routes through
-     *  saintApp.formatTemperature so the displayed unit follows the
+     *  window.app.formatTemperature so the displayed unit follows the
      *  operator's preference; for everything else falls back to the
      *  generic numeric format. `ch` may be undefined (sparkline tooltip
      *  callers before this was threaded through), in which case we
      *  also fall back to the generic format. */
     _formatValueForChannel(ch, v) {
-        if (ch && window.saintApp && window.saintApp.isTemperatureChannel(ch)
+        if (ch && window.app && window.app.isTemperatureChannel(ch)
             && typeof v === 'number') {
-            return window.saintApp.formatTemperature(v);
+            return window.app.formatTemperature(v);
         }
         return this._formatValue(v);
     }
