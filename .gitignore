@@ -222,6 +222,10 @@ controller/src-tauri/gen/
 # state; never want in git.
 controller/.flatpak-cache/
 controller/SAINT-Controller.flatpak
+# Per-user generated manifest emitted by controller/flatpak/build.sh
+# (substitutes @PERSISTENT_CACHE@ with the local cache path so
+# flatpak-builder, which doesn't expand env vars in YAML, can see it).
+controller/flatpak/.generated.com.saintos.Controller.yml
 
 # =============================================================================
 # Node.js / NPM

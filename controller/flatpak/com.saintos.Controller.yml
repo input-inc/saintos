@@ -71,18 +71,46 @@ finish-args:
   - --filesystem=xdg-data/Steam
 
 # Build-time environment: put the SDK extension binaries on PATH,
-# point CARGO_HOME at a writeable in-build location (the default
-# ~/.cargo is read-only in the sandbox), and allow network during
-# the build so cargo can fetch crates and npm can fetch packages.
-# Vendoring those would let us drop --share=network here at the cost
-# of ~1 GB committed; not worth it for an internal-build artifact.
+# anchor cargo + npm state in the host-mounted persistent cache so
+# it survives between invocations, and allow network during the
+# build so cargo can fetch crates and npm can fetch packages on the
+# first run. After that, the populated caches let subsequent builds
+# run fully offline (npm ci uses --prefer-offline; cargo only hits
+# the network when the lockfile asks for new crates).
+#
+# @PERSISTENT_CACHE@ is a placeholder substituted by build.sh with the
+# per-user host path (typically $HOME/.../.flatpak-cache/persistent).
+# It points at a directory that's mounted into the sandbox via the
+# --filesystem build-arg below. flatpak-builder doesn't expand env
+# vars in this YAML, so build.sh sed-renders a .generated.<...>.yml
+# sibling and passes THAT to flatpak-builder. Don't edit the
+# generated file — it gets overwritten every build.
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin
   build-args:
     - --share=network
+    # Bind-mount the host's persistent cache into the build sandbox.
+    # Without this, the env paths below resolve to dirs that don't
+    # exist (or aren't writable) and the build can't reach the cached
+    # cargo registry / npm tarballs / target/ from the previous run.
+    - --filesystem=@PERSISTENT_CACHE@
   env:
-    CARGO_HOME: /run/build/saint-controller/cargo
-    npm_config_cache: /run/build/saint-controller/npm-cache
+    # Cargo's registry index + downloaded crate sources. Persisting
+    # this is what makes offline rebuilds work — once a crate has
+    # been fetched, it never needs the network again.
+    CARGO_HOME: '@PERSISTENT_CACHE@/cargo'
+    # Cargo's compile output. Persisting this is what makes
+    # incremental Rust rebuilds work — only changed crates recompile.
+    # Cargo respects this env var globally, so tauri-cli picks up
+    # the same dir. NOTE: the saint-controller binary lands at
+    # $CARGO_TARGET_DIR/release/saint-controller, not at the
+    # conventional controller/src-tauri/target/release/ — the
+    # install command below reflects that.
+    CARGO_TARGET_DIR: '@PERSISTENT_CACHE@/target'
+    # npm's downloaded-tarball cache. Combined with --prefer-offline
+    # on `npm ci` (see build-commands), this lets the install run
+    # without touching the network once the cache is populated.
+    npm_config_cache: '@PERSISTENT_CACHE@/npm-cache'
     # Suppress interactive prompts from tools that don't realize
     # they're running in a sandbox without a tty. Angular CLI in
     # particular asks for analytics consent on first run and
@@ -112,28 +140,42 @@ modules:
       # want those layered under the Flatpak — and AppImage in
       # particular needs linuxdeploy + FUSE which doesn't play well
       # inside flatpak-builder's nested sandbox).
-      # npm ci always wipes and reinstalls node_modules, which makes
-      # warm rebuilds expensive even when build.sh's
-      # --keep-build-dirs preserves the directory. Short-circuit by
-      # comparing the running lockfile snapshot (.package-lock.json
-      # inside node_modules — npm writes this on every successful
-      # install) against the source-tree package-lock.json. If they
-      # match byte-for-byte, the install is already exact and we skip.
-      # Anything else (missing snapshot, lockfile drift, partial
-      # install) falls through to a full `npm ci`.
+      # node_modules lives in the per-module build dir by default,
+      # which flatpak-builder allocates fresh (saint-controller-1,
+      # -2, -3...) on every invocation — so without intervention every
+      # build starts with an empty node_modules and `npm ci` has to
+      # re-run from scratch.
+      #
+      # Solution: symlink controller/node_modules into the host-mounted
+      # persistent cache. The source-dir copy excludes node_modules
+      # (see `skip:` below), so the symlink isn't clobbered when sources
+      # get re-extracted on subsequent runs. After the link is in place,
+      # check whether the existing install already matches package-lock.json
+      # (npm writes node_modules/.package-lock.json as its install
+      # snapshot) — if so, skip npm entirely. Otherwise run `npm ci`
+      # with --prefer-offline so it uses the persistent npm cache
+      # before hitting the network. Once that cache is populated by
+      # one online build, every subsequent build can run fully offline.
       - |
+        mkdir -p @PERSISTENT_CACHE@/node_modules
         cd controller
+        if [ ! -L node_modules ]; then
+          rm -rf node_modules
+          ln -s @PERSISTENT_CACHE@/node_modules node_modules
+        fi
         if [ -f node_modules/.package-lock.json ] \
             && cmp -s package-lock.json node_modules/.package-lock.json; then
           echo "node_modules matches package-lock.json — skipping npm ci"
         else
-          npm ci --no-audit --no-fund
+          npm ci --no-audit --no-fund --prefer-offline
         fi
       - cd controller && npx tauri build --no-bundle
 
       # Install paths follow the Flatpak conventions so KDE Discover
-      # / Game Mode find the app properly.
-      - install -Dm755 controller/src-tauri/target/release/saint-controller
+      # / Game Mode find the app properly. Binary path reflects
+      # CARGO_TARGET_DIR — cargo writes the release binary into the
+      # persistent target/ dir, NOT controller/src-tauri/target/.
+      - install -Dm755 @PERSISTENT_CACHE@/target/release/saint-controller
                        /app/bin/saint-controller
       - install -Dm644 controller/flatpak/com.saintos.Controller.desktop
                        /app/share/applications/com.saintos.Controller.desktop

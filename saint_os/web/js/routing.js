@@ -143,8 +143,22 @@ class RoutingPage {
     }
 
     _sheetIds() {
-        // Sheets in display order: one per adopted controller node.
-        return this.nodes.map(n => n.node_id);
+        // Union of adopted-node ids and sheets that exist on disk —
+        // sheets can outlive an unadopt (or appear before list_adopted
+        // finishes), and the empty-state was firing when sheets clearly
+        // existed because we only looked at this.nodes.
+        const ids = [];
+        const seen = new Set();
+        for (const n of this.nodes) {
+            ids.push(n.node_id);
+            seen.add(n.node_id);
+        }
+        for (const sid of Object.keys(this.routing.sheets || {})) {
+            if (seen.has(sid)) continue;
+            ids.push(sid);
+            seen.add(sid);
+        }
+        return ids;
     }
 
     selectSheet(sheetId) {
@@ -180,15 +194,22 @@ class RoutingPage {
         const list = document.getElementById('routing-sheet-list');
         if (!list) return;
         const html = [];
-        for (const node of this.nodes) {
-            const sheet = this._sheetData(node.node_id);
+        // Build a node lookup so orphan sheets (sheets on disk with no
+        // matching adopted node) can still appear in the list, marked
+        // as orphan so the operator can choose to clean them up.
+        const nodeById = new Map(this.nodes.map(n => [n.node_id, n]));
+        for (const sid of this._sheetIds()) {
+            const node = nodeById.get(sid);
+            const sheet = this._sheetData(sid);
             const count = (sheet.wires || []).length;
-            const isActive = node.node_id === this.activeSheetId;
-            const label = node.display_name || node.node_id;
+            const isActive = sid === this.activeSheetId;
+            const label = node ? (node.display_name || node.node_id) : `${sid} (no node)`;
+            const orphan = !node;
             html.push(`
-                <div class="routing-sheet-item ${isActive ? 'active' : ''}"
-                     onclick="routingPage.selectSheet('${escapeAttr(node.node_id)}')">
-                    <span class="material-icons">memory</span>
+                <div class="routing-sheet-item ${isActive ? 'active' : ''} ${orphan ? 'orphan' : ''}"
+                     onclick="routingPage.selectSheet('${escapeAttr(sid)}')"
+                     title="${orphan ? 'Orphan sheet — owning node is no longer adopted' : ''}">
+                    <span class="material-icons">${orphan ? 'help_outline' : 'memory'}</span>
                     <span class="truncate">${escapeHtml(label)}</span>
                     ${count ? `<span class="routing-sheet-count">${count}</span>` : ''}
                 </div>

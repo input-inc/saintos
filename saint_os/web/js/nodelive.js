@@ -272,7 +272,7 @@ class NodeLiveManager {
         const v = this._values.get(key);
         const valStr = (v === undefined || v.value === null || v.value === undefined)
             ? '<span class="text-slate-500">—</span>'
-            : `<span class="${ch.dir === 'in' ? 'text-cyan-300' : 'text-amber-300'}">${this._formatValue(v.value)}</span>`;
+            : `<span class="${ch.dir === 'in' ? 'text-cyan-300' : 'text-amber-300'}">${this._formatValueForChannel(ch, v.value)}</span>`;
         // v.ts has already been corrected in _ingest to a browser-clock
         // value when the Pi has no RTC. Cap the printed age at "stale"
         // so a few-second drift doesn't look like hours.
@@ -285,7 +285,7 @@ class NodeLiveManager {
         // separate from the visual ring buffer — this draws as soon as
         // samples arrive from pin_state.
         const spark = (ch.dir === 'in')
-            ? this._sparkline(this._history.get(key))
+            ? this._sparkline(this._history.get(key), ch)
             : '';
         return `
             <div class="flex items-center justify-between text-sm font-mono py-1 border-b border-slate-800 last:border-b-0">
@@ -299,8 +299,12 @@ class NodeLiveManager {
         `;
     }
 
-    /** Inline SVG sparkline of the 30s window. Returns empty when no data. */
-    _sparkline(samples) {
+    /** Inline SVG sparkline of the 30s window. Returns empty when no data.
+     *  `ch` is the optional channel descriptor — used so the tooltip
+     *  shows min/max in the operator's preferred unit (matters for
+     *  temperature channels where the raw values are in Celsius but
+     *  the operator may have Fahrenheit selected). */
+    _sparkline(samples, ch) {
         if (!samples || samples.length < 2) {
             return `<span class="inline-block" style="width:${SPARK_W}px;height:${SPARK_H}px"></span>`;
         }
@@ -327,7 +331,7 @@ class NodeLiveManager {
         const lx = Math.max(0, Math.min(SPARK_W,
             ((last[0] - t0) / SPARK_WINDOW_S) * SPARK_W));
         const ly = (SPARK_H - 2) - ((last[1] - lo) / span) * (SPARK_H - 4) + 1;
-        const titleAttr = `min=${this._formatValue(lo)} max=${this._formatValue(hi)} (30s)`;
+        const titleAttr = `min=${this._formatValueForChannel(ch, lo)} max=${this._formatValueForChannel(ch, hi)} (30s)`;
         return `<svg width="${SPARK_W}" height="${SPARK_H}"
                      viewBox="0 0 ${SPARK_W} ${SPARK_H}"
                      class="text-cyan-400" title="${escapeAttr(titleAttr)}"
@@ -344,6 +348,29 @@ class NodeLiveManager {
         if (typeof v !== 'number') return escapeHtml(String(v));
         if (Number.isInteger(v)) return v.toString();
         return v.toFixed(3);
+    }
+
+    /** Channel-aware formatter. For temperature channels routes through
+     *  saintApp.formatTemperature so the displayed unit follows the
+     *  operator's preference; for everything else falls back to the
+     *  generic numeric format. `ch` may be undefined (sparkline tooltip
+     *  callers before this was threaded through), in which case we
+     *  also fall back to the generic format. */
+    _formatValueForChannel(ch, v) {
+        if (ch && window.saintApp && window.saintApp.isTemperatureChannel(ch)
+            && typeof v === 'number') {
+            return window.saintApp.formatTemperature(v);
+        }
+        return this._formatValue(v);
+    }
+
+    /** Public re-entry point for re-rendering after a settings change
+     *  (e.g. the operator toggled Celsius/Fahrenheit). Just re-runs
+     *  the grid render against the current data — no refetch. */
+    renderGrid() {
+        if (this.selectedNode) {
+            this._render();
+        }
     }
 }
 

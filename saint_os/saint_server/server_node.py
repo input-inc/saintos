@@ -71,34 +71,81 @@ class SaintServerNode(Node):
             logger=self.get_logger()
         )
 
-        # Peripheral telemetry logger — opt-in per peripheral, writes
-        # NDJSON to ${SAINT_LOG_DIR}/peripherals/peripherals.log with
-        # daily rotation. SAINT_LOG_DIR is set by the systemd unit and
-        # is pre-created + chowned to the service user by install.sh,
-        # so the candidate path is writable in production. We test the
-        # target directory itself (after ensuring it exists) — earlier
-        # versions checked the parent's writability, which is /var/log
-        # for the production path and is root-owned, so the check
-        # always failed and the logger silently fell through to
-        # /tmp/saint-os (which is isolated by PrivateTmp=true and thus
-        # invisible from outside the service).
-        candidate = os.environ.get("SAINT_LOG_DIR") or "/var/log/saint-os"
-        peripherals_dir = os.path.join(candidate, "peripherals")
-        log_dir = peripherals_dir
+        # File-backed logging tree under $SAINT_LOG_DIR (default
+        # /var/log/saint-os):
+        #   saint-server.log                      — every activity event
+        #   nodes/<node_id>.log                   — per-node activity events
+        #   peripherals/<node_id>__<periph>.log   — per-peripheral telemetry (opt-in)
+        #
+        # SAINT_LOG_DIR is set by the systemd unit and pre-created +
+        # chowned to the service user by install.sh, so production
+        # paths are writable. We test the target directory itself
+        # (after ensuring it exists) — earlier versions checked the
+        # PARENT's writability, which is /var/log for the production
+        # path and is root-owned, so the check always failed and the
+        # logger silently fell through to /tmp/saint-os (which is
+        # isolated by PrivateTmp=true and thus invisible from outside
+        # the service).
+        #
+        # If the configured dir isn't writable we fall back to
+        # /tmp/saint-os so the server still starts; the journal log
+        # is the audit trail when the file sinks are unavailable.
+        base_dir = os.environ.get("SAINT_LOG_DIR") or "/var/log/saint-os"
         try:
-            os.makedirs(log_dir, exist_ok=True)
-            if not os.access(log_dir, os.W_OK):
-                raise PermissionError(f"{log_dir} not writable")
+            os.makedirs(base_dir, exist_ok=True)
+            if not os.access(base_dir, os.W_OK):
+                raise PermissionError(f"{base_dir} not writable")
         except (OSError, PermissionError) as e:
-            fallback = "/tmp/saint-os/peripherals"
+            fallback = "/tmp/saint-os"
             self.get_logger().warn(
-                f"PeripheralLogger: {peripherals_dir} unusable ({e}); "
+                f"saint-os log dir: {base_dir} unusable ({e}); "
                 f"falling back to {fallback}"
             )
             os.makedirs(fallback, exist_ok=True)
-            log_dir = fallback
+            base_dir = fallback
+
+        # Server-wide activity file — one line per _log_activity call,
+        # rotating daily at midnight. Plain-text format so an operator
+        # can tail it without a parser.
+        import logging as _logging
+        from saint_server.file_log import make_daily_handler, PerKeyLogger
+        _activity_fmt = _logging.Formatter(
+            "%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        self._server_activity_logger = _logging.getLogger("saint_os.activity")
+        self._server_activity_logger.setLevel(_logging.DEBUG)
+        self._server_activity_logger.propagate = False
+        # Idempotent in case __init__ runs twice (tests, reloads).
+        for _h in list(self._server_activity_logger.handlers):
+            self._server_activity_logger.removeHandler(_h)
+        self._server_activity_logger.addHandler(make_daily_handler(
+            os.path.join(base_dir, "saint-server.log"),
+            formatter=_activity_fmt,
+        ))
+
+        # Per-node activity files. PerKeyLogger lazily opens
+        # nodes/<node_id>.log on the first event for that node, each
+        # with its own daily-rotating handler (with rotate-on-restart).
+        self._per_node_activity_logger = PerKeyLogger(
+            base_dir=os.path.join(base_dir, "nodes"),
+            logger_name_prefix="saint_os.nodes",
+            formatter=_activity_fmt,
+        )
+
+        # Hook them into the state manager so every _log_activity call
+        # also writes to the file sinks.
+        self.state_manager.set_activity_file_logger(
+            server_logger=self._server_activity_logger,
+            per_node_logger=self._per_node_activity_logger,
+        )
+
+        # Per-peripheral telemetry logger — opt-in per peripheral,
+        # writes NDJSON to ${SAINT_LOG_DIR}/peripherals/<node>__<id>.log
+        # with daily rotation.
+        peripherals_dir = os.path.join(base_dir, "peripherals")
+        os.makedirs(peripherals_dir, exist_ok=True)
         self.peripheral_logger = PeripheralLogger(
-            log_dir=log_dir,
+            log_dir=peripherals_dir,
             logger=self.get_logger(),
         )
         # Hand it to the state manager so update_pin_actual can feed
@@ -1281,24 +1328,61 @@ class SaintServerNode(Node):
 
     # Throttle state for the routing-evaluator value broadcast. We want
     # live values on the routing UI but a Joy stream at 30Hz drags too
-    # much over the WebSocket — clamp to 20Hz / 50ms.
+    # much over the WebSocket — clamp to 20Hz / 50ms with a trailing
+    # edge so the final snapshot in any burst always reaches the UI.
     _ROUTING_VALUES_INTERVAL_S = 0.05
     _last_routing_values_emit: float = 0.0
+    _pending_routing_snapshot: Optional[Dict[str, Any]] = None
+    _routing_trail_scheduled: bool = False
 
     def _broadcast_routing_values(self, snapshot: Dict[str, Any]):
         """Forward the routing evaluator's value snapshot to subscribers.
 
-        Called from the ROS callback thread on every sheet evaluation;
-        bounces onto the async loop via call_soon_threadsafe and skips
-        emits that come in faster than 20Hz so we don't flood clients.
+        Called from the ROS callback thread on every sheet evaluation.
+        Leading-edge broadcast every 50ms; intra-window updates are
+        coalesced into `_pending_routing_snapshot` and emitted by a
+        single deferred trailing-edge fire. Without the trail, the
+        last snapshot in a burst (e.g. the all-zero state when the
+        operator releases the joystick) silently disappears and the
+        UI sticks on whichever intermediate value was the leading-edge
+        broadcast.
         """
         if not (self.web_server and self.web_server.ws_handler and self._async_loop):
             return
         import time as _time
         now = _time.monotonic()
-        if now - self._last_routing_values_emit < self._ROUTING_VALUES_INTERVAL_S:
+        elapsed = now - self._last_routing_values_emit
+        if elapsed >= self._ROUTING_VALUES_INTERVAL_S:
+            # Leading edge: emit immediately, clear any pending trail
+            # so we don't double-send the same snapshot.
+            self._last_routing_values_emit = now
+            self._pending_routing_snapshot = None
+            self._emit_routing_snapshot(snapshot)
             return
-        self._last_routing_values_emit = now
+        # Inside the throttle window — stash the latest snapshot and
+        # schedule a single deferred fire if one isn't already pending.
+        self._pending_routing_snapshot = snapshot
+        if self._routing_trail_scheduled:
+            return
+        self._routing_trail_scheduled = True
+        delay = max(0.0, self._ROUTING_VALUES_INTERVAL_S - elapsed)
+        self._async_loop.call_soon_threadsafe(
+            lambda d=delay: self._async_loop.call_later(d, self._flush_routing_trail)
+        )
+
+    def _flush_routing_trail(self):
+        """Trailing-edge fire of the most-recent pending snapshot."""
+        self._routing_trail_scheduled = False
+        snap = self._pending_routing_snapshot
+        self._pending_routing_snapshot = None
+        if snap is None:
+            return
+        import time as _time
+        self._last_routing_values_emit = _time.monotonic()
+        self._emit_routing_snapshot(snap)
+
+    def _emit_routing_snapshot(self, snapshot: Dict[str, Any]):
+        """Schedule the actual websocket broadcast."""
         handler = self.web_server.ws_handler
         self._async_loop.call_soon_threadsafe(
             lambda s=snapshot: asyncio.create_task(

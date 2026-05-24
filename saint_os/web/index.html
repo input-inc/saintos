@@ -2491,6 +2491,10 @@
         }
         .routing-sheet-item .material-icons { font-size: 16px; color: #64748b; }
         .routing-sheet-item.active .material-icons { color: #67e8f9; }
+        /* Orphan sheets — persisted but no adopted owner. Dimmed so
+           they don't compete with live sheets, but still selectable. */
+        .routing-sheet-item.orphan { color: #94a3b8; font-style: italic; }
+        .routing-sheet-item.orphan .material-icons { color: #475569; }
         .routing-sheet-count {
             margin-left: auto; font-size: 0.65rem; color: #64748b;
         }

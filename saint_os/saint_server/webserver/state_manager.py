@@ -6,12 +6,24 @@ Manages system state and provides data for WebSocket clients.
 
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
 import time
 import yaml
 import psutil
+
+# Map our string log levels onto stdlib logging levels for the file
+# sinks. Anything not in the map falls through to INFO.
+_LEVEL_TO_PY = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warn": logging.WARNING,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+}
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable, Tuple
@@ -543,6 +555,12 @@ class StateManager:
         # Optional callback fired when a node-scoped log entry is recorded.
         # Wired by server_node.py to broadcast on node_log/<id>.
         self._node_log_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        # Optional file-backed activity sinks (set by set_activity_file_logger).
+        # server_node.py wires these to /var/log/saint-os/saint-server.log
+        # and /var/log/saint-os/nodes/<node_id>.log so activity is still
+        # available after a restart, separate from the systemd journal.
+        self._activity_server_logger = None
+        self._activity_per_node_logger = None
         self._log_entries: List[Dict[str, Any]] = []  # Circular buffer for logs
 
         # Runtime config (persists across installs) vs. shipped config
@@ -653,6 +671,19 @@ class StateManager:
                 if p.log_enabled:
                     logger.set_enabled(node_id, p.id, True)
 
+    def set_activity_file_logger(self, server_logger, per_node_logger) -> None:
+        """Attach optional file-backed activity loggers.
+
+        ``server_logger`` is a stdlib ``Logger`` with a daily-rotating
+        file handler attached — every activity event goes here.
+        ``per_node_logger`` is a ``PerKeyLogger`` (see file_log.py);
+        per-node events are routed to ``<node_id>.log``.
+
+        Either may be ``None`` to disable that sink.
+        """
+        self._activity_server_logger = server_logger
+        self._activity_per_node_logger = per_node_logger
+
     def get_node_logs(self, node_id: str) -> List[Dict[str, Any]]:
         """Return the log buffer for a node (oldest first). Empty if unknown."""
         node = (self.state.adopted_nodes.get(node_id)
@@ -697,6 +728,27 @@ class StateManager:
         # Broadcast to clients
         if self._activity_callback:
             self._activity_callback(message, level)
+
+        # File sink: every activity event goes to the server-wide log,
+        # and per-node events ALSO go to that node's log file. Done
+        # after the broadcast so a slow disk can't delay the live UI.
+        if self._activity_server_logger is not None:
+            try:
+                self._activity_server_logger.log(
+                    _LEVEL_TO_PY.get(level, logging.INFO),
+                    f"[{level}] {message}" if not node_id
+                    else f"[{level}] [{node_id}] {message}",
+                )
+            except Exception:
+                pass  # Never let log I/O kill the caller.
+        if node_id and self._activity_per_node_logger is not None:
+            try:
+                self._activity_per_node_logger.log(
+                    node_id, f"[{level}] {message}",
+                    level=_LEVEL_TO_PY.get(level, logging.INFO),
+                )
+            except Exception:
+                pass
 
         # Per-node log buffer + targeted broadcast
         if node_id:

@@ -403,6 +403,13 @@ class RoutingEvaluator:
                 ptype = ""
             try:
                 self._send_channel(node_id, peripheral_id, channel_id, float(value), ptype)
+                # Include node_id in the log: peripheral_ids are scoped
+                # per-node so e.g. "roboclaw-1" on the Left vs Right Track
+                # Drive nodes both render as "roboclaw-1/motor" without
+                # this prefix, which made the side-by-side log impossible
+                # to read on a tank with one roboclaw per track.
+                self._log("info",
+                          f"set_channel {node_id}/{peripheral_id}/{channel_id} = {value:.3f}")
             except Exception as e:
                 self._log("error",
                           f"Failed to send channel {node_id}/{peripheral_id}/{channel_id}: {e}")

@@ -163,10 +163,18 @@ impl OutgoingMessage {
     }
 
     pub fn emergency_stop() -> Self {
+        // Server handler matches on action == "estop" (latching toggle:
+        // each press flips system-wide state, fans out to all adopted
+        // nodes, broadcasts on the "estop" topic). The legacy
+        // "emergency_stop" action name we used to send fell through the
+        // server's match and silently produced "Unknown command action"
+        // errors — pressing the button did nothing. Keep the Rust
+        // method name (it's the user-facing semantic) but emit the wire
+        // action the server actually accepts.
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             msg_type: "command".to_string(),
-            action: "emergency_stop".to_string(),
+            action: "estop".to_string(),
             params: None,
             password: None,
         }

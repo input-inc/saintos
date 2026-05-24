@@ -329,15 +329,18 @@ class WidgetsDashboard {
     _renderFas100Card(w, type) {
         // Per-input range + accent color. Ranges are generous defaults
         // — they're only used to scale the progress fill, never as
-        // clamps on the displayed value.
+        // clamps on the displayed value. Temperature unit follows the
+        // operator's preference (saintApp.temperatureUnitSymbol()).
+        const tempUnit = (window.saintApp && window.saintApp.temperatureUnitSymbol)
+            ? window.saintApp.temperatureUnitSymbol() : '°C';
         const meta = {
             voltage: { max: 30,  unit: 'V',  color: 'bg-amber-500',
                        barText: 'text-amber-400' },
             current: { max: 100, unit: 'A',  color: 'bg-cyan-500',
                        barText: 'text-cyan-400' },
-            temp1:   { max: 80,  unit: '°C', color: 'bg-rose-500',
+            temp1:   { max: 80,  unit: tempUnit, color: 'bg-rose-500',
                        barText: 'text-rose-300' },
-            temp2:   { max: 80,  unit: '°C', color: 'bg-rose-500',
+            temp2:   { max: 80,  unit: tempUnit, color: 'bg-rose-500',
                        barText: 'text-rose-300' },
         };
 
@@ -436,7 +439,7 @@ class WidgetsDashboard {
                     valEl.className = 'inline-block w-3 h-3 rounded-full ' +
                         (triggered ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.7)]' : 'bg-emerald-500');
                 } else {
-                    valEl.textContent = this._formatValue(input, last.value);
+                    valEl.textContent = this._formatValueForInput(input, last.value);
                 }
                 if (sparkEl) {
                     sparkEl.innerHTML = this._sparkline(this._history.get(key));
@@ -492,6 +495,20 @@ class WidgetsDashboard {
         if (Math.abs(value) >= 100) return value.toFixed(0);
         if (Math.abs(value) >= 10)  return value.toFixed(1);
         return value.toFixed(2);
+    }
+
+    /** Input-aware formatter. Routes temperature inputs through
+     *  saintApp.formatTemperatureValue (which converts to the
+     *  operator's preferred unit and returns the number only — the
+     *  unit symbol is rendered in a sibling span by _renderFas100Card,
+     *  using saintApp.temperatureUnitSymbol() so the two stay in
+     *  sync). Falls back to the generic numeric format otherwise. */
+    _formatValueForInput(input, value) {
+        if (typeof value === 'number' && window.saintApp
+            && window.saintApp.isTemperatureChannel(input)) {
+            return window.saintApp.formatTemperatureValue(value);
+        }
+        return this._formatValue(input, value);
     }
 
     _widgetType(id) {

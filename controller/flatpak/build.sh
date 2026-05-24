@@ -34,7 +34,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTROLLER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-MANIFEST="$SCRIPT_DIR/com.saintos.Controller.yml"
+SOURCE_MANIFEST="$SCRIPT_DIR/com.saintos.Controller.yml"
 APP_ID="com.saintos.Controller"
 
 # All flatpak-builder working state and scratch space live under here.
@@ -50,16 +50,42 @@ APP_ID="com.saintos.Controller"
 #                  that writes to /tmp (RAM-backed tmpfs) or /var/tmp
 #                  (tiny SteamOS partition) eats those out of space
 #                  long before /home would notice.
+#   persistent/    Per-user host-side cache exposed to the build
+#                  sandbox via --filesystem. Holds cargo registry +
+#                  target/, node_modules, and the npm package cache —
+#                  the things that need to survive between runs to
+#                  make builds fast AND offline-capable. Without
+#                  this, every invocation of flatpak-builder gets a
+#                  fresh saint-controller-N build dir and every
+#                  cache inside it starts empty.
 CACHE_ROOT="$CONTROLLER_DIR/.flatpak-cache"
 BUILD_DIR="$CACHE_ROOT/build"
 REPO_DIR="$CACHE_ROOT/repo"
 STATE_DIR="$CACHE_ROOT/state"
 CCACHE_DIR="$CACHE_ROOT/ccache"
 TMPDIR_LOCAL="$CACHE_ROOT/tmp"
+PERSISTENT_CACHE="$CACHE_ROOT/persistent"
+
+# The generated manifest is the source manifest with the per-user
+# PERSISTENT_CACHE path substituted in. flatpak-builder doesn't expand
+# env vars in YAML, so the path has to be a literal; we keep the
+# committed manifest portable by templating it and emitting a
+# .gitignored sibling at build time. It lives next to the source so
+# `path: ../..` resolves the same way.
+MANIFEST="$SCRIPT_DIR/.generated.com.saintos.Controller.yml"
 
 # Make all the cache dirs eagerly so subprocesses don't fail on
-# ENOENT before we get a chance to write anything.
-mkdir -p "$BUILD_DIR" "$REPO_DIR" "$STATE_DIR" "$CCACHE_DIR" "$TMPDIR_LOCAL"
+# ENOENT before we get a chance to write anything. Persistent subdirs
+# match the env vars + symlink targets in the manifest.
+mkdir -p "$BUILD_DIR" "$REPO_DIR" "$STATE_DIR" "$CCACHE_DIR" "$TMPDIR_LOCAL" \
+         "$PERSISTENT_CACHE/cargo" \
+         "$PERSISTENT_CACHE/target" \
+         "$PERSISTENT_CACHE/node_modules" \
+         "$PERSISTENT_CACHE/npm-cache"
+
+# Render the generated manifest fresh each run so the substituted path
+# tracks whatever CACHE_ROOT resolves to (e.g. if the script moves).
+sed "s|@PERSISTENT_CACHE@|$PERSISTENT_CACHE|g" "$SOURCE_MANIFEST" > "$MANIFEST"
 
 # Export TMPDIR for any subprocess that honors it (cargo's tarball
 # unpacks, npm's package extracts, ostree's transaction journal,
@@ -90,6 +116,7 @@ else
     FLATPAK_BUILDER=(
         flatpak run
         --filesystem="$CACHE_ROOT"
+        --filesystem="$PERSISTENT_CACHE"
         --filesystem="$CONTROLLER_DIR"
         --filesystem="$(cd "$CONTROLLER_DIR/.." && pwd)"   # repo root for the source dir
         --env=TMPDIR="$TMPDIR"
@@ -122,32 +149,50 @@ fi
 BUILDER_COMMON=(
     --user
     --force-clean
-    --keep-build-dirs
     --install-deps-from=flathub
     --state-dir="$STATE_DIR"
     --ccache
+    # No --keep-build-dirs: it preserves per-module build dirs after
+    # the build but doesn't make flatpak-builder REUSE them on the
+    # next invocation — each run still allocates a fresh
+    # saint-controller-N (-1, -2, -3, ...), so the only thing
+    # --keep-build-dirs accomplished was accumulating GB of stale
+    # dirs on disk. Incremental caching is now handled by the
+    # host-mounted persistent cache (see PERSISTENT_CACHE above plus
+    # --filesystem in the generated manifest).
 )
 
 clean_build_dirs() {
-    # Wipe per-module build dirs (forces full cargo + npm recompile
-    # next time). KEEPS the source download cache + ccache so we don't
-    # re-fetch a few GB of crates and npm tarballs.
-    echo "==> --clean: wiping per-module build dirs (forces full rebuild)"
-    echo "    removing: $STATE_DIR/build"
-    echo "    removing: $BUILD_DIR"
-    rm -rf "$STATE_DIR/build" "$BUILD_DIR"
-    mkdir -p "$BUILD_DIR"
+    # Wipe compile artifacts so cargo + npm rebuild from scratch, but
+    # KEEP downloaded sources (cargo registry, npm package tarballs)
+    # so the rebuild can run offline. Use this when you've changed
+    # toolchains, cargo flags, or suspect a stale binary.
+    echo "==> --clean: wiping compile artifacts (full rebuild, keeps downloads)"
+    echo "    removing per-module build dirs: $STATE_DIR/build"
+    echo "    removing staging output:        $BUILD_DIR"
+    echo "    removing cargo target:          $PERSISTENT_CACHE/target"
+    echo "    removing node_modules:          $PERSISTENT_CACHE/node_modules"
+    echo "    KEEPING cargo registry:         $PERSISTENT_CACHE/cargo"
+    echo "    KEEPING npm package cache:      $PERSISTENT_CACHE/npm-cache"
+    rm -rf "$STATE_DIR/build" "$BUILD_DIR" \
+           "$PERSISTENT_CACHE/target" "$PERSISTENT_CACHE/node_modules"
+    mkdir -p "$BUILD_DIR" \
+             "$PERSISTENT_CACHE/target" "$PERSISTENT_CACHE/node_modules"
 }
 
 nuke_cache() {
-    # Wipe EVERYTHING. Forces re-downloading cargo registry, npm
-    # tarballs, flatpak runtime extension snapshots, ccache. Last
-    # resort — use when --clean isn't enough and you suspect a
-    # corrupted state dir or want to reclaim disk.
+    # Wipe EVERYTHING including downloaded sources. The next build
+    # needs the network to re-fetch the cargo registry + npm
+    # tarballs + flatpak runtime extensions + ccache. Last resort —
+    # only use when --clean isn't enough.
     echo "==> --nuke: wiping entire flatpak cache root"
     echo "    removing: $CACHE_ROOT"
     rm -rf "$CACHE_ROOT"
-    mkdir -p "$BUILD_DIR" "$REPO_DIR" "$STATE_DIR" "$CCACHE_DIR" "$TMPDIR_LOCAL"
+    mkdir -p "$BUILD_DIR" "$REPO_DIR" "$STATE_DIR" "$CCACHE_DIR" "$TMPDIR_LOCAL" \
+             "$PERSISTENT_CACHE/cargo" \
+             "$PERSISTENT_CACHE/target" \
+             "$PERSISTENT_CACHE/node_modules" \
+             "$PERSISTENT_CACHE/npm-cache"
 }
 
 prereqs() {

@@ -55,6 +55,72 @@ class SaintApp {
         if (this.currentNodeInfo) {
             this.updateNodeOverview();
         }
+        // Force a re-render so the change is visible immediately on
+        // the Live Readings tab and dashboard widget cards. Both
+        // re-render on a debounce/timer anyway, so this is just a UX
+        // smoothing — no need to chase every numeric span manually.
+        if (window.nodeLiveManager) {
+            try { window.nodeLiveManager.renderGrid(); } catch (_) {}
+        }
+        if (window.widgetsDashboard) {
+            try {
+                window.widgetsDashboard.render();
+                window.widgetsDashboard.renderValues();
+            } catch (_) {}
+        }
+    }
+
+    /**
+     * Active temperature unit symbol — '°C' or '°F' — based on the
+     * user's preference. Used by other JS modules that render
+     * temperature values themselves rather than going through
+     * formatTemperature().
+     */
+    temperatureUnitSymbol() {
+        return this.temperatureUnit === 'fahrenheit' ? '°F' : '°C';
+    }
+
+    /**
+     * Convert a Celsius temperature to the user's preferred unit and
+     * return JUST THE NUMBER (no unit symbol). Use when the unit
+     * symbol is rendered in a separate element from the value (e.g.
+     * the FAS100 widget card lays them out as two spans).
+     *
+     * Returns '--' for null/undefined/NaN to match formatTemperature().
+     */
+    formatTemperatureValue(celsius) {
+        if (celsius === null || celsius === undefined || isNaN(celsius)) {
+            return '--';
+        }
+        const t = this.temperatureUnit === 'fahrenheit'
+            ? (celsius * 9 / 5) + 32
+            : celsius;
+        return t.toFixed(1);
+    }
+
+    /**
+     * Detect whether a peripheral channel descriptor represents a
+     * temperature reading. Used by render code in widgets.js /
+     * nodelive.js to decide between the generic numeric formatter
+     * and the temperature-aware one.
+     *
+     * Pattern-matches the channel ids actually emitted across our
+     * peripheral types (PeripheralChannel definitions in
+     * peripheral_model.py): temp, temp1, temp2, temp_1, temp_2,
+     * cpu_temp. Falls back to checking the display string for a
+     * literal °C/°F or "temp" word so a future peripheral that
+     * names its temperature channel something unexpected still
+     * gets the right treatment.
+     */
+    isTemperatureChannel(ch) {
+        if (!ch) return false;
+        const id = (typeof ch === 'string' ? ch : ch.id) || '';
+        if (id === 'temp' || /^temp[_0-9]/.test(id) || /(^|_)temp$/.test(id)
+            || id.includes('cpu_temp')) {
+            return true;
+        }
+        const disp = (ch && ch.display) || '';
+        return /°[CF]|temperat/i.test(disp);
     }
 
     /**

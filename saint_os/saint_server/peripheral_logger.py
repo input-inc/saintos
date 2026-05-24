@@ -3,8 +3,11 @@
 Three-tier sink fed from the firmware-state hot path:
   - 30 s and 60 s in-memory deques per (node_id, peripheral_id, channel_id)
     for live graphing and recent-history download.
-  - NDJSON file under SAINT_LOG_DIR/peripherals/, rotated daily,
-    last 5 days retained (TimedRotatingFileHandler does both).
+  - NDJSON file PER (node_id, peripheral_id) under
+    ``$SAINT_LOG_DIR/peripherals/``, rotated daily (catches up on
+    restart if the server was off across midnight). One file per
+    peripheral instead of one giant peripherals.log so an operator
+    can ``tail`` a specific peripheral without grep.
 
 Logging is opt-in: ``record()`` is a no-op unless the peripheral is in
 the enabled set. The state manager calls ``set_enabled()`` whenever a
@@ -13,13 +16,14 @@ peripheral's ``log_enabled`` flag changes (or on config load).
 
 import json
 import logging
-import logging.handlers
 import os
 import queue
 import threading
 import time
 from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
+
+from saint_server.file_log import PerKeyLogger
 
 # 10 Hz ceiling per the design discussion. We size deques generously so a
 # misbehaving peripheral can't quietly grow memory if it overshoots.
@@ -35,6 +39,15 @@ _QUEUE_MAXSIZE = 10_000
 _ChannelKey = Tuple[str, str, str]  # (node_id, peripheral_id, channel_id)
 
 
+def _peripheral_log_key(node_id: str, peripheral_id: str) -> str:
+    """Filename key for a (node, peripheral) pair. The double-underscore
+    separator is intentional: node ids and peripheral ids can each
+    contain single underscores, so doubling makes the split unambiguous
+    if anything ever parses the filename back.
+    """
+    return f"{node_id}__{peripheral_id}"
+
+
 class PeripheralLogger:
     def __init__(self, log_dir: str, logger: Optional[logging.Logger] = None):
         self._log_dir = log_dir
@@ -45,23 +58,21 @@ class PeripheralLogger:
         self._live_60s: Dict[_ChannelKey, Deque[Tuple[float, float]]] = {}
 
         os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "peripherals.log")
 
-        # Plain file handler, not the root logger — keeps NDJSON lines
-        # separate from anything Python's logging hierarchy might write.
-        self._file_logger = logging.getLogger("saint_os.peripherals")
-        self._file_logger.setLevel(logging.INFO)
-        self._file_logger.propagate = False
-        # Idempotent across re-instantiation (tests, reloads).
-        for h in list(self._file_logger.handlers):
-            self._file_logger.removeHandler(h)
-        self._handler = logging.handlers.TimedRotatingFileHandler(
-            log_path, when="midnight", backupCount=5, encoding="utf-8"
+        # One file per (node, peripheral). PerKeyLogger lazily creates
+        # the handler the first time a key is seen, and each handler
+        # rotates daily with a rotate-on-restart catch-up.
+        self._files = PerKeyLogger(
+            base_dir=log_dir,
+            logger_name_prefix="saint_os.peripherals",
         )
-        self._handler.setFormatter(logging.Formatter("%(message)s"))
-        self._file_logger.addHandler(self._handler)
 
-        self._queue: "queue.Queue[Optional[str]]" = queue.Queue(maxsize=_QUEUE_MAXSIZE)
+        # Each queue entry is (peripheral_key, ndjson_line). Keeping
+        # the routing key on the queue means the writer thread doesn't
+        # have to re-parse the JSON to figure out which file to write.
+        self._queue: "queue.Queue[Optional[Tuple[str, str]]]" = queue.Queue(
+            maxsize=_QUEUE_MAXSIZE
+        )
         self._writer_thread = threading.Thread(
             target=self._writer_loop, name="peripheral-logger", daemon=True
         )
@@ -80,7 +91,8 @@ class PeripheralLogger:
                 self._enabled.discard(key)
                 # Free the deques so a long-running server doesn't keep
                 # state for a peripheral that's been disabled.
-                for ckey in [k for k in self._live_30s if k[0] == node_id and k[1] == peripheral_id]:
+                for ckey in [k for k in self._live_30s
+                             if k[0] == node_id and k[1] == peripheral_id]:
                     self._live_30s.pop(ckey, None)
                     self._live_60s.pop(ckey, None)
 
@@ -111,7 +123,9 @@ class PeripheralLogger:
             d60.append((ts, value))
 
         # Disk: serialize outside the lock; drop rather than block if the
-        # writer thread is wedged.
+        # writer thread is wedged. channel_id stays in the JSON payload
+        # so all channels for a peripheral share one file but are still
+        # filterable.
         line = json.dumps({
             "ts": ts,
             "node": node_id,
@@ -119,8 +133,9 @@ class PeripheralLogger:
             "channel": channel_id,
             "v": value,
         }, separators=(",", ":"))
+        file_key = _peripheral_log_key(node_id, peripheral_id)
         try:
-            self._queue.put_nowait(line)
+            self._queue.put_nowait((file_key, line))
         except queue.Full:
             self._dropped += 1
             if self._logger and self._dropped % 1000 == 1:
@@ -138,23 +153,24 @@ class PeripheralLogger:
             return list(d) if d else []
 
     def shutdown(self, timeout: float = 2.0) -> None:
-        """Flush the writer thread and close the file handler."""
+        """Flush the writer thread and close all file handlers."""
         self._queue.put(None)
         self._writer_thread.join(timeout=timeout)
-        self._handler.close()
+        self._files.shutdown()
 
     # ---- internals --------------------------------------------------------
 
     def _writer_loop(self) -> None:
         while True:
             try:
-                line = self._queue.get()
+                item = self._queue.get()
             except Exception:
                 continue
-            if line is None:
+            if item is None:
                 return
+            file_key, line = item
             try:
-                self._file_logger.info(line)
+                self._files.log(file_key, line)
             except Exception as e:
                 # Never let a disk hiccup kill the thread.
                 if self._logger:
