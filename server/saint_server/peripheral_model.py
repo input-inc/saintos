@@ -1038,6 +1038,20 @@ DEFAULT_WIDGET_CATALOG: Dict[str, WidgetType] = {
         description="Reflects a digital signal as an on-screen LED.",
         inputs=[WidgetInputSpec("state", "State", "digital_in")],
     ),
+    "roboclaw_monitor": WidgetType(
+        id="roboclaw_monitor", label="RoboClaw Motor Monitor",
+        description="RoboClaw motor controller telemetry: commanded duty, "
+                    "encoder, bus voltage, motor current, and controller "
+                    "temperature. Rendered as the dashboard's violet-"
+                    "accented motor card with per-row sparklines.",
+        inputs=[
+            WidgetInputSpec("motor",   "Motor Duty",     "analog"),
+            WidgetInputSpec("encoder", "Encoder",        "analog"),
+            WidgetInputSpec("voltage", "Bus Voltage",    "analog"),
+            WidgetInputSpec("current", "Motor Current",  "analog"),
+            WidgetInputSpec("temp",    "Temperature",    "analog"),
+        ],
+    ),
 }
 
 

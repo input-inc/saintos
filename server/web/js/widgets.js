@@ -282,6 +282,9 @@ class WidgetsDashboard {
         if (type.id === 'battery_monitor') {
             return this._renderFas100Card(w, type);
         }
+        if (type.id === 'roboclaw_monitor') {
+            return this._renderRoboClawCard(w, type);
+        }
 
         const inputsHtml = (type.inputs || []).map(input => {
             const src = this.sourceForInput(w.id, input.id);
@@ -397,6 +400,95 @@ class WidgetsDashboard {
             </div>`;
     }
 
+    /** Mockup-faithful rendering for the RoboClaw Motor Monitor widget.
+     *  Violet-accented, modeled on the FAS100 card but adapted for a
+     *  motor controller: motor duty gets a bidirectional bar centered
+     *  on zero, encoder shows raw counts with no bar (counts are
+     *  unbounded), and voltage/current/temp use single-sided fills
+     *  matching their natural 0..max ranges. The firmware-side driver
+     *  publishes values already scaled to display units (duty -1..+1,
+     *  V, A, °C — see roboclaw_drv_get_value in roboclaw_driver.c). */
+    _renderRoboClawCard(w, type) {
+        const a = (typeof app !== 'undefined') ? app : null;
+        const tempUnit = (a && a.temperatureUnitSymbol)
+            ? a.temperatureUnitSymbol() : '°C';
+        // Per-input row metadata. `bar` is one of:
+        //   'bidirectional' — motor duty (-100%..+100%), violet fill
+        //                     anchored at center
+        //   'unipolar'      — single-sided 0..max fill
+        //   'none'          — no bar (e.g. encoder counts)
+        const meta = {
+            motor:   { unit: '%',        color: 'bg-violet-500',
+                       barText: 'text-violet-300', bar: 'bidirectional' },
+            encoder: { unit: 'cnt',      color: 'bg-slate-500',
+                       barText: 'text-slate-200',  bar: 'none' },
+            voltage: { unit: 'V',        color: 'bg-amber-500',
+                       barText: 'text-amber-300',  bar: 'unipolar' },
+            current: { unit: 'A',        color: 'bg-cyan-500',
+                       barText: 'text-cyan-300',   bar: 'unipolar' },
+            temp:    { unit: tempUnit,   color: 'bg-rose-500',
+                       barText: 'text-rose-300',   bar: 'unipolar' },
+        };
+
+        const rowsHtml = (type.inputs || []).map(input => {
+            const src = this.sourceForInput(w.id, input.id);
+            const srcLabel = this.sourceLabel(src);
+            const valId = `widget-${w.id}-${input.id}`;
+            const m = meta[input.id] || meta.voltage;
+            let barHtml = '';
+            if (m.bar === 'bidirectional') {
+                // Track with a 1px center divider; the fill sits on top
+                // and is positioned/sized at runtime in renderValues
+                // (left:50%, width:0% when idle).
+                barHtml = `
+                <div class="relative flex-1 h-1 bg-slate-700 rounded-full overflow-hidden ml-2">
+                    <div class="absolute inset-y-0 left-1/2 w-px bg-slate-500"></div>
+                    <div id="${valId}-bar" class="absolute inset-y-0 ${m.color} transition-all"
+                         style="left:50%;width:0%"></div>
+                </div>`;
+            } else if (m.bar === 'unipolar') {
+                barHtml = `
+                <div class="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden ml-2">
+                    <div id="${valId}-bar" class="${m.color} h-full transition-all"
+                         style="width:0%"></div>
+                </div>`;
+            }
+            return `
+                <div class="border-t border-slate-700/60 pt-2 mt-2 first:border-t-0 first:pt-0 first:mt-0">
+                    <div class="flex items-center justify-between">
+                        <span class="stat-label">${escapeHtml(input.display)}</span>
+                        <span class="inline-flex items-center gap-2">
+                            <span id="${valId}-spark" class="inline-flex items-center"
+                                  style="width:${WIDGET_SPARK_W}px;height:${WIDGET_SPARK_H}px"></span>
+                            <span id="${valId}" class="stat-value ${m.barText}">—</span>
+                            <span class="text-xs text-slate-500">${m.unit}</span>
+                        </span>
+                    </div>
+                    <div class="flex items-center mt-1">
+                        <div class="text-[0.65rem] text-slate-500 truncate flex-1" title="${escapeAttr(srcLabel)}">
+                            ${src ? '← ' : ''}${escapeHtml(srcLabel)}
+                        </div>
+                        ${barHtml}
+                    </div>
+                </div>`;
+        }).join('');
+
+        return `
+            <div class="card" data-widget-id="${escapeAttr(w.id)}">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center gap-2">
+                        <span class="material-icons text-violet-400 icon-md">precision_manufacturing</span>
+                        <h4 class="text-base font-semibold text-white">${escapeHtml(w.label)}</h4>
+                    </div>
+                    <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-violet-900/40 text-violet-200">
+                        RoboClaw
+                    </span>
+                </div>
+                <div class="h-0.5 bg-violet-500 rounded-full mb-3"></div>
+                <div>${rowsHtml || '<p class="text-xs text-slate-500 italic">No inputs configured.</p>'}</div>
+            </div>`;
+    }
+
     _renderInputValue(typeId, input, valId) {
         // Status indicators get a colored dot. Analog inputs render the
         // value plus an inline 30s sparkline that the live pin_state
@@ -419,6 +511,11 @@ class WidgetsDashboard {
         // Per-input ranges for the FAS100 progress bars. Kept in sync
         // with the same table in _renderFas100Card.
         const fas100Max = { voltage: 30, current: 100, temp1: 80, temp2: 80 };
+        // RoboClaw ranges. `motor` is bidirectional, handled separately
+        // below (firmware emits duty as -1..+1, so the displayed value
+        // is the fraction *100 with a center-anchored fill). Encoder
+        // has no bar (counts are unbounded).
+        const roboclawMax = { voltage: 30, current: 60, temp: 80 };
         for (const { widget: w } of this._allWidgets()) {
             const type = this._widgetType(w.type);
             if (!type) continue;
@@ -437,24 +534,66 @@ class WidgetsDashboard {
                         valEl.textContent = '—';
                     }
                     if (sparkEl) sparkEl.innerHTML = '';
-                    if (barEl) barEl.style.width = '0%';
+                    if (barEl) {
+                        if (type.id === 'roboclaw_monitor' && input.id === 'motor') {
+                            barEl.style.left = '50%';
+                            barEl.style.width = '0%';
+                        } else {
+                            barEl.style.width = '0%';
+                        }
+                    }
                     continue;
                 }
                 if (valEl.dataset.empty === '1') {
                     const triggered = !!last.value;
                     valEl.className = 'inline-block w-3 h-3 rounded-full ' +
                         (triggered ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.7)]' : 'bg-emerald-500');
+                } else if (type.id === 'roboclaw_monitor' && input.id === 'motor'
+                        && typeof last.value === 'number') {
+                    // Render the duty fraction as a signed percentage —
+                    // e.g. +42 / -17 / 0. Sign carries direction so the
+                    // operator can tell at a glance which way the motor
+                    // is being driven without parsing the bar.
+                    const pct = last.value * 100;
+                    const sign = pct > 0 ? '+' : '';
+                    valEl.textContent = `${sign}${pct.toFixed(0)}`;
                 } else {
                     valEl.textContent = this._formatValueForInput(input, last.value);
                 }
                 if (sparkEl) {
                     sparkEl.innerHTML = this._sparkline(this._history.get(key));
                 }
-                if (barEl && type.id === 'battery_monitor'
-                        && typeof last.value === 'number') {
-                    const max = fas100Max[input.id] || 1;
-                    const pct = Math.max(0, Math.min(100, (last.value / max) * 100));
-                    barEl.style.width = `${pct.toFixed(1)}%`;
+                if (barEl && typeof last.value === 'number') {
+                    if (type.id === 'battery_monitor') {
+                        const max = fas100Max[input.id] || 1;
+                        const pct = Math.max(0, Math.min(100, (last.value / max) * 100));
+                        barEl.style.width = `${pct.toFixed(1)}%`;
+                    } else if (type.id === 'roboclaw_monitor') {
+                        if (input.id === 'motor') {
+                            // Bidirectional: half-width track on each
+                            // side of the 50% center line. Clamp
+                            // |duty| at 1.0 — the firmware shouldn't
+                            // exceed it, but a glitch reading shouldn't
+                            // cause the fill to overflow the track.
+                            const duty = Math.max(-1, Math.min(1, last.value));
+                            const half = Math.abs(duty) * 50;
+                            if (duty >= 0) {
+                                barEl.style.left  = '50%';
+                                barEl.style.width = `${half.toFixed(1)}%`;
+                            } else {
+                                barEl.style.left  = `${(50 - half).toFixed(1)}%`;
+                                barEl.style.width = `${half.toFixed(1)}%`;
+                            }
+                        } else if (roboclawMax[input.id] !== undefined) {
+                            // For temperature, scale on the raw Celsius
+                            // value (not the displayed °F number) so
+                            // the bar means the same thing regardless
+                            // of the operator's unit preference.
+                            const max = roboclawMax[input.id];
+                            const pct = Math.max(0, Math.min(100, (last.value / max) * 100));
+                            barEl.style.width = `${pct.toFixed(1)}%`;
+                        }
+                    }
                 }
             }
         }
