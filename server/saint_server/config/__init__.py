@@ -39,6 +39,19 @@ class LiveLinkConfig:
 
 
 @dataclass
+class LoggingConfig:
+    """Logging configuration.
+
+    Default is WARNING so the per-tick INFO lines emitted by the
+    routing evaluator and ROS bridge stay off the file handler at
+    50 Hz. Bump to INFO (or DEBUG) from the Settings panel when
+    diagnosing a binding or evaluator issue. Applies live — no
+    server restart needed.
+    """
+    level: str = "WARNING"
+
+
+@dataclass
 class ServerConfig:
     """Complete server configuration."""
     name: str = "SAINT-01"
@@ -46,6 +59,7 @@ class ServerConfig:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     ros_bridge: ROSBridgeConfig = field(default_factory=ROSBridgeConfig)
     livelink: LiveLinkConfig = field(default_factory=LiveLinkConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
 # Global config instance
@@ -100,6 +114,13 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
         if ll_data:
             config.livelink.enabled = ll_data.get('enabled', config.livelink.enabled)
             config.livelink.port = ll_data.get('port', config.livelink.port)
+
+        # Logging settings
+        log_data = data.get('logging', {})
+        if log_data:
+            level = log_data.get('level', config.logging.level)
+            if isinstance(level, str) and level.strip():
+                config.logging.level = level.strip().upper()
 
     _config = config
     return config
@@ -160,6 +181,9 @@ def save_config(config: Optional[ServerConfig] = None) -> bool:
             'enabled': config.livelink.enabled,
             'port': config.livelink.port,
         },
+        'logging': {
+            'level': config.logging.level,
+        },
     }
 
     # Only include websocket_port if set
@@ -210,6 +234,9 @@ def config_to_dict(config: Optional[ServerConfig] = None) -> dict:
         'livelink': {
             'enabled': config.livelink.enabled,
             'port': config.livelink.port,
+        },
+        'logging': {
+            'level': config.logging.level,
         },
     }
 
@@ -265,6 +292,14 @@ def update_config_from_dict(data: dict) -> ServerConfig:
         if 'port' in ll:
             _config.livelink.port = int(ll['port'])
 
+    # Logging settings
+    if 'logging' in data:
+        log = data['logging']
+        if 'level' in log:
+            level = log['level']
+            if isinstance(level, str) and level.strip():
+                _config.logging.level = level.strip().upper()
+
     return _config
 
 
@@ -274,6 +309,7 @@ __all__ = [
     'NetworkConfig',
     'ROSBridgeConfig',
     'LiveLinkConfig',
+    'LoggingConfig',
     'load_config',
     'get_config',
     'get_config_path',

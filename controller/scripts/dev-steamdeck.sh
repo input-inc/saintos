@@ -42,11 +42,11 @@
 #     Linux: `apt install fswatch` or `inotify-tools` (auto-detected).
 #
 # What this script does NOT do:
-#   - Start a dev server on the Deck. The intended workflow with the
-#     Flatpak-deployment model is: this script keeps the source in
-#     sync, you ssh in and run `flatpak/build.sh` (or `tauri dev`)
-#     when you want to rebuild. Mixing the file-sync loop with a
-#     long-lived remote build process turned out to be fragile.
+#   - Start a dev server on the Deck. The intended workflow is: this
+#     script keeps the source in sync, you ssh in and run a build
+#     yourself (e.g. `tauri dev`) when you want to rebuild. Mixing
+#     the file-sync loop with a long-lived remote build process
+#     turned out to be fragile.
 
 set -euo pipefail
 
@@ -134,32 +134,19 @@ sync_files() {
     echo "[$(date +%H:%M:%S)] syncing → $DECK:$REMOTE_DIR"
     # ADDITIVE ONLY — no --delete. Files only ever flow dev → Deck;
     # nothing on the Deck side gets removed. That keeps Deck-local
-    # state intact: flatpak-builder caches, build artifacts, and
-    # anything the operator manually left in the tree. Trade-off:
-    # renaming a file on the dev machine leaves the old copy on the
-    # Deck — rare in practice, and a manual `ssh ... rm` is the right
-    # cleanup tool when it happens.
+    # state intact: build artifacts, the operator's manual notes, and
+    # so on. Trade-off: renaming a file on the dev machine leaves the
+    # old copy on the Deck — rare in practice, and a manual
+    # `ssh ... rm` is the right cleanup tool when it happens.
     #
-    # Excludes:
-    #   node_modules / target / dist / .angular  — heavy build outputs
-    #   .git                                     — irrelevant on the Deck
-    #   flatpak-build / flatpak-repo             — local build outputs
-    #                                              that flatpak/build.sh
-    #                                              produces on the Deck
-    #   .flatpak-builder                         — flatpak-builder's
-    #                                              own cache (SDK
-    #                                              extensions etc).
-    #                                              Surviving this is
-    #                                              what makes Flatpak
-    #                                              re-builds fast.
+    # Excludes: heavy build outputs (node_modules, target, dist,
+    # .angular) and .git (irrelevant on the Deck).
     rsync -avz \
         --exclude 'node_modules' \
         --exclude 'target' \
         --exclude 'dist' \
         --exclude '.angular' \
         --exclude '.git' \
-        --exclude '.flatpak-cache' \
-        --exclude 'SAINT-Controller.flatpak' \
         -e "$(ssh_cmd_string)" \
         "$LOCAL_DIR/" "$DECK:$REMOTE_DIR/"
     echo "[$(date +%H:%M:%S)] sync complete"
@@ -172,37 +159,31 @@ sync_files
 # fswatch on macOS, inotifywait on Linux. The dev box this script
 # runs from is almost always macOS, so fall back to a polite error
 # on Linux rather than silently failing.
+#
+# IMPORTANT: watch directories, not individual files. Modern editors
+# (VS Code, JetBrains, vim with `:set backupcopy=auto`) save atomically:
+# write to a temp file, then rename() it over the target. The rename
+# swaps the inode, so fswatch's FSEvents stream that was bound to the
+# OLD inode goes stale after the first save and silently sees nothing
+# from then on. Directory inodes don't change, so watching the parent
+# dir picks up the rename event correctly. Same gotcha applies to
+# inotify on Linux (IN_MOVED_TO without IN_MODIFY tracking).
+#
+# The exclude regex strips the heavy build outputs and noise dirs so
+# fswatch isn't paging through cargo's target/ on every read; same set
+# the rsync exclude list uses.
+COMMON_EXCLUDES='(node_modules|/target/|/dist/|\.angular|\.git/|src-tauri/gen)'
+
 if command -v fswatch >/dev/null 2>&1; then
-    WATCHER=(fswatch -o
-        --exclude 'node_modules'
-        --exclude 'target'
-        --exclude 'dist'
-        --exclude '.angular'
-        --exclude '.git'
-        --exclude '.flatpak-cache'
-        "$LOCAL_DIR/src"
-        "$LOCAL_DIR/src-tauri/src"
-        "$LOCAL_DIR/src-tauri/Cargo.toml"
-        "$LOCAL_DIR/src-tauri/tauri.conf.json"
-        "$LOCAL_DIR/package.json"
-        "$LOCAL_DIR/angular.json"
-        "$LOCAL_DIR/tailwind.config.js"
-        "$LOCAL_DIR/flatpak"
-    )
+    # --latency 0.2 = coalesce events for 200ms then emit one batch
+    # marker (we don't care which file changed, just that something did)
+    WATCHER=(fswatch -o --latency 0.2 --exclude "$COMMON_EXCLUDES" "$LOCAL_DIR")
 elif command -v inotifywait >/dev/null 2>&1; then
     echo "fswatch missing on Linux — install with: sudo apt install fswatch" >&2
     echo "Falling back to inotifywait..."
     WATCHER=(inotifywait -m -r -e modify,create,delete,move
-        --exclude '(node_modules|target|dist|\.angular|\.git|\.flatpak-cache)'
-        "$LOCAL_DIR/src"
-        "$LOCAL_DIR/src-tauri/src"
-        "$LOCAL_DIR/src-tauri/Cargo.toml"
-        "$LOCAL_DIR/src-tauri/tauri.conf.json"
-        "$LOCAL_DIR/package.json"
-        "$LOCAL_DIR/angular.json"
-        "$LOCAL_DIR/tailwind.config.js"
-        "$LOCAL_DIR/flatpak"
-    )
+        --exclude "$COMMON_EXCLUDES"
+        "$LOCAL_DIR")
 else
     echo "Neither fswatch nor inotifywait found." >&2
     echo "  macOS:  brew install fswatch" >&2
@@ -211,13 +192,10 @@ else
 fi
 
 echo "Watching $LOCAL_DIR for changes (Ctrl-C to stop)…"
-if [[ -n "$ROBOT" ]]; then
-    echo "On the Deck, rebuild the Flatpak when you want to test:"
-    echo "  ssh -J $ROBOT $DECK '$REMOTE_DIR/flatpak/build.sh'"
-else
-    echo "On the Deck, rebuild the Flatpak when you want to test:"
-    echo "  ssh $DECK '$REMOTE_DIR/flatpak/build.sh'"
-fi
+echo
+echo "Note: production builds happen via controller/appimage/build-docker.sh"
+echo "on this machine; the AppImage is then scp'd to the Deck. This script"
+echo "is for on-Deck inner-loop work (tauri dev / direct cargo runs)."
 echo
 
 "${WATCHER[@]}" | while read -r _; do

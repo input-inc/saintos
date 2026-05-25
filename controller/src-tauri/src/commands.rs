@@ -562,55 +562,169 @@ pub fn resolve_host(
     }
 }
 
-/// Install a freshly-downloaded controller .flatpak bundle by writing
-/// the bytes to the app's xdg-data dir and invoking the host's `flatpak`
-/// CLI via the org.freedesktop.Flatpak portal (flatpak-spawn --host).
+/// Pick the path on disk to write a new AppImage to.
 ///
-/// JS gates this behind a SHA-256 verification on the downloaded body,
-/// so the bytes we receive here are trusted. Returning Ok does NOT
-/// mean the new version is running — the freshly installed bundle
-/// replaces the on-disk app, but the operator still has to manually
-/// relaunch (Steam tile, or `flatpak run com.saintos.Controller`)
-/// before the new code takes effect.
-#[tauri::command]
-pub fn install_controller_update(bytes: Vec<u8>) -> Result<(), String> {
-    use std::process::Command;
+/// Prefers `$APPIMAGE` (the AppImage runtime sets this to the absolute
+/// path of the file that was launched) so OTA updates overwrite the
+/// same file the Steam shortcut points at — the shortcut keeps working
+/// across versions without us touching `shortcuts.vdf`. Falls back to a
+/// canonical XDG location when not running inside an AppImage (dev
+/// mode, `tauri dev`, raw binary), so first-time installs from inside
+/// the app still go somewhere predictable.
+fn target_appimage_path() -> Result<std::path::PathBuf, String> {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("APPIMAGE") {
+        let path = PathBuf::from(p);
+        if path.parent().is_some_and(|parent| parent.is_dir()) {
+            return Ok(path);
+        }
+    }
+    let data_home = dirs::data_dir()
+        .ok_or_else(|| "no XDG data dir available".to_string())?;
+    let install_dir = data_home.join("saint-controller");
+    std::fs::create_dir_all(&install_dir)
+        .map_err(|e| format!("mkdir {}: {}", install_dir.display(), e))?;
+    Ok(install_dir.join("SAINT-Controller.AppImage"))
+}
 
-    let dir = dirs::data_dir()
-        .ok_or_else(|| "no XDG data dir available".to_string())?
-        .join("saint-controller");
+/// Stable XDG location for install metadata (`installed.json`).
+///
+/// Distinct from the AppImage's path on purpose: the binary could land
+/// anywhere depending on `$APPIMAGE`, but `installed.json` always lives
+/// here so update-detection can find it deterministically.
+fn metadata_dir() -> Result<std::path::PathBuf, String> {
+    let data_home = dirs::data_dir()
+        .ok_or_else(|| "no XDG data dir available".to_string())?;
+    let dir = data_home.join("saint-controller");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
+    Ok(dir)
+}
 
-    let target = dir.join("controller-update.flatpak");
-    std::fs::write(&target, &bytes)
-        .map_err(|e| format!("write {}: {}", target.display(), e))?;
+/// Install a freshly-downloaded controller .AppImage.
+///
+/// JS gates this behind a SHA-256 verification on the downloaded body,
+/// so the bytes we receive here are trusted. `version`, `filename`,
+/// and `checksum` come from the same `info.json` the bytes were
+/// fetched against — they get recorded into `installed.json` so the
+/// next update check can compare both fields against the server. This
+/// is what catches "same version string, different content" rebuilds:
+/// the version may not have changed but the checksum did, so an
+/// update is still offered.
+///
+/// Target path resolution: see `target_appimage_path()` — prefers
+/// `$APPIMAGE` so the file the Steam shortcut points at gets
+/// overwritten in-place. Linux's `rename(2)` is safe to apply over a
+/// busy executable; the running process keeps the old inode via its
+/// open fd, while the next launch execs the new file.
+///
+/// Returning `Ok` does NOT mean the new version is running — the
+/// operator still has to relaunch the app (Steam tile, file launcher,
+/// or running the AppImage path directly) before the new code takes
+/// effect.
+#[tauri::command]
+pub fn install_controller_update(
+    bytes: Vec<u8>,
+    version: String,
+    filename: String,
+    checksum: String,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let target = target_appimage_path()?;
+
+    // `with_extension` would replace `.AppImage` outright; we want to
+    // append, so build the staging filename manually.
+    let mut staging = target.clone();
+    let staging_name = format!("{}.new", target
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "SAINT-Controller.AppImage".to_string()));
+    staging.set_file_name(staging_name);
+
+    std::fs::write(&staging, &bytes)
+        .map_err(|e| format!("write {}: {}", staging.display(), e))?;
+    let mut perms = std::fs::metadata(&staging)
+        .map_err(|e| format!("stat {}: {}", staging.display(), e))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&staging, perms)
+        .map_err(|e| format!("chmod {}: {}", staging.display(), e))?;
+
+    std::fs::rename(&staging, &target)
+        .map_err(|e| format!("rename {} -> {}: {}", staging.display(), target.display(), e))?;
     log::info!(
-        "Wrote {} byte controller update bundle to {}",
+        "Installed {} byte controller AppImage at {}",
         bytes.len(),
         target.display(),
     );
 
-    // flatpak-spawn is part of every Flatpak runtime and bridges to the
-    // host through the org.freedesktop.Flatpak portal. --talk-name on
-    // that bus name in the manifest is what makes this allowed; without
-    // it we'd see "Access denied" here.
-    let status = Command::new("flatpak-spawn")
-        .args([
-            "--host",
-            "flatpak", "install",
-            "--user",
-            "--reinstall",
-            "--noninteractive",
-            "--assumeyes",
-        ])
-        .arg(&target)
-        .status()
-        .map_err(|e| format!("spawn flatpak-spawn: {}", e))?;
+    // installed.json sidecar — version + checksum stored alongside in
+    // a stable XDG location, regardless of where the binary went. The
+    // update-detection logic in settings.component.ts reads this back
+    // and compares both fields.
+    let meta_path = metadata_dir()?.join("installed.json");
+    let installed_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let installed = serde_json::json!({
+        "version": version,
+        "checksum": checksum,
+        "filename": filename,
+        "installed_at_unix": installed_at_unix,
+        "path": target.to_string_lossy(),
+    });
+    std::fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(&installed).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| format!("write {}: {}", meta_path.display(), e))?;
 
-    if !status.success() {
-        return Err(format!("flatpak install exited with {}", status));
-    }
-    log::info!("flatpak install succeeded; operator must relaunch");
+    // .desktop entry pointing at the install path. For OTA updates
+    // this just keeps the entry in sync if the path changed; for
+    // first-time installs it's how GUI launchers find the app.
+    let applications_dir = dirs::data_dir()
+        .ok_or_else(|| "no XDG data dir available".to_string())?
+        .join("applications");
+    std::fs::create_dir_all(&applications_dir)
+        .map_err(|e| format!("mkdir {}: {}", applications_dir.display(), e))?;
+    let desktop_path = applications_dir.join("saint-controller.desktop");
+    let desktop_contents = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=SAINT Controller\n\
+         Comment=Operator interface for SAINT.OS robots\n\
+         Exec={} %U\n\
+         Icon=saint-controller\n\
+         Terminal=false\n\
+         Categories=Utility;\n\
+         StartupNotify=true\n",
+        target.display()
+    );
+    std::fs::write(&desktop_path, desktop_contents)
+        .map_err(|e| format!("write {}: {}", desktop_path.display(), e))?;
+
+    log::info!("Operator must relaunch the app to pick up the new version");
     Ok(())
+}
+
+/// Read the `installed.json` sidecar that records what was installed
+/// by the last successful `install_controller_update` call. Returns
+/// `None` when the file doesn't exist — typically a fresh install
+/// from a hand-downloaded AppImage where the in-app OTA never ran.
+/// The caller falls back to a looser version-string comparison in
+/// that case.
+#[tauri::command]
+pub fn get_installed_controller_info() -> Result<Option<serde_json::Value>, String> {
+    let meta_path = metadata_dir()?.join("installed.json");
+    if !meta_path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&meta_path)
+        .map_err(|e| format!("read {}: {}", meta_path.display(), e))?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("parse {}: {}", meta_path.display(), e))?;
+    Ok(Some(json))
 }

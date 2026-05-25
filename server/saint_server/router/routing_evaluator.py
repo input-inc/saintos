@@ -19,6 +19,7 @@ each input tick is cheap and keeps the algorithm trivial.
 from __future__ import annotations
 
 import math
+import time
 from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -29,6 +30,14 @@ from saint_server.peripheral_model import (
     SystemRouting,
     Wire,
 )
+
+
+# Hot-path INFO logs (per-tick set_ws_input / set_channel emissions) are
+# sampled to keep file-handler I/O bounded at high tick rates. We still
+# always log the first message after a quiet gap so the operator sees a
+# binding light up immediately when they push the stick.
+_HOT_LOG_SAMPLE_N = 20      # log 1-of-N during steady streams
+_HOT_LOG_IDLE_MS = 500.0    # also log if this much wallclock has passed
 
 
 # (topic, field) → most recent scalar value, or None if no message yet.
@@ -78,6 +87,9 @@ class RoutingEvaluator:
         # "outputs", "widgets". Refreshed on each _evaluate_sheet pass
         # and shipped to the UI via _on_values_changed.
         self._sheet_values: Dict[str, Dict[str, Dict[str, float]]] = {}
+        # Hot-path log sampling state (see _hot_log).
+        self._hot_log_count = 0
+        self._hot_log_last_ms = 0.0
 
     # ── public API ──────────────────────────────────────────────────
 
@@ -136,10 +148,9 @@ class RoutingEvaluator:
             self._ws_input_values[(sheet_id, input_id)] = scalar
 
         # Visible-by-default so the operator can see WS-input pushes in
-        # the live log alongside set_topic_channel events. Throttled
-        # downstream by the routing-values broadcast.
-        self._log("info",
-                  f"set_ws_input {sheet_id}/{input_id} = {scalar}")
+        # the live log alongside set_topic_channel events. Sampled — see
+        # _hot_log — to keep file-handler I/O bounded during stick bursts.
+        self._hot_log(f"set_ws_input {sheet_id}/{input_id} = {scalar}")
 
         try:
             self._evaluate_sheet(sheet)
@@ -268,7 +279,7 @@ class RoutingEvaluator:
             finally:
                 visiting.discard(op_id)
             op_cache[op_id] = value
-            self._log("info",
+            self._log("debug",
                       f"eval {op_node.op}({op_id}) inputs={inputs} → {value}")
             return value
 
@@ -407,9 +418,11 @@ class RoutingEvaluator:
                 # per-node so e.g. "roboclaw-1" on the Left vs Right Track
                 # Drive nodes both render as "roboclaw-1/motor" without
                 # this prefix, which made the side-by-side log impossible
-                # to read on a tank with one roboclaw per track.
-                self._log("info",
-                          f"set_channel {node_id}/{peripheral_id}/{channel_id} = {value:.3f}")
+                # to read on a tank with one roboclaw per track. Sampled
+                # via _hot_log so 50 Hz binding streams don't saturate
+                # the daily file handler.
+                self._hot_log(
+                    f"set_channel {node_id}/{peripheral_id}/{channel_id} = {value:.3f}")
             except Exception as e:
                 self._log("error",
                           f"Failed to send channel {node_id}/{peripheral_id}/{channel_id}: {e}")
@@ -461,6 +474,17 @@ class RoutingEvaluator:
                 getattr(self._logger, level)(message)
             except Exception:
                 pass
+
+    def _hot_log(self, message: str) -> None:
+        """Sampled INFO log for per-tick lines. Logs 1-of-N during steady
+        streams, plus always logs the first message after an idle gap so
+        a binding firing fresh is still visible immediately."""
+        self._hot_log_count += 1
+        now_ms = time.monotonic() * 1000.0
+        if (now_ms - self._hot_log_last_ms >= _HOT_LOG_IDLE_MS
+                or self._hot_log_count % _HOT_LOG_SAMPLE_N == 0):
+            self._hot_log_last_ms = now_ms
+            self._log("info", message)
 
 
 _EVALUATOR_CLIENT_ID = "_routing_evaluator"

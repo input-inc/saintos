@@ -244,18 +244,6 @@
                         </div>
                     </div>
 
-                    <!-- Activity Log Card -->
-                    <div class="card lg:col-span-2">
-                        <div class="flex items-center justify-between mb-4">
-                            <h3 class="text-lg font-semibold text-white">Activity Log</h3>
-                            <button id="btn-view-logs" class="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">
-                                View Full Logs →
-                            </button>
-                        </div>
-                        <div id="activity-log" class="log-container h-48 overflow-y-auto space-y-1 font-mono text-sm">
-                            <p class="text-slate-500">Waiting for connection...</p>
-                        </div>
-                    </div>
                 </div>
 
                 <!-- Operator widgets — populated from system_routing.widgets -->
@@ -1727,6 +1715,44 @@
                             </div>
                         </div>
                     </div>
+
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-cyan-400">videogame_asset</span>
+                            Steam Deck Controller
+                        </h3>
+                        <p class="text-sm text-slate-400 mb-4">Tauri operator app served as a self-contained AppImage</p>
+
+                        <div class="space-y-4">
+                            <!-- Controller AppImage -->
+                            <div class="bg-slate-800/50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <span class="material-icons text-cyan-400">sports_esports</span>
+                                        <h4 class="font-medium text-white">Controller AppImage</h4>
+                                    </div>
+                                    <span id="settings-fw-controller-status" class="px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400">
+                                        Checking...
+                                    </span>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1 ml-8">Auto-installed via the controller app's Settings → Software Update</p>
+                                <div class="mt-3 ml-8 grid grid-cols-2 gap-3 text-sm">
+                                    <div>
+                                        <span class="text-slate-500">Version:</span>
+                                        <span id="settings-fw-controller-version" class="text-white ml-2">--</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-slate-500">Package:</span>
+                                        <span id="settings-fw-controller-package" class="text-white ml-2 font-mono text-xs">--</span>
+                                    </div>
+                                    <div class="col-span-2">
+                                        <span class="text-slate-500">Build Date:</span>
+                                        <span id="settings-fw-controller-build" class="text-white ml-2">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Boards Settings Tab -->
@@ -1811,22 +1837,58 @@
             </section>
 
             <!-- Logs Page -->
-            <section id="page-logs" class="page">
-                <h2 class="text-2xl font-bold text-white mb-6">System Logs</h2>
+            <section id="page-logs" class="page logs-page">
+                <div class="logs-shell">
+                    <!-- Left rail: one entry per log source -->
+                    <aside class="logs-sidebar">
+                        <div class="logs-sidebar-header">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Sources</span>
+                        </div>
+                        <div id="logs-source-list" class="logs-source-list"></div>
+                    </aside>
 
-                <div class="card">
-                    <div class="flex flex-col sm:flex-row gap-4 mb-4">
-                        <select id="log-level" class="input-field w-full sm:w-48">
-                            <option value="all">All Levels</option>
-                            <option value="debug">Debug</option>
-                            <option value="info">Info</option>
-                            <option value="warn">Warning</option>
-                            <option value="error">Error</option>
-                        </select>
-                        <input type="text" id="log-search" placeholder="Search logs..." class="input-field flex-1">
-                    </div>
-                    <div id="log-entries" class="log-container h-96 overflow-y-auto space-y-1 font-mono text-sm">
-                        <p class="text-slate-500">Loading logs...</p>
+                    <!-- Main area: per-source toolbar + log rows -->
+                    <div class="logs-main">
+                        <div class="logs-toolbar">
+                            <div class="min-w-0 flex-1">
+                                <h2 id="logs-source-title" class="text-lg font-semibold text-white truncate">Server</h2>
+                                <p id="logs-source-subtitle" class="text-xs text-slate-400 truncate">
+                                    Activity events from the server process.
+                                </p>
+                            </div>
+                            <div class="flex gap-2 items-center flex-wrap">
+                                <!-- Global server log level. Saved via set_settings
+                                     so the choice survives restart; applied live by
+                                     apply_log_level() so the dropdown takes effect
+                                     immediately. WARNING is the default so the
+                                     per-tick INFO from the routing evaluator stays
+                                     off the file handler at 50 Hz. -->
+                                <label for="logs-level-select" class="text-xs text-slate-400">Level</label>
+                                <select id="logs-level-select" class="input-field text-sm py-1">
+                                    <option value="DEBUG">Debug</option>
+                                    <option value="INFO">Info</option>
+                                    <option value="WARNING" selected>Warning</option>
+                                    <option value="ERROR">Error</option>
+                                </select>
+                                <select id="logs-row-filter" class="input-field text-sm py-1" title="Filter the rows currently shown">
+                                    <option value="all">Show all</option>
+                                    <option value="debug">Debug+</option>
+                                    <option value="info">Info+</option>
+                                    <option value="warn">Warn+</option>
+                                    <option value="error">Error only</option>
+                                </select>
+                                <input type="text" id="logs-search" placeholder="Search logs…"
+                                    class="input-field text-sm py-1 w-48">
+                                <button id="logs-clear-btn" class="btn-secondary text-sm" title="Clear the rows shown for the current source">
+                                    <span class="material-icons icon-sm">delete_sweep</span>
+                                    Clear
+                                </button>
+                            </div>
+                        </div>
+
+                        <div id="logs-rows" class="logs-rows">
+                            <p class="text-slate-500 italic text-sm p-4">Loading…</p>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -2460,6 +2522,95 @@
             /* Fill all available height under the nav bar. */
             height: calc(100vh - 6.5rem);
             min-height: 32rem;
+        }
+        /* Logs page — same master-detail shell as routing-page so the
+           two surfaces feel like siblings. Source list on the left
+           (Server + adopted nodes), per-source log rows on the right
+           with an inline expand-on-click detail panel. */
+        .logs-page {
+            height: calc(100vh - 6.5rem);
+            min-height: 32rem;
+        }
+        .logs-shell {
+            display: flex; height: 100%; gap: 0;
+            border-top: 1px solid #1e293b;
+        }
+        .logs-sidebar {
+            width: 16rem; min-width: 12rem; flex-shrink: 0;
+            background: #0f172a; border-right: 1px solid #1e293b;
+            display: flex; flex-direction: column;
+        }
+        .logs-sidebar-header {
+            padding: 0.75rem 1rem; border-bottom: 1px solid #1e293b;
+        }
+        .logs-source-list {
+            flex: 1; overflow-y: auto; padding: 0.5rem;
+        }
+        .logs-source-item {
+            display: flex; align-items: center; gap: 0.5rem;
+            padding: 0.5rem 0.75rem; border-radius: 0.375rem;
+            font-size: 0.85rem; color: #cbd5e1; cursor: pointer;
+            border: 1px solid transparent;
+        }
+        .logs-source-item:hover { background: #1e293b; }
+        .logs-source-item.active {
+            background: #0f4c5c; border-color: #06b6d4; color: #fff;
+        }
+        .logs-source-item .material-icons { font-size: 16px; color: #64748b; }
+        .logs-source-item.active .material-icons { color: #67e8f9; }
+        .logs-source-meta {
+            margin-left: auto; font-size: 0.7rem; color: #64748b;
+        }
+        .logs-main {
+            flex: 1; display: flex; flex-direction: column; min-width: 0;
+        }
+        .logs-toolbar {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 1rem; padding: 0.75rem 1rem;
+            border-bottom: 1px solid #1e293b; background: #0f172a;
+        }
+        .logs-rows {
+            flex: 1; overflow-y: auto;
+            background: #0b1220;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.8rem;
+        }
+        .logs-row {
+            display: grid;
+            grid-template-columns: 7rem 9rem 1fr;
+            gap: 0.75rem;
+            padding: 0.35rem 1rem;
+            border-bottom: 1px solid #0f172a;
+            cursor: pointer;
+        }
+        .logs-row:hover { background: #111c2e; }
+        .logs-row.expanded { background: #111c2e; }
+        .logs-row > .logs-time { color: #64748b; }
+        .logs-row > .logs-source { color: #94a3b8; }
+        .logs-row > .logs-summary { color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+        /* Level-driven row tint. Debug = dim; info = default; warn = amber; error = red. */
+        .logs-row.debug > .logs-summary { color: #64748b; }
+        .logs-row.warn > .logs-summary,
+        .logs-row.warning > .logs-summary { color: #fcd34d; }
+        .logs-row.error > .logs-summary,
+        .logs-row.fatal > .logs-summary { color: #fca5a5; }
+        .logs-row.warn,
+        .logs-row.warning { background: rgba(252, 211, 77, 0.04); }
+        .logs-row.error,
+        .logs-row.fatal { background: rgba(252, 165, 165, 0.06); }
+        .logs-detail {
+            grid-column: 1 / -1;
+            margin-top: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            background: #050a14;
+            border-left: 2px solid #06b6d4;
+            color: #cbd5e1;
+            white-space: pre;
+            overflow-x: auto;
+        }
+        .logs-empty {
+            display: flex; align-items: center; justify-content: center;
+            height: 100%; color: #64748b; font-style: italic;
         }
         body.routing-fullwidth .routing-page {
             height: calc(100vh - 6.5rem);

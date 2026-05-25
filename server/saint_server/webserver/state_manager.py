@@ -700,18 +700,28 @@ class StateManager:
         node.log_entries.clear()
         return True
 
-    def log_node_event(self, node_id: str, message: str, level: str = "info") -> None:
+    def log_node_event(self, node_id: str, message: str, level: str = "info",
+                       peripheral: Optional[str] = None) -> None:
         """Public entry point for callers outside StateManager (e.g.
-        server_node.py) that want to record a node-scoped event."""
-        self._log_activity(message, level, node_id=node_id)
+        server_node.py) that want to record a node-scoped event.
+
+        ``peripheral`` is an optional tag (e.g. ``"roboclaw-1"``) so
+        the Logs tab can render the originating peripheral as a column
+        without having to parse it back out of the message text.
+        Untagged callers stay backward-compatible.
+        """
+        self._log_activity(message, level, node_id=node_id, peripheral=peripheral)
 
     def _log_activity(self, message: str, level: str = "info",
-                      node_id: Optional[str] = None):
+                      node_id: Optional[str] = None,
+                      peripheral: Optional[str] = None):
         """Log an activity event.
 
         If ``node_id`` is provided, the entry is also appended to that
         node's per-node ring buffer and broadcast on ``node_log/<id>``
-        so the node-detail Logs tab sees it.
+        so the node-detail Logs tab sees it. ``peripheral`` is an
+        optional tag stored alongside the entry — the Logs UI uses it
+        to render the source column without text-parsing.
         """
         # Store in log buffer
         entry = {
@@ -719,6 +729,8 @@ class StateManager:
             "text": message,
             "level": level,
         }
+        if peripheral:
+            entry["peripheral"] = peripheral
         self._log_entries.append(entry)
 
         # Trim to max size
@@ -2070,11 +2082,22 @@ class StateManager:
             return {"success": False, "message": err}
         pos = self._coerce_position(position)
         sheet = self.state.system_routing.get_sheet(node_id)
+        # Widget IDs must be unique across ALL sheets — see the
+        # comment in NodeSheet.add_widget. Pre-populate the conflict
+        # set from every other sheet's widgets so the new ID skips
+        # any number already used elsewhere.
+        other_widget_ids = {
+            w.id
+            for sid, s in self.state.system_routing.sheets.items()
+            if sid != node_id
+            for w in s.widgets
+        }
         widget = sheet.add_widget(
             type_id=type_id,
             label=label or self.widget_catalog[type_id].label,
             position=pos,
             params=params,
+            extra_existing_ids=other_widget_ids,
         )
         self.state.system_routing.bump_version()
         self._save_system_routing()
@@ -2831,6 +2854,7 @@ class StateManager:
             "simulation": self.get_firmware_build_info("simulation"),
             "hardware": self.get_firmware_build_info("hardware"),
             "rpi5": self.get_firmware_info_for_type("rpi5"),
+            "controller": self.get_firmware_info_for_type("controller"),
         }
 
     def is_firmware_update_available(self, node_id: str) -> Dict[str, Any]:
@@ -2926,7 +2950,7 @@ class StateManager:
         Get firmware info for a specific platform type.
 
         Args:
-            fw_type: 'rp2040' or 'rpi5'
+            fw_type: 'rp2040', 'teensy41', 'rpi5', or 'controller'
 
         Returns dict with:
             - available: Whether firmware is available
@@ -3028,6 +3052,44 @@ class StateManager:
                     result["available"] = True
                     result["filename"] = f
                     # Try to extract version from filename
+                    import re
+                    version_match = re.search(r'(\d+\.\d+\.\d+)', f)
+                    if version_match:
+                        result["version"] = version_match.group(1)
+                    break
+
+        elif fw_type == 'controller':
+            # Steam Deck controller .AppImage in resources/firmware/controller.
+            # Same info.json shape as the node firmware types; produced by
+            # controller/appimage/build-bundle.sh on local builds and by the
+            # appimage-controller CI job.
+            current_dir = os.path.dirname(__file__)
+            firmware_dir = os.path.abspath(
+                os.path.join(current_dir, '..', '..', 'resources', 'firmware', 'controller')
+            )
+
+            if not os.path.isdir(firmware_dir):
+                return result
+
+            info_file = os.path.join(firmware_dir, 'info.json')
+            if os.path.isfile(info_file):
+                try:
+                    with open(info_file, 'r') as f:
+                        info = json.load(f)
+                        result["available"] = True
+                        result["version"] = info.get("latest_version", "0.0.0")
+                        result["filename"] = info.get("latest_package")
+                        result["checksum"] = info.get("latest_checksum")
+                        result["build_date"] = info.get("updated")
+                        return result
+                except Exception:
+                    pass
+
+            # Fallback: scan for AppImage files.
+            for f in os.listdir(firmware_dir):
+                if f.endswith('.AppImage'):
+                    result["available"] = True
+                    result["filename"] = f
                     import re
                     version_match = re.search(r'(\d+\.\d+\.\d+)', f)
                     if version_match:

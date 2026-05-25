@@ -20,7 +20,7 @@ get merged into this catalog at runtime.)
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Peripheral catalog
@@ -730,8 +730,20 @@ class NodeSheet:
 
     def add_widget(self, type_id: str, label: str,
                    position: Tuple[int, int] = (0, 0),
-                   params: Optional[Dict[str, Any]] = None) -> "WidgetInstance":
+                   params: Optional[Dict[str, Any]] = None,
+                   extra_existing_ids: Optional[Set[str]] = None) -> "WidgetInstance":
+        # Widget IDs must be unique GLOBALLY across all sheets, not just
+        # within this sheet — the dashboard's WidgetsDashboard keys its
+        # DOM elements, _lastValues map, and history map by bare widget
+        # ID, and its wire-lookup helper (`_findWidgetSheet`) treats the
+        # first sheet containing a given widget ID as authoritative.
+        # Two sheets each adding their first roboclaw_monitor would
+        # otherwise both pick "roboclaw_monitor-1" and render onto the
+        # same DOM nodes. State manager passes the set of widget IDs
+        # already in use elsewhere via extra_existing_ids.
         existing = {w.id for w in self.widgets}
+        if extra_existing_ids:
+            existing = existing | extra_existing_ids
         n = sum(1 for w in self.widgets if w.type == type_id) + 1
         while f"{type_id}-{n}" in existing:
             n += 1
@@ -1091,6 +1103,42 @@ class SystemRouting:
             legacy = sheets.setdefault(DASHBOARD_SHEET_ID, NodeSheet(node_id=DASHBOARD_SHEET_ID))
             for w in legacy_widgets:
                 legacy.widgets.append(WidgetInstance.from_dict(w))
+
+        # Migration: resolve widget-ID collisions across sheets. The
+        # pre-fix NodeSheet.add_widget scoped its uniqueness check to
+        # the current sheet only, so two sheets that each added their
+        # first widget of a given type would collide on "<type>-1".
+        # The dashboard's WidgetsDashboard uses widget IDs as DOM keys
+        # and as keys into its live-value map; collisions cause one
+        # widget's values to silently overwrite the other's. We rename
+        # the *second* (and any further) collisions to a fresh
+        # globally-unique ID and rewrite the wires in the affected
+        # sheet so the binding is preserved.
+        seen_widget_ids: Set[str] = set()
+        for sheet_id, sheet in sheets.items():
+            for widget in sheet.widgets:
+                if widget.id not in seen_widget_ids:
+                    seen_widget_ids.add(widget.id)
+                    continue
+                # Pick a fresh suffix that's globally unique. Start at
+                # 2 so the first survivor keeps "<type>-1".
+                base = widget.type
+                n = 2
+                while f"{base}-{n}" in seen_widget_ids:
+                    n += 1
+                new_id = f"{base}-{n}"
+                old_id = widget.id
+                widget.id = new_id
+                # Update wires in this sheet that reference the old
+                # widget. Widget endpoints only appear as wire sinks
+                # (you can't wire FROM a widget), so we only check
+                # `sink`.
+                for wire in sheet.wires:
+                    if (wire.sink.kind == "widget"
+                            and wire.sink.parts
+                            and wire.sink.parts[0] == old_id):
+                        wire.sink.parts[0] = new_id
+                seen_widget_ids.add(new_id)
         return cls(
             version=int(d.get("version", 0)),
             sheets=sheets,

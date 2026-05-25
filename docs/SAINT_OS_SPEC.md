@@ -1961,7 +1961,7 @@ source/
 │
 ├── controller/                       # Tauri + Angular controller app
 │   ├── docs/
-│   ├── flatpak/
+│   ├── appimage/                     # linux/amd64 Docker AppImage builder
 │   ├── scripts/
 │   ├── src/                          # Angular frontend
 │   └── src-tauri/                    # Rust backend

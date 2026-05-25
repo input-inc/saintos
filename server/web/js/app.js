@@ -14,6 +14,22 @@ class SaintApp {
         this.currentNodeId = null;  // Currently viewed node
         this.currentNodeInfo = null;
 
+        // Logs page state.
+        //   logsSelectedSource: 'server' (default) or `node:<id>`
+        //   logsPerNode:        per-node ring buffers populated when
+        //                       the operator selects a node on the
+        //                       Logs page. We subscribe to
+        //                       node_log/<id> on selection.
+        //   logsExpandedKey:    which row is showing its raw-JSON
+        //                       detail (only one open at a time).
+        //   logsNodeSubscription: the topic we're currently
+        //                       subscribed to (so we can unsubscribe
+        //                       when switching sources).
+        this.logsSelectedSource = 'server';
+        this.logsPerNode = new Map();
+        this.logsExpandedKey = null;
+        this.logsNodeSubscription = null;
+
         // Refresh interval for node detail page
         this.nodeDetailRefreshInterval = null;
         this.nodeDetailRefreshRate = 2000;  // Refresh every 2 seconds
@@ -346,22 +362,28 @@ class SaintApp {
             this.emergencyStop();
         });
 
-        document.getElementById('btn-view-logs')?.addEventListener('click', () => {
-            this.showPage('logs');
-            window.location.hash = 'logs';
-        });
-
         // Refresh WebSocket clients
         document.getElementById('btn-refresh-clients')?.addEventListener('click', () => {
             this.loadWebSocketClients();
         });
 
-        // Log filters
-        document.getElementById('log-level')?.addEventListener('change', () => {
+        // Logs page filters and global-level selector. The two
+        // dropdowns intentionally do different things:
+        //   logs-level-select → global server log level (apply_log_level
+        //     via set_settings; persists across restart)
+        //   logs-row-filter   → client-side row filter on currently
+        //     buffered events (no server impact)
+        document.getElementById('logs-row-filter')?.addEventListener('change', () => {
             this.renderLogsPage();
         });
-        document.getElementById('log-search')?.addEventListener('input', () => {
+        document.getElementById('logs-search')?.addEventListener('input', () => {
             this.renderLogsPage();
+        });
+        document.getElementById('logs-level-select')?.addEventListener('change', (e) => {
+            this.applyServerLogLevel(e.target.value);
+        });
+        document.getElementById('logs-clear-btn')?.addEventListener('click', () => {
+            this.clearLogsForCurrentSource();
         });
 
         // Node detail tab switching
@@ -450,6 +472,21 @@ class SaintApp {
         if (this.currentPage === 'terminal' && pageId !== 'terminal') {
             if (window.terminalManager) {
                 window.terminalManager.closeSession();
+            }
+        }
+
+        // Drop the node_log subscription when leaving the Logs page —
+        // otherwise we'd keep streaming entries into the per-node
+        // ring buffer for a source the operator isn't watching.
+        if (this.currentPage === 'logs' && pageId !== 'logs'
+            && this.logsNodeSubscription) {
+            const sub = this.logsNodeSubscription;
+            this.logsNodeSubscription = null;
+            if (sub.startsWith('node:')) {
+                const nodeId = sub.slice('node:'.length);
+                try {
+                    window.saintWS.unsubscribe([`node_log/${nodeId}`]);
+                } catch (_) { /* ignore */ }
             }
         }
 
@@ -568,6 +605,9 @@ class SaintApp {
 
             // Update Pi 5 firmware info
             this.updatePi5FirmwareDisplay(result.rpi5);
+
+            // Update Steam Deck controller AppImage info
+            this.updateControllerFirmwareDisplay(result.controller);
         } catch (error) {
             console.error('Failed to load firmware builds:', error);
         }
@@ -954,10 +994,23 @@ class SaintApp {
             }
             // Update UI based on current page
             this.updateNodesUI();
+            // Re-render the Logs source list so newly adopted nodes
+            // appear (and removed ones disappear) on the left rail.
+            if (this.currentPage === 'logs') {
+                this.renderLogsSourceList();
+            }
         } else if (message.node === 'estop') {
             // Server-side latch flipped (by us or by another dashboard).
             // Mirror the visual state.
             this.setEstopState(!!message.data?.active);
+        } else if (typeof message.node === 'string'
+                   && message.node.startsWith('node_log/')) {
+            // Live node-log streams. NodeLogsManager already handles
+            // the node-detail Logs tab; this catches the same frames
+            // for the global Logs page so the row table updates in
+            // real time when the operator is watching a node source.
+            const nodeId = message.node.slice('node_log/'.length);
+            this.onNodeLogEntry(nodeId, message.data);
         }
         // pin_state/<id> broadcasts are also handled by widgetsDashboard
         // — it subscribes itself when the dashboard activates.
@@ -1127,6 +1180,36 @@ class SaintApp {
     }
 
     /**
+     * Update display for the Steam Deck controller AppImage staged on the
+     * server. Same shape as Pi 5 firmware — the in-app OTA flow in the
+     * controller's Settings tab fetches the file from this same staging.
+     */
+    updateControllerFirmwareDisplay(info) {
+        const versionEl = document.getElementById('settings-fw-controller-version');
+        const packageEl = document.getElementById('settings-fw-controller-package');
+        const buildEl = document.getElementById('settings-fw-controller-build');
+        const statusEl = document.getElementById('settings-fw-controller-status');
+
+        if (!versionEl) return;
+
+        if (info?.available) {
+            versionEl.textContent = info.version || '--';
+            packageEl.textContent = info.filename || '--';
+            buildEl.textContent = info.build_date || '--';
+
+            statusEl.textContent = 'Available';
+            statusEl.className = 'px-2 py-1 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400';
+        } else {
+            versionEl.textContent = '--';
+            packageEl.textContent = '--';
+            buildEl.textContent = '--';
+
+            statusEl.textContent = 'Not Available';
+            statusEl.className = 'px-2 py-1 text-xs font-medium rounded-full bg-slate-700 text-slate-400';
+        }
+    }
+
+    /**
      * Format uptime seconds to human readable string.
      */
     formatUptime(seconds) {
@@ -1146,46 +1229,25 @@ class SaintApp {
     }
 
     /**
-     * Add entry to activity log.
+     * Add entry to the in-memory activity stream. The dashboard
+     * Activity Log card was removed in favor of the master-detail
+     * Logs page (Server source), so we only update the buffer and
+     * re-render the Logs page when it's open.
      */
     addActivityLogEntry(message) {
-        const logContainer = document.getElementById('activity-log');
-        const entry = document.createElement('div');
-
         const level = message.level || 'info';
-        entry.className = `log-entry ${level}`;
-
-        // Use Unix timestamp (seconds) for consistency with server logs
         const timestamp = message.timestamp || (Date.now() / 1000);
-        const timeStr = new Date(timestamp * 1000).toLocaleTimeString();
-        entry.innerHTML = `<span class="text-slate-500">${timeStr}</span> ${message.text || message.message}`;
 
-        // Remove "waiting" message if it exists
-        const waiting = logContainer.querySelector('.text-slate-500:not(.log-entry span)');
-        if (waiting && waiting.textContent.includes('Waiting')) {
-            waiting.remove();
-        }
-
-        logContainer.insertBefore(entry, logContainer.firstChild);
-
-        // Keep only last 100 entries
-        while (logContainer.children.length > 100) {
-            logContainer.removeChild(logContainer.lastChild);
-        }
-
-        // Add to activity log array with proper timestamp format
         this.activityLog.unshift({
             time: timestamp,
             text: message.text || message.message,
-            level: level
+            level: level,
         });
 
-        // Trim activity log to reasonable size
         if (this.activityLog.length > 500) {
             this.activityLog = this.activityLog.slice(0, 500);
         }
 
-        // Re-render logs page if currently viewing it
         if (this.currentPage === 'logs') {
             this.renderLogsPage();
         }
@@ -1838,71 +1900,288 @@ class SaintApp {
     }
 
     /**
-     * Load logs page data.
+     * Load logs page data. Hydrates the server-source ring from the
+     * recent server-side activity buffer (so the page isn't empty on
+     * first open), renders the source list, and selects whatever
+     * source was last open (default: 'server').
      */
     async loadLogsData() {
         const ws = window.saintWS;
         if (!ws.connected) return;
 
+        // Pull recent server-side activity events into the local
+        // activityLog ring. Existing connections keep getting new
+        // events via the 'activity' WebSocket message — this just
+        // backfills history on first open.
         try {
             const result = await ws.management('get_logs', { limit: 200 });
             const logs = result?.logs || [];
-
-            // Merge with local activity log (remove duplicates by time)
             const existingTimes = new Set(this.activityLog.map(e => e.time));
             for (const log of logs) {
-                if (!existingTimes.has(log.time)) {
-                    this.activityLog.push(log);
-                }
+                if (!existingTimes.has(log.time)) this.activityLog.push(log);
             }
-
-            // Sort by time (newest first)
             this.activityLog.sort((a, b) => b.time - a.time);
-
-            // Trim to reasonable size
             if (this.activityLog.length > 500) {
                 this.activityLog = this.activityLog.slice(0, 500);
             }
-
-            // Render logs
-            this.renderLogsPage();
         } catch (error) {
-            console.error('Failed to load logs:', error);
+            console.error('Failed to load server logs:', error);
+        }
+
+        // Sync the level dropdown with the current server-side setting
+        // so the UI reflects reality (e.g. a config file edit before
+        // first open).
+        try {
+            const settings = await ws.management('get_settings', {});
+            const level = settings?.logging?.level || 'WARNING';
+            const sel = document.getElementById('logs-level-select');
+            if (sel) sel.value = level;
+        } catch (_) { /* non-fatal */ }
+
+        this.renderLogsSourceList();
+        await this.selectLogsSource(this.logsSelectedSource || 'server');
+    }
+
+    /**
+     * Render the left rail with "Server" + each adopted node.
+     */
+    renderLogsSourceList() {
+        const list = document.getElementById('logs-source-list');
+        if (!list) return;
+
+        const items = [];
+        items.push({
+            key: 'server',
+            label: 'Server',
+            icon: 'dns',
+            meta: '',
+        });
+        const adopted = (this.nodes && this.nodes.adopted) || [];
+        for (const node of adopted) {
+            const id = node.node_id;
+            if (!id) continue;
+            items.push({
+                key: `node:${id}`,
+                label: node.display_name || id,
+                icon: 'memory',
+                meta: id.length > 14 ? id.slice(0, 14) + '…' : id,
+            });
+        }
+
+        list.innerHTML = items.map(item => {
+            const active = (item.key === this.logsSelectedSource) ? ' active' : '';
+            return `<div class="logs-source-item${active}" data-source="${escapeHtml(item.key)}">` +
+                   `<span class="material-icons">${item.icon}</span>` +
+                   `<span class="truncate">${escapeHtml(item.label)}</span>` +
+                   (item.meta ? `<span class="logs-source-meta">${escapeHtml(item.meta)}</span>` : '') +
+                   `</div>`;
+        }).join('');
+
+        list.querySelectorAll('.logs-source-item').forEach(el => {
+            el.addEventListener('click', () => {
+                const key = el.dataset.source;
+                if (key) this.selectLogsSource(key);
+            });
+        });
+    }
+
+    /**
+     * Switch the right pane to a specific source. For node sources we
+     * subscribe to node_log/<id> + fetch history; for 'server' the
+     * rows come straight from `this.activityLog`.
+     */
+    async selectLogsSource(key) {
+        if (!key) return;
+        const previous = this.logsSelectedSource;
+        this.logsSelectedSource = key;
+        this.logsExpandedKey = null;
+
+        // Update the left-rail highlight without a full re-render.
+        document.querySelectorAll('.logs-source-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.source === key);
+        });
+
+        // Header text reflects the selection.
+        const titleEl = document.getElementById('logs-source-title');
+        const subEl = document.getElementById('logs-source-subtitle');
+
+        // Tear down any previous node subscription before subscribing
+        // to a new one — we only stream from one node at a time on
+        // this page to keep noise contained.
+        if (this.logsNodeSubscription && this.logsNodeSubscription !== key) {
+            const oldId = this.logsNodeSubscription.slice('node:'.length);
+            try {
+                await window.saintWS.unsubscribe([`node_log/${oldId}`]);
+            } catch (_) { /* ignore */ }
+            this.logsNodeSubscription = null;
+        }
+
+        if (key === 'server') {
+            if (titleEl) titleEl.textContent = 'Server';
+            if (subEl) subEl.textContent = 'Activity events from the server process.';
+            this.renderLogsPage();
+            return;
+        }
+
+        if (!key.startsWith('node:')) return;
+        const nodeId = key.slice('node:'.length);
+        if (titleEl) titleEl.textContent = nodeId;
+        if (subEl) subEl.textContent = 'Per-node events streamed from this node.';
+
+        try {
+            await window.saintWS.subscribe([`node_log/${nodeId}`]);
+            this.logsNodeSubscription = key;
+            const result = await window.saintWS.management('get_node_logs', { node_id: nodeId });
+            const entries = (result && result.entries) || [];
+            // Store newest-first to match server-source ring layout.
+            this.logsPerNode.set(nodeId, [...entries].reverse());
+            this.renderLogsPage();
+        } catch (err) {
+            console.error('Failed to load node logs:', err);
+            const rows = document.getElementById('logs-rows');
+            if (rows) rows.innerHTML = `<p class="logs-empty">Failed to load: ${escapeHtml(err.message || err)}</p>`;
         }
     }
 
     /**
-     * Render the logs page.
+     * Receiver for live node_log/<id> events. Called from the
+     * WebSocket 'state' dispatch path in setupActivitySubscription.
+     */
+    onNodeLogEntry(nodeId, entry) {
+        if (!nodeId || !entry) return;
+        const ring = this.logsPerNode.get(nodeId) || [];
+        ring.unshift(entry);
+        if (ring.length > 500) ring.length = 500;
+        this.logsPerNode.set(nodeId, ring);
+        // Only re-render if this is the source the operator is looking at.
+        if (this.currentPage === 'logs'
+            && this.logsSelectedSource === `node:${nodeId}`) {
+            this.renderLogsPage();
+        }
+    }
+
+    /**
+     * Render the rows pane for the currently selected source, applying
+     * the level filter + search filter, with the expanded row (if any)
+     * inlined as a JSON detail panel.
      */
     renderLogsPage() {
-        const container = document.getElementById('log-entries');
+        const container = document.getElementById('logs-rows');
         if (!container) return;
 
-        const levelFilter = document.getElementById('log-level')?.value || 'all';
-        const searchFilter = document.getElementById('log-search')?.value?.toLowerCase() || '';
-
-        let logs = this.activityLog;
-
-        // Apply level filter
-        if (levelFilter && levelFilter !== 'all') {
-            logs = logs.filter(log => log.level === levelFilter);
+        // Source the entries list.
+        let entries = [];
+        if (this.logsSelectedSource === 'server') {
+            entries = this.activityLog;
+        } else if (this.logsSelectedSource.startsWith('node:')) {
+            const nodeId = this.logsSelectedSource.slice('node:'.length);
+            entries = this.logsPerNode.get(nodeId) || [];
         }
 
-        // Apply search filter
-        if (searchFilter) {
-            logs = logs.filter(log => log.text?.toLowerCase().includes(searchFilter));
+        const rowFilter = document.getElementById('logs-row-filter')?.value || 'all';
+        const search = document.getElementById('logs-search')?.value?.toLowerCase() || '';
+
+        // Inclusive level filter — "Info+" means info/warn/error visible.
+        const LEVEL_RANK = { debug: 10, info: 20, warn: 30, warning: 30, error: 40, fatal: 50 };
+        let threshold = 0;
+        if (rowFilter === 'debug') threshold = LEVEL_RANK.debug;
+        else if (rowFilter === 'info') threshold = LEVEL_RANK.info;
+        else if (rowFilter === 'warn') threshold = LEVEL_RANK.warn;
+        else if (rowFilter === 'error') threshold = LEVEL_RANK.error;
+
+        let rows = entries;
+        if (threshold > 0) {
+            if (rowFilter === 'error') {
+                rows = rows.filter(e => (LEVEL_RANK[(e.level || 'info').toLowerCase()] || 20) >= LEVEL_RANK.error);
+            } else {
+                rows = rows.filter(e => (LEVEL_RANK[(e.level || 'info').toLowerCase()] || 20) >= threshold);
+            }
+        }
+        if (search) {
+            rows = rows.filter(e => (e.text || '').toLowerCase().includes(search)
+                                 || (e.peripheral || '').toLowerCase().includes(search));
         }
 
-        if (logs.length === 0) {
-            container.innerHTML = '<p class="text-slate-500">No logs matching filters.</p>';
+        if (rows.length === 0) {
+            container.innerHTML = '<p class="logs-empty">No logs match the current filters.</p>';
             return;
         }
 
-        container.innerHTML = logs.map(log => {
-            const time = new Date(log.time * 1000).toLocaleTimeString();
-            const level = log.level || 'info';
-            return `<div class="log-entry ${level}">[${time}] ${log.text || ''}</div>`;
+        const fallbackSource = this.logsSelectedSource === 'server'
+            ? 'saint_server'
+            : this.logsSelectedSource.slice('node:'.length);
+
+        container.innerHTML = rows.map((entry, idx) => {
+            const t = entry.time ? new Date(entry.time * 1000) : new Date();
+            const ts = t.toLocaleTimeString([], { hour12: false })
+                       + '.' + String(t.getMilliseconds()).padStart(3, '0');
+            const level = (entry.level || 'info').toLowerCase();
+            const source = entry.peripheral || fallbackSource;
+            const rowKey = `${entry.time || idx}:${idx}`;
+            const expanded = (this.logsExpandedKey === rowKey) ? ' expanded' : '';
+            const detail = (this.logsExpandedKey === rowKey)
+                ? `<div class="logs-detail">${escapeHtml(JSON.stringify(entry, null, 2))}</div>`
+                : '';
+            return `<div class="logs-row ${level}${expanded}" data-row-key="${escapeHtml(rowKey)}">` +
+                   `<span class="logs-time">${ts}</span>` +
+                   `<span class="logs-source">${escapeHtml(source)}</span>` +
+                   `<span class="logs-summary">${escapeHtml(entry.text || '')}</span>` +
+                   detail +
+                   `</div>`;
         }).join('');
+
+        container.querySelectorAll('.logs-row').forEach(el => {
+            el.addEventListener('click', () => {
+                const key = el.dataset.rowKey;
+                this.logsExpandedKey = (this.logsExpandedKey === key) ? null : key;
+                this.renderLogsPage();
+            });
+        });
+    }
+
+    /**
+     * Send the chosen global log level to the server. Persists to
+     * config and applies live via apply_log_level().
+     */
+    async applyServerLogLevel(level) {
+        if (!level) return;
+        try {
+            const ws = window.saintWS;
+            await ws.management('set_settings', {
+                settings: { logging: { level } }
+            });
+            this.addActivityLogEntry({
+                text: `Log level set to ${level}`,
+                level: 'info',
+                timestamp: Date.now() / 1000,
+            });
+        } catch (err) {
+            console.error('Failed to set log level:', err);
+            alert(`Failed to set log level: ${err.message || err}`);
+        }
+    }
+
+    /**
+     * Clear the rows shown for the currently selected source. Server
+     * source: clear the client-side activity ring only (the file log
+     * is canonical history). Node source: also call clear_node_logs
+     * on the server so the ring buffer drops the entries.
+     */
+    async clearLogsForCurrentSource() {
+        if (this.logsSelectedSource === 'server') {
+            this.activityLog = [];
+            this.renderLogsPage();
+            return;
+        }
+        if (!this.logsSelectedSource.startsWith('node:')) return;
+        const nodeId = this.logsSelectedSource.slice('node:'.length);
+        this.logsPerNode.set(nodeId, []);
+        this.renderLogsPage();
+        try {
+            await window.saintWS.management('clear_node_logs', { node_id: nodeId });
+        } catch (err) {
+            console.error('clear_node_logs failed:', err);
+        }
     }
 
     /**

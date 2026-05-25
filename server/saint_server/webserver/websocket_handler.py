@@ -1376,6 +1376,21 @@ class WebSocketHandler:
                     self._auth_password = config.websocket.password
                     self._auth_timeout = config.websocket.auth_timeout
 
+                    # Log level applies live — no restart needed for the
+                    # WARNING→INFO/DEBUG toggle from the Logs tab. We
+                    # normalize the level back into config so a typo
+                    # ("WARM") falls back to WARNING instead of leaving
+                    # the file disagreeing with the running logger.
+                    if 'logging' in settings:
+                        try:
+                            from saint_server.log_level import apply_log_level
+                            applied = apply_log_level(config.logging.level)
+                            if applied != config.logging.level:
+                                config.logging.level = applied
+                                save_config()
+                        except Exception as e:
+                            self.log('warn', f'Live log-level apply failed: {e}')
+
                     await self.broadcast_activity('Server settings updated (restart required for some changes)', 'info')
                     return {
                         "status": "ok",

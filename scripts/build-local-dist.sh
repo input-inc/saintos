@@ -13,7 +13,7 @@
 #   scripts/build-local-dist.sh [options]
 #
 # Default behavior: builds RP2040 / Teensy / Pi5 node firmware AND the
-# Steam Deck Controller .flatpak locally so the server tarball ships
+# Steam Deck Controller .AppImage locally so the server tarball ships
 # everything needed to OTA-update every connected target. Override with
 # the firmware / controller skip flags below.
 #
@@ -268,21 +268,21 @@ build_firmware_rpi5() {
     fi
 }
 
-# Build the Steam Deck controller .flatpak via the linux/amd64 Docker
+# Build the Steam Deck controller .AppImage via the linux/amd64 Docker
 # wrapper. Slow on first run (Apple Silicon: Rosetta-emulated cargo
 # build, ~15-25 min cold); incremental rebuilds are fast once the
 # persistent cache warms. Failures here are non-fatal — we'd rather
 # ship a dist tarball with the previous controller bundle than fail
-# the whole build over a flatpak hiccup.
-build_controller_flatpak() {
-    local driver=controller/flatpak/build-docker.sh
+# the whole build over an AppImage hiccup.
+build_controller_appimage() {
+    local driver=controller/appimage/build-docker.sh
     if [[ ! -x "$driver" ]]; then
-        warn "Controller flatpak driver $driver missing — skipping"
+        warn "Controller AppImage driver $driver missing — skipping"
         return
     fi
-    log "Building controller flatpak (linux/amd64 Docker; Rosetta on Apple Silicon)"
+    log "Building controller AppImage (linux/amd64 Docker; Rosetta on Apple Silicon)"
     if ! "$driver" 2>&1; then
-        warn "Controller flatpak build failed — leaving existing staged bundle (if any)"
+        warn "Controller AppImage build failed — leaving existing staged bundle (if any)"
         return
     fi
 }
@@ -301,7 +301,7 @@ elif (( FETCH_FIRMWARE )); then
     log "Using run ${RUN_ID}"
     gh run download "$RUN_ID" --dir _fw \
         --name firmware-rp2040 --name firmware-teensy41 --name firmware-rpi5 \
-        --name flatpak-controller
+        --name appimage-controller
     mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5,controller}
     [[ -d _fw/firmware-rp2040 ]] && find _fw/firmware-rp2040 -type f \
         \( -name '*.uf2' -o -name '*.elf' \) \
@@ -309,9 +309,9 @@ elif (( FETCH_FIRMWARE )); then
     [[ -d _fw/firmware-teensy41 ]] && find _fw/firmware-teensy41 -type f \
         -name '*.hex' -exec cp {} server/resources/firmware/teensy41/ \;
     [[ -d _fw/firmware-rpi5 ]] && cp -r _fw/firmware-rpi5/. server/resources/firmware/rpi5/
-    # Controller artifact ships the .flatpak + info.json already shaped
+    # Controller artifact ships the .AppImage + info.json already shaped
     # for the firmware-list endpoint — just copy it over verbatim.
-    [[ -d _fw/flatpak-controller ]] && cp -r _fw/flatpak-controller/. server/resources/firmware/controller/
+    [[ -d _fw/appimage-controller ]] && cp -r _fw/appimage-controller/. server/resources/firmware/controller/
 elif (( SKIP_FIRMWARE_BUILD )); then
     log "Using existing server/resources/firmware/ (--skip-firmware-build)"
 else
@@ -320,9 +320,9 @@ else
     build_firmware_teensy41
     build_firmware_rpi5
     if (( SKIP_CONTROLLER_BUILD )); then
-        log "Skipping controller flatpak build (--skip-controller-build); using existing staged bundle if any"
+        log "Skipping controller AppImage build (--skip-controller-build); using existing staged bundle if any"
     else
-        build_controller_flatpak
+        build_controller_appimage
     fi
 fi
 

@@ -31,13 +31,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["appimage"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.png"
     ],
+    "resources": {
+      "../images/libraryCapsule.png": "art/library-capsule.png",
+      "../images/libraryHero.png": "art/library-hero.png"
+    },
     "linux": {
       "appimage": {
         "bundleMediaFramework": false

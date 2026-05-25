@@ -17,7 +17,7 @@ interface DiscoveredServer {
 }
 
 /** Subset of the /api/firmware/<type> shape we care about. Mirrors
- *  the JSON produced by controller/flatpak/build.sh's stage_to_server()
+ *  the JSON produced by controller/appimage/build-bundle.sh's staging
  *  helper — keep the field names in sync with that script. */
 interface FirmwareInfo {
   type: string;
@@ -269,9 +269,7 @@ type UpdateState =
                 Update installed.
                 <strong class="block mt-1">Please manually relaunch the SAINT
                 Controller</strong>
-                from your Steam library (or via <span class="font-mono">flatpak
-                run com.saintos.Controller</span>) so the new version takes
-                effect.
+                from your Steam library so the new version takes effect.
               </div>
             }
             @case ('error') {
@@ -343,8 +341,16 @@ export class SettingsComponent implements OnInit, OnDestroy {
 
   /** Controller version reported by Tauri (from tauri.conf.json, which
    *  is kept in sync with controller/VERSION by scripts/sync-version.js).
-   *  Read once on init; doesn't change at runtime. */
+   *  Read once on init; doesn't change at runtime. This is the bare
+   *  semver ("0.5.0") with no build metadata. */
   currentVersion = signal<string | null>(null);
+  /** What the last successful `install_controller_update` call wrote to
+   *  the installed.json sidecar — `{ version, checksum, filename, ... }`.
+   *  Authoritative for update detection; falls back to currentVersion()
+   *  only when no install has run on this Deck (hand-downloaded
+   *  AppImage). Null until fetched, or stays null if the sidecar
+   *  doesn't exist yet. */
+  installedInfo = signal<{ version?: string; checksum?: string; filename?: string } | null>(null);
   /** Latest controller info from `/api/firmware/controller` on the
    *  connected server. Null until we've successfully fetched it once. */
   updateInfo = signal<FirmwareInfo | null>(null);
@@ -510,13 +516,32 @@ export class SettingsComponent implements OnInit, OnDestroy {
       console.error('[Settings] getVersion failed:', err);
       this.currentVersion.set('unknown');
     }
+    // installed.json records what the last successful in-app OTA wrote.
+    // Pulling it once on init lets the update check compare the exact
+    // version+checksum against the server, catching same-version-
+    // different-content rebuilds that bare-version comparison misses.
+    try {
+      const info = await invoke<{ version?: string; checksum?: string; filename?: string } | null>(
+        'get_installed_controller_info'
+      );
+      this.installedInfo.set(info);
+    } catch (err) {
+      console.error('[Settings] get_installed_controller_info failed:', err);
+      this.installedInfo.set(null);
+    }
   }
 
   /** Poll /api/firmware/controller on the connected server and decide
-   *  whether an Install button should appear. Comparison is exact
-   *  string equality on `latest_version` — anything different (older
-   *  or newer) surfaces an Install option so the operator can roll
-   *  back as easily as roll forward. */
+   *  whether an Install button should appear.
+   *
+   *  Comparison uses both `latest_version` AND `latest_checksum` so a
+   *  rebuild that produces a different binary with the same version
+   *  string still surfaces as "available". The local side comes from
+   *  the installed.json sidecar written by the last successful OTA;
+   *  when that sidecar doesn't exist (fresh manual install, no in-app
+   *  OTA has run yet), we fall back to comparing the server's
+   *  `latest_version` against Tauri's bare `getVersion()` — which is
+   *  loose (no SHA suffix) but better than nothing. */
   async checkForUpdate(): Promise<void> {
     this.updateError.set('');
     if (!this.connectionService.isConnected()) {
@@ -548,10 +573,13 @@ export class SettingsComponent implements OnInit, OnDestroy {
 
       if (!info.latest_version || !info.latest_package || !info.latest_checksum) {
         this.updateState.set('up-to-date');
-      } else if (info.latest_version === this.currentVersion()) {
-        this.updateState.set('up-to-date');
       } else {
-        this.updateState.set('available');
+        const installed = this.installedInfo();
+        const upToDate = installed?.version && installed.checksum
+          ? installed.version === info.latest_version
+            && installed.checksum === info.latest_checksum
+          : info.latest_version === this.currentVersion();
+        this.updateState.set(upToDate ? 'up-to-date' : 'available');
       }
     } catch (err) {
       this.updateError.set(`Update check failed: ${err}`);
@@ -559,9 +587,10 @@ export class SettingsComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Download the .flatpak bundle, verify SHA-256, then hand the bytes
-   *  to the Rust `install_controller_update` command which writes the
-   *  file out and runs `flatpak install` on the host. The operator
+  /** Download the .AppImage, verify SHA-256, then hand the bytes to
+   *  the Rust `install_controller_update` command which writes the file
+   *  to its canonical install path (~/.local/share/saint-controller/),
+   *  marks it executable, and writes a .desktop entry. The operator
    *  must relaunch manually after a successful install. */
   async installUpdate(): Promise<void> {
     const info = this.updateInfo();
@@ -598,7 +627,19 @@ export class SettingsComponent implements OnInit, OnDestroy {
       // side. Multi-MB payloads work but allocate twice (here +
       // serialization); acceptable for a one-shot operator action.
       const bytes = Array.from(new Uint8Array(buf));
-      await invoke('install_controller_update', { bytes });
+      await invoke('install_controller_update', {
+        bytes,
+        version: info.latest_version,
+        filename: info.latest_package,
+        checksum: info.latest_checksum,
+      });
+      // Update local cache of installed.json so a re-check immediately
+      // after install reports "up to date" without re-reading the file.
+      this.installedInfo.set({
+        version: info.latest_version,
+        checksum: info.latest_checksum,
+        filename: info.latest_package,
+      });
 
       this.updateState.set('installed');
     } catch (err) {

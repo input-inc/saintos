@@ -66,6 +66,33 @@ from saint_server.livelink.router import LiveLinkRoute, OutputMapping, MappingTy
 from saint_server.discovery import DiscoveryService
 
 
+# Known peripheral prefixes the firmware uses in log lines today. The
+# match is case-insensitive and only fires when the prefix is followed
+# by a colon, so generic "foo: bar" log lines from non-peripheral
+# subsystems don't get mis-tagged. List is intentionally small — we'd
+# rather under-tag than mis-tag.
+_PERIPHERAL_LOG_PREFIXES = (
+    "roboclaw", "fas100", "jbd", "neopixel", "maestro", "syren",
+)
+
+
+def _extract_peripheral_from_text(text: str) -> Optional[str]:
+    """Best-effort peripheral name from a node log line. Looks for a
+    leading known-prefix followed by ``:`` (case-insensitive). Returns
+    the canonical (lowercase) name or ``None`` when no prefix matches.
+    Cheap — runs once per inbound log frame, only when the firmware
+    didn't tag the message itself."""
+    if not text:
+        return None
+    head = text.lstrip()
+    for prefix in _PERIPHERAL_LOG_PREFIXES:
+        if head[:len(prefix)].lower() == prefix and len(head) > len(prefix):
+            sep = head[len(prefix)]
+            if sep in (":", "_", "-"):
+                return prefix
+    return None
+
+
 class SaintServerNode(Node):
     """Main SAINT.OS server node."""
 
@@ -184,6 +211,21 @@ class SaintServerNode(Node):
         # Hand it to the state manager so update_pin_actual can feed
         # samples and so the WS log_enabled toggle finds it.
         self.state_manager.set_peripheral_logger(self.peripheral_logger)
+
+        # Apply the configured log level. Default in config is WARNING
+        # so per-tick INFO from the routing evaluator and ROS bridge
+        # stays off the file handlers + rclpy console at 50 Hz —
+        # operators bump it from the Logs tab when debugging. Lives
+        # here (after file handlers are attached but before any heavy
+        # logging starts) so the level takes hold for everything we
+        # subsequently emit.
+        try:
+            from saint_server.config import get_config
+            from saint_server.log_level import apply_log_level
+            applied = apply_log_level(get_config().logging.level, ros_node=self)
+            self.get_logger().info(f'Log level set to {applied}')
+        except Exception as e:
+            self.get_logger().warn(f'Failed to apply configured log level: {e}')
 
         # Web server components (set during start_async_services)
         self.web_server = None
@@ -572,7 +614,16 @@ class SaintServerNode(Node):
                 text = f'[+{int(up) / 1000.0:.3f}s] {text}'
             if not text:
                 return
-            self.state_manager.log_node_event(node_id, text, level)
+            # Forward an optional peripheral tag if the firmware
+            # included one (e.g. {"peripheral": "roboclaw-1"}). Falls
+            # back to a leading-prefix extraction so the existing
+            # "roboclaw: …" / "FAS100: …" patterns also light up the
+            # column without a firmware-side change.
+            peripheral = data.get('peripheral')
+            if not peripheral:
+                peripheral = _extract_peripheral_from_text(text)
+            self.state_manager.log_node_event(
+                node_id, text, level, peripheral=peripheral)
             self._maybe_handle_sync_ack(node_id, text)
         except Exception as e:
             self.state_manager.log_node_event(

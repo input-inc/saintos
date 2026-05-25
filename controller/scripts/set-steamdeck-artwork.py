@@ -18,6 +18,7 @@ This script:
      filenames Steam looks for at render time:
        <appid>p.png      → vertical capsule (600 × 900)
        <appid>_hero.png  → hero banner (1920 × 620)
+       <appid>.png       → horizontal capsule (920 × 430)
 
 It's idempotent — re-running just overwrites the same files. If the
 operator hasn't added the controller as a Non-Steam Game yet, the
@@ -111,25 +112,59 @@ def find_shortcuts_dirs() -> list[Path]:
     return result
 
 
-def find_entry(shortcuts_vdf: Path, name_pattern: str) -> tuple[int | None, dict | None]:
-    """Return (appid, entry_dict) for the first shortcut whose AppName
-    contains name_pattern (case-insensitive), else (None, None).
+def _slugify(s: str) -> str:
+    """Collapse a name to lowercase alphanumeric so separator variants
+    (space, hyphen, underscore, dot) all compare equal:
+
+        "SAINT Controller"   → "saintcontroller"
+        "saint-controller"   → "saintcontroller"     ← what Steam auto-fills
+        "com.saintos.Controller" → "comsaintoscontroller"
+
+    Steam's "Add a Non-Steam Game" dialog often names entries from the
+    executable filename (which yields a slug-cased name), while
+    operators who add it by hand tend to type the human-readable form.
+    Matching after slugification accepts both without making the
+    operator remember which exact form they used.
     """
+    return "".join(c.lower() for c in s if c.isalnum())
+
+
+def find_entry(shortcuts_vdf: Path, name_pattern: str) -> tuple[int | None, dict | None, list[str]]:
+    """Locate the shortcut for the controller.
+
+    Returns (appid, entry_dict, seen_names) where:
+      - appid: the Steam-assigned non-Steam-game id, or None if no match
+      - entry_dict: the matching shortcut entry, or None
+      - seen_names: every AppName we observed in the file (for diagnostics)
+
+    Matching is slugified substring: needle and haystack are both
+    reduced to lowercase alphanumeric before the `in` check, so
+    "SAINT Controller" finds "saint-controller" and vice versa.
+    """
+    seen: list[str] = []
     buf = shortcuts_vdf.read_bytes()
-    header = b"\x00shortcuts\x00"
-    if not buf.startswith(header):
-        return None, None
-    parsed, _ = parse_vdf(buf, len(header))
-    needle = name_pattern.lower()
+    # Steam writes the root key as "Shortcuts" (capital S) in files
+    # created via Add-a-Non-Steam-Game. The Valve binary-KV spec is
+    # case-insensitive on key names, so accept both casings instead of
+    # hard-coding lowercase. Without this we silently fail with a
+    # "no shortcut matching" message before even parsing the entries.
+    lower = buf[:11].lower()
+    if not lower.startswith(b"\x00shortcuts\x00"):
+        return None, None, seen
+    parsed, _ = parse_vdf(buf, 11)
+    needle = _slugify(name_pattern)
     for entry in parsed.values():
         if not isinstance(entry, dict):
             continue
         appname = entry.get("AppName") or entry.get("appname") or ""
-        if isinstance(appname, str) and needle in appname.lower():
+        if not isinstance(appname, str):
+            continue
+        seen.append(appname)
+        if needle and needle in _slugify(appname):
             appid = entry.get("appid")
             if isinstance(appid, int):
-                return appid, entry
-    return None, None
+                return appid, entry, seen
+    return None, None, seen
 
 
 def install_artwork(userdata_dir: Path, appid: int, art_dir: Path) -> list[str]:
@@ -144,8 +179,9 @@ def install_artwork(userdata_dir: Path, appid: int, art_dir: Path) -> list[str]:
     grid.mkdir(parents=True, exist_ok=True)
 
     copies = [
-        ("library-capsule.png", f"{appid_u}p.png"),
-        ("library-hero.png", f"{appid_u}_hero.png"),
+        ("libraryCapsule.png", f"{appid_u}p.png"),
+        ("libraryHero.png", f"{appid_u}_hero.png"),
+        ("horizontalCapsule.png", f"{appid_u}.png"),
     ]
     installed: list[str] = []
     for src_name, dst_name in copies:
@@ -182,9 +218,10 @@ def main() -> int:
                     help='Substring to match against shortcuts.vdf AppName '
                          '(default: "SAINT Controller")')
     ap.add_argument("--art-dir", type=Path, default=None,
-                    help="Directory containing library-capsule.png + "
-                         "library-hero.png (default: bundled Flatpak path, "
-                         "falling back to ../images/)")
+                    help="Directory containing libraryCapsule.png, "
+                         "libraryHero.png, and horizontalCapsule.png "
+                         "(default: bundled Flatpak path, falling back "
+                         "to ../images/)")
     args = ap.parse_args()
 
     art_dir = args.art_dir or default_art_dir()
@@ -197,9 +234,11 @@ def main() -> int:
 
     print(f"Installing artwork from: {art_dir}")
     any_installed = False
+    all_seen: list[tuple[str, list[str]]] = []   # (user_dir, [AppNames])
     for ud in userdatas:
         sv = ud / "config" / "shortcuts.vdf"
-        appid, entry = find_entry(sv, args.name_pattern)
+        appid, entry, seen = find_entry(sv, args.name_pattern)
+        all_seen.append((ud.name, seen))
         if not appid:
             print(f"  user {ud.name}: no shortcut matching '{args.name_pattern}'")
             continue
@@ -214,11 +253,25 @@ def main() -> int:
 
     if not any_installed:
         print()
-        print("No art installed. To set up:")
+        print("No art installed. The following non-Steam-game AppNames"
+              " were found in shortcuts.vdf:")
+        any_seen = False
+        for ud_name, names in all_seen:
+            if names:
+                any_seen = True
+                print(f"  user {ud_name}:")
+                for n in names:
+                    print(f"    - {n!r}")
+        if not any_seen:
+            print("  (none — no Non-Steam Games added yet)")
+        print()
+        print("To set up:")
         print(f"  1. Open Steam in Desktop Mode")
         print(f"  2. Games → Add a Non-Steam Game → Browse to the controller binary")
         print(f"  3. Re-run this script")
-        print(f"  (or pass --name-pattern <substring> if you renamed it)")
+        print(f"  (matching is space/hyphen/underscore-insensitive — 'saint-controller'")
+        print(f"   and 'SAINT Controller' both match the default '--name-pattern'.")
+        print(f"   Pass --name-pattern <substring> if you used a different name.)")
         return 1
 
     print()

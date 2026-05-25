@@ -27,6 +27,12 @@ from saint_server.ros_bridge.message_types import (
 
 # Throttle settings (reuse WebSocket handler constant)
 CONTROL_THROTTLE_MS = 50  # Minimum ms between commands per topic
+
+# Hot-path INFO logs (per-tick set_topic_channel emissions) are sampled
+# to keep file-handler I/O bounded at high tick rates. The first message
+# after a quiet gap still logs so a binding firing fresh stays visible.
+_HOT_LOG_SAMPLE_N = 20      # log 1-of-N during steady streams
+_HOT_LOG_IDLE_MS = 500.0    # also log if this much wallclock has passed
 # Values within this epsilon of zero are treated as "deadstick / stop"
 # and bypass the throttle so a return-to-zero never gets buffered behind
 # the previous non-zero publish. Mirrors NEUTRAL_EPSILON in the
@@ -92,10 +98,25 @@ class ROSBridge:
         # Track initialization
         self._initialized = False
 
+        # Hot-path log sampling state (see _hot_log).
+        self._hot_log_count = 0
+        self._hot_log_last_ms = 0.0
+
     def log(self, level: str, message: str):
         """Log a message if logger is available."""
         if self._logger:
             getattr(self._logger, level)(message)
+
+    def _hot_log(self, message: str):
+        """Sampled INFO log for per-tick lines. Logs 1-of-N during steady
+        streams, plus always logs the first message after an idle gap so
+        a binding firing fresh is still visible immediately."""
+        self._hot_log_count += 1
+        now_ms = time.monotonic() * 1000.0
+        if (now_ms - self._hot_log_last_ms >= _HOT_LOG_IDLE_MS
+                or self._hot_log_count % _HOT_LOG_SAMPLE_N == 0):
+            self._hot_log_last_ms = now_ms
+            self.log("info", message)
 
     def initialize(self):
         """Initialize the bridge and load endpoint definitions."""
@@ -388,10 +409,11 @@ class ROSBridge:
                 return {'status': 'error',
                         'message': f'Failed to publish: {str(e)}'}
         # Visible-by-default so the operator can tell at a glance that
-        # bindings are actually pushing values through. Cheap; throttle
-        # in the channel buffer keeps this to ~CONTROL_THROTTLE_MS bursts.
-        self.log('info',
-                 f'set_topic_channel {endpoint_path} {field}={value} (client {client_id})')
+        # bindings are actually pushing values through. Sampled via
+        # _hot_log so 20 Hz binding streams don't saturate the daily
+        # file handler — first message after an idle gap still logs.
+        self._hot_log(
+            f'set_topic_channel {endpoint_path} {field}={value} (client {client_id})')
         return {'status': 'ok', 'data': {'throttled': False}}
 
     def list_topic_channels(self) -> Dict[str, Any]:
