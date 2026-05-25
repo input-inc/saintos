@@ -406,11 +406,25 @@ mkdir -p "/opt/ros/${ROS_DISTRO}"
 cp -a "/work/_ros2/opt/ros/${ROS_DISTRO}/install" "/opt/ros/${ROS_DISTRO}/install"
 source "/opt/ros/${ROS_DISTRO}/install/setup.bash"
 
+# --base-paths server: scope colcon's package discovery to the one
+# directory that actually contains the ROS package. Without it colcon
+# crawls the whole tree (controller/node_modules, pico-sdk, _ros2/, …)
+# and on macOS bind mounts the walk has been observed to silently
+# truncate after large subtrees like pico-sdk, ending with
+# "ignoring unknown package 'saint_os' in --packages-select" and an
+# empty install/. Explicit base-paths is also ~30s faster on a cold
+# discovery and keeps CI and local in sync.
 colcon build \
+    --base-paths server \
     --merge-install \
     --packages-select saint_os \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 
+# Fail loud if the build produced no library output — the dist tarball
+# is useless without install/lib, but make-dist.sh has been seen to
+# happily package an empty install/ tree.
+[[ -d install/lib ]] \
+    || { echo "ERROR: install/lib missing after colcon build" >&2; exit 1; }
 ls install/setup.bash >/dev/null
 echo "saint_os build size: $(du -sh install | cut -f1)"
 CONTAINER_EOF

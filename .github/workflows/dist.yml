@@ -322,12 +322,23 @@ jobs:
           cp -a /work/_ros2/opt/ros/${ROS_DISTRO}/install /opt/ros/${ROS_DISTRO}/install
           source /opt/ros/${ROS_DISTRO}/install/setup.bash
 
+          # --base-paths server: scope colcon's package discovery to the
+          # one directory that actually contains the ROS package. Kept in
+          # sync with scripts/build-local-dist.sh — see the comment there
+          # for why an unbounded crawl is unreliable.
           colcon build \
+              --base-paths server \
               --merge-install \
               --packages-select saint_os \
               --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
           CONTAINER_EOF
 
+          # Fail loud if no libraries were produced — make-dist.sh will
+          # otherwise happily package an empty install/ tree and the
+          # target's installer dies with "find: install/lib: No such
+          # file or directory".
+          [[ -d install/lib ]] \
+              || { echo "ERROR: install/lib missing after colcon build" >&2; exit 1; }
           ls install/setup.bash >/dev/null
           echo "saint_os built: $(du -sh install | cut -f1)"
 
