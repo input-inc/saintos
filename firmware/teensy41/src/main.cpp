@@ -440,10 +440,13 @@ static bool init_micro_ros(void)
     config_msg.data.size = 0;
     config_msg.data.capacity = sizeof(config_buffer);
 
-    // Control subscriber
+    // Control subscriber. BEST_EFFORT to match the server's streaming-
+    // control publisher — see firmware/rp2040/src/main.c for the
+    // rationale (deadstick must not queue behind unacknowledged
+    // reliable retransmissions).
     snprintf(topic, sizeof(topic), "/saint/nodes/%s/control", g_node.node_id);
     for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
-    ret = rclc_subscription_init_default(&control_sub, &ros_node,
+    ret = rclc_subscription_init_best_effort(&control_sub, &ros_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic);
     if (ret != RCL_RET_OK) return false;
     control_msg.data.data = control_buffer;

@@ -27,6 +27,12 @@ from saint_server.ros_bridge.message_types import (
 
 # Throttle settings (reuse WebSocket handler constant)
 CONTROL_THROTTLE_MS = 50  # Minimum ms between commands per topic
+# Values within this epsilon of zero are treated as "deadstick / stop"
+# and bypass the throttle so a return-to-zero never gets buffered behind
+# the previous non-zero publish. Mirrors NEUTRAL_EPSILON in the
+# webserver's WS handler (kept as a separate constant so the two paths
+# can be tuned independently if needed).
+NEUTRAL_EPSILON = 0.02
 
 class ROSBridge:
     """
@@ -345,10 +351,24 @@ class ROSBridge:
                 _set_field_in_dict(buf, field, value)
             except ValueError as e:
                 return {'status': 'error', 'message': str(e)}
-            # Reuse the existing throttle (per-endpoint).
+            # Reuse the existing throttle (per-endpoint). Deadstick
+            # values (near zero) BYPASS the throttle — otherwise a
+            # return-to-zero that arrives within the 50 ms window after a
+            # non-zero publish gets merged into the buffer but never
+            # republished, and the motor keeps spinning until either the
+            # controller's heartbeat re-sends or the operator nudges the
+            # stick again. Mirrors the WS handler's is_neutral_value
+            # bypass on set_channel_value (webserver/websocket_handler.py).
+            is_neutral = False
+            try:
+                is_neutral = abs(float(value)) <= NEUTRAL_EPSILON
+            except (TypeError, ValueError):
+                # Non-numeric values (rare on this path) skip the bypass
+                # — fall through to the normal throttle check.
+                is_neutral = False
             now = time.time() * 1000
             last_publish = self._publish_throttle.get(endpoint_path, 0)
-            if now - last_publish < CONTROL_THROTTLE_MS:
+            if not is_neutral and now - last_publish < CONTROL_THROTTLE_MS:
                 return {'status': 'ok',
                         'message': 'Throttled',
                         'data': {'throttled': True, 'buffered': True}}

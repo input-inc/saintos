@@ -28,8 +28,15 @@ class _Node:  # noqa: D401  (matches rclpy's Node base class shape we use)
 _node_mod.Node = _Node
 
 _qos = _stub("rclpy.qos")
-for n in ("QoSProfile",):
-    setattr(_qos, n, type(n, (), {}))
+# QoSProfile is constructed with keyword args (reliability=, history=,
+# depth=, durability=…). The default `type(...)` produced an arg-less
+# __init__ which broke server_node.py's module-level CONTROL_QOS
+# initialization. Accept any kwargs and just stash them.
+class _QoSProfile:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+_qos.QoSProfile = _QoSProfile
 for n, vals in (
     ("QoSReliabilityPolicy", {"RELIABLE": 1, "BEST_EFFORT": 2}),
     ("QoSHistoryPolicy",     {"KEEP_LAST": 1, "KEEP_ALL": 2}),

@@ -340,7 +340,14 @@ impl InputMapper {
                         right /= max_val;
                     }
 
-                    // Check if we should send (same logic as DirectControl but for the combined values)
+                    // Check if we should send (same logic as DirectControl but for the combined values).
+                    // Match DirectControl's heartbeat behaviour: re-emit
+                    // the current values periodically so a dropped
+                    // deadstick packet doesn't permanently strand the
+                    // motors. Without this, a single lost UDP frame on
+                    // return-to-zero leaves both tracks running at the
+                    // last commanded velocity until the operator nudges
+                    // the stick again.
                     let key_left = format!("{}::{}", topic, left_channel);
                     let key_right = format!("{}::{}", topic, right_channel);
                     let last_left = self.last_analog_values.get(&key_left).copied().unwrap_or(0.0);
@@ -352,11 +359,20 @@ impl InputMapper {
                     let any_active = left.abs() > 0.001 || right.abs() > 0.001;
                     let returned_to_zero = (last_left.abs() > 0.001 || last_right.abs() > 0.001)
                         && left.abs() <= 0.001 && right.abs() <= 0.001;
-                    let should_send = any_changed || any_active || returned_to_zero;
+                    // Heartbeat is keyed on the LEFT slot but covers both —
+                    // they're always sent together, so a single timer
+                    // tracks the pair correctly.
+                    let heartbeat_due = match self.last_send_times.get(&key_left) {
+                        Some(t) => t.elapsed() >= std::time::Duration::from_millis(HEARTBEAT_MS),
+                        None => true,
+                    };
+                    let should_send = any_changed || any_active || returned_to_zero || heartbeat_due;
 
                     if should_send {
-                        self.last_analog_values.insert(key_left, left);
+                        self.last_analog_values.insert(key_left.clone(), left);
                         self.last_analog_values.insert(key_right, right);
+                        let now = std::time::Instant::now();
+                        self.last_send_times.insert(key_left, now);
 
                         // Send both left and right commands. Differential
                         // drive stays on the raw topic/channel path — the

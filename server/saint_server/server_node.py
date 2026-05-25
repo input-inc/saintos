@@ -14,6 +14,26 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+
+# QoS for streaming control commands (joystick → motor). Joystick-style
+# data is fire-and-forget: a packet lost in transit must NOT stall the
+# queue behind it while DDS retransmits, because that's how a deadstick
+# ends up arriving a full second late behind nine stale non-zero values.
+# BEST_EFFORT + KEEP_LAST(1) gives us "always the freshest command, drop
+# anything older" — the standard pattern for /cmd_vel-class topics.
+#
+# Trade-off: one-shot commands sent on the same topic (factory_reset,
+# firmware_update, identify, estop) become slightly less reliable too.
+# In practice this hasn't been a problem — those are operator-driven
+# clicks and a re-click costs nothing, while a stuck deadstick costs the
+# robot crashing into a wall.
+CONTROL_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=1,
+    durability=QoSDurabilityPolicy.VOLATILE,
+)
 
 # Use std_msgs/String for node announcements (matches firmware)
 from std_msgs.msg import String
@@ -433,11 +453,11 @@ class SaintServerNode(Node):
         pub = self.create_publisher(
             String,
             topic,
-            10,
+            CONTROL_QOS,
             callback_group=self.callback_group
         )
         self._node_control_pubs[node_id] = pub
-        self.get_logger().info(f'Created control publisher: {topic}')
+        self.get_logger().info(f'Created control publisher: {topic} (best-effort, depth=1)')
         return pub
 
     def _ensure_node_state_subscriber(self, node_id: str):

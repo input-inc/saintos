@@ -1096,7 +1096,14 @@ static bool init_micro_ros(void)
         if (*p == '-' || *p == ':') *p = '_';
     }
 
-    ret = rclc_subscription_init_default(
+    // Control commands are streaming joystick state. Use BEST_EFFORT
+    // QoS to match the server-side publisher and avoid the deadstick-
+    // queues-behind-stale-values pathology: with RELIABLE + KEEP_LAST(10)
+    // a single lost UDP packet stalls the queue while DDS retransmits,
+    // and the return-to-zero ends up sitting at queue position 10. Must
+    // match the publisher's QoS (BEST_EFFORT + KEEP_LAST(1)) or DDS
+    // won't even establish the connection.
+    ret = rclc_subscription_init_best_effort(
         &control_sub,
         &ros_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
@@ -1106,7 +1113,7 @@ static bool init_micro_ros(void)
         printf("Failed to create control subscription: %d\n", ret);
         return false;
     }
-    printf("Subscribed to control: %s\n", control_topic);
+    printf("Subscribed to control: %s (best-effort)\n", control_topic);
 
     // Initialize control message buffer
     control_msg.data.data = control_buffer;

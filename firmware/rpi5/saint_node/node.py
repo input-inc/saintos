@@ -87,6 +87,17 @@ class SaintNode(Node):
             durability=DurabilityPolicy.VOLATILE,
             depth=10
         )
+        # Streaming control commands use BEST_EFFORT + KEEP_LAST(1) so a
+        # dropped UDP packet doesn't queue subsequent commands behind
+        # retransmissions — the deadstick (return-to-zero) needs to be
+        # the freshest thing at the head of the queue, not stuck behind
+        # nine stale non-zero values. Must match the server-side
+        # publisher's QoS (see server_node.py CONTROL_QOS).
+        self._qos_control = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=1
+        )
 
         # Publishers
         self._pub_announce = self.create_publisher(
@@ -104,7 +115,7 @@ class SaintNode(Node):
             self._on_config_message, self._qos_reliable)
         self._sub_control = self.create_subscription(
             String, f'/saint/nodes/{self._node_id}/control',
-            self._on_control_message, self._qos_reliable)
+            self._on_control_message, self._qos_control)
 
         # Main loop timer (10 Hz)
         self._timer = self.create_timer(0.1, self._main_loop)
