@@ -69,6 +69,12 @@ finish-args:
   # but Flatpak finish-args are app-wide so the grant applies to
   # every entry point. Worth it for the one-command artwork setup.
   - --filesystem=xdg-data/Steam
+  # Allow talking to the org.freedesktop.Flatpak portal so the in-app
+  # OTA flow (Settings → Software Update) can shell out to the host's
+  # `flatpak` CLI via `flatpak-spawn --host` to install a new bundle of
+  # ourselves. Without this, the install command can't cross the
+  # sandbox boundary and updates fail with a permission denied error.
+  - --talk-name=org.freedesktop.Flatpak
 
 # Build-time environment: put the SDK extension binaries on PATH,
 # anchor cargo + npm state in the host-mounted persistent cache so

@@ -80,7 +80,8 @@ static rcl_publisher_t state_pub;
 
 // Subscribers
 static rcl_subscription_t config_sub;
-static rcl_subscription_t control_sub;
+static rcl_subscription_t control_sub;     // Streaming pin/channel writes (BEST_EFFORT)
+static rcl_subscription_t command_sub;     // One-shot operator actions (RELIABLE)
 
 // Timers
 static rcl_timer_t announce_timer;
@@ -95,6 +96,9 @@ static char config_buffer[2048];
 
 static std_msgs__msg__String control_msg;
 static char control_buffer[512];
+
+static std_msgs__msg__String command_msg;
+static char command_buffer[512];
 
 static std_msgs__msg__String state_msg;
 static char state_buffer[2048];
@@ -248,27 +252,20 @@ static void handle_firmware_update(const char* json, size_t len)
 #endif
 }
 
-static void control_subscription_callback(const void* msgin)
+/* Dispatch action JSON from either /control (BEST_EFFORT, streaming
+ * writes) or /command (RELIABLE, one-shots). Same body for both topics;
+ * the split exists for QoS only — see firmware/rp2040/src/main.c and
+ * server_node.py for the rationale. */
+static void dispatch_action_buffer(const char* data, size_t size)
 {
-    const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
-    if (!msg || !msg->data.data) return;
-
-    if (msg->data.size >= sizeof(control_buffer)) return;
-
-    control_buffer[msg->data.size] = '\0';
-
-    Serial.printf("Control received: %.*s\n",
-                   (int)(msg->data.size < 80 ? msg->data.size : 80),
-                   msg->data.data);
-
-    if (strstr(msg->data.data, "\"action\":\"firmware_update\"") ||
-        strstr(msg->data.data, "\"action\": \"firmware_update\"")) {
-        handle_firmware_update(msg->data.data, msg->data.size);
+    if (strstr(data, "\"action\":\"firmware_update\"") ||
+        strstr(data, "\"action\": \"firmware_update\"")) {
+        handle_firmware_update(data, size);
         return;
     }
 
-    if (strstr(msg->data.data, "\"action\":\"factory_reset\"") ||
-        strstr(msg->data.data, "\"action\": \"factory_reset\"")) {
+    if (strstr(data, "\"action\":\"factory_reset\"") ||
+        strstr(data, "\"action\": \"factory_reset\"")) {
         flash_storage_erase();
         pin_config_reset();
         node_set_state(NODE_STATE_UNADOPTED);
@@ -277,8 +274,8 @@ static void control_subscription_callback(const void* msgin)
         return;
     }
 
-    if (strstr(msg->data.data, "\"action\":\"restart\"") ||
-        strstr(msg->data.data, "\"action\": \"restart\"")) {
+    if (strstr(data, "\"action\":\"restart\"") ||
+        strstr(data, "\"action\": \"restart\"")) {
         Serial.printf("Restart requested\n");
         delay(500);
 #ifdef SIMULATION
@@ -289,19 +286,43 @@ static void control_subscription_callback(const void* msgin)
 #endif
     }
 
-    if (strstr(msg->data.data, "\"action\":\"identify\"") ||
-        strstr(msg->data.data, "\"action\": \"identify\"")) {
+    if (strstr(data, "\"action\":\"identify\"") ||
+        strstr(data, "\"action\": \"identify\"")) {
         led_identify(5);
         return;
     }
 
-    if (strstr(msg->data.data, "\"action\":\"estop\"") ||
-        strstr(msg->data.data, "\"action\": \"estop\"")) {
+    if (strstr(data, "\"action\":\"estop\"") ||
+        strstr(data, "\"action\": \"estop\"")) {
         pin_control_estop();
         return;
     }
 
-    pin_control_apply_json(msg->data.data, msg->data.size);
+    pin_control_apply_json(data, size);
+}
+
+static void control_subscription_callback(const void* msgin)
+{
+    const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
+    if (!msg || !msg->data.data) return;
+    if (msg->data.size >= sizeof(control_buffer)) return;
+    control_buffer[msg->data.size] = '\0';
+    Serial.printf("Control received: %.*s\n",
+                   (int)(msg->data.size < 80 ? msg->data.size : 80),
+                   msg->data.data);
+    dispatch_action_buffer(msg->data.data, msg->data.size);
+}
+
+static void command_subscription_callback(const void* msgin)
+{
+    const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
+    if (!msg || !msg->data.data) return;
+    if (msg->data.size >= sizeof(command_buffer)) return;
+    command_buffer[msg->data.size] = '\0';
+    Serial.printf("Command received: %.*s\n",
+                   (int)(msg->data.size < 80 ? msg->data.size : 80),
+                   msg->data.data);
+    dispatch_action_buffer(msg->data.data, msg->data.size);
 }
 
 // ============================================================================
@@ -453,6 +474,18 @@ static bool init_micro_ros(void)
     control_msg.data.size = 0;
     control_msg.data.capacity = sizeof(control_buffer);
 
+    // Command subscriber — RELIABLE one-shots (firmware_update, estop,
+    // factory_reset, identify, …). See firmware/rp2040/src/main.c and
+    // server_node.py CONTROL_QOS/COMMAND_QOS for the rationale.
+    snprintf(topic, sizeof(topic), "/saint/nodes/%s/command", g_node.node_id);
+    for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
+    ret = rclc_subscription_init_default(&command_sub, &ros_node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic);
+    if (ret != RCL_RET_OK) return false;
+    command_msg.data.data = command_buffer;
+    command_msg.data.size = 0;
+    command_msg.data.capacity = sizeof(command_buffer);
+
     // State publisher
     snprintf(topic, sizeof(topic), "/saint/nodes/%s/state", g_node.node_id);
     for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
@@ -469,12 +502,14 @@ static bool init_micro_ros(void)
         RCL_MS_TO_NS(STATE_PUBLISH_INTERVAL_MS), state_timer_callback);
     if (ret != RCL_RET_OK) return false;
 
-    // Executor (2 timers + 2 subscriptions)
-    ret = rclc_executor_init(&executor, &support.context, 4, &allocator);
+    // Executor (2 timers + 3 subscriptions)
+    ret = rclc_executor_init(&executor, &support.context, 5, &allocator);
     if (ret != RCL_RET_OK) return false;
 
     rclc_executor_add_timer(&executor, &announce_timer);
     rclc_executor_add_timer(&executor, &state_timer);
+    rclc_executor_add_subscription(&executor, &command_sub, &command_msg,
+        command_subscription_callback, ON_NEW_DATA);
     rclc_executor_add_subscription(&executor, &config_sub, &config_msg,
         config_subscription_callback, ON_NEW_DATA);
     rclc_executor_add_subscription(&executor, &control_sub, &control_msg,
@@ -486,6 +521,7 @@ static bool init_micro_ros(void)
 
 static void cleanup_micro_ros(void)
 {
+    rcl_subscription_fini(&command_sub, &ros_node);
     rcl_subscription_fini(&control_sub, &ros_node);
     rcl_subscription_fini(&config_sub, &ros_node);
     rcl_publisher_fini(&state_pub, &ros_node);

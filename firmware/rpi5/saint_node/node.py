@@ -116,6 +116,15 @@ class SaintNode(Node):
         self._sub_control = self.create_subscription(
             String, f'/saint/nodes/{self._node_id}/control',
             self._on_control_message, self._qos_control)
+        # One-shot operator actions (firmware_update, factory_reset,
+        # reboot, check_update). RELIABLE so a dropped UDP packet
+        # doesn't silently lose an OTA trigger — see server_node.py
+        # CONTROL_QOS/COMMAND_QOS for the rationale. Same callback as
+        # /control: the action match-on-string is the actual router,
+        # the topic split is purely for QoS.
+        self._sub_command = self.create_subscription(
+            String, f'/saint/nodes/{self._node_id}/command',
+            self._on_control_message, self._qos_reliable)
 
         # Main loop timer (10 Hz)
         self._timer = self.create_timer(0.1, self._main_loop)

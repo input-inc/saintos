@@ -209,7 +209,8 @@ static rcl_publisher_t log_pub;            // Node log lines (best-effort)
 
 // Subscribers
 static rcl_subscription_t config_sub;
-static rcl_subscription_t control_sub;     // Pin control subscription
+static rcl_subscription_t control_sub;     // Streaming pin/channel writes (BEST_EFFORT)
+static rcl_subscription_t command_sub;     // One-shot operator actions (RELIABLE)
 
 // Timers
 static rcl_timer_t announce_timer;
@@ -224,6 +225,9 @@ static char config_buffer[2048];        // Buffer for incoming config
 
 static std_msgs__msg__String control_msg;
 static char control_buffer[512];        // Buffer for incoming control commands
+
+static std_msgs__msg__String command_msg;
+static char command_buffer[512];        // Buffer for incoming one-shot commands
 
 static std_msgs__msg__String state_msg;
 static char state_buffer[2048];         // Buffer for outgoing state
@@ -677,39 +681,25 @@ static void handle_firmware_update(const char* json, size_t len)
  * Subscription callback for control messages.
  * Handles runtime pin value changes from the server.
  */
-static void control_subscription_callback(const void* msgin)
+/* Dispatch action JSON from either /control (BEST_EFFORT, streaming
+ * writes) or /command (RELIABLE, operator one-shots). Both callbacks
+ * funnel here so the firmware accepts each action regardless of which
+ * topic the server publishes on — keeps backward-compat with servers
+ * that haven't been upgraded to the topic split, and forward-compat
+ * with future actions that may move between topics. The split exists
+ * for *delivery* semantics (QoS), not action authorization. */
+static void dispatch_action_buffer(const char* data, size_t size)
 {
-    const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
-
-    if (!msg || !msg->data.data) {
-        return;
-    }
-
-    // SAFETY: Validate message size before processing
-    if (msg->data.size >= sizeof(control_buffer)) {
-        saint_log_publish("error",
-            "Control message too large: %zu >= %zu, rejecting",
-            msg->data.size, sizeof(control_buffer));
-        return;
-    }
-
-    // Ensure null termination for safe string operations
-    control_buffer[msg->data.size] = '\0';
-
-    printf("Control received: %.*s\n",
-           (int)(msg->data.size < 80 ? msg->data.size : 80),
-           msg->data.data);
-
     // Check for firmware update command
-    if (strstr(msg->data.data, "\"action\":\"firmware_update\"") ||
-        strstr(msg->data.data, "\"action\": \"firmware_update\"")) {
-        handle_firmware_update(msg->data.data, msg->data.size);
+    if (strstr(data, "\"action\":\"firmware_update\"") ||
+        strstr(data, "\"action\": \"firmware_update\"")) {
+        handle_firmware_update(data, size);
         return;
     }
 
     // Check for factory reset command
-    if (strstr(msg->data.data, "\"action\":\"factory_reset\"") ||
-        strstr(msg->data.data, "\"action\": \"factory_reset\"")) {
+    if (strstr(data, "\"action\":\"factory_reset\"") ||
+        strstr(data, "\"action\": \"factory_reset\"")) {
         printf("\n");
         printf("====================================\n");
         printf("FACTORY RESET REQUESTED\n");
@@ -732,8 +722,8 @@ static void control_subscription_callback(const void* msgin)
     }
 
     // Check for restart command
-    if (strstr(msg->data.data, "\"action\":\"restart\"") ||
-        strstr(msg->data.data, "\"action\": \"restart\"")) {
+    if (strstr(data, "\"action\":\"restart\"") ||
+        strstr(data, "\"action\": \"restart\"")) {
         printf("\n");
         printf("====================================\n");
         printf("RESTART REQUESTED\n");
@@ -751,8 +741,8 @@ static void control_subscription_callback(const void* msgin)
     }
 
     // Check for identify command
-    if (strstr(msg->data.data, "\"action\":\"identify\"") ||
-        strstr(msg->data.data, "\"action\": \"identify\"")) {
+    if (strstr(data, "\"action\":\"identify\"") ||
+        strstr(data, "\"action\": \"identify\"")) {
         printf("\n");
         printf("====================================\n");
         printf("IDENTIFY REQUESTED\n");
@@ -768,8 +758,8 @@ static void control_subscription_callback(const void* msgin)
 
     // Emergency stop — engage. Sets all outputs to safe values AND
     // drives peripheral e-stop latches (e.g. RoboClaw estop_pin → HIGH).
-    if (strstr(msg->data.data, "\"action\":\"estop\"") ||
-        strstr(msg->data.data, "\"action\": \"estop\"")) {
+    if (strstr(data, "\"action\":\"estop\"") ||
+        strstr(data, "\"action\": \"estop\"")) {
         printf("\n");
         printf("====================================\n");
         printf("EMERGENCY STOP ACTIVATED\n");
@@ -784,8 +774,8 @@ static void control_subscription_callback(const void* msgin)
     // commands flow again. Direct pin outputs (PWM/servo/digital)
     // are NOT auto-restored — the host should resend whatever
     // values it wants.
-    if (strstr(msg->data.data, "\"action\":\"clear_estop\"") ||
-        strstr(msg->data.data, "\"action\": \"clear_estop\"")) {
+    if (strstr(data, "\"action\":\"clear_estop\"") ||
+        strstr(data, "\"action\": \"clear_estop\"")) {
         printf("\n");
         printf("====================================\n");
         printf("EMERGENCY STOP RELEASED\n");
@@ -802,10 +792,10 @@ static void control_subscription_callback(const void* msgin)
     // arrives. JSON forms:
     //   {"action":"set_neopixel","r":255,"g":0,"b":0,"brightness":128}
     //   {"action":"set_neopixel","clear":true}    // resume state LED
-    if (strstr(msg->data.data, "\"action\":\"set_neopixel\"") ||
-        strstr(msg->data.data, "\"action\": \"set_neopixel\"")) {
-        if (strstr(msg->data.data, "\"clear\":true") ||
-            strstr(msg->data.data, "\"clear\": true")) {
+    if (strstr(data, "\"action\":\"set_neopixel\"") ||
+        strstr(data, "\"action\": \"set_neopixel\"")) {
+        if (strstr(data, "\"clear\":true") ||
+            strstr(data, "\"clear\": true")) {
             led_clear_override();
             saint_log_publish("info",
                 "NeoPixel: override cleared — resuming state-driven LED");
@@ -818,19 +808,19 @@ static void control_subscription_callback(const void* msgin)
         // leave the pixel dark, which is at least non-misleading).
         int r = 0, g = 0, b = 0, brightness = 255;
         const char* p;
-        if ((p = strstr(msg->data.data, "\"r\""))) {
+        if ((p = strstr(data, "\"r\""))) {
             p = strchr(p, ':');
             if (p) { p++; while (*p == ' ') p++; r = atoi(p); }
         }
-        if ((p = strstr(msg->data.data, "\"g\""))) {
+        if ((p = strstr(data, "\"g\""))) {
             p = strchr(p, ':');
             if (p) { p++; while (*p == ' ') p++; g = atoi(p); }
         }
-        if ((p = strstr(msg->data.data, "\"b\""))) {
+        if ((p = strstr(data, "\"b\""))) {
             p = strchr(p, ':');
             if (p) { p++; while (*p == ' ') p++; b = atoi(p); }
         }
-        if ((p = strstr(msg->data.data, "\"brightness\""))) {
+        if ((p = strstr(data, "\"brightness\""))) {
             p = strchr(p, ':');
             if (p) { p++; while (*p == ' ') p++; brightness = atoi(p); }
         }
@@ -850,16 +840,52 @@ static void control_subscription_callback(const void* msgin)
     // RoboClaw wire-level debug passthrough. Diagnostic-only; the host
     // CLI uses this to send raw bytes, sniff the idle line, and rebind
     // the PIO UART without an OTA. See roboclaw_debug_handle_json().
-    if (strstr(msg->data.data, "\"action\":\"roboclaw_debug\"")
-        || strstr(msg->data.data, "\"action\": \"roboclaw_debug\"")) {
-        roboclaw_debug_handle_json(msg->data.data);
+    if (strstr(data, "\"action\":\"roboclaw_debug\"")
+        || strstr(data, "\"action\": \"roboclaw_debug\"")) {
+        roboclaw_debug_handle_json(data);
         return;
     }
 
     // Apply pin control command
-    if (pin_control_apply_json(msg->data.data, msg->data.size)) {
+    if (pin_control_apply_json(data, size)) {
         printf("Control command applied\n");
     }
+}
+
+/* Streaming pin/channel writes on /control (BEST_EFFORT). */
+static void control_subscription_callback(const void* msgin)
+{
+    const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
+    if (!msg || !msg->data.data) return;
+    if (msg->data.size >= sizeof(control_buffer)) {
+        saint_log_publish("error",
+            "Control message too large: %zu >= %zu, rejecting",
+            msg->data.size, sizeof(control_buffer));
+        return;
+    }
+    control_buffer[msg->data.size] = '\0';
+    printf("Control received: %.*s\n",
+           (int)(msg->data.size < 80 ? msg->data.size : 80),
+           msg->data.data);
+    dispatch_action_buffer(msg->data.data, msg->data.size);
+}
+
+/* One-shot operator actions on /command (RELIABLE). */
+static void command_subscription_callback(const void* msgin)
+{
+    const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
+    if (!msg || !msg->data.data) return;
+    if (msg->data.size >= sizeof(command_buffer)) {
+        saint_log_publish("error",
+            "Command message too large: %zu >= %zu, rejecting",
+            msg->data.size, sizeof(command_buffer));
+        return;
+    }
+    command_buffer[msg->data.size] = '\0';
+    printf("Command received: %.*s\n",
+           (int)(msg->data.size < 80 ? msg->data.size : 80),
+           msg->data.data);
+    dispatch_action_buffer(msg->data.data, msg->data.size);
 }
 
 /**
@@ -1120,6 +1146,34 @@ static bool init_micro_ros(void)
     control_msg.data.size = 0;
     control_msg.data.capacity = sizeof(control_buffer);
 
+    // Create command subscriber — operator one-shots (firmware_update,
+    // factory_reset, identify, estop, …). RELIABLE so a single dropped
+    // packet doesn't lose an OTA trigger or estop. Topic is
+    // /saint/nodes/<id>/command — separate from /control so this
+    // subscription's QoS doesn't have to share the streaming-write
+    // tradeoffs. Server-side counterpart: server_node.py COMMAND_QOS.
+    char command_topic[64];
+    snprintf(command_topic, sizeof(command_topic),
+             "/saint/nodes/%s/command", g_node.node_id);
+    for (char* p = command_topic; *p; p++) {
+        if (*p == '-' || *p == ':') *p = '_';
+    }
+    ret = rclc_subscription_init_default(
+        &command_sub,
+        &ros_node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+        command_topic
+    );
+    if (ret != RCL_RET_OK) {
+        printf("Failed to create command subscription: %d\n", ret);
+        return false;
+    }
+    printf("Subscribed to command: %s (reliable)\n", command_topic);
+
+    command_msg.data.data = command_buffer;
+    command_msg.data.size = 0;
+    command_msg.data.capacity = sizeof(command_buffer);
+
     // Create state publisher
     char state_topic[64];
     snprintf(state_topic, sizeof(state_topic),
@@ -1187,8 +1241,9 @@ static bool init_micro_ros(void)
         return false;
     }
 
-    // Initialize executor with 2 timers + 2 subscriptions
-    ret = rclc_executor_init(&executor, &support.context, 4, &allocator);
+    // Initialize executor with 2 timers + 3 subscriptions (config,
+    // control, command).
+    ret = rclc_executor_init(&executor, &support.context, 5, &allocator);
     if (ret != RCL_RET_OK) {
         printf("Failed to create executor: %d\n", ret);
         return false;
@@ -1234,6 +1289,19 @@ static bool init_micro_ros(void)
         return false;
     }
 
+    // Add command subscription to executor
+    ret = rclc_executor_add_subscription(
+        &executor,
+        &command_sub,
+        &command_msg,
+        command_subscription_callback,
+        ON_NEW_DATA
+    );
+    if (ret != RCL_RET_OK) {
+        printf("Failed to add command subscription: %d\n", ret);
+        return false;
+    }
+
     printf("micro-ROS initialized successfully\n");
     return true;
 }
@@ -1243,6 +1311,7 @@ static bool init_micro_ros(void)
  */
 static void cleanup_micro_ros(void)
 {
+    rcl_subscription_fini(&command_sub, &ros_node);
     rcl_subscription_fini(&control_sub, &ros_node);
     rcl_subscription_fini(&config_sub, &ros_node);
     ros_log_ready = false;

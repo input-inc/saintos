@@ -1,9 +1,10 @@
-import { Component, OnDestroy, OnInit, signal } from '@angular/core';
+import { Component, effect, OnDestroy, OnInit, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ConnectionService, ConnectionStatus, ConnectionConfig } from '../../core/services/connection.service';
 import { KeyboardService } from '../../core/services/keyboard.service';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 
 /** Mirrors crate::discovery::DiscoveredServer. The Rust backend
  *  serializes this shape verbatim, so any rename on either side must
@@ -14,6 +15,31 @@ interface DiscoveredServer {
   ipv4: string | null;
   port: number;
 }
+
+/** Subset of the /api/firmware/<type> shape we care about. Mirrors
+ *  the JSON produced by controller/flatpak/build.sh's stage_to_server()
+ *  helper — keep the field names in sync with that script. */
+interface FirmwareInfo {
+  type: string;
+  latest_version?: string;
+  latest_package?: string;
+  latest_checksum?: string;
+  updated?: string;
+}
+
+/** UI states for the in-app OTA flow. 'not-connected' is the resting
+ *  state when there's no server to ask; everything else is a step in
+ *  the check → download → verify → install → done pipeline. */
+type UpdateState =
+  | 'not-connected'
+  | 'checking'
+  | 'up-to-date'
+  | 'available'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'installed'
+  | 'error';
 
 @Component({
   selector: 'app-settings',
@@ -176,9 +202,84 @@ interface DiscoveredServer {
       <div class="card">
         <h2 class="text-lg font-semibold mb-4">About</h2>
         <div class="space-y-2 text-sm text-saint-text-muted">
-          <p><span class="text-saint-text">SAINT Controller</span> v0.1.0</p>
+          <p><span class="text-saint-text">SAINT Controller</span> v{{ currentVersion() || '…' }}</p>
           <p>A Tauri-based controller application for SAINT.OS robots.</p>
           <p>Supports gamepad, gyroscope, and touch input.</p>
+        </div>
+      </div>
+
+      <!-- Software Update -->
+      <div class="card">
+        <div class="flex items-start justify-between mb-4">
+          <h2 class="text-lg font-semibold">Software Update</h2>
+          <button class="btn btn-secondary btn-sm flex items-center gap-1"
+                  (click)="checkForUpdate()"
+                  [disabled]="updateState() === 'checking' || updateState() === 'downloading'
+                             || updateState() === 'verifying' || updateState() === 'installing'">
+            <span class="material-icons icon-sm">refresh</span>
+            Check
+          </button>
+        </div>
+
+        <div class="space-y-3 text-sm">
+          <div class="flex items-center justify-between">
+            <span class="text-saint-text-muted">Installed</span>
+            <span class="font-mono">{{ currentVersion() || '…' }}</span>
+          </div>
+          @if (updateInfo()?.latest_version) {
+            <div class="flex items-center justify-between">
+              <span class="text-saint-text-muted">Latest on server</span>
+              <span class="font-mono">{{ updateInfo()!.latest_version }}</span>
+            </div>
+          }
+
+          @switch (updateState()) {
+            @case ('not-connected') {
+              <p class="text-saint-text-muted">
+                Connect to a SAINT.OS server (above) to check for updates.
+              </p>
+            }
+            @case ('checking') {
+              <p class="text-saint-text-muted">Checking for updates…</p>
+            }
+            @case ('up-to-date') {
+              <p class="text-saint-text-muted">You're on the latest version.</p>
+            }
+            @case ('available') {
+              <button class="btn btn-primary w-full"
+                      (click)="installUpdate()">
+                Install update
+              </button>
+            }
+            @case ('downloading') {
+              <p class="text-saint-text-muted">
+                Downloading… {{ updateProgress() }}
+              </p>
+            }
+            @case ('verifying') {
+              <p class="text-saint-text-muted">Verifying checksum…</p>
+            }
+            @case ('installing') {
+              <p class="text-saint-text-muted">
+                Installing on host (this may take a minute)…
+              </p>
+            }
+            @case ('installed') {
+              <div class="bg-saint-success/20 border border-saint-success rounded-lg p-3">
+                Update installed.
+                <strong class="block mt-1">Please manually relaunch the SAINT
+                Controller</strong>
+                from your Steam library (or via <span class="font-mono">flatpak
+                run com.saintos.Controller</span>) so the new version takes
+                effect.
+              </div>
+            }
+            @case ('error') {
+              <div class="bg-saint-error/20 border border-saint-error rounded-lg p-3 text-saint-error">
+                {{ updateError() }}
+              </div>
+            }
+          }
         </div>
       </div>
 
@@ -240,6 +341,21 @@ export class SettingsComponent implements OnInit, OnDestroy {
   discoveredServers = signal<DiscoveredServer[]>([]);
   private discoveryPollHandle: ReturnType<typeof setInterval> | null = null;
 
+  /** Controller version reported by Tauri (from tauri.conf.json, which
+   *  is kept in sync with controller/VERSION by scripts/sync-version.js).
+   *  Read once on init; doesn't change at runtime. */
+  currentVersion = signal<string | null>(null);
+  /** Latest controller info from `/api/firmware/controller` on the
+   *  connected server. Null until we've successfully fetched it once. */
+  updateInfo = signal<FirmwareInfo | null>(null);
+  /** Step in the OTA check/install pipeline — drives the UI states. */
+  updateState = signal<UpdateState>('not-connected');
+  /** Human-readable error surfaced under the Software Update card when
+   *  any step in the OTA pipeline fails. */
+  updateError = signal<string>('');
+  /** Progress hint shown during the 'downloading' state (e.g. byte count). */
+  updateProgress = signal<string>('');
+
   readonly scaleOptions = [
     { value: 1.0, label: '100% (Default)' },
     { value: 1.25, label: '125%' },
@@ -277,6 +393,24 @@ export class SettingsComponent implements OnInit, OnDestroy {
         // Ignore parse errors
       }
     }
+
+    // Re-check for updates whenever the connection becomes Connected.
+    // Skips the check while a download/install is in flight so we don't
+    // clobber the operator's in-progress action with a fresh poll.
+    effect(() => {
+      const connected = this.connectionService.isConnected();
+      const state = this.updateState();
+      const inFlight =
+        state === 'downloading' ||
+        state === 'verifying' ||
+        state === 'installing';
+      if (connected && !inFlight) {
+        void this.checkForUpdate();
+      } else if (!connected && !inFlight) {
+        this.updateState.set('not-connected');
+        this.updateInfo.set(null);
+      }
+    });
   }
 
   private async initializeScale(): Promise<void> {
@@ -359,6 +493,118 @@ export class SettingsComponent implements OnInit, OnDestroy {
         void this.refreshDiscoveredServers();
       }
     }, 3000);
+
+    // Resolve our own version once. The effect() in the constructor
+    // handles the first update check as soon as the connection becomes
+    // ready, so we don't need to schedule one here.
+    void this.initializeVersion();
+  }
+
+  private async initializeVersion(): Promise<void> {
+    try {
+      this.currentVersion.set(await getVersion());
+    } catch (err) {
+      // getVersion() reads from the bundled tauri.conf.json — failures
+      // are highly unusual but we still don't want them to break the
+      // settings tab. Fall back to a placeholder and log.
+      console.error('[Settings] getVersion failed:', err);
+      this.currentVersion.set('unknown');
+    }
+  }
+
+  /** Poll /api/firmware/controller on the connected server and decide
+   *  whether an Install button should appear. Comparison is exact
+   *  string equality on `latest_version` — anything different (older
+   *  or newer) surfaces an Install option so the operator can roll
+   *  back as easily as roll forward. */
+  async checkForUpdate(): Promise<void> {
+    this.updateError.set('');
+    if (!this.connectionService.isConnected()) {
+      this.updateState.set('not-connected');
+      this.updateInfo.set(null);
+      return;
+    }
+    const config = this.connectionService.getSavedConfig();
+    if (!config) {
+      this.updateState.set('not-connected');
+      return;
+    }
+    this.updateState.set('checking');
+    try {
+      const resp = await fetch(`http://${config.host}:${config.port}/api/firmware/controller`);
+      if (!resp.ok) {
+        // 404 means the server doesn't have any controller bundles
+        // staged yet — treat that as "no updates available" rather
+        // than an error so the UI doesn't shout at the operator.
+        if (resp.status === 404) {
+          this.updateInfo.set(null);
+          this.updateState.set('up-to-date');
+          return;
+        }
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const info: FirmwareInfo = await resp.json();
+      this.updateInfo.set(info);
+
+      if (!info.latest_version || !info.latest_package || !info.latest_checksum) {
+        this.updateState.set('up-to-date');
+      } else if (info.latest_version === this.currentVersion()) {
+        this.updateState.set('up-to-date');
+      } else {
+        this.updateState.set('available');
+      }
+    } catch (err) {
+      this.updateError.set(`Update check failed: ${err}`);
+      this.updateState.set('error');
+    }
+  }
+
+  /** Download the .flatpak bundle, verify SHA-256, then hand the bytes
+   *  to the Rust `install_controller_update` command which writes the
+   *  file out and runs `flatpak install` on the host. The operator
+   *  must relaunch manually after a successful install. */
+  async installUpdate(): Promise<void> {
+    const info = this.updateInfo();
+    const config = this.connectionService.getSavedConfig();
+    if (!info?.latest_package || !info.latest_checksum || !config) {
+      this.updateError.set('Missing update info — try Check again.');
+      this.updateState.set('error');
+      return;
+    }
+    try {
+      this.updateState.set('downloading');
+      this.updateProgress.set('');
+
+      const url = `http://${config.host}:${config.port}/api/firmware/controller/${info.latest_package}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`download HTTP ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      const megabytes = (buf.byteLength / 1024 / 1024).toFixed(1);
+      this.updateProgress.set(`${megabytes} MB downloaded`);
+
+      this.updateState.set('verifying');
+      const hashBuf = await crypto.subtle.digest('SHA-256', buf);
+      const hashHex = Array.from(new Uint8Array(hashBuf))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      if (hashHex !== info.latest_checksum) {
+        throw new Error(
+          `Checksum mismatch (expected ${info.latest_checksum.slice(0, 12)}…, got ${hashHex.slice(0, 12)}…)`,
+        );
+      }
+
+      this.updateState.set('installing');
+      // Tauri's IPC serializes number arrays as Vec<u8> on the Rust
+      // side. Multi-MB payloads work but allocate twice (here +
+      // serialization); acceptable for a one-shot operator action.
+      const bytes = Array.from(new Uint8Array(buf));
+      await invoke('install_controller_update', { bytes });
+
+      this.updateState.set('installed');
+    } catch (err) {
+      this.updateError.set(`Update failed: ${err}`);
+      this.updateState.set('error');
+    }
   }
 
   ngOnDestroy(): void {

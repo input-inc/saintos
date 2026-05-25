@@ -20,8 +20,11 @@ from saint_server.webserver.websocket_handler import WebSocketHandler
 class WebServer:
     """HTTP server for static files and WebSocket endpoint."""
 
-    # Supported firmware types
-    FIRMWARE_TYPES = ['rp2040', 'rpi5', 'teensy41']
+    # Supported firmware types. 'controller' is the Steam Deck operator app
+    # (Tauri/flatpak); the others are node firmware. They share the same
+    # /api/firmware* surface — the controller just happens to ship a
+    # .flatpak bundle instead of a .zip.
+    FIRMWARE_TYPES = ['rp2040', 'rpi5', 'teensy41', 'controller']
 
     def __init__(
         self,
@@ -217,7 +220,7 @@ class WebServer:
 
         # Fallback: scan for firmware files
         packages = []
-        for ext in ['.zip', '.tar.gz', '.tgz', '.elf']:
+        for ext in ['.zip', '.tar.gz', '.tgz', '.elf', '.flatpak']:
             for f in fw_dir.glob(f'*{ext}'):
                 stat = f.stat()
                 packages.append({

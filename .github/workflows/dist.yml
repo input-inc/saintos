@@ -29,7 +29,7 @@ jobs:
       - id: v
         run: |
           set -euo pipefail
-          BASE=$(tr -d '[:space:]' < VERSION)
+          BASE=$(tr -d '[:space:]' < server/VERSION)
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
           elif [[ -n "${{ inputs.version }}" ]]; then
@@ -151,8 +151,71 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
+  # Steam Deck controller flatpak. Builds natively on the Ubuntu amd64
+  # runner — no QEMU/Rosetta tax here, unlike the Apple Silicon Mac
+  # path through controller/flatpak/build-docker.sh. We share the same
+  # controller/flatpak/build-bundle.sh body, so any change to the
+  # bundle layout / staging logic stays in lockstep with the local path.
+  flatpak-controller:
+    needs: meta
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install flatpak + flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              flatpak flatpak-builder ostree
+
+      # Caches the GNOME runtime + Rust/Node SDK extensions
+      # (~1 GB). Key includes the manifest hash so a runtime-version
+      # bump invalidates automatically.
+      - name: Cache flatpak runtimes
+        uses: actions/cache@v5
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-gnome50-${{ hashFiles('controller/flatpak/com.saintos.Controller.yml') }}
+          restore-keys: flatpak-gnome50-
+
+      # Caches cargo registry + cargo target dir + npm package cache +
+      # node_modules. Key includes Cargo.lock + package-lock.json so
+      # dep bumps cleanly invalidate. The dir layout matches the
+      # manifest's `@PERSISTENT_CACHE@` substitution and build-bundle.sh's
+      # default expectations.
+      - name: Cache cargo + npm
+        uses: actions/cache@v5
+        with:
+          path: |
+            /tmp/saint-controller-build/persistent/cargo
+            /tmp/saint-controller-build/persistent/target
+            /tmp/saint-controller-build/persistent/node_modules
+            /tmp/saint-controller-build/persistent/npm-cache
+          key: controller-build-${{ hashFiles('controller/Cargo.lock', 'controller/package-lock.json') }}
+          restore-keys: controller-build-
+
+      - name: Build controller flatpak
+        env:
+          REPO_ROOT: ${{ github.workspace }}
+          BUILD_DIR: /tmp/saint-controller-build
+          PERSISTENT_CACHE: /tmp/saint-controller-build/persistent
+          FLATPAK_INSTALL_SCOPE: --user
+        run: |
+          controller/flatpak/build-bundle.sh
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: flatpak-controller
+          # Upload the staged files exactly as build-bundle.sh wrote
+          # them, so package-server can copy the dir contents verbatim
+          # into server/resources/firmware/controller/.
+          path: server/resources/firmware/controller/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
   package-server:
-    needs: [meta, firmware-rp2040, firmware-teensy41, firmware-rpi5]
+    needs: [meta, firmware-rp2040, firmware-teensy41, firmware-rpi5, flatpak-controller]
     strategy:
       fail-fast: false
       matrix:
@@ -218,7 +281,7 @@ jobs:
       - name: Stage firmware into resources
         run: |
           set -eo pipefail
-          mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5}
+          mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5,controller}
           if [[ -d _fw/firmware-rp2040 ]]; then
             find _fw/firmware-rp2040 -type f \( -name '*.uf2' -o -name '*.elf' \) \
               -exec cp -v {} server/resources/firmware/rp2040/ \;
@@ -236,6 +299,13 @@ jobs:
           fi
           if [[ -d _fw/firmware-rpi5 ]]; then
             cp -rv _fw/firmware-rpi5/. server/resources/firmware/rpi5/
+          fi
+          # The flatpak-controller artifact ships the .flatpak + the
+          # already-populated info.json (built by build-bundle.sh),
+          # so a plain dir copy is enough — no per-file fixups needed
+          # like the node firmware jobs.
+          if [[ -d _fw/flatpak-controller ]]; then
+            cp -rv _fw/flatpak-controller/. server/resources/firmware/controller/
           fi
           ls -la server/resources/firmware/*/
 

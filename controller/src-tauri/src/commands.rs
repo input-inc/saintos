@@ -561,3 +561,56 @@ pub fn resolve_host(
         None => Err(format!("No mDNS answer for '{}' within 2 s", host)),
     }
 }
+
+/// Install a freshly-downloaded controller .flatpak bundle by writing
+/// the bytes to the app's xdg-data dir and invoking the host's `flatpak`
+/// CLI via the org.freedesktop.Flatpak portal (flatpak-spawn --host).
+///
+/// JS gates this behind a SHA-256 verification on the downloaded body,
+/// so the bytes we receive here are trusted. Returning Ok does NOT
+/// mean the new version is running — the freshly installed bundle
+/// replaces the on-disk app, but the operator still has to manually
+/// relaunch (Steam tile, or `flatpak run com.saintos.Controller`)
+/// before the new code takes effect.
+#[tauri::command]
+pub fn install_controller_update(bytes: Vec<u8>) -> Result<(), String> {
+    use std::process::Command;
+
+    let dir = dirs::data_dir()
+        .ok_or_else(|| "no XDG data dir available".to_string())?
+        .join("saint-controller");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
+
+    let target = dir.join("controller-update.flatpak");
+    std::fs::write(&target, &bytes)
+        .map_err(|e| format!("write {}: {}", target.display(), e))?;
+    log::info!(
+        "Wrote {} byte controller update bundle to {}",
+        bytes.len(),
+        target.display(),
+    );
+
+    // flatpak-spawn is part of every Flatpak runtime and bridges to the
+    // host through the org.freedesktop.Flatpak portal. --talk-name on
+    // that bus name in the manifest is what makes this allowed; without
+    // it we'd see "Access denied" here.
+    let status = Command::new("flatpak-spawn")
+        .args([
+            "--host",
+            "flatpak", "install",
+            "--user",
+            "--reinstall",
+            "--noninteractive",
+            "--assumeyes",
+        ])
+        .arg(&target)
+        .status()
+        .map_err(|e| format!("spawn flatpak-spawn: {}", e))?;
+
+    if !status.success() {
+        return Err(format!("flatpak install exited with {}", status));
+    }
+    log::info!("flatpak install succeeded; operator must relaunch");
+    Ok(())
+}

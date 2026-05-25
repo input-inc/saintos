@@ -258,6 +258,66 @@ build_and_install() {
     fi
 }
 
+# Stage the freshly built .flatpak bundle into the server's firmware
+# resources tree and regenerate info.json so /api/firmware/controller
+# advertises it as the latest installable build. Mirrors the
+# saint_firmware_<type>_<version>-local.<sha>.<ext> naming used by
+# firmware/rpi5/scripts/package.sh so the existing /api/firmware* endpoints
+# pick it up without server-side changes.
+#
+# No-op (with a warning) if controller/VERSION is missing — bundling
+# itself already succeeded by the time we get here.
+stage_to_server() {
+    local bundle="$1"
+    local repo_root version_file resources_dir
+    repo_root="$(cd "$CONTROLLER_DIR/.." && pwd)"
+    version_file="$CONTROLLER_DIR/VERSION"
+    resources_dir="$repo_root/server/resources/firmware/controller"
+
+    if [ ! -f "$version_file" ]; then
+        echo "warn: $version_file missing — skipping server staging"
+        return 0
+    fi
+
+    local base_version git_sha version filename
+    base_version=$(tr -d '[:space:]' < "$version_file")
+    git_sha=$(cd "$repo_root" && git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+    version="${base_version}-local.${git_sha}"
+    filename="saint_firmware_controller_${version}.flatpak"
+
+    mkdir -p "$resources_dir"
+    cp "$bundle" "$resources_dir/$filename"
+
+    local size checksum updated
+    size=$(wc -c < "$resources_dir/$filename" | tr -d ' ')
+    if command -v sha256sum >/dev/null 2>&1; then
+        checksum=$(sha256sum "$resources_dir/$filename" | awk '{print $1}')
+    else
+        checksum=$(shasum -a 256 "$resources_dir/$filename" | awk '{print $1}')
+    fi
+    updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    cat > "$resources_dir/info.json" <<EOF
+{
+    "type": "controller",
+    "latest_version": "${version}",
+    "latest_package": "${filename}",
+    "latest_checksum": "${checksum}",
+    "updated": "${updated}",
+    "packages": [
+        {
+            "version": "${version}",
+            "filename": "${filename}",
+            "checksum": "${checksum}",
+            "size": ${size}
+        }
+    ]
+}
+EOF
+
+    echo "==> Staged for OTA: $resources_dir/$filename"
+}
+
 bundle() {
     echo "==> Building $APP_ID into a portable .flatpak"
     cd "$CONTROLLER_DIR"
@@ -273,6 +333,8 @@ bundle() {
     echo "Bundle written to: $out"
     echo "Install on another machine with:"
     echo "  flatpak install --user $out"
+
+    stage_to_server "$out"
 }
 
 usage() {

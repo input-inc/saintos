@@ -16,22 +16,35 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
-# QoS for streaming control commands (joystick → motor). Joystick-style
-# data is fire-and-forget: a packet lost in transit must NOT stall the
-# queue behind it while DDS retransmits, because that's how a deadstick
-# ends up arriving a full second late behind nine stale non-zero values.
-# BEST_EFFORT + KEEP_LAST(1) gives us "always the freshest command, drop
-# anything older" — the standard pattern for /cmd_vel-class topics.
+# Two server→node topics split by delivery semantics:
 #
-# Trade-off: one-shot commands sent on the same topic (factory_reset,
-# firmware_update, identify, estop) become slightly less reliable too.
-# In practice this hasn't been a problem — those are operator-driven
-# clicks and a re-click costs nothing, while a stuck deadstick costs the
-# robot crashing into a wall.
+#   /saint/nodes/<id>/control  →  CONTROL_QOS  (BEST_EFFORT, depth=1)
+#     Streaming peripheral writes (set_pin, set_channel) from joystick
+#     and the routing evaluator. Freshest-wins; a dropped UDP packet
+#     just means the next sample (50 Hz) supersedes it. Avoids the
+#     deadstick-queues-behind-stale-values pathology of RELIABLE.
+#
+#   /saint/nodes/<id>/command  →  COMMAND_QOS  (RELIABLE, depth=8)
+#     Operator one-shots that MUST land: firmware_update, factory_reset,
+#     restart, identify, estop, clear_estop, roboclaw_debug. RELIABLE
+#     so a single dropped packet doesn't silently lose an estop or an
+#     OTA trigger. Depth 8 is generous — covers operator key-mashing
+#     during a node's brief disconnect.
+#
+# Compatibility note: nodes flashed BEFORE the topic split don't
+# subscribe to /command, so one-shots sent here silently no-op until
+# the node is re-flashed once manually (BOOTSEL/USB) with current
+# firmware. After that, OTA self-update keeps the firmware current.
 CONTROL_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
     history=QoSHistoryPolicy.KEEP_LAST,
     depth=1,
+    durability=QoSDurabilityPolicy.VOLATILE,
+)
+COMMAND_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=8,
     durability=QoSDurabilityPolicy.VOLATILE,
 )
 
@@ -195,7 +208,8 @@ class SaintServerNode(Node):
         # Dynamic publishers/subscribers for node communication
         self._node_config_pubs: Dict[str, Any] = {}  # node_id -> publisher
         self._node_caps_subs: Dict[str, Any] = {}    # node_id -> subscription
-        self._node_control_pubs: Dict[str, Any] = {} # node_id -> control publisher
+        self._node_control_pubs: Dict[str, Any] = {} # node_id -> control publisher (streaming, BEST_EFFORT)
+        self._node_command_pubs: Dict[str, Any] = {} # node_id -> command publisher (one-shots, RELIABLE)
         self._node_state_subs: Dict[str, Any] = {}   # node_id -> state subscription
         self._node_log_subs: Dict[str, Any] = {}     # node_id -> log subscription
 
@@ -460,6 +474,30 @@ class SaintServerNode(Node):
         self.get_logger().info(f'Created control publisher: {topic} (best-effort, depth=1)')
         return pub
 
+    def _ensure_node_command_publisher(self, node_id: str):
+        """Ensure a command publisher exists for a node.
+
+        Commands are operator one-shot actions (firmware_update,
+        factory_reset, identify, estop, …) that must not be dropped.
+        Separate topic + RELIABLE QoS so they don't share the streaming
+        /control topic's fire-and-forget semantics.
+        """
+        if node_id in self._node_command_pubs:
+            return self._node_command_pubs[node_id]
+
+        sanitized_id = self._sanitize_topic_name(node_id)
+        topic = f'/saint/nodes/{sanitized_id}/command'
+
+        pub = self.create_publisher(
+            String,
+            topic,
+            COMMAND_QOS,
+            callback_group=self.callback_group
+        )
+        self._node_command_pubs[node_id] = pub
+        self.get_logger().info(f'Created command publisher: {topic} (reliable, depth=8)')
+        return pub
+
     def _ensure_node_state_subscriber(self, node_id: str):
         """Ensure a state subscriber exists for a node."""
         if node_id in self._node_state_subs:
@@ -648,7 +686,7 @@ class SaintServerNode(Node):
         """
         import json
 
-        pub = self._ensure_node_control_publisher(node_id)
+        pub = self._ensure_node_command_publisher(node_id)
 
         control_data = {
             "action": "factory_reset"
@@ -669,7 +707,7 @@ class SaintServerNode(Node):
         """
         import json
 
-        pub = self._ensure_node_control_publisher(node_id)
+        pub = self._ensure_node_command_publisher(node_id)
 
         control_data = {
             "action": "restart"
@@ -689,7 +727,7 @@ class SaintServerNode(Node):
         """
         import json
 
-        pub = self._ensure_node_control_publisher(node_id)
+        pub = self._ensure_node_command_publisher(node_id)
 
         control_data = {
             "action": "identify"
@@ -714,7 +752,7 @@ class SaintServerNode(Node):
         """
         import json
 
-        pub = self._ensure_node_control_publisher(node_id)
+        pub = self._ensure_node_command_publisher(node_id)
 
         # JSON wire format kept backward-compatible: the legacy
         # firmware path matches on "action":"estop" for the engage
@@ -751,7 +789,7 @@ class SaintServerNode(Node):
         """
         import json
 
-        pub = self._ensure_node_control_publisher(node_id)
+        pub = self._ensure_node_command_publisher(node_id)
         control_data = {"action": "roboclaw_debug", **payload}
         msg = String()
         msg.data = json.dumps(control_data)
@@ -782,7 +820,7 @@ class SaintServerNode(Node):
         node_info = self.state_manager.get_node(node_id)
         hw_type = node_info.get('hw', '') if node_info else ''
 
-        pub = self._ensure_node_control_publisher(node_id)
+        pub = self._ensure_node_command_publisher(node_id)
 
         if 'Raspberry Pi' in hw_type or 'rpi5' in hw_type.lower():
             # Pi 5 node - send download URL

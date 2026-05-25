@@ -12,21 +12,25 @@
 # Usage:
 #   scripts/build-local-dist.sh [options]
 #
-# Default behavior: builds RP2040 / Teensy / Pi5 firmware locally so the
-# server tarball ships the matching node firmware. Override with one of
-# --fetch-firmware, --skip-firmware-build, or --skip-firmware below.
+# Default behavior: builds RP2040 / Teensy / Pi5 node firmware AND the
+# Steam Deck Controller .flatpak locally so the server tarball ships
+# everything needed to OTA-update every connected target. Override with
+# the firmware / controller skip flags below.
 #
 # Options:
-#   --version VER         Override version string (default: <VERSION>-local.<sha7>)
-#   --rebundle-debs       Re-download the bundled .deb cache (slow; usually unneeded)
-#   --refetch-ros2        Force re-download of the bundled ROS2 install tree
-#   --fetch-firmware      Pull the latest CI firmware artifacts from GitHub via `gh`
-#                         instead of building locally (requires `gh auth login`)
-#   --skip-firmware-build Use whatever firmware is already staged under
-#                         server/resources/firmware/ — fastest server-only iteration
-#   --skip-firmware       Don't stage any firmware (smallest tarball, server-only)
-#   --clean               Remove the local build dirs (_ros2/, _debs/, install/) first
-#   -h, --help            Show this help
+#   --version VER          Override version string (default: <VERSION>-local.<sha7>)
+#   --rebundle-debs        Re-download the bundled .deb cache (slow; usually unneeded)
+#   --refetch-ros2         Force re-download of the bundled ROS2 install tree
+#   --fetch-firmware       Pull the latest CI firmware + controller artifacts from
+#                          GitHub via `gh` instead of building locally (requires
+#                          `gh auth login`)
+#   --skip-firmware-build  Use whatever firmware is already staged under
+#                          server/resources/firmware/ — fastest server-only iteration
+#   --skip-firmware        Don't stage any firmware OR controller (smallest tarball)
+#   --skip-controller-build  Use whatever controller bundle is already staged; skip
+#                          the linux/amd64 Docker build (saves the QEMU/Rosetta tax)
+#   --clean                Remove the local build dirs (_ros2/, _debs/, install/) first
+#   -h, --help             Show this help
 #
 # Requirements:
 #   - docker (with linux/arm64 platform support — buildx + qemu on Intel)
@@ -56,6 +60,7 @@ REFETCH_ROS2=0
 FETCH_FIRMWARE=0
 SKIP_FIRMWARE=0
 SKIP_FIRMWARE_BUILD=0
+SKIP_CONTROLLER_BUILD=0
 CLEAN=0
 
 while (( "$#" )); do
@@ -66,8 +71,9 @@ while (( "$#" )); do
         --fetch-firmware) FETCH_FIRMWARE=1; shift ;;
         --skip-firmware) SKIP_FIRMWARE=1; shift ;;
         --skip-firmware-build) SKIP_FIRMWARE_BUILD=1; shift ;;
+        --skip-controller-build) SKIP_CONTROLLER_BUILD=1; shift ;;
         --clean) CLEAN=1; shift ;;
-        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -90,7 +96,7 @@ fi
 
 # --- version resolution -----------------------------------------------------
 
-BASE_VERSION=$(tr -d '[:space:]' < VERSION)
+BASE_VERSION=$(tr -d '[:space:]' < server/VERSION)
 GIT_SHA=$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
 if [[ -z "$VERSION" ]]; then
     VERSION="${BASE_VERSION}-local.${GIT_SHA}"
@@ -262,12 +268,31 @@ build_firmware_rpi5() {
     fi
 }
 
+# Build the Steam Deck controller .flatpak via the linux/amd64 Docker
+# wrapper. Slow on first run (Apple Silicon: Rosetta-emulated cargo
+# build, ~15-25 min cold); incremental rebuilds are fast once the
+# persistent cache warms. Failures here are non-fatal — we'd rather
+# ship a dist tarball with the previous controller bundle than fail
+# the whole build over a flatpak hiccup.
+build_controller_flatpak() {
+    local driver=controller/flatpak/build-docker.sh
+    if [[ ! -x "$driver" ]]; then
+        warn "Controller flatpak driver $driver missing — skipping"
+        return
+    fi
+    log "Building controller flatpak (linux/amd64 Docker; Rosetta on Apple Silicon)"
+    if ! "$driver" 2>&1; then
+        warn "Controller flatpak build failed — leaving existing staged bundle (if any)"
+        return
+    fi
+}
+
 if (( SKIP_FIRMWARE )); then
-    log "Skipping firmware staging (--skip-firmware)"
+    log "Skipping firmware + controller staging (--skip-firmware)"
     rm -rf server/resources/firmware/*
 elif (( FETCH_FIRMWARE )); then
     command -v gh >/dev/null || die "--fetch-firmware needs the gh CLI"
-    log "Fetching latest CI firmware artifacts from main"
+    log "Fetching latest CI firmware + controller artifacts from main"
     rm -rf _fw && mkdir -p _fw
     # Pick the latest successful dist.yml run on main.
     RUN_ID=$(gh run list --workflow=dist.yml --branch=main \
@@ -275,21 +300,30 @@ elif (( FETCH_FIRMWARE )); then
     [[ -n "$RUN_ID" ]] || die "No successful dist.yml runs on main found"
     log "Using run ${RUN_ID}"
     gh run download "$RUN_ID" --dir _fw \
-        --name firmware-rp2040 --name firmware-teensy41 --name firmware-rpi5
-    mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5}
+        --name firmware-rp2040 --name firmware-teensy41 --name firmware-rpi5 \
+        --name flatpak-controller
+    mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5,controller}
     [[ -d _fw/firmware-rp2040 ]] && find _fw/firmware-rp2040 -type f \
         \( -name '*.uf2' -o -name '*.elf' \) \
         -exec cp {} server/resources/firmware/rp2040/ \;
     [[ -d _fw/firmware-teensy41 ]] && find _fw/firmware-teensy41 -type f \
         -name '*.hex' -exec cp {} server/resources/firmware/teensy41/ \;
     [[ -d _fw/firmware-rpi5 ]] && cp -r _fw/firmware-rpi5/. server/resources/firmware/rpi5/
+    # Controller artifact ships the .flatpak + info.json already shaped
+    # for the firmware-list endpoint — just copy it over verbatim.
+    [[ -d _fw/flatpak-controller ]] && cp -r _fw/flatpak-controller/. server/resources/firmware/controller/
 elif (( SKIP_FIRMWARE_BUILD )); then
     log "Using existing server/resources/firmware/ (--skip-firmware-build)"
 else
-    log "Building firmware locally so the server tarball contains the latest"
+    log "Building firmware + controller locally so the server tarball contains the latest"
     build_firmware_rp2040
     build_firmware_teensy41
     build_firmware_rpi5
+    if (( SKIP_CONTROLLER_BUILD )); then
+        log "Skipping controller flatpak build (--skip-controller-build); using existing staged bundle if any"
+    else
+        build_controller_flatpak
+    fi
 fi
 
 # --- bundled apt deps (cached) ---------------------------------------------
