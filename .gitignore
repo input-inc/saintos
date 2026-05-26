@@ -217,6 +217,12 @@ controller/.angular/
 controller/src-tauri/target/
 controller/src-tauri/gen/
 
+# Built AppImage artifacts (output of controller/appimage/build-bundle.sh).
+# These get staged into server/resources/firmware/controller/ at build
+# time, then bundled into the dist tarball — they're regenerated from
+# source on every build, no reason to keep them in git history.
+server/resources/firmware/controller/*.AppImage
+
 # =============================================================================
 # Node.js / NPM
 # =============================================================================

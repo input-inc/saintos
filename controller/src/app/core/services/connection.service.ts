@@ -37,6 +37,16 @@ export class ConnectionService implements OnDestroy {
   readonly error = computed(() => this.connectionState().error);
   readonly isConnected = computed(() => this.connectionState().status === ConnectionStatus.Connected);
 
+  /** Mirror of the server's system-wide e-stop latch. Driven by the
+   *  `estop-state` event emitted from Rust whenever the get_estop_state
+   *  response or an `estop` topic broadcast arrives. Read by the app
+   *  shell to show a persistent banner and by binding-runtime UI to
+   *  shade controls. The Rust side also gates outgoing streaming
+   *  control by this same value — this signal is purely for visual
+   *  feedback. */
+  private estopState = signal<boolean>(false);
+  readonly estopActive = computed(() => this.estopState());
+
   constructor(private tauri: TauriService) {
     this.subscribeToConnectionEvents();
     // Attempt auto-connect after a short delay to let the app initialize
@@ -90,6 +100,22 @@ export class ConnectionService implements OnDestroy {
       this.tauri.listen<ConnectionState>('connection-status').subscribe(state => {
         console.log('[ConnectionService] Connection status changed:', state.status, state.error || '');
         this.connectionState.set(state);
+        // Clear the local estop mirror on disconnect so the banner
+        // doesn't linger after the WS drops. The bootstrap on the
+        // next connect re-sets it from the authoritative server-side
+        // value.
+        if (state.status === ConnectionStatus.Disconnected) {
+          this.estopState.set(false);
+        }
+      })
+    );
+    // estop-state is emitted by the Rust side on both the
+    // get_estop_state bootstrap response and the 'estop' topic
+    // broadcast.
+    this.subscriptions.push(
+      this.tauri.listen<{ active: boolean }>('estop-state').subscribe(payload => {
+        console.log('[ConnectionService] E-Stop state:', payload.active ? 'ENGAGED' : 'released');
+        this.estopState.set(!!payload.active);
       })
     );
   }

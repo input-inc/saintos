@@ -180,6 +180,20 @@ impl OutgoingMessage {
         }
     }
 
+    /// One-shot query for the current system-wide e-stop latch state.
+    /// Sent right after auth so a freshly-connected controller picks
+    /// up the latched state without waiting for the next toggle
+    /// broadcast. Server responds with `{ active, changed_at }`.
+    pub fn get_estop_state() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "management".to_string(),
+            action: "get_estop_state".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -190,6 +204,11 @@ impl OutgoingMessage {
 pub struct IncomingMessage {
     #[serde(rename = "type", default)]
     pub msg_type: String,
+    /// Topic name for `type == "state"` broadcasts (e.g. "estop",
+    /// "system_routing", "pin_state/<node_id>"). Set by the server's
+    /// `broadcast_state(topic, data)` helper.
+    #[serde(default)]
+    pub node: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -228,6 +247,13 @@ pub struct ConnectionState {
     pub status: ConnectionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Mirror of the server's system-wide e-stop latch. Set from the
+    /// `estop` state-topic broadcast and the `get_estop_state`
+    /// management response. Used to gate outgoing streaming control
+    /// at the client layer so a stuck stick can't keep republishing
+    /// values into the WS while the system is supposed to be safed.
+    #[serde(default)]
+    pub estop_active: bool,
 }
 
 impl Default for ConnectionState {
@@ -235,6 +261,7 @@ impl Default for ConnectionState {
         Self {
             status: ConnectionStatus::Disconnected,
             error: None,
+            estop_active: false,
         }
     }
 }

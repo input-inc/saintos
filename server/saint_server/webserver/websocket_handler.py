@@ -695,6 +695,12 @@ class WebSocketHandler:
 
             self._estop_active = new_state
             self._estop_changed_at = time.time()
+            # Mirror into the routing evaluator so peripheral/output
+            # sink writes get suppressed while estop is engaged.
+            # Otherwise the next controller tick from a stick that
+            # hasn't been re-centered would re-publish motion the
+            # moment the firmware estop releases.
+            self.state_manager.set_routing_estop_active(new_state)
             await self.broadcast_state('estop', {
                 'active': new_state,
                 'changed_at': self._estop_changed_at,
@@ -1402,6 +1408,99 @@ class WebSocketHandler:
             except Exception as e:
                 self.log('error', f'Failed to save settings: {e}')
                 return {"status": "error", "message": f"Failed to save settings: {e}"}
+
+        # ── WiFi AP management ──────────────────────────────────────
+        #
+        # The Pi 4's brcmfmac driver doesn't support `channel_switch`
+        # (no smooth 802.11h CSA), so every channel/SSID/password
+        # change here uses the full nmcli bring-down/bring-up path
+        # and triggers a ~5–10 s client disconnect. The UI is
+        # responsible for warning the operator before they apply.
+        #
+        # Order matters in wifi_set_channel / wifi_set_credentials:
+        # respond OK FIRST, then run the nmcli switch from a thread,
+        # so the response packet makes it back over the websocket
+        # before the AP goes down. Without the thread the client
+        # sees a generic disconnect with no indication that the
+        # switch was actually accepted.
+
+        elif action == 'wifi_get_config':
+            try:
+                from saint_server.wifi_admin import get_credentials
+                return {"status": "ok", "data": get_credentials()}
+            except Exception as e:
+                self.log('error', f'wifi_get_config failed: {e}')
+                return {"status": "error", "message": f"wifi_get_config failed: {e}"}
+
+        elif action == 'wifi_survey':
+            try:
+                from saint_server.wifi_admin import survey
+                return {"status": "ok", "data": survey()}
+            except Exception as e:
+                self.log('error', f'wifi_survey failed: {e}')
+                return {"status": "error", "message": f"wifi_survey failed: {e}"}
+
+        elif action == 'wifi_set_channel':
+            band = params.get('band')
+            channel = params.get('channel')
+            if band not in ('bg', 'a'):
+                return {"status": "error",
+                        "message": "band must be 'bg' (2.4 GHz) or 'a' (5 GHz)"}
+            try:
+                channel = int(channel)
+            except (TypeError, ValueError):
+                return {"status": "error",
+                        "message": "channel must be an integer"}
+
+            import asyncio as _asyncio
+            from saint_server.wifi_admin import apply_channel
+
+            def _do_switch():
+                # Brief delay so the OK response we just enqueued
+                # actually makes it onto the wire before the AP
+                # restarts and drops the websocket.
+                import time as _t
+                _t.sleep(0.4)
+                return apply_channel(band, channel)
+
+            _asyncio.get_event_loop().run_in_executor(None, _do_switch)
+            await self.broadcast_activity(
+                f'Switching AP to {band} channel {channel} '
+                f'— clients will reconnect in ~10 s',
+                'warn'
+            )
+            return {"status": "ok", "data": {
+                "switching": True,
+                "band": band,
+                "channel": channel,
+            }}
+
+        elif action == 'wifi_set_credentials':
+            ssid = params.get('ssid')
+            password = params.get('password')
+            if not isinstance(ssid, str) or not isinstance(password, str):
+                return {"status": "error",
+                        "message": "ssid and password must be strings"}
+
+            import asyncio as _asyncio
+            from saint_server.wifi_admin import set_credentials, _validate_credentials
+
+            err = _validate_credentials(ssid, password)
+            if err:
+                return {"status": "error", "message": err}
+
+            def _do_set():
+                import time as _t
+                _t.sleep(0.4)
+                return set_credentials(ssid, password)
+
+            _asyncio.get_event_loop().run_in_executor(None, _do_set)
+            await self.broadcast_activity(
+                f'Updating AP credentials (SSID={ssid}) '
+                '— clients will reconnect with new SSID in ~10 s',
+                'warn'
+            )
+            return {"status": "ok", "data": {"switching": True, "ssid": ssid}}
 
         else:
             return {"status": "error", "message": f"Unknown management action: {action}"}

@@ -180,10 +180,6 @@
             <section id="page-dashboard" class="page active">
                 <div class="flex items-center justify-between mb-6">
                     <h2 class="text-2xl font-bold text-white">Dashboard</h2>
-                    <button id="btn-scan-nodes" class="btn-secondary">
-                        <span class="material-icons icon-sm">search</span>
-                        Scan Nodes
-                    </button>
                 </div>
 
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -231,16 +227,52 @@
                         </div>
                     </div>
 
-                    <!-- Nodes Summary Card -->
+                    <!-- WiFi Status Card.
+                         Treated like System Status: a hardcoded
+                         server-level card, NOT a routable widget,
+                         because it reports on the AP the dashboard
+                         itself depends on. Static-ish bits (SSID,
+                         band, channel) come from wifi_get_config on
+                         page load; live metrics come from the
+                         pin_state/host_controller broadcast's
+                         system_monitor.wifi_* channels. -->
                     <div class="card">
                         <div class="flex items-center justify-between mb-4">
-                            <h3 class="text-lg font-semibold text-white">Nodes</h3>
-                            <button onclick="app.showPage('nodes')" class="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">
-                                View All →
+                            <h3 class="text-lg font-semibold text-white">WiFi Status</h3>
+                            <button onclick="app.showPage('settings')"
+                                class="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">
+                                Manage →
                             </button>
                         </div>
-                        <div id="nodes-summary" class="space-y-3">
-                            <p class="text-slate-400">Loading...</p>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="stat-item col-span-2">
+                                <span class="stat-label">SSID</span>
+                                <span id="wifi-status-ssid" class="stat-value font-mono">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Band / Channel</span>
+                                <span id="wifi-status-bandch" class="stat-value">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Signal</span>
+                                <span id="wifi-status-signal" class="stat-value">-- dBm</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">TX retry</span>
+                                <span id="wifi-status-retry" class="stat-value">--%</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Noise floor</span>
+                                <span id="wifi-status-noise" class="stat-value">-- dBm</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">TX bitrate</span>
+                                <span id="wifi-status-bitrate" class="stat-value">-- Mbps</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Last updated</span>
+                                <span id="wifi-status-age" class="stat-value text-sm">--</span>
+                            </div>
                         </div>
                     </div>
 
@@ -265,11 +297,20 @@
             <section id="page-nodes" class="page">
                 <div class="flex items-center justify-between mb-6">
                     <h2 class="text-2xl font-bold text-white">Nodes</h2>
-                    <button id="btn-update-all-nodes" class="btn-secondary hidden" title="Update firmware on all adopted nodes that have a newer version available">
-                        <span class="material-icons icon-sm">system_update</span>
-                        <span class="update-all-text">Update All</span>
-                        <span id="update-all-count" class="ml-1 px-1.5 py-0.5 text-xs font-medium rounded-full bg-cyan-500/20 text-cyan-300"></span>
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <!-- Scan Nodes used to live on the Dashboard header,
+                             but it's a Nodes-tab action — moved here so the
+                             dashboard's only header element is the page title. -->
+                        <button id="btn-scan-nodes" class="btn-secondary">
+                            <span class="material-icons icon-sm">search</span>
+                            Scan Nodes
+                        </button>
+                        <button id="btn-update-all-nodes" class="btn-secondary hidden" title="Update firmware on all adopted nodes that have a newer version available">
+                            <span class="material-icons icon-sm">system_update</span>
+                            <span class="update-all-text">Update All</span>
+                            <span id="update-all-count" class="ml-1 px-1.5 py-0.5 text-xs font-medium rounded-full bg-cyan-500/20 text-cyan-300"></span>
+                        </button>
+                    </div>
                 </div>
 
                 <div class="space-y-8">
@@ -478,7 +519,7 @@
                             <div class="flex items-center justify-between mb-4">
                                 <h3 class="text-lg font-semibold text-white">Peripheral Controls</h3>
                                 <div id="state-stale-indicator" class="hidden flex items-center gap-2 text-sm text-amber-400">
-                                    <span class="material-icons icon-sm animate-pulse">warning</span>
+                                    <span class="material-icons icon-sm">warning</span>
                                     No recent data
                                 </div>
                             </div>
@@ -1463,6 +1504,124 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- WiFi AP — operator-managed SSID/password/channel.
+                         install.sh seeds these on first install and then
+                         leaves them alone; the Wireless card here is the
+                         only path operators should use to change them
+                         going forward. -->
+                    <div class="card mb-6">
+                        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span class="material-icons text-cyan-400">wifi</span>
+                            Wireless
+                        </h3>
+                        <div class="text-xs text-slate-400 mb-4 p-3 rounded bg-amber-900/30 border border-amber-700/50">
+                            <span class="material-icons text-amber-400 text-sm align-middle">warning</span>
+                            Saving credentials or switching the channel restarts the AP.
+                            Every connected client (including this dashboard) will drop and
+                            reconnect — expect a ~5–10 s blackout. Do it while the robot is idle.
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label for="wifi-ssid" class="block text-sm font-medium text-slate-300 mb-1">SSID</label>
+                                <input type="text" id="wifi-ssid" class="input-field w-full" maxlength="32" placeholder="OpenSAINT">
+                                <p class="text-xs text-slate-500 mt-1">1–32 printable ASCII characters.</p>
+                            </div>
+                            <div>
+                                <label for="wifi-password" class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+                                <div class="flex gap-2">
+                                    <input type="password" id="wifi-password" class="input-field w-full" minlength="8" maxlength="63" placeholder="••••••••">
+                                    <button id="wifi-password-toggle" class="btn-secondary text-xs" type="button" title="Show / hide password">
+                                        <span class="material-icons icon-sm">visibility</span>
+                                    </button>
+                                </div>
+                                <p class="text-xs text-slate-500 mt-1">8–63 characters (WPA2-PSK).</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3 mb-6">
+                            <button id="wifi-save-creds-btn" class="btn-primary">
+                                <span class="material-icons icon-sm">save</span>
+                                Save credentials &amp; restart AP
+                            </button>
+                            <span id="wifi-creds-status" class="text-sm text-slate-500"></span>
+                        </div>
+
+                        <div class="pt-4 border-t border-slate-700">
+                            <div class="flex items-center justify-between mb-2">
+                                <h4 class="text-sm font-semibold text-slate-300">Channel</h4>
+                                <span id="wifi-current-channel" class="text-xs text-slate-500">--</span>
+                            </div>
+                            <p class="text-xs text-slate-500 mb-3">
+                                Scan nearby APs to see which channels are busy, then pick a quieter one.
+                                Brief beacon interruption during scan; full disconnect on apply.
+                            </p>
+                            <button id="wifi-find-channel-btn" class="btn-secondary">
+                                <span class="material-icons icon-sm">radar</span>
+                                Find Better Channel…
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Channel picker modal — populated by wifi_survey -->
+                <div id="wifi-channel-modal" class="fixed inset-0 z-50 hidden">
+                    <div class="absolute inset-0 bg-black/70" onclick="window.app && app.closeWifiChannelModal()"></div>
+                    <div class="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
+                        <div class="card max-w-3xl w-full pointer-events-auto max-h-[85vh] flex flex-col">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-white">WiFi Channel Survey</h3>
+                                <button onclick="window.app && app.closeWifiChannelModal()" class="text-slate-400 hover:text-white">
+                                    <span class="material-icons">close</span>
+                                </button>
+                            </div>
+                            <div id="wifi-channel-loading" class="text-sm text-slate-400 py-8 text-center">
+                                <span class="material-icons animate-spin align-middle">refresh</span>
+                                Scanning…
+                            </div>
+                            <div id="wifi-channel-results" class="hidden flex-1 min-h-0 flex flex-col">
+                                <p class="text-xs text-slate-400 mb-3">
+                                    Pick the channel with the fewest nearby APs. Current channel is highlighted.
+                                    DFS channels (5 GHz, marked) may have a brief radar-detection silence before
+                                    going active.
+                                </p>
+                                <div class="overflow-y-auto border border-slate-700 rounded">
+                                    <table class="w-full text-sm">
+                                        <thead class="bg-slate-800 sticky top-0">
+                                            <tr class="text-left text-xs uppercase text-slate-400">
+                                                <th class="p-2">Band</th>
+                                                <th class="p-2">Channel</th>
+                                                <th class="p-2">Freq</th>
+                                                <th class="p-2">Nearby APs</th>
+                                                <th class="p-2">Strongest</th>
+                                                <th class="p-2"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="wifi-channel-rows"></tbody>
+                                    </table>
+                                </div>
+                                <div class="flex items-center justify-end gap-3 mt-4">
+                                    <button onclick="window.app && app.closeWifiChannelModal()" class="btn-secondary">Cancel</button>
+                                    <button id="wifi-channel-apply-btn" class="btn-primary" disabled>
+                                        <span class="material-icons icon-sm">power_settings_new</span>
+                                        Apply &amp; restart AP
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="wifi-channel-error" class="hidden text-sm text-red-300 p-3 rounded bg-red-900/40 border border-red-700"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- "Switching..." overlay shown while the AP restarts.
+                     Dismissed automatically by the websocket-reconnected
+                     handler in app.js. -->
+                <div id="wifi-switching-overlay" class="fixed inset-0 z-50 hidden bg-black/80 flex items-center justify-center">
+                    <div class="text-center text-white">
+                        <div class="material-icons text-6xl text-cyan-400 mb-4 animate-spin">refresh</div>
+                        <h3 class="text-xl font-semibold mb-2">Restarting WiFi AP…</h3>
+                        <p class="text-slate-400 mb-2">The dashboard will reconnect when the AP returns.</p>
+                        <p class="text-xs text-slate-500" id="wifi-switching-detail">If you changed the SSID or password, you may need to reconnect your laptop/phone to the new network manually.</p>
+                    </div>
                 </div>
 
                 <!-- Install confirmation modal -->
@@ -2427,14 +2586,13 @@
             pointer-events: auto;
         }
 
-        /* Sync indicator pulse */
-        .pin-sync-indicator.animate-pulse {
-            animation: syncPulse 1s ease-in-out infinite;
-        }
-        @keyframes syncPulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.6; transform: scale(1.2); }
-        }
+        /* Sync indicator: amber/emerald color tells the operator
+           whether a pin is synced or pending. We deliberately don't
+           animate the dot — the previous `syncPulse` keyframe used
+           `transform: scale(1.2)` which physically resized the
+           element every second, causing nearby buttons in the
+           Peripheral Controls list to shift around mid-click. The
+           color change is enough to communicate state. */
 
         /* LiveLink blend shape items */
         .blend-shape-item {
@@ -2514,7 +2672,8 @@
            it's active, body.routing-fullwidth (toggled by app.js) makes
            main shed its max-width and padding so the sheet UI fills the
            window. */
-        body.routing-fullwidth main {
+        body.routing-fullwidth main,
+        body.logs-fullwidth main {
             max-width: none !important;
             padding: 0 !important;
         }

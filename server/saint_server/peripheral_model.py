@@ -250,7 +250,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "system_monitor": PeripheralType(
         id="system_monitor", label="System Monitor",
-        description="Host controller telemetry: CPU/memory usage, temperature, throttle status, uptime.",
+        description="Host controller telemetry: CPU/memory usage, temperature, throttle status, uptime, WiFi link health.",
         pin_kind="builtin",
         channels=[
             PeripheralChannel("cpu_usage", "CPU usage (%)",    "in", "analog"),
@@ -258,6 +258,13 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralChannel("mem_usage", "Memory usage (%)", "in", "analog"),
             PeripheralChannel("throttle",  "Throttled",        "in", "digital_in"),
             PeripheralChannel("uptime",    "Uptime (s)",       "in", "analog"),
+            # WiFi link health — populated from `iw dev` + /proc/net/wireless
+            # when the host has a wireless interface. See wifi_stats.py
+            # for the data sources and what each number means.
+            PeripheralChannel("wifi_signal",    "WiFi signal (dBm)",     "in", "analog"),
+            PeripheralChannel("wifi_retry_pct", "WiFi tx retry (%)",     "in", "analog"),
+            PeripheralChannel("wifi_noise",     "WiFi noise floor (dBm)", "in", "analog"),
+            PeripheralChannel("wifi_bitrate",   "WiFi tx bitrate (Mbps)", "in", "analog"),
         ],
         params=[],
         builtin_only=True,

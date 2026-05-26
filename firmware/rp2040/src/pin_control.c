@@ -627,7 +627,15 @@ static bool apply_set_channel(const char* json)
     // instance lookup keyed by peripheral_id (instance name) instead
     // of by GPIO offset — bigger refactor, separate change.
     uint8_t target_gpio = (uint8_t)(base_gpio + offset);
-    saint_log_publish("info",
+    // Per-tick line: with the Tier-1 DifferentialDrive heartbeat
+    // resending 0 every 500 ms, every adopted channel emits 2 of
+    // these per second forever. That floods the dashboard Logs feed
+    // (the broadcast path goes out regardless of server log level —
+    // only file sinks are gated). Demote to "debug" so the default
+    // WARNING-level dashboard view stays clean; an operator who
+    // wants to confirm channel writes are happening can flip the
+    // Logs-tab level dropdown to debug/info.
+    saint_log_publish("debug",
         "set_channel %s/%s = %.3f",
         peripheral_id, channel_id, value);
     return pin_control_set_value(target_gpio, value);

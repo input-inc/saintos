@@ -2137,6 +2137,20 @@ class StateManager:
                 if self.logger:
                     self.logger.error(f"Initial routing reconcile failed: {e}")
 
+    def set_routing_estop_active(self, active: bool) -> None:
+        """Mirror the system-wide e-stop latch into the routing evaluator
+        so peripheral/output sink writes get suppressed at the routing
+        layer. Called from the websocket handler's `estop` action right
+        after it fans out the per-node estop calls.
+        """
+        if self._routing_evaluator is None:
+            return
+        try:
+            self._routing_evaluator.set_estop_active(active)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Routing estop gate toggle failed: {e}")
+
     def lookup_peripheral_type(self, node_id: str, peripheral_id: str) -> str:
         """Resolve a peripheral type id for the firmware command payload."""
         node = self.state.adopted_nodes.get(node_id)
@@ -2364,6 +2378,29 @@ class StateManager:
         }
         if cpu_temp is not None:
             readings['cpu_temp'] = float(cpu_temp)
+
+        # WiFi telemetry — only published when the host actually has a
+        # wireless interface and `iw` is installed, so dev boxes and
+        # ethernet-only deployments don't end up with bogus zeros on
+        # their dashboard widgets. See wifi_stats.py for what each
+        # value means and how it's collected.
+        try:
+            from saint_server.wifi_stats import collect as _wifi_collect
+            wifi = _wifi_collect()
+            if wifi.signal_dbm is not None:
+                readings['wifi_signal'] = float(wifi.signal_dbm)
+            if wifi.retry_pct is not None:
+                readings['wifi_retry_pct'] = float(wifi.retry_pct)
+            if wifi.noise_dbm is not None:
+                readings['wifi_noise'] = float(wifi.noise_dbm)
+            if wifi.bitrate_mbps is not None:
+                readings['wifi_bitrate'] = float(wifi.bitrate_mbps)
+        except Exception as e:
+            # Never let a WiFi-collection hiccup take down the broadcast
+            # loop — the cpu/mem/temp metrics are more important and
+            # need to keep flowing.
+            if self.logger:
+                self.logger.debug(f'WiFi telemetry skipped: {e}')
 
         for channel_id, value in readings.items():
             node.runtime_state.set_channel(HOST_CONTROLLER_PERIPHERAL_ID, channel_id, value)

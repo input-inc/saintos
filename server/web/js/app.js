@@ -508,9 +508,13 @@ class SaintApp {
             }
         });
 
-        // The routing page wants the full viewport under the nav, so it
-        // breaks out of <main>'s max-w / padding via a body-level class.
+        // Pages that want the full viewport under the nav (routes and
+        // logs, currently — both are master-detail shells) break out of
+        // <main>'s max-w / padding via body-level classes the CSS keys
+        // off of. Kept as separate classes so the styling rules can
+        // diverge if one ever needs nav-bar-relative height tweaks.
         document.body.classList.toggle('routing-fullwidth', pageId === 'routes');
+        document.body.classList.toggle('logs-fullwidth', pageId === 'logs');
 
         this.currentPage = pageId;
 
@@ -619,6 +623,16 @@ class SaintApp {
         } catch (error) {
             console.error('Failed to load settings:', error);
         }
+
+        // Load WiFi AP credentials + current channel into the Wireless card.
+        try {
+            await this.loadWifiConfig();
+        } catch (error) {
+            console.error('Failed to load WiFi config:', error);
+        }
+
+        // Wire the Wireless card buttons (idempotent — guarded by data-bound).
+        this.setupWirelessCardHandlers();
 
         // Load local display preferences
         this.loadDisplayPreferences();
@@ -907,6 +921,236 @@ class SaintApp {
         }
     }
 
+    // ── Wireless settings (SSID / password / channel) ────────────────
+    //
+    // Backed by the wifi_admin module on the server, which talks to
+    // NetworkManager. Every save here triggers an AP restart and a
+    // ~5-10 s websocket outage — the switching-overlay covers the
+    // gap and the existing websocket auto-reconnect picks it back up.
+
+    async loadWifiConfig() {
+        const ws = window.saintWS;
+        const cfg = await ws.management('wifi_get_config', {});
+        if (!cfg || !cfg.ok) return;
+        const ssidInput = document.getElementById('wifi-ssid');
+        const pwInput   = document.getElementById('wifi-password');
+        const chSpan    = document.getElementById('wifi-current-channel');
+        if (ssidInput && cfg.ssid) ssidInput.value = cfg.ssid;
+        if (pwInput && cfg.password) pwInput.value = cfg.password;
+        if (chSpan) {
+            const bandLabel = cfg.band === 'a' ? '5 GHz' : (cfg.band === 'bg' ? '2.4 GHz' : cfg.band || '?');
+            chSpan.textContent = cfg.channel
+                ? `Currently ${bandLabel}, channel ${cfg.channel}`
+                : `Currently ${bandLabel}, channel auto`;
+        }
+        // Mirror the same SSID/band/channel onto the dashboard's
+        // WiFi Status card if it exists. Cheap; keeps both surfaces
+        // coherent after an AP restart pulls fresh values.
+        this.updateWifiStatusConfig(cfg);
+    }
+
+    setupWirelessCardHandlers() {
+        const saveBtn = document.getElementById('wifi-save-creds-btn');
+        const toggleBtn = document.getElementById('wifi-password-toggle');
+        const findBtn = document.getElementById('wifi-find-channel-btn');
+        const applyBtn = document.getElementById('wifi-channel-apply-btn');
+
+        if (saveBtn && !saveBtn.dataset.bound) {
+            saveBtn.dataset.bound = '1';
+            saveBtn.addEventListener('click', () => this.saveWifiCredentials());
+        }
+        if (toggleBtn && !toggleBtn.dataset.bound) {
+            toggleBtn.dataset.bound = '1';
+            toggleBtn.addEventListener('click', () => {
+                const inp = document.getElementById('wifi-password');
+                if (!inp) return;
+                inp.type = inp.type === 'password' ? 'text' : 'password';
+            });
+        }
+        if (findBtn && !findBtn.dataset.bound) {
+            findBtn.dataset.bound = '1';
+            findBtn.addEventListener('click', () => this.openWifiChannelModal());
+        }
+        if (applyBtn && !applyBtn.dataset.bound) {
+            applyBtn.dataset.bound = '1';
+            applyBtn.addEventListener('click', () => this.applyWifiChannel());
+        }
+    }
+
+    async saveWifiCredentials() {
+        const ssid = document.getElementById('wifi-ssid')?.value || '';
+        const password = document.getElementById('wifi-password')?.value || '';
+        const status = document.getElementById('wifi-creds-status');
+
+        if (!confirm(
+            `Save new credentials and restart the AP?\n\n` +
+            `New SSID: ${ssid}\n\n` +
+            `Every connected client will drop and reconnect (~5–10 s). ` +
+            `If you change the SSID, your laptop/phone will need to ` +
+            `reconnect to the new network name manually.`
+        )) {
+            return;
+        }
+
+        try {
+            const ws = window.saintWS;
+            const r = await ws.management('wifi_set_credentials', { ssid, password });
+            if (r && r.switching) {
+                this._showWifiSwitchingOverlay(
+                    `New SSID: ${ssid}. If the dashboard doesn't reconnect ` +
+                    `within 30 s, refresh after rejoining the WiFi network manually.`
+                );
+            } else if (status) {
+                status.textContent = 'Saved.';
+                status.className = 'text-sm text-emerald-400';
+            }
+        } catch (err) {
+            console.error('wifi_set_credentials failed:', err);
+            if (status) {
+                status.textContent = `Save failed: ${err.message || err}`;
+                status.className = 'text-sm text-red-300';
+            } else {
+                alert(`Save failed: ${err.message || err}`);
+            }
+        }
+    }
+
+    async openWifiChannelModal() {
+        const modal = document.getElementById('wifi-channel-modal');
+        const loading = document.getElementById('wifi-channel-loading');
+        const results = document.getElementById('wifi-channel-results');
+        const errEl = document.getElementById('wifi-channel-error');
+        if (!modal) return;
+
+        // Reset modal state on every open. The async survey can run
+        // for a few seconds; the spinner is the user feedback.
+        modal.classList.remove('hidden');
+        loading.classList.remove('hidden');
+        results.classList.add('hidden');
+        errEl.classList.add('hidden');
+        this._wifiSelectedChannel = null;
+        document.getElementById('wifi-channel-apply-btn').disabled = true;
+
+        try {
+            const ws = window.saintWS;
+            const r = await ws.management('wifi_survey', {});
+            const data = r || {};
+            if (!data.ok) {
+                errEl.textContent = data.error || 'Survey failed (no detail).';
+                errEl.classList.remove('hidden');
+                loading.classList.add('hidden');
+                return;
+            }
+            this._renderWifiChannelRows(data.channels || [], data.current_channel);
+            loading.classList.add('hidden');
+            results.classList.remove('hidden');
+        } catch (err) {
+            console.error('wifi_survey failed:', err);
+            errEl.textContent = `Survey failed: ${err.message || err}`;
+            errEl.classList.remove('hidden');
+            loading.classList.add('hidden');
+        }
+    }
+
+    _renderWifiChannelRows(channels, currentChannel) {
+        const tbody = document.getElementById('wifi-channel-rows');
+        if (!tbody) return;
+        if (!channels.length) {
+            tbody.innerHTML =
+                `<tr><td colspan="6" class="p-4 text-center text-slate-500">No channels available</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = channels.map((c, i) => {
+            const bandLabel = c.band === '5' ? '5 GHz' : '2.4 GHz';
+            const sig = (c.strongest_signal_dbm != null)
+                ? `${Math.round(c.strongest_signal_dbm)} dBm`
+                : '—';
+            const badges = [];
+            if (c.is_current) badges.push(
+                '<span class="px-1.5 py-0.5 text-xs rounded bg-cyan-500/20 text-cyan-300">Current</span>');
+            if (c.is_dfs) badges.push(
+                '<span class="px-1.5 py-0.5 text-xs rounded bg-amber-500/20 text-amber-300">DFS</span>');
+            const apClass = c.ap_count === 0
+                ? 'text-emerald-400'
+                : (c.ap_count <= 2 ? 'text-slate-300' : 'text-amber-300');
+            return `
+                <tr class="border-t border-slate-700 hover:bg-slate-700/30 cursor-pointer"
+                    data-channel-idx="${i}"
+                    data-band="${c.band === '5' ? 'a' : 'bg'}"
+                    data-channel-num="${c.channel}">
+                    <td class="p-2 text-slate-300">${bandLabel}</td>
+                    <td class="p-2 font-mono">${c.channel}</td>
+                    <td class="p-2 text-slate-500 text-xs">${c.freq_mhz} MHz</td>
+                    <td class="p-2 ${apClass}">${c.ap_count}</td>
+                    <td class="p-2 text-slate-400">${sig}</td>
+                    <td class="p-2 flex gap-1">${badges.join('')}</td>
+                </tr>
+            `;
+        }).join('');
+
+        tbody.querySelectorAll('tr[data-channel-idx]').forEach(row => {
+            row.addEventListener('click', () => {
+                tbody.querySelectorAll('tr').forEach(r => r.classList.remove('bg-cyan-500/10'));
+                row.classList.add('bg-cyan-500/10');
+                this._wifiSelectedChannel = {
+                    band: row.dataset.band,
+                    channel: parseInt(row.dataset.channelNum, 10),
+                };
+                document.getElementById('wifi-channel-apply-btn').disabled = false;
+            });
+        });
+    }
+
+    closeWifiChannelModal() {
+        document.getElementById('wifi-channel-modal')?.classList.add('hidden');
+    }
+
+    async applyWifiChannel() {
+        const sel = this._wifiSelectedChannel;
+        if (!sel) return;
+        const bandLabel = sel.band === 'a' ? '5 GHz' : '2.4 GHz';
+        if (!confirm(
+            `Switch the AP to ${bandLabel} channel ${sel.channel}?\n\n` +
+            `Every connected client (including this dashboard) will ` +
+            `drop and reconnect over ~5–10 s.`
+        )) {
+            return;
+        }
+        try {
+            const ws = window.saintWS;
+            await ws.management('wifi_set_channel', sel);
+            this.closeWifiChannelModal();
+            this._showWifiSwitchingOverlay(
+                `Switching to ${bandLabel} channel ${sel.channel}.`
+            );
+        } catch (err) {
+            console.error('wifi_set_channel failed:', err);
+            alert(`Channel switch failed: ${err.message || err}`);
+        }
+    }
+
+    _showWifiSwitchingOverlay(detail) {
+        const overlay = document.getElementById('wifi-switching-overlay');
+        const detailEl = document.getElementById('wifi-switching-detail');
+        if (detailEl && detail) detailEl.textContent = detail;
+        if (overlay) overlay.classList.remove('hidden');
+        // Hide the overlay once the websocket reconnects — the
+        // existing 'connected' event is the right signal. We bind
+        // a one-shot listener since the overlay only matters once.
+        const ws = window.saintWS;
+        if (ws && typeof ws.on === 'function') {
+            const onReconnected = () => {
+                overlay?.classList.add('hidden');
+                // refresh the Wireless card with new values
+                this.loadWifiConfig().catch(() => {});
+            };
+            ws.once ? ws.once('connected', onReconnected) : ws.on('connected', onReconnected);
+        }
+        // Safety net — never leave the overlay up forever if the
+        // 'connected' event doesn't fire for some reason.
+        setTimeout(() => overlay?.classList.add('hidden'), 60_000);
+    }
+
     /**
      * Request initial data after connection.
      */
@@ -917,7 +1161,11 @@ class SaintApp {
             // Subscribe to state updates. 'estop' carries the latching
             // E-Stop state — broadcast by the server whenever the
             // latch flips so every connected dashboard tracks it.
-            await ws.subscribe(['system', 'nodes', 'estop'], 1);
+            // 'pin_state/host_controller' streams the server's own
+            // system_monitor channels (cpu/mem/temp/wifi_*), used by
+            // the dashboard's WiFi Status card.
+            await ws.subscribe(
+                ['system', 'nodes', 'estop', 'pin_state/host_controller'], 1);
 
             // Pull the current latch state so the button doesn't
             // start in a stale "released" look when the page loads
@@ -1011,8 +1259,16 @@ class SaintApp {
             // real time when the operator is watching a node source.
             const nodeId = message.node.slice('node_log/'.length);
             this.onNodeLogEntry(nodeId, message.data);
+        } else if (message.node === 'pin_state/host_controller') {
+            // The host_controller's system_monitor channels live on
+            // this topic. We pluck the wifi_* fields out and feed
+            // the WiFi Status card. cpu/mem/temp/uptime/throttle
+            // continue to flow through the 'system' message above —
+            // host_controller carries the same data on a different
+            // schema, used elsewhere for routing-graph values.
+            this.updateWifiStatusCard(message.data);
         }
-        // pin_state/<id> broadcasts are also handled by widgetsDashboard
+        // Other pin_state/<id> broadcasts are handled by widgetsDashboard
         // — it subscribes itself when the dashboard activates.
     }
 
@@ -1020,10 +1276,9 @@ class SaintApp {
      * Update nodes-related UI elements based on current page.
      */
     updateNodesUI() {
-        // Always update dashboard summary (it's in the sidebar)
-        this.updateNodesSummary();
-
-        // If on nodes page, refresh the list
+        // If on nodes page, refresh the list. The old dashboard
+        // "Nodes Summary" card is gone — the Nodes tab is the
+        // canonical view, and the dashboard now shows WiFi instead.
         if (this.currentPage === 'nodes') {
             this.renderNodesList();
         }
@@ -1231,25 +1486,28 @@ class SaintApp {
     /**
      * Add entry to the in-memory activity stream. The dashboard
      * Activity Log card was removed in favor of the master-detail
-     * Logs page (Server source), so we only update the buffer and
-     * re-render the Logs page when it's open.
+     * Logs page (Server source), so we update the buffer and — only
+     * when the Logs page is open AND looking at the Server source —
+     * incrementally prepend the new row so the user's scroll/expand
+     * state survives the update.
      */
     addActivityLogEntry(message) {
         const level = message.level || 'info';
         const timestamp = message.timestamp || (Date.now() / 1000);
-
-        this.activityLog.unshift({
+        const entry = {
             time: timestamp,
             text: message.text || message.message,
             level: level,
-        });
+        };
 
+        this.activityLog.unshift(entry);
         if (this.activityLog.length > 500) {
             this.activityLog = this.activityLog.slice(0, 500);
         }
 
-        if (this.currentPage === 'logs') {
-            this.renderLogsPage();
+        if (this.currentPage === 'logs'
+            && this.logsSelectedSource === 'server') {
+            this._prependLogRow(entry, this.activityLog.length - 1);
         }
     }
 
@@ -1268,73 +1526,72 @@ class SaintApp {
             this.nodes.adopted = adopted.nodes || [];
             this.nodes.unadopted = unadopted.nodes || [];
 
-            this.updateNodesSummary();
             if (window.widgetsDashboard) {
                 await window.widgetsDashboard.activate(this.nodes.adopted);
             }
         } catch (error) {
             console.error('Failed to load dashboard data:', error);
         }
+
+        // Seed the WiFi card with config-time info (SSID, band,
+        // channel). Live metrics fill in from pin_state/host_controller
+        // as it streams. Best-effort — missing iw / non-Pi host just
+        // leaves the static fields as "--".
+        try {
+            const cfg = await ws.management('wifi_get_config', {});
+            this.updateWifiStatusConfig(cfg);
+        } catch (e) {
+            // Non-fatal.
+        }
     }
 
     /**
-     * Update nodes summary on dashboard.
+     * Populate the static-ish portion of the WiFi card (SSID + band/channel)
+     * from a wifi_get_config response. Called on dashboard load and after
+     * a successful AP restart (when the post-switch reload hook fires).
      */
-    updateNodesSummary() {
-        const container = document.getElementById('nodes-summary');
-        const adopted = this.nodes.adopted;
-        const unadopted = this.nodes.unadopted;
-
-        // Count online nodes
-        const adoptedOnline = adopted.filter(n => n.online !== false).length;
-        const unadoptedOnline = unadopted.filter(n => n.online !== false).length;
-
-        let html = `
-            <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                    <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
-                    <span class="text-slate-300">Adopted</span>
-                </div>
-                <span class="text-xl font-bold text-white">${adoptedOnline}<span class="text-sm text-slate-500">/${adopted.length}</span></span>
-            </div>
-            <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                    <span class="w-2 h-2 rounded-full bg-amber-500"></span>
-                    <span class="text-slate-300">Unadopted</span>
-                </div>
-                <span class="text-xl font-bold text-white">${unadoptedOnline}<span class="text-sm text-slate-500">/${unadopted.length}</span></span>
-            </div>
-        `;
-
-        // Show recent nodes (adopted first, then unadopted)
-        const recentNodes = [...adopted.slice(0, 2), ...unadopted.filter(n => n.online !== false).slice(0, 2)];
-        if (recentNodes.length > 0) {
-            html += '<div class="mt-4 pt-4 border-t border-slate-700 space-y-2">';
-            for (const node of recentNodes) {
-                const isAdopted = node.role;
-                const statusColor = node.online !== false
-                    ? (isAdopted ? 'bg-emerald-500' : 'bg-amber-500')
-                    : 'bg-slate-500';
-                const label = isAdopted
-                    ? (node.display_name || node.node_id)
-                    : node.node_id;
-                const badge = isAdopted
-                    ? `<span class="text-slate-400">${node.role}</span>`
-                    : '<span class="text-amber-400 text-xs">new</span>';
-                html += `
-                    <div class="flex items-center justify-between text-sm">
-                        <div class="flex items-center gap-2">
-                            <span class="w-2 h-2 rounded-full ${statusColor}"></span>
-                            <span class="text-slate-200 truncate max-w-[150px]">${label}</span>
-                        </div>
-                        ${badge}
-                    </div>
-                `;
-            }
-            html += '</div>';
+    updateWifiStatusConfig(cfg) {
+        if (!cfg || !cfg.ok) return;
+        const ssidEl = document.getElementById('wifi-status-ssid');
+        const bcEl   = document.getElementById('wifi-status-bandch');
+        if (ssidEl) ssidEl.textContent = cfg.ssid || '--';
+        if (bcEl) {
+            const bandLabel = cfg.band === 'a' ? '5 GHz'
+                : (cfg.band === 'bg' ? '2.4 GHz' : (cfg.band || '?'));
+            bcEl.textContent = cfg.channel
+                ? `${bandLabel} · ch ${cfg.channel}`
+                : `${bandLabel} · auto`;
         }
+    }
 
-        container.innerHTML = html;
+    /**
+     * Live update from pin_state/host_controller. We sift the channel
+     * list for the four system_monitor.wifi_* readings and refresh
+     * just those fields. Missing channels (e.g. on a host with no
+     * WiFi interface) leave the previous value in place so the card
+     * doesn't flicker between "--" and a real number every second.
+     */
+    updateWifiStatusCard(data) {
+        if (!data || !Array.isArray(data.channels)) return;
+        let signal, retry, noise, bitrate;
+        for (const ch of data.channels) {
+            if (ch.peripheral_id !== 'system_monitor') continue;
+            if (ch.channel_id === 'wifi_signal') signal = ch.value;
+            else if (ch.channel_id === 'wifi_retry_pct') retry = ch.value;
+            else if (ch.channel_id === 'wifi_noise') noise = ch.value;
+            else if (ch.channel_id === 'wifi_bitrate') bitrate = ch.value;
+        }
+        const set = (id, val, fmt) => {
+            const el = document.getElementById(id);
+            if (el && typeof val === 'number') el.textContent = fmt(val);
+        };
+        set('wifi-status-signal',  signal,  v => `${Math.round(v)} dBm`);
+        set('wifi-status-retry',   retry,   v => `${v.toFixed(1)}%`);
+        set('wifi-status-noise',   noise,   v => `${Math.round(v)} dBm`);
+        set('wifi-status-bitrate', bitrate, v => `${v.toFixed(1)} Mbps`);
+
+        const ageEl = document.getElementById('wifi-status-age');
+        if (ageEl) ageEl.textContent = new Date().toLocaleTimeString();
     }
 
     /**
@@ -1412,7 +1669,7 @@ class SaintApp {
             unadoptedContainer.innerHTML = this.nodes.unadopted.map(node => {
                 const isOnline = node.online !== false;
                 const statusDot = isOnline
-                    ? 'bg-amber-500 animate-pulse'
+                    ? 'bg-amber-500'
                     : 'bg-slate-500';
                 const statusBadge = isOnline
                     ? '<span class="px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400">New</span>'
@@ -2045,7 +2302,13 @@ class SaintApp {
 
     /**
      * Receiver for live node_log/<id> events. Called from the
-     * WebSocket 'state' dispatch path in setupActivitySubscription.
+     * WebSocket 'state' dispatch path in handleStateUpdate.
+     *
+     * Critical: this MUST NOT trigger a full renderLogsPage on every
+     * frame — that would rebuild the entire DOM, destroying the
+     * user's scroll position and any expanded-row state. Incremental
+     * prepend instead, with scroll compensation so a busy stream
+     * doesn't push the row the user is reading down the page.
      */
     onNodeLogEntry(nodeId, entry) {
         if (!nodeId || !entry) return;
@@ -2053,23 +2316,176 @@ class SaintApp {
         ring.unshift(entry);
         if (ring.length > 500) ring.length = 500;
         this.logsPerNode.set(nodeId, ring);
-        // Only re-render if this is the source the operator is looking at.
         if (this.currentPage === 'logs'
             && this.logsSelectedSource === `node:${nodeId}`) {
-            this.renderLogsPage();
+            this._prependLogRow(entry, ring.length - 1);
         }
     }
 
     /**
-     * Render the rows pane for the currently selected source, applying
-     * the level filter + search filter, with the expanded row (if any)
-     * inlined as a JSON detail panel.
+     * Filter state derived from the toolbar — shared by full-render
+     * and incremental-prepend so a streaming entry is held to the
+     * same predicate as one drawn from history.
+     */
+    _logFiltersAndRank() {
+        const rowFilter = document.getElementById('logs-row-filter')?.value || 'all';
+        const search = (document.getElementById('logs-search')?.value || '').toLowerCase();
+        const LEVEL_RANK = { debug: 10, info: 20, warn: 30, warning: 30, error: 40, fatal: 50 };
+        let threshold = 0;
+        if (rowFilter === 'debug') threshold = LEVEL_RANK.debug;
+        else if (rowFilter === 'info') threshold = LEVEL_RANK.info;
+        else if (rowFilter === 'warn') threshold = LEVEL_RANK.warn;
+        else if (rowFilter === 'error') threshold = LEVEL_RANK.error;
+        return { rowFilter, search, threshold, LEVEL_RANK };
+    }
+
+    _logEntryPassesFilter(entry, ctx) {
+        const rank = ctx.LEVEL_RANK[(entry.level || 'info').toLowerCase()] || 20;
+        if (ctx.threshold > 0) {
+            if (ctx.rowFilter === 'error') {
+                if (rank < ctx.LEVEL_RANK.error) return false;
+            } else if (rank < ctx.threshold) {
+                return false;
+            }
+        }
+        if (ctx.search) {
+            const hay = (entry.text || '').toLowerCase()
+                + ' ' + (entry.peripheral || '').toLowerCase();
+            if (!hay.includes(ctx.search)) return false;
+        }
+        return true;
+    }
+
+    _fallbackLogSource() {
+        return this.logsSelectedSource === 'server'
+            ? 'saint_server'
+            : this.logsSelectedSource.slice('node:'.length);
+    }
+
+    /**
+     * Build the HTML for one row. `idx` is a stable index used to
+     * derive a click key — kept distinct from array position so
+     * subsequent prepends don't collide with an already-rendered key.
+     */
+    _logRowHtml(entry, idx, fallbackSource) {
+        const t = entry.time ? new Date(entry.time * 1000) : new Date();
+        const ts = t.toLocaleTimeString([], { hour12: false })
+                   + '.' + String(t.getMilliseconds()).padStart(3, '0');
+        const level = (entry.level || 'info').toLowerCase();
+        const source = entry.peripheral || fallbackSource;
+        const rowKey = `${entry.time || 'x'}:${idx}`;
+        const expanded = (this.logsExpandedKey === rowKey) ? ' expanded' : '';
+        const detail = (this.logsExpandedKey === rowKey)
+            ? `<div class="logs-detail">${escapeHtml(JSON.stringify(entry, null, 2))}</div>`
+            : '';
+        return `<div class="logs-row ${level}${expanded}" data-row-key="${escapeHtml(rowKey)}">` +
+               `<span class="logs-time">${ts}</span>` +
+               `<span class="logs-source">${escapeHtml(source)}</span>` +
+               `<span class="logs-summary">${escapeHtml(entry.text || '')}</span>` +
+               detail +
+               `</div>`;
+    }
+
+    /**
+     * Single delegated click listener installed once on the container.
+     * Avoids the previous pattern of re-binding per-row on every
+     * render (which only worked because we were re-rendering — and
+     * exactly that re-rendering was destroying scroll state). With
+     * delegation, prepended rows pick up the handler for free.
+     */
+    _ensureLogsContainerListener(container) {
+        if (container.dataset.logsListenerBound) return;
+        container.dataset.logsListenerBound = 'true';
+        container.addEventListener('click', (ev) => {
+            const row = ev.target.closest('.logs-row');
+            if (!row || !container.contains(row)) return;
+            // Don't toggle when the user is selecting text inside the
+            // expanded detail panel.
+            if (ev.target.closest('.logs-detail')) return;
+            const key = row.dataset.rowKey;
+            if (!key) return;
+            const wasExpanded = (this.logsExpandedKey === key);
+            // Collapse any currently-open row in the DOM directly so
+            // we don't have to nuke the whole list.
+            if (this.logsExpandedKey && this.logsExpandedKey !== key) {
+                const prev = container.querySelector(
+                    `.logs-row.expanded[data-row-key="${CSS.escape(this.logsExpandedKey)}"]`);
+                if (prev) {
+                    prev.classList.remove('expanded');
+                    const det = prev.querySelector('.logs-detail');
+                    if (det) det.remove();
+                }
+            }
+            if (wasExpanded) {
+                row.classList.remove('expanded');
+                const det = row.querySelector('.logs-detail');
+                if (det) det.remove();
+                this.logsExpandedKey = null;
+            } else {
+                row.classList.add('expanded');
+                // Re-derive the entry's JSON from the dataset — we
+                // stash it on the row at render time. Cheaper than
+                // walking the model on every click.
+                const raw = row.dataset.entryJson || '{}';
+                row.insertAdjacentHTML('beforeend',
+                    `<div class="logs-detail">${escapeHtml(
+                        JSON.stringify(JSON.parse(raw), null, 2))}</div>`);
+                this.logsExpandedKey = key;
+            }
+        });
+    }
+
+    /**
+     * Insert one newly-arrived row at the top of the container. The
+     * scroll-compensation block is the bit the user explicitly asked
+     * for: if they're already scrolled away from the top to read
+     * something, the new row must not push their view down. We do
+     * this by measuring the row height after insert and bumping
+     * scrollTop by that amount whenever the user wasn't at the very
+     * top — so the visible content stays anchored.
+     */
+    _prependLogRow(entry, idx) {
+        const container = document.getElementById('logs-rows');
+        if (!container) return;
+        if (!this._logEntryPassesFilter(entry, this._logFiltersAndRank())) {
+            return;
+        }
+        // First message after the empty-state placeholder needs to
+        // clear that placeholder before we insert.
+        const placeholder = container.querySelector('.logs-empty');
+        if (placeholder) placeholder.remove();
+
+        this._ensureLogsContainerListener(container);
+
+        const prevScrollTop = container.scrollTop;
+        const wasAtTop = prevScrollTop <= 4;   // small tolerance
+        const html = this._logRowHtml(entry, idx, this._fallbackLogSource());
+        container.insertAdjacentHTML('afterbegin', html);
+        const inserted = container.firstElementChild;
+        if (inserted) {
+            inserted.dataset.entryJson = JSON.stringify(entry);
+        }
+        if (!wasAtTop && inserted) {
+            // Push scrollTop down by the inserted row's height so the
+            // content the user is reading stays visually in place.
+            container.scrollTop = prevScrollTop + inserted.offsetHeight;
+        }
+        // Cap the rendered DOM to a sensible size so long-running
+        // sessions don't grow unbounded.
+        while (container.childElementCount > 1000) {
+            container.removeChild(container.lastElementChild);
+        }
+    }
+
+    /**
+     * Render the rows pane for the currently selected source. Called
+     * on source-switch, filter change, and search change — NOT on
+     * every incoming live event (that path is _prependLogRow above).
      */
     renderLogsPage() {
         const container = document.getElementById('logs-rows');
         if (!container) return;
 
-        // Source the entries list.
         let entries = [];
         if (this.logsSelectedSource === 'server') {
             entries = this.activityLog;
@@ -2078,65 +2494,26 @@ class SaintApp {
             entries = this.logsPerNode.get(nodeId) || [];
         }
 
-        const rowFilter = document.getElementById('logs-row-filter')?.value || 'all';
-        const search = document.getElementById('logs-search')?.value?.toLowerCase() || '';
-
-        // Inclusive level filter — "Info+" means info/warn/error visible.
-        const LEVEL_RANK = { debug: 10, info: 20, warn: 30, warning: 30, error: 40, fatal: 50 };
-        let threshold = 0;
-        if (rowFilter === 'debug') threshold = LEVEL_RANK.debug;
-        else if (rowFilter === 'info') threshold = LEVEL_RANK.info;
-        else if (rowFilter === 'warn') threshold = LEVEL_RANK.warn;
-        else if (rowFilter === 'error') threshold = LEVEL_RANK.error;
-
-        let rows = entries;
-        if (threshold > 0) {
-            if (rowFilter === 'error') {
-                rows = rows.filter(e => (LEVEL_RANK[(e.level || 'info').toLowerCase()] || 20) >= LEVEL_RANK.error);
-            } else {
-                rows = rows.filter(e => (LEVEL_RANK[(e.level || 'info').toLowerCase()] || 20) >= threshold);
-            }
-        }
-        if (search) {
-            rows = rows.filter(e => (e.text || '').toLowerCase().includes(search)
-                                 || (e.peripheral || '').toLowerCase().includes(search));
-        }
+        const ctx = this._logFiltersAndRank();
+        const rows = entries.filter(e => this._logEntryPassesFilter(e, ctx));
 
         if (rows.length === 0) {
             container.innerHTML = '<p class="logs-empty">No logs match the current filters.</p>';
             return;
         }
 
-        const fallbackSource = this.logsSelectedSource === 'server'
-            ? 'saint_server'
-            : this.logsSelectedSource.slice('node:'.length);
-
-        container.innerHTML = rows.map((entry, idx) => {
-            const t = entry.time ? new Date(entry.time * 1000) : new Date();
-            const ts = t.toLocaleTimeString([], { hour12: false })
-                       + '.' + String(t.getMilliseconds()).padStart(3, '0');
-            const level = (entry.level || 'info').toLowerCase();
-            const source = entry.peripheral || fallbackSource;
-            const rowKey = `${entry.time || idx}:${idx}`;
-            const expanded = (this.logsExpandedKey === rowKey) ? ' expanded' : '';
-            const detail = (this.logsExpandedKey === rowKey)
-                ? `<div class="logs-detail">${escapeHtml(JSON.stringify(entry, null, 2))}</div>`
-                : '';
-            return `<div class="logs-row ${level}${expanded}" data-row-key="${escapeHtml(rowKey)}">` +
-                   `<span class="logs-time">${ts}</span>` +
-                   `<span class="logs-source">${escapeHtml(source)}</span>` +
-                   `<span class="logs-summary">${escapeHtml(entry.text || '')}</span>` +
-                   detail +
-                   `</div>`;
-        }).join('');
-
-        container.querySelectorAll('.logs-row').forEach(el => {
-            el.addEventListener('click', () => {
-                const key = el.dataset.rowKey;
-                this.logsExpandedKey = (this.logsExpandedKey === key) ? null : key;
-                this.renderLogsPage();
-            });
+        const fallbackSource = this._fallbackLogSource();
+        container.innerHTML = rows.map((entry, idx) =>
+            this._logRowHtml(entry, idx, fallbackSource)).join('');
+        // Re-stash entry JSON on each row so click expansion can find it.
+        container.querySelectorAll('.logs-row').forEach((row, i) => {
+            row.dataset.entryJson = JSON.stringify(rows[i]);
         });
+        this._ensureLogsContainerListener(container);
+        // After a full render we reset to top so the freshest row is
+        // visible. The incremental path is the one that preserves
+        // mid-list scroll position.
+        container.scrollTop = 0;
     }
 
     /**

@@ -87,11 +87,35 @@ class RoutingEvaluator:
         # "outputs", "widgets". Refreshed on each _evaluate_sheet pass
         # and shipped to the UI via _on_values_changed.
         self._sheet_values: Dict[str, Dict[str, Dict[str, float]]] = {}
+        # System-wide E-Stop latch mirror. Driven by the websocket
+        # handler's `estop` action so the evaluator can suppress
+        # peripheral / output sink writes while estop is engaged.
+        # Widgets still get their cached value updates — the dashboard
+        # should keep rendering last-known telemetry, just nothing
+        # commands motors. The firmware-level estop has already
+        # neutralized the nodes; this gate just stops us from
+        # republishing stale operator input that would resume motion
+        # the moment estop releases.
+        self._estop_active: bool = False
         # Hot-path log sampling state (see _hot_log).
         self._hot_log_count = 0
         self._hot_log_last_ms = 0.0
 
     # ── public API ──────────────────────────────────────────────────
+
+    def set_estop_active(self, active: bool) -> None:
+        """Toggle the e-stop gate. While active, ``_dispatch_sink``
+        suppresses peripheral and output sink writes — no ROS publishes
+        for motor commands or any other downstream control. Widget
+        sinks still update so the dashboard reflects the latched
+        state. Called from the websocket handler's `estop` action.
+        """
+        prev = self._estop_active
+        self._estop_active = bool(active)
+        if prev != self._estop_active:
+            self._log("warn",
+                      f"Routing evaluator estop gate: "
+                      f"{'ENGAGED — suppressing peripheral/output writes' if self._estop_active else 'RELEASED'}")
 
     def reconcile(self, routing: SystemRouting) -> None:
         """Adopt the latest routing graph and resync ROS subscriptions."""
@@ -403,6 +427,14 @@ class RoutingEvaluator:
 
     def _dispatch_sink(self, sheet: NodeSheet, wire: Wire, value: float) -> None:
         sink = wire.sink
+        # E-Stop gate: drop everything that would command actuators
+        # (peripheral channels, ROS output publishes). Widget sinks
+        # fall through so dashboard cards keep their last value
+        # visible. The firmware-level estop already cut motor power
+        # on each node; this prevents the next stick tick from
+        # republishing stale operator input.
+        if self._estop_active and sink.kind in ("peripheral", "output"):
+            return
         if sink.kind == "peripheral":
             if len(sink.parts) < 3:
                 return

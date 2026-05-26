@@ -2,6 +2,7 @@ import { Component, signal, computed, OnInit, OnDestroy } from '@angular/core';
 import { RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { Subscription } from 'rxjs';
+import { invoke } from '@tauri-apps/api/core';
 import { ConnectionService, ConnectionStatus } from './core/services/connection.service';
 import { InputService, ButtonEvent } from './core/services/input.service';
 import { BindingsService, DigitalInput } from './core/services/bindings.service';
@@ -78,16 +79,36 @@ interface TrackBattery {
             <span class="text-sm text-saint-text-muted">{{ getStatusText() }}</span>
           </div>
 
-          <!-- E-Stop Button -->
+          <!-- E-Stop Button. Color + label tracks the latched server
+               state so the operator can tell engaged from released
+               without guessing. Each press toggles the latch on the
+               server. -->
           <button
             (click)="emergencyStop()"
-            class="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition-colors uppercase tracking-wide"
-            title="Emergency Stop">
-            <span class="material-icons icon-sm">front_hand</span>
-            <span>E-Stop</span>
+            [class]="connectionService.estopActive()
+              ? 'flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black font-semibold rounded-lg transition-colors uppercase tracking-wide ring-2 ring-amber-300'
+              : 'flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition-colors uppercase tracking-wide'"
+            [title]="connectionService.estopActive() ? 'E-Stop is ENGAGED — press to release' : 'Emergency Stop'">
+            <span class="material-icons icon-sm">
+              {{ connectionService.estopActive() ? 'check_circle' : 'front_hand' }}
+            </span>
+            <span>{{ connectionService.estopActive() ? 'Release' : 'E-Stop' }}</span>
           </button>
         </div>
       </header>
+
+      <!-- System-wide E-Stop banner. Shows whenever the server's
+           latch is engaged. Outputs are also blocked at both the
+           Rust client (no WS sends) and the server's routing
+           evaluator (no peripheral/output writes), so this is
+           visual confirmation — not just a hint. -->
+      @if (connectionService.estopActive()) {
+        <div class="bg-amber-500 text-black px-4 py-2 text-center text-sm font-semibold flex items-center justify-center gap-2">
+          <span class="material-icons icon-sm">warning</span>
+          EMERGENCY STOP ENGAGED — control inputs are suppressed system-wide.
+          Press the E-Stop button to release.
+        </div>
+      }
 
       <!-- Main Content - shows either router outlet or preset panel -->
       <main class="flex-1 overflow-hidden">
@@ -507,10 +528,32 @@ export class AppComponent implements OnInit, OnDestroy {
     private keyboardService: KeyboardService,
     private dragScrollService: DragScrollService,
   ) {
-    // Apply saved UI scale on startup
+    // Apply saved UI scale on startup. Use Tauri's webview-level
+    // set_zoom rather than CSS `documentElement.style.zoom`:
+    //
+    //  - CSS zoom on the root element stacks multiplicatively with the
+    //    webview zoom that SettingsComponent later applies via
+    //    invoke('set_zoom'), giving an effective scale ~= saved^2 on
+    //    every restart (a 1.5x setting renders at ~2.25x).
+    //  - CSS zoom doesn't reliably scale native form controls — the
+    //    <select> dropdown popup is rendered outside the zoomed root
+    //    so its menu items stay at 1x even when the page text scales.
+    //
+    // Tauri's set_zoom drives webkit2gtk's webview-wide zoom factor,
+    // which is the single source of truth and includes form controls.
     const savedScale = localStorage.getItem('saint-controller-ui-scale');
     if (savedScale) {
-      document.documentElement.style.zoom = savedScale;
+      const scale = parseFloat(savedScale);
+      if (!Number.isNaN(scale) && scale > 0) {
+        invoke('set_zoom', { scale }).catch((err) => {
+          // Fallback: if the Tauri call fails for some reason (unlikely
+          // in a normal startup, but possible if the JS context loads
+          // before the Tauri runtime), fall back to CSS zoom. This is
+          // the failure-only path that SettingsComponent also takes.
+          console.error('[App] set_zoom failed on startup, falling back to CSS zoom:', err);
+          document.documentElement.style.zoom = savedScale;
+        });
+      }
     }
   }
 

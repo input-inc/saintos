@@ -624,43 +624,31 @@ NETPLAN
     # and WPA2-AES, which macOS / iOS now flag as "weak security." Pin to
     # WPA2-only (proto=rsn) with AES/CCMP for both pairwise and group
     # ciphers — same UX, no insecure-network warning.
+    # AP credential policy (2026-05-25 change):
+    #
+    # SSID, password, band, and channel are *operator-managed* via the
+    # dashboard's Wireless settings. Re-running install.sh must NOT
+    # clobber operator-set values — otherwise every dist update would
+    # silently revert the AP back to the env-var defaults, kick the
+    # operator off, and force them to reconfigure. So:
+    #
+    #   - Profile missing → create from env-var seeds. First install.
+    #   - Profile exists  → only ensure *structural* fields (mode=ap,
+    #                       ipv4.method=shared, WPA2 cipher stack,
+    #                       powersave off) match what we expect.
+    #                       Leave SSID/PSK/band/channel alone.
+    #
+    # nmcli modify is idempotent and per-property — modifying e.g.
+    # `mode ap` when it's already `ap` is a no-op, so this stays safe
+    # to re-run.
     local conn=saint-os-ap
-    local need_apply=1
+    local existed=0
     if nmcli -g connection.id connection show "$conn" >/dev/null 2>&1; then
-        local cur_ssid cur_mode cur_band cur_keymgmt cur_psk cur_ipmethod cur_iface
-        local cur_proto cur_pairwise cur_group cur_powersave
-        cur_ssid=$(nmcli -g 802-11-wireless.ssid connection show "$conn" 2>/dev/null || true)
-        cur_mode=$(nmcli -g 802-11-wireless.mode connection show "$conn" 2>/dev/null || true)
-        cur_band=$(nmcli -g 802-11-wireless.band connection show "$conn" 2>/dev/null || true)
-        cur_powersave=$(nmcli -g 802-11-wireless.powersave connection show "$conn" 2>/dev/null || true)
-        cur_keymgmt=$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$conn" 2>/dev/null || true)
-        cur_psk=$(nmcli -s -g 802-11-wireless-security.psk connection show "$conn" 2>/dev/null || true)
-        cur_proto=$(nmcli -g 802-11-wireless-security.proto connection show "$conn" 2>/dev/null || true)
-        cur_pairwise=$(nmcli -g 802-11-wireless-security.pairwise connection show "$conn" 2>/dev/null || true)
-        cur_group=$(nmcli -g 802-11-wireless-security.group connection show "$conn" 2>/dev/null || true)
-        cur_ipmethod=$(nmcli -g ipv4.method connection show "$conn" 2>/dev/null || true)
-        cur_iface=$(nmcli -g connection.interface-name connection show "$conn" 2>/dev/null || true)
-
-        if [[ "$cur_ssid"    == "$WIFI_SSID" \
-           && "$cur_mode"    == "ap" \
-           && "$cur_band"    == "bg" \
-           && "$cur_powersave" == "2" \
-           && "$cur_keymgmt" == "wpa-psk" \
-           && "$cur_psk"     == "$WIFI_PASS" \
-           && "$cur_proto"   == "rsn" \
-           && "$cur_pairwise" == "ccmp" \
-           && "$cur_group"   == "ccmp" \
-           && "$cur_ipmethod" == "shared" \
-           && "$cur_iface"   == "$wlan" ]]; then
-            log "WiFi AP profile '${conn}' already matches — not reconfiguring"
-            need_apply=0
-        else
-            log "WiFi AP profile differs from desired — reconfiguring (this will briefly drop connected clients)"
-        fi
+        existed=1
     fi
 
-    if (( need_apply )); then
-        run nmcli connection delete "$conn" 2>/dev/null || true
+    if (( existed == 0 )); then
+        log "Creating WiFi AP profile '${conn}' from defaults"
         run nmcli connection add type wifi ifname "$wlan" \
             con-name "$conn" autoconnect yes ssid "$WIFI_SSID"
         # 802-11-wireless.powersave=2 disables Pi WiFi power-save on the AP.
@@ -676,17 +664,35 @@ NETPLAN
             wifi-sec.pairwise ccmp \
             wifi-sec.group ccmp \
             wifi-sec.psk "$WIFI_PASS"
+    else
+        log "WiFi AP profile '${conn}' already exists — preserving operator-set SSID/password/band/channel"
+        # Touch only the fields that are structural / required for the
+        # AP to function correctly. Notably absent: ssid, band,
+        # channel, psk — those are managed via the dashboard.
+        run nmcli connection modify "$conn" \
+            802-11-wireless.mode ap \
+            802-11-wireless.powersave 2 \
+            ipv4.method shared \
+            wifi-sec.key-mgmt wpa-psk \
+            wifi-sec.proto rsn \
+            wifi-sec.pairwise ccmp \
+            wifi-sec.group ccmp
     fi
 
     if (( NO_START )); then
-        log "WiFi AP profile created (autostarts on next boot)"
-    elif (( need_apply )); then
+        log "WiFi AP profile ready (autostarts on next boot)"
+    elif (( existed == 0 )); then
+        # First-time bring-up after creation.
         run nmcli connection up "$conn" \
             || warn "Failed to bring up AP now (will retry on boot)"
     elif ! nmcli -g GENERAL.STATE connection show "$conn" 2>/dev/null | grep -q activated; then
+        # Existing profile but currently inactive — bring it back up.
         run nmcli connection up "$conn" \
             || warn "Failed to bring up AP now (will retry on boot)"
     else
+        # Existing AND active — leave it alone so a reinstall doesn't
+        # kick the operator's own session. Any structural-field changes
+        # we just made will take effect on next nmcli con up / reboot.
         log "WiFi AP already active — not touching it"
     fi
 }

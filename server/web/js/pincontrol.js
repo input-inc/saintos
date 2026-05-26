@@ -1131,15 +1131,17 @@ class PinControlManager {
     _updateSinglePinFast(elements, pin) {
         const { item, mode, slider, display, syncIndicator, toggle, indicator, state, voltageDisplay, bar } = elements;
 
-        // Update sync indicator
+        // Update sync indicator. Color-only — the pulse animation
+        // was removed because its scale(1.2) keyframe physically
+        // resized the dot and shifted nearby buttons during clicks.
         if (syncIndicator) {
             if (pin.synced) {
-                syncIndicator.classList.remove('bg-amber-500', 'animate-pulse');
+                syncIndicator.classList.remove('bg-amber-500');
                 syncIndicator.classList.add('bg-emerald-500');
                 syncIndicator.title = 'Synced';
             } else {
                 syncIndicator.classList.remove('bg-emerald-500');
-                syncIndicator.classList.add('bg-amber-500', 'animate-pulse');
+                syncIndicator.classList.add('bg-amber-500');
                 syncIndicator.title = 'Pending sync';
             }
         }

@@ -101,6 +101,13 @@ impl WebSocketClient {
         let mut s = self.state.write();
         s.status = ConnectionStatus::Disconnected;
         s.error = None;
+        // Clear the estop mirror on disconnect. The bootstrap on the
+        // next connect (subscribe + get_estop_state) will re-set it
+        // from the authoritative server-side value. Without this we
+        // could end up gating outgoing streaming control while
+        // disconnected, then briefly while reconnecting to a different
+        // server that has estop released.
+        s.estop_active = false;
     }
 
     /// Legacy command using node_id + pin_id (deprecated)
@@ -287,6 +294,14 @@ impl WebSocketClient {
             );
             return Ok(());
         }
+        // E-Stop gate. Server's routing evaluator drops these too, but
+        // we drop at the client to keep the WS quiet (an engaged
+        // estop on a tank with both sticks deflected would otherwise
+        // dump 100 Hz of unused traffic into the socket for every
+        // axis).
+        if self.state.read().estop_active {
+            return Ok(());
+        }
         let is_stop_command = match &value {
             Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
             _ => false,
@@ -340,6 +355,10 @@ impl WebSocketClient {
                  re-bind this axis in the bindings UI",
                 topic, channel
             );
+            return Ok(());
+        }
+        // E-Stop gate — same rationale as send_ws_input_value.
+        if self.state.read().estop_active {
             return Ok(());
         }
         let is_stop_command = match &value {
@@ -539,6 +558,23 @@ async fn handle_connection<R: Runtime>(
 ) -> bool {
     let (mut write, mut read) = ws_stream.split();
 
+    // Bootstrap the e-stop mirror so a controller joining mid-session
+    // immediately picks up the latched state. The subscribe registers
+    // us for future toggle broadcasts on the 'estop' topic; the
+    // get_estop_state management call returns the current value right
+    // away without waiting for the next toggle. Failures here are
+    // non-fatal — worst case the controller doesn't know the system
+    // is safed and the server's routing gate (added in the same
+    // change) still blocks motor commands.
+    let estop_subscribe = OutgoingMessage::subscribe(&["estop"]);
+    if let Err(e) = write.send(Message::Text(estop_subscribe.to_json())).await {
+        tracing::warn!("Failed to subscribe to estop topic: {}", e);
+    }
+    let estop_query = OutgoingMessage::get_estop_state();
+    if let Err(e) = write.send(Message::Text(estop_query.to_json())).await {
+        tracing::warn!("Failed to query initial estop state: {}", e);
+    }
+
     loop {
         tokio::select! {
             msg = read.next() => {
@@ -587,6 +623,32 @@ async fn handle_connection<R: Runtime>(
                                             tracing::error!("Failed to emit discovery-ws-inputs: {}", e);
                                         }
                                     }
+                                    // Response to our get_estop_state bootstrap.
+                                    // `data` shape: { "active": bool, "changed_at": float }.
+                                    // The state-topic broadcast handler below
+                                    // catches subsequent toggles; this catches
+                                    // the initial value so a freshly-connected
+                                    // controller knows the latched state
+                                    // without waiting for the next toggle.
+                                    if let Some(active) = data.get("active").and_then(|v| v.as_bool()) {
+                                        update_estop_state(state, app_handle, active);
+                                    }
+                                }
+                            }
+
+                            // State-topic broadcast handler. The server
+                            // broadcasts on 'estop' with shape:
+                            //   { type: "state", node: "estop", data: { active, changed_at, node_count } }
+                            if incoming.msg_type == "state"
+                                && incoming.node.as_deref() == Some("estop")
+                            {
+                                if let Some(active) = incoming
+                                    .data
+                                    .as_ref()
+                                    .and_then(|d| d.get("active"))
+                                    .and_then(|v| v.as_bool())
+                                {
+                                    update_estop_state(state, app_handle, active);
                                 }
                             }
                         } else {
@@ -640,6 +702,34 @@ async fn handle_connection<R: Runtime>(
                 return false;
             }
         }
+    }
+}
+
+/// Mirror an authoritative server-side e-stop value into our local
+/// `ConnectionState.estop_active` and emit a Tauri event so the
+/// frontend can show the banner + skip rendering joystick output
+/// while engaged. Called from both the `get_estop_state` response
+/// branch (bootstrap on connect) and the `state/estop` broadcast
+/// branch (subsequent toggles).
+fn update_estop_state<R: Runtime>(
+    state: &Arc<RwLock<ConnectionState>>,
+    app_handle: &AppHandle<R>,
+    active: bool,
+) {
+    let changed;
+    {
+        let mut s = state.write();
+        changed = s.estop_active != active;
+        s.estop_active = active;
+    }
+    if changed {
+        tracing::warn!(
+            "E-STOP state from server: {}",
+            if active { "ENGAGED" } else { "RELEASED" }
+        );
+    }
+    if let Err(e) = app_handle.emit("estop-state", serde_json::json!({ "active": active })) {
+        tracing::error!("Failed to emit estop-state event: {}", e);
     }
 }
 

@@ -1,4 +1,4 @@
-import { Component, effect, OnDestroy, OnInit, signal } from '@angular/core';
+import { Component, effect, OnDestroy, OnInit, signal, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ConnectionService, ConnectionStatus, ConnectionConfig } from '../../core/services/connection.service';
@@ -403,19 +403,26 @@ export class SettingsComponent implements OnInit, OnDestroy {
     // Re-check for updates whenever the connection becomes Connected.
     // Skips the check while a download/install is in flight so we don't
     // clobber the operator's in-progress action with a fresh poll.
+    //
+    // updateState is read via untracked() — checkForUpdate() *writes*
+    // updateState ('checking' → 'up-to-date'/etc.), and if the effect
+    // tracked it we'd fire a fresh check on every transition,
+    // spawning unbounded concurrent fetches against the server.
     effect(() => {
       const connected = this.connectionService.isConnected();
-      const state = this.updateState();
-      const inFlight =
-        state === 'downloading' ||
-        state === 'verifying' ||
-        state === 'installing';
-      if (connected && !inFlight) {
-        void this.checkForUpdate();
-      } else if (!connected && !inFlight) {
-        this.updateState.set('not-connected');
-        this.updateInfo.set(null);
-      }
+      untracked(() => {
+        const state = this.updateState();
+        const inFlight =
+          state === 'downloading' ||
+          state === 'verifying' ||
+          state === 'installing';
+        if (connected && !inFlight) {
+          void this.checkForUpdate();
+        } else if (!connected && !inFlight) {
+          this.updateState.set('not-connected');
+          this.updateInfo.set(null);
+        }
+      });
     });
   }
 

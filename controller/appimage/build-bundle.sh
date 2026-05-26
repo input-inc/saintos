@@ -232,6 +232,16 @@ if [ -z "$APPIMAGE_SRC" ]; then
 fi
 
 mkdir -p "$DEST_DIR"
+# Prune any prior .AppImage from the staging dir so the dist tarball
+# ships exactly one — the most recently built. Two reasons:
+#   - The dist tarball would otherwise grow ~80MB per stale build.
+#   - The server's firmware-listing endpoint picks `latest_package`
+#     from info.json, but any stray .AppImage left here would still
+#     be servable via /api/firmware/controller/<filename> and confuse
+#     the OTA flow if an operator pointed at it manually.
+# Other firmware staging dirs (rp2040/teensy41/rpi5) keep their
+# version-stamped artifacts on purpose — that's their convention.
+find "$DEST_DIR" -maxdepth 1 -type f -name '*.AppImage' -delete
 cp "$APPIMAGE_SRC" "$DEST_DIR/$FILENAME"
 
 CHECKSUM=$(sha256sum "$DEST_DIR/$FILENAME" | awk '{print $1}')
