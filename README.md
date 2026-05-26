@@ -34,7 +34,7 @@ SAINT.OS is a ROS2-based operating system for track-based mobile robots featurin
 
 ## Components
 
-### Server (`saint_os/`)
+### Server (`server/`)
 
 The central coordinator running on Raspberry Pi 4/5:
 
@@ -53,7 +53,7 @@ Cross-platform Tauri application for remote control:
 - **Platforms**: Steam Deck (SteamOS), macOS, Windows, Linux
 - **Features**: Gamepad input, gyro control, touchpad support, customizable bindings
 
-### Firmware (`saint_os/firmware/`)
+### Firmware (`firmware/`)
 
 Unified firmware for peripheral nodes:
 
@@ -79,10 +79,9 @@ git clone https://github.com/your-org/saintos.git
 cd saintos
 
 # Install ROS2 dependencies
-rosdep install --from-paths saint_os --ignore-src -y
+rosdep install --from-paths server --ignore-src -y
 
-# Build
-cd saint_os
+# Build (from the workspace root — colcon discovers the `server/` package)
 colcon build
 
 # Source and run
@@ -109,9 +108,20 @@ See [INSTALL.md](INSTALL.md) for detailed installation instructions.
 
 ## Documentation
 
-- [SAINT_OS_SPEC.md](SAINT_OS_SPEC.md) - Full system specification
-- [HARDWARE.md](HARDWARE.md) - Hardware requirements and supported platforms
-- [INSTALL.md](INSTALL.md) - Installation guide
+- [docs/SAINT_OS_SPEC.md](docs/SAINT_OS_SPEC.md) — Full system specification
+- [docs/HARDWARE.md](docs/HARDWARE.md) — Hardware requirements and supported platforms
+- [INSTALL.md](INSTALL.md) — Source-build installation guide (dev machines)
+- [server/docs/SERVER_GUIDE.md](server/docs/SERVER_GUIDE.md) — Operator
+  guide: install, flash initial nodes, apply OTA updates, add peripherals,
+  author routing sheets
+- [server/docs/DEPLOYMENT.md](server/docs/DEPLOYMENT.md) — Lower-level
+  deployment reference (systemd, netplan, monitoring, security)
+- [controller/README.md](controller/README.md) — Controller build &
+  deployment (Steam Deck Flatpak path + native dev mode)
+- [controller/docs/SHEETS_BINDINGS.md](controller/docs/SHEETS_BINDINGS.md) —
+  Binding controller inputs to server routing-sheet WebSocket inputs
+- [controller/docs/BINDINGS_SYSTEM.md](controller/docs/BINDINGS_SYSTEM.md) —
+  Bindings data model (input sources, action types, preset panels)
 
 ## Hardware Support
 

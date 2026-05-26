@@ -29,7 +29,7 @@ jobs:
       - id: v
         run: |
           set -euo pipefail
-          BASE=$(tr -d '[:space:]' < VERSION)
+          BASE=$(tr -d '[:space:]' < server/VERSION)
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
           elif [[ -n "${{ inputs.version }}" ]]; then
@@ -74,16 +74,16 @@ jobs:
         env:
           PICO_SDK_PATH: /home/runner/pico-sdk
         run: |
-          cd saint_os/firmware/rp2040
+          cd firmware/rp2040
           ./build.sh hw
 
       - uses: actions/upload-artifact@v6
         with:
           name: firmware-rp2040
           path: |
-            saint_os/firmware/rp2040/build/*.uf2
-            saint_os/firmware/rp2040/build/*.elf
-            saint_os/firmware/rp2040/build/generated/version.h
+            firmware/rp2040/build/*.uf2
+            firmware/rp2040/build/*.elf
+            firmware/rp2040/build/generated/version.h
           if-no-files-found: error
           retention-days: 30
 
@@ -104,7 +104,7 @@ jobs:
             ~/.platformio/packages
             ~/.platformio/platforms
             ~/.platformio/penv
-          key: pio-${{ hashFiles('saint_os/firmware/teensy41/platformio.ini') }}
+          key: pio-${{ hashFiles('firmware/teensy41/platformio.ini') }}
           restore-keys: pio-
 
       # micro_ros_platformio's build script sources ~/.platformio/penv/bin/activate,
@@ -121,13 +121,13 @@ jobs:
 
       - name: Build firmware (hardware)
         run: |
-          cd saint_os/firmware/teensy41
+          cd firmware/teensy41
           pio run -e hardware
 
       - uses: actions/upload-artifact@v6
         with:
           name: firmware-teensy41
-          path: saint_os/firmware/teensy41/.pio/build/hardware/firmware.hex
+          path: firmware/teensy41/.pio/build/hardware/firmware.hex
           if-no-files-found: error
           retention-days: 30
 
@@ -140,19 +140,100 @@ jobs:
 
       - name: Package Pi 5 node firmware
         run: |
-          cd saint_os/firmware/rpi5/scripts
+          cd firmware/rpi5/scripts
           ./package.sh "${{ needs.meta.outputs.version }}"
 
       - uses: actions/upload-artifact@v6
         with:
           name: firmware-rpi5
-          path: saint_os/firmware/rpi5/dist/
+          path: firmware/rpi5/dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Steam Deck controller AppImage. Builds natively on the Ubuntu amd64
+  # runner — no QEMU/Rosetta tax here, unlike the Apple Silicon Mac
+  # path through controller/appimage/build-docker.sh. We share the same
+  # controller/appimage/build-bundle.sh body, so any change to the
+  # bundle layout / staging logic stays in lockstep with the local path.
+  appimage-controller:
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              nodejs npm \
+              libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev \
+              librsvg2-dev libssl-dev libudev-dev \
+              pkg-config build-essential file \
+              fuse libfuse2 \
+              ca-certificates curl git
+
+      - name: Install Rust (stable)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # linuxdeploy + appimagetool aren't packaged for Ubuntu. We grab
+      # the upstream AppImages and put them on PATH. build-bundle.sh
+      # exports APPIMAGE_EXTRACT_AND_RUN=1 so they self-extract
+      # instead of mounting via FUSE (CI runners often lack /dev/fuse).
+      - name: Install AppImage bundler tools
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/linuxdeploy \
+              https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          sudo curl -fsSL -o /usr/local/bin/linuxdeploy-plugin-appimage \
+              https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+          sudo curl -fsSL -o /usr/local/bin/appimagetool \
+              https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          sudo chmod +x /usr/local/bin/linuxdeploy \
+                        /usr/local/bin/linuxdeploy-plugin-appimage \
+                        /usr/local/bin/appimagetool
+
+      # Caches cargo registry + cargo target dir + npm package cache +
+      # node_modules. Key includes Cargo.lock + package-lock.json so
+      # dep bumps cleanly invalidate. The dir layout matches
+      # build-bundle.sh's BUILD_DIR convention.
+      - name: Cache cargo + npm
+        uses: actions/cache@v5
+        with:
+          path: |
+            /tmp/saint-controller-build/cargo
+            /tmp/saint-controller-build/target
+            /tmp/saint-controller-build/node_modules
+            /tmp/saint-controller-build/npm-cache
+          key: controller-appimage-${{ hashFiles('controller/Cargo.lock', 'controller/package-lock.json') }}
+          restore-keys: controller-appimage-
+
+      # On native Linux runners tauri's own linuxdeploy invocation
+      # succeeds, so the build-bundle.sh fallback path doesn't fire.
+      # No need for the LD_PRELOAD shim setup that the Mac driver
+      # leans on; everything just works through tauri-bundler.
+      - name: Build controller AppImage
+        env:
+          REPO_ROOT: ${{ github.workspace }}
+          BUILD_DIR: /tmp/saint-controller-build
+        run: |
+          controller/appimage/build-bundle.sh
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: appimage-controller
+          # Upload the staged files exactly as build-bundle.sh wrote
+          # them, so package-server can copy the dir contents verbatim
+          # into server/resources/firmware/controller/.
+          path: server/resources/firmware/controller/
           if-no-files-found: error
           retention-days: 30
 
   # ---------------------------------------------------------------------------
   package-server:
-    needs: [meta, firmware-rp2040, firmware-teensy41, firmware-rpi5]
+    needs: [meta, firmware-rp2040, firmware-teensy41, firmware-rpi5, appimage-controller]
     strategy:
       fail-fast: false
       matrix:
@@ -218,26 +299,33 @@ jobs:
       - name: Stage firmware into resources
         run: |
           set -eo pipefail
-          mkdir -p saint_os/resources/firmware/{rp2040,teensy41,rpi5}
+          mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5,controller}
           if [[ -d _fw/firmware-rp2040 ]]; then
             find _fw/firmware-rp2040 -type f \( -name '*.uf2' -o -name '*.elf' \) \
-              -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+              -exec cp -v {} server/resources/firmware/rp2040/ \;
             # version.h sits alongside the artifacts in the build dir;
             # the upload artifact preserves its `generated/` subpath.
             if [[ -f _fw/firmware-rp2040/generated/version.h ]]; then
-              mkdir -p saint_os/resources/firmware/rp2040/generated
+              mkdir -p server/resources/firmware/rp2040/generated
               cp -v _fw/firmware-rp2040/generated/version.h \
-                saint_os/resources/firmware/rp2040/generated/version.h
+                server/resources/firmware/rp2040/generated/version.h
             fi
           fi
           if [[ -d _fw/firmware-teensy41 ]]; then
             find _fw/firmware-teensy41 -type f -name '*.hex' \
-              -exec cp -v {} saint_os/resources/firmware/teensy41/ \;
+              -exec cp -v {} server/resources/firmware/teensy41/ \;
           fi
           if [[ -d _fw/firmware-rpi5 ]]; then
-            cp -rv _fw/firmware-rpi5/. saint_os/resources/firmware/rpi5/
+            cp -rv _fw/firmware-rpi5/. server/resources/firmware/rpi5/
           fi
-          ls -la saint_os/resources/firmware/*/
+          # The appimage-controller artifact ships the .AppImage + the
+          # already-populated info.json (built by build-bundle.sh),
+          # so a plain dir copy is enough — no per-file fixups needed
+          # like the node firmware jobs.
+          if [[ -d _fw/appimage-controller ]]; then
+            cp -rv _fw/appimage-controller/. server/resources/firmware/controller/
+          fi
+          ls -la server/resources/firmware/*/
 
       # ------------------------------------------------------------------------
       # Download all runtime apt deps as .deb files into _debs/ so the dist
@@ -285,16 +373,16 @@ jobs:
       # ------------------------------------------------------------------------
       # Build the Vue web UI on the runner. Output is platform-independent
       # static assets — no reason to drag npm/node into the arm64 colcon
-      # container. setup.py globs saint_os/web/dist/ into the install tree,
+      # container. setup.py globs server/web/dist/ into the install tree,
       # so this has to land before the colcon step below.
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: saint_os/web/package-lock.json
+          cache-dependency-path: server/web/package-lock.json
 
       - name: Build web UI (Vite)
-        working-directory: saint_os/web
+        working-directory: server/web
         run: |
           set -eo pipefail
           if [[ -f package-lock.json ]]; then
@@ -346,18 +434,29 @@ jobs:
           cp -a /work/_ros2/opt/ros/${ROS_DISTRO}/install /opt/ros/${ROS_DISTRO}/install
           source /opt/ros/${ROS_DISTRO}/install/setup.bash
 
+          # --base-paths server: scope colcon's package discovery to the
+          # one directory that actually contains the ROS package. Kept in
+          # sync with scripts/build-local-dist.sh — see the comment there
+          # for why an unbounded crawl is unreliable.
           colcon build \
+              --base-paths server \
               --merge-install \
               --packages-select saint_os \
               --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
           CONTAINER_EOF
 
+          # Fail loud if no libraries were produced — make-dist.sh will
+          # otherwise happily package an empty install/ tree and the
+          # target's installer dies with "find: install/lib: No such
+          # file or directory".
+          [[ -d install/lib ]] \
+              || { echo "ERROR: install/lib missing after colcon build" >&2; exit 1; }
           ls install/setup.bash >/dev/null
           echo "saint_os built: $(du -sh install | cut -f1)"
 
       - name: Assemble distribution tarball
         run: |
-          .github/scripts/make-dist.sh \
+          scripts/make-dist.sh \
             "${{ needs.meta.outputs.version }}" \
             "${{ matrix.arch }}" \
             "${{ matrix.ros }}"

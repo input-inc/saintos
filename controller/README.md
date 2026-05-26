@@ -1,178 +1,237 @@
 # SAINT.OS Controller
 
-A Tauri-based controller application for SAINT.OS that captures gamepad, trigger, touch, gyro, and touchscreen input and sends control messages to the SAINT.OS server via WebSocket.
+A Tauri-based controller application for SAINT.OS that captures gamepad,
+trigger, touch, gyro, and touchscreen input and forwards it to the SAINT.OS
+server over WebSocket.
 
-## Stack
+- **Frontend:** Angular 19 + TypeScript + Tailwind CSS
+- **Backend:** Rust (Tauri 2.0)
+- **Primary platform:** Steam Deck (SteamOS) — single-file AppImage, launched
+  from Game Mode as a Non-Steam Game
+- **Secondary platforms:** macOS / Linux / Windows (developer mode only)
 
-- **Frontend**: Angular 19 + TypeScript + Tailwind CSS
-- **Backend**: Rust (Tauri 2.0)
-- **Target Platforms**: Steam Deck (SteamOS/Linux), macOS, Windows
+## How it ships
 
-## Development Setup
+The controller is built into a single self-contained `.AppImage` file by the
+linux/amd64 Docker pipeline in `controller/appimage/`. The AppImage bundles
+its own webkit2gtk-4.1, GTK, libsoup, and a small LD_PRELOAD shim that
+remaps webkit's hardcoded helper-process path to the bundled equivalent
+— see [docs/APPIMAGE_MIGRATION.md](docs/APPIMAGE_MIGRATION.md) for why
+that shim exists and what it does.
+
+End user (Deck operator) never touches a toolchain. They get a `.AppImage`
+file from one of two places:
+
+1. **Built locally**, via `controller/appimage/build-docker.sh` on a Mac
+   or Linux dev machine, then `scp`'d to the Deck.
+2. **OTA-fetched**, from a SAINT.OS server: the controller's Settings tab
+   polls `/api/firmware/controller` for newer versions and downloads the
+   replacement straight into `~/.local/share/saint-controller/`.
+
+Either way, the operator-side install is the same atomic-file-replace
+flow: write the file, `chmod +x`, drop a `.desktop` entry. No portal
+calls, no package manager, no sandbox shell game.
+
+## First-time install on a Steam Deck
+
+### 1. Get the AppImage onto the Deck
+
+From your dev machine (or wherever you have the built artifact):
+
+```bash
+scp server/resources/firmware/controller/saint_firmware_controller_*.AppImage \
+    deck@steamdeck.local:~/.local/share/saint-controller/SAINT-Controller.AppImage
+```
+
+If `~/.local/share/saint-controller/` doesn't exist yet on the Deck, `scp`
+will refuse — create it first with
+`ssh deck@steamdeck.local mkdir -p ~/.local/share/saint-controller`.
+
+### 2. Mark it executable and try a launch
+
+```bash
+ssh deck@steamdeck.local
+chmod +x ~/.local/share/saint-controller/SAINT-Controller.AppImage
+~/.local/share/saint-controller/SAINT-Controller.AppImage
+```
+
+The controller window should come up. (GTK module warnings about
+`canberra-gtk-module`, `colorreload-gtk-module`, and
+`window-decorations-gtk-module` are non-fatal noise — those are KDE-side
+modules GTK probes for and skips when missing.)
+
+### 3. Add it to Steam as a Non-Steam Game
+
+In Desktop Mode, **Steam → Games → Add a Non-Steam Game to My Library →
+BROWSE…** and pick:
+
+```
+/home/deck/.local/share/saint-controller/SAINT-Controller.AppImage
+```
+
+Rename the entry to **SAINT Controller** in the library so the
+artwork-setup script in the next step finds it.
+
+### 4. Set the Steam library artwork (optional)
+
+`set-steamdeck-artwork.py` finds the Steam shortcut by name and writes
+the bundled hero + capsule PNGs into Steam's grid dir.
+
+```bash
+~/.local/share/saint-controller/SAINT-Controller.AppImage \
+    --appimage-extract-and-run saint-controller-artwork-setup
+```
+
+Then restart Steam (`steam -shutdown && steam &`). The hero banner and
+vertical capsule should appear on the library page. Pass
+`--name-pattern "<Your Custom Name>"` if you used a different name.
+
+### 5. Launch in Game Mode
+
+Switch back to Game Mode. The controller appears under **Non-Steam →
+SAINT Controller**. Press A.
+
+On first launch, point it at the SAINT.OS server (default
+`ws://opensaint.local/api/ws`, password `12345`) and accept the prompt.
+The connection setting persists under `~/.config/saint-controller/`.
+
+## Updating
+
+### From the server's OTA flow (recommended)
+
+The controller's **Settings** tab polls `/api/firmware/controller` on the
+configured SAINT.OS server. When the server has a newer
+`saint_firmware_controller_*.AppImage` than what's running, a banner
+appears: **Update available — Install**. The flow downloads, verifies
+SHA-256, then atomically replaces
+`~/.local/share/saint-controller/SAINT-Controller.AppImage`. The Steam
+shortcut keeps working — the file path doesn't change.
+
+Operator-visible UX: click Install, wait for "Update installed. Please
+manually relaunch the SAINT Controller", relaunch from the Steam tile.
+
+### Manual replacement
+
+`scp` a newer AppImage over the existing one. `chmod +x` it. Relaunch.
+
+## Building locally
+
+The build runs in a linux/amd64 Docker container so the output is x86_64
+regardless of the host. On Apple Silicon, Docker Desktop's Rosetta
+emulation handles the architecture mismatch:
+
+```bash
+controller/appimage/build-docker.sh
+```
+
+First clean build is ~15–25 min (cargo deps + Angular). Subsequent builds
+reuse the persistent cache at `~/.cache/saint-os/controller-appimage/`
+(cargo registry, target/, node_modules, npm cache) and finish in
+minutes for small edits.
+
+Output:
+- `server/resources/firmware/controller/saint_firmware_controller_<version>-local.<sha>.AppImage`
+- `server/resources/firmware/controller/info.json` (matches the server's
+  `/api/firmware/controller` endpoint schema)
+
+CI builds the same artifact natively via `.github/workflows/dist.yml`'s
+`appimage-controller` job — same `controller/appimage/build-bundle.sh`
+runs in both places, so behavior stays in lockstep.
+
+## Developer mode (no AppImage)
+
+For tight inner-loop development on a laptop you don't need to bundle.
+Install the prereqs for your host OS and run `npm run tauri dev`.
 
 ### macOS
 
-1. **Install prerequisites:**
-   ```bash
-   # Install Rust
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source ~/.cargo/env
-
-   # Install Node.js (via Homebrew)
-   brew install node
-   ```
-
-2. **Install dependencies and run:**
-   ```bash
-   cd controller
-   npm install
-   npm run tauri dev
-   ```
-
-### Steam Deck (SteamOS)
-
-Steam Deck requires additional setup due to its read-only filesystem.
-
-1. **Switch to Desktop Mode:**
-   - Press the Steam button
-   - Select **Power** → **Switch to Desktop**
-   - Open **Konsole** from the application launcher
-
-2. **Set a password (if not already set):**
-   ```bash
-   passwd
-   ```
-
-3. **Disable read-only filesystem:**
-   ```bash
-   sudo steamos-readonly disable
-   ```
-
-4. **Initialize pacman keyring:**
-   ```bash
-   sudo pacman-key --init
-   sudo pacman-key --populate archlinux
-   sudo pacman-key --populate holo
-   ```
-
-5. **Install development dependencies:**
-   ```bash
-   sudo pacman -S --noconfirm --overwrite '*' base-devel glibc linux-api-headers webkit2gtk-4.1 gtk3 glib2 pango gdk-pixbuf2 cairo atk libayatana-appindicator librsvg openssl nodejs npm git pkg-config pcre2 sysprof harfbuzz fontconfig freetype2 fribidi libthai libdatrie expat brotli bzip2 zstd xz graphite libffi libpng libjpeg-turbo libtiff pixman libx11 libxcb libxext libxrender xorgproto libxau libxdmcp libxft libxi libxrandr libxcursor libxfixes libxcomposite libxdamage libxinerama wayland libxkbcommon libepoxy libcloudproviders mesa libglvnd
-   ```
-
-   > **Note:** SteamOS strips development files (headers, .pc files) from some packages. The `--overwrite '*'` flag ensures proper installation.
-
-6. **Set PKG_CONFIG_PATH (add to ~/.bashrc for persistence):**
-   ```bash
-   echo 'export PKG_CONFIG_PATH=/usr/lib/pkgconfig' >> ~/.bashrc
-   source ~/.bashrc
-   ```
-
-7. **Install Rust:**
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source ~/.cargo/env
-   ```
-
-8. **Clone and run:**
-   ```bash
-   mkdir -p ~/Projects
-   cd ~/Projects
-   git clone git@github.com:input-inc/saintos.git
-   cd saintos/controller
-   npm install
-   npm run tauri dev
-   ```
-
-9. **(Optional) Re-enable read-only filesystem:**
-   ```bash
-   sudo steamos-readonly enable
-   ```
-
-## Cross-Development Workflow
-
-For developing on Mac and testing on Steam Deck:
-
-### On Mac (development):
 ```bash
-# Make changes, test locally
-npm run tauri dev
+# Rust + Node
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+brew install node
 
-# Commit and push when ready
-git add -A && git commit -m "Your message" && git push
-```
-
-### On Steam Deck (testing):
-```bash
-cd ~/Projects/saintos/controller
-
-# Pull latest changes
-git pull
-
-# Run dev mode
-npm run tauri dev
-
-# Or build a release
-npm run tauri build
-```
-
-### Quick Sync Script (Steam Deck)
-
-Create `~/sync-and-run.sh`:
-```bash
-#!/bin/bash
-cd ~/Projects/saintos/controller
-git pull
+# Build & run
+cd controller
+npm install
 npm run tauri dev
 ```
 
-Then run: `~/sync-and-run.sh`
-
-## Build Commands
+### Linux (Ubuntu / Debian)
 
 ```bash
-# Development (with hot reload)
-npm run tauri dev
+sudo apt install build-essential curl wget pkg-config libssl-dev libudev-dev \
+    libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+    nodejs npm
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
 
-# Production build (current platform)
-npm run tauri build
+cd controller && npm install && npm run tauri dev
 ```
+
+### Steam Deck developer mode
+
+`npm run tauri dev` does work on the Deck if you really want it, but it
+requires disabling read-only root and installing a Rust toolchain into
+the system — which SteamOS wipes on every OS update. The AppImage flow
+is the supported path. The native-dev recipe is preserved in
+`controller/scripts/setup-steamdeck.sh` for the rare case you need it.
+
+## Build commands
+
+| Command | Effect |
+|---|---|
+| `controller/appimage/build-docker.sh` | Build the .AppImage in linux/amd64 Docker (incremental) |
+| `controller/appimage/build-docker.sh --rebuild-image` | Re-run the Dockerfile (after deps change) |
+| `controller/appimage/build-docker.sh --clean` | Wipe the persistent build cache and start fresh |
+| `npm run tauri dev` | Native dev mode (hot reload, macOS / Linux desktops) |
+| `npm run tauri build` | Native production build (host-OS bundle, not AppImage) |
+
+## Documentation
+
+- [docs/APPIMAGE_MIGRATION.md](docs/APPIMAGE_MIGRATION.md) — why the
+  build moved from flatpak to AppImage, what the path-shim does, and
+  the full migration plan
+- [docs/BINDINGS_SYSTEM.md](docs/BINDINGS_SYSTEM.md) — input → action
+  data model (binding profiles, preset panels, action types)
+- [docs/SHEETS_BINDINGS.md](docs/SHEETS_BINDINGS.md) — how to bind a
+  controller input to a routing-sheet WebSocket input on the server
+  (the end-to-end "make my joystick drive this servo" walkthrough)
 
 ## Troubleshooting
 
-### Steam Deck: "Package X was not found"
+### Build fails on Apple Silicon with `Exec format error`
 
-Ensure PKG_CONFIG_PATH is set:
+Docker Desktop's Rosetta emulation has trouble exec'ing the AppImage
+runtime stub used by linuxdeploy / appimagetool. The build pipeline
+already works around this — the Dockerfile pre-installs patched copies
+with the AppImage magic byte zeroed. If you see this error, you're
+likely running an old Docker image; pass `--rebuild-image`.
+
+### AppImage launches but the webview is blank
+
+Check `~/.local/share/saint-controller/` exists and the file there is
+the actual current build (compare with the server's `info.json`
+checksum). Tauri's release binary embeds the production frontend, so a
+blank window usually means the binary is stale relative to what the
+controller's UI expects from the server.
+
+### `npm ci` fails inside the AppImage build
+
+`package.json` and `package-lock.json` are out of sync in the source
+tree. The build falls back to `npm install` automatically so this run
+goes through, but it'll prompt every build until you fix it. On the
+host (not inside the container):
+
 ```bash
-export PKG_CONFIG_PATH=/usr/lib/pkgconfig
+cd controller && npm install
+git add package-lock.json && git commit
 ```
 
-Verify pkg-config can find the library:
-```bash
-pkg-config --modversion glib-2.0
-```
+### Controller doesn't appear in Game Mode
 
-### Steam Deck: "could not get file information for usr/include/..."
-
-The filesystem is still read-only. Run:
-```bash
-sudo steamos-readonly disable
-```
-
-Then reinstall the packages.
-
-### Steam Deck: "stdint.h: No such file or directory"
-
-Missing C library headers:
-```bash
-sudo pacman -S --noconfirm glibc linux-api-headers
-```
-
-### Steam Deck: Keyring errors with pacman
-
-Initialize the keyring:
-```bash
-sudo pacman-key --init
-sudo pacman-key --populate archlinux
-sudo pacman-key --populate holo
-```
+Verify the Steam shortcut exists
+(`grep SAINT ~/.local/share/Steam/userdata/*/config/shortcuts.vdf` —
+the file is binary but the name will be readable). If it's missing,
+re-do step 3 in Desktop Mode. Steam must be restarted after editing
+shortcuts.

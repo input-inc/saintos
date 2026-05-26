@@ -12,24 +12,28 @@
 # Usage:
 #   scripts/build-local-dist.sh [options]
 #
-# Default behavior: builds RP2040 / Teensy / Pi5 firmware locally so the
-# server tarball ships the matching node firmware. Override with one of
-# --fetch-firmware, --skip-firmware-build, or --skip-firmware below.
+# Default behavior: builds RP2040 / Teensy / Pi5 node firmware AND the
+# Steam Deck Controller .AppImage locally so the server tarball ships
+# everything needed to OTA-update every connected target. Override with
+# the firmware / controller skip flags below.
 #
 # Options:
-#   --version VER         Override version string (default: <VERSION>-local.<sha7>)
-#   --rebundle-debs       Re-download the bundled .deb cache (slow; usually unneeded)
-#   --refetch-ros2        Force re-download of the bundled ROS2 install tree
-#   --fetch-firmware      Pull the latest CI firmware artifacts from GitHub via `gh`
-#                         instead of building locally (requires `gh auth login`)
-#   --skip-firmware-build Use whatever firmware is already staged under
-#                         saint_os/resources/firmware/ — fastest server-only iteration
-#   --skip-firmware       Don't stage any firmware (smallest tarball, server-only)
-#   --skip-web-build      Skip `npm run build` — reuse whatever's already in
-#                         saint_os/web/dist/. Speeds up iteration when only
-#                         Python or firmware changed.
-#   --clean               Remove the local build dirs (_ros2/, _debs/, install/) first
-#   -h, --help            Show this help
+#   --version VER            Override version string (default: <VERSION>-local.<sha7>)
+#   --rebundle-debs          Re-download the bundled .deb cache (slow; usually unneeded)
+#   --refetch-ros2           Force re-download of the bundled ROS2 install tree
+#   --fetch-firmware         Pull the latest CI firmware + controller artifacts from
+#                            GitHub via `gh` instead of building locally (requires
+#                            `gh auth login`)
+#   --skip-firmware-build    Use whatever firmware is already staged under
+#                            server/resources/firmware/ — fastest server-only iteration
+#   --skip-firmware          Don't stage any firmware OR controller (smallest tarball)
+#   --skip-controller-build  Use whatever controller bundle is already staged; skip
+#                            the linux/amd64 Docker build (saves the QEMU/Rosetta tax)
+#   --skip-web-build         Skip `npm run build` — reuse whatever's already in
+#                            server/web/dist/. Speeds up iteration when only
+#                            Python or firmware changed.
+#   --clean                  Remove the local build dirs (_ros2/, _debs/, install/) first
+#   -h, --help               Show this help
 #
 # Requirements:
 #   - docker (with linux/arm64 platform support — buildx + qemu on Intel)
@@ -60,6 +64,7 @@ REFETCH_ROS2=0
 FETCH_FIRMWARE=0
 SKIP_FIRMWARE=0
 SKIP_FIRMWARE_BUILD=0
+SKIP_CONTROLLER_BUILD=0
 SKIP_WEB_BUILD=0
 CLEAN=0
 
@@ -71,9 +76,10 @@ while (( "$#" )); do
         --fetch-firmware) FETCH_FIRMWARE=1; shift ;;
         --skip-firmware) SKIP_FIRMWARE=1; shift ;;
         --skip-firmware-build) SKIP_FIRMWARE_BUILD=1; shift ;;
+        --skip-controller-build) SKIP_CONTROLLER_BUILD=1; shift ;;
         --skip-web-build) SKIP_WEB_BUILD=1; shift ;;
         --clean) CLEAN=1; shift ;;
-        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -96,7 +102,7 @@ fi
 
 # --- version resolution -----------------------------------------------------
 
-BASE_VERSION=$(tr -d '[:space:]' < VERSION)
+BASE_VERSION=$(tr -d '[:space:]' < server/VERSION)
 GIT_SHA=$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
 if [[ -z "$VERSION" ]]; then
     VERSION="${BASE_VERSION}-local.${GIT_SHA}"
@@ -107,8 +113,21 @@ log "Building version: ${VERSION}"
 
 if (( CLEAN )); then
     log "Cleaning local build artifacts"
-    rm -rf _ros2 _debs install dist saint_os/resources/firmware
+    # Top-level extract / colcon outputs / staged firmware
+    rm -rf _ros2 _debs install build dist server/resources/firmware
+    # Per-firmware build dirs (CMake out-of-source trees). Incremental
+    # builds normally keep these between runs; --clean is the only path
+    # that wipes them.
+    rm -rf firmware/rp2040/build
+    rm -rf firmware/teensy41/.pio
+    rm -rf firmware/rpi5/dist
 fi
+
+# colcon `build/` and `install/` at the repo root persist between runs
+# (the container bind-mounts `$PWD` to `/work`, so colcon's outputs land
+# here on the host). That's why a server-only iteration after the first
+# typically takes seconds — only the changed package gets recompiled.
+# Use `--clean` above to start fresh.
 
 # --- ROS2 install tree (cached) ---------------------------------------------
 #
@@ -169,100 +188,117 @@ fi
 # (omit firmware entirely).
 
 build_firmware_rp2040() {
-    if [[ ! -x "saint_os/firmware/rp2040/build.sh" ]]; then
+    if [[ ! -x "firmware/rp2040/build.sh" ]]; then
         warn "RP2040 build script missing — skipping"
         return
     fi
-    log "Building RP2040 hardware firmware (OTA bootloader ON)"
+    log "Building RP2040 hardware firmware (OTA bootloader ON, incremental)"
     # Build with the OTA bootloader enabled so the dist tarball contains
     # both the combined first-flash .uf2 and the body-only .bin the
     # bootloader fetches over HTTP.
     #
-    # Robust build-dir clean: macOS' Finder / Spotlight occasionally drops
-    # a fresh .DS_Store into the directory while `rm -rf` is iterating,
-    # which makes rm bail with "Directory not empty". Try once, sleep
-    # briefly to let any racing Finder write settle, try again, then
-    # mkdir. The second rm is a no-op on the happy path.
-    ( cd saint_os/firmware/rp2040 \
-        && rm -rf build 2>/dev/null || true \
-        && sleep 0.2 \
-        && rm -rf build \
-        && mkdir build && cd build \
+    # Incremental: keep build/ between runs so cmake + make only rebuild
+    # what changed. `--clean` wipes it. The previous version did
+    # `rm -rf build` every time on the theory that cmake config drift
+    # could leave stale state — but cmake is robust to re-running on an
+    # existing tree, and our config (-DSIMULATION + -DSAINT_OS_OTA_BOOTLOADER)
+    # doesn't change run-to-run unless someone edits this script.
+    ( cd firmware/rp2040 \
+        && mkdir -p build && cd build \
         && cmake -DSIMULATION=OFF -DSAINT_OS_OTA_BOOTLOADER=ON .. > /dev/null \
         && make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
                saint_node saint_ota_bootloader saint_node_combined ) \
         || { warn "RP2040 firmware build failed — leaving existing staged files"; return; }
 
-    local fw_out=saint_os/firmware/rp2040/build
-    local fw_bl=saint_os/firmware/rp2040/build/bootloader
+    local fw_out=firmware/rp2040/build
+    local fw_bl=firmware/rp2040/build/bootloader
 
     if [[ ! -f "${fw_out}/saint_node.uf2" ]]; then
         warn "RP2040 build produced no saint_node.uf2 — staged files unchanged"
         return
     fi
-    mkdir -p saint_os/resources/firmware/rp2040
+    mkdir -p server/resources/firmware/rp2040
     # App artifacts: .uf2 (legacy first-flash), .elf (debug), .bin (OTA fetch).
     find "${fw_out}" -maxdepth 1 -type f \
         \( -name 'saint_node.uf2' -o -name 'saint_node.elf' -o -name 'saint_node.bin' \) \
-        -exec cp -v {} saint_os/resources/firmware/rp2040/ \;
+        -exec cp -v {} server/resources/firmware/rp2040/ \;
     # Combined .uf2 = bootloader + app, for first-time BOOTSEL flash.
     if [[ -f "${fw_out}/saint_node_combined.uf2" ]]; then
         cp -v "${fw_out}/saint_node_combined.uf2" \
-            saint_os/resources/firmware/rp2040/
+            server/resources/firmware/rp2040/
     fi
     # Bootloader-only .uf2, for ad-hoc bootloader reflashing.
     if [[ -f "${fw_bl}/saint_ota_bootloader.uf2" ]]; then
         cp -v "${fw_bl}/saint_ota_bootloader.uf2" \
-            saint_os/resources/firmware/rp2040/
+            server/resources/firmware/rp2040/
     fi
     # version.h carries FIRMWARE_VERSION_STRING / FIRMWARE_VERSION_FULL /
     # FIRMWARE_GIT_HASH / FIRMWARE_BUILD_TIMESTAMP. The server reads it
     # to display the build version + decide whether an update is needed.
     if [[ -f "${fw_out}/generated/version.h" ]]; then
-        mkdir -p saint_os/resources/firmware/rp2040/generated
+        mkdir -p server/resources/firmware/rp2040/generated
         cp -v "${fw_out}/generated/version.h" \
-            saint_os/resources/firmware/rp2040/generated/version.h
+            server/resources/firmware/rp2040/generated/version.h
     fi
 }
 
 build_firmware_teensy41() {
-    if [[ ! -x "saint_os/firmware/teensy41/build.sh" ]]; then
+    if [[ ! -x "firmware/teensy41/build.sh" ]]; then
         warn "Teensy build script missing — skipping"
         return
     fi
     log "Building Teensy 4.1 hardware firmware (best-effort; needs PlatformIO + binutils)"
-    if ! ( cd saint_os/firmware/teensy41 && ./build.sh hw 2>&1 ); then
+    if ! ( cd firmware/teensy41 && ./build.sh hw 2>&1 ); then
         warn "Teensy firmware build failed — leaving existing staged files (run 'brew install binutils' if missing)"
         return
     fi
-    local hex=saint_os/firmware/teensy41/.pio/build/hardware/firmware.hex
+    local hex=firmware/teensy41/.pio/build/hardware/firmware.hex
     if [[ -f "$hex" ]]; then
-        mkdir -p saint_os/resources/firmware/teensy41
-        cp -v "$hex" saint_os/resources/firmware/teensy41/
+        mkdir -p server/resources/firmware/teensy41
+        cp -v "$hex" server/resources/firmware/teensy41/
     fi
 }
 
 build_firmware_rpi5() {
-    local pkg=saint_os/firmware/rpi5/scripts/package.sh
+    local pkg=firmware/rpi5/scripts/package.sh
     if [[ ! -x "$pkg" ]]; then
         warn "Pi5 package script missing — skipping"
         return
     fi
     log "Packaging Pi5 firmware"
-    ( cd saint_os/firmware/rpi5/scripts && ./package.sh "${VERSION}" ) \
+    ( cd firmware/rpi5/scripts && ./package.sh "${VERSION}" ) \
         || { warn "Pi5 firmware package failed — leaving existing staged files"; return; }
-    if [[ -d saint_os/firmware/rpi5/dist ]]; then
-        mkdir -p saint_os/resources/firmware/rpi5
-        cp -rv saint_os/firmware/rpi5/dist/. saint_os/resources/firmware/rpi5/
+    if [[ -d firmware/rpi5/dist ]]; then
+        mkdir -p server/resources/firmware/rpi5
+        cp -rv firmware/rpi5/dist/. server/resources/firmware/rpi5/
+    fi
+}
+
+# Build the Steam Deck controller .AppImage via the linux/amd64 Docker
+# wrapper. Slow on first run (Apple Silicon: Rosetta-emulated cargo
+# build, ~15-25 min cold); incremental rebuilds are fast once the
+# persistent cache warms. Failures here are non-fatal — we'd rather
+# ship a dist tarball with the previous controller bundle than fail
+# the whole build over an AppImage hiccup.
+build_controller_appimage() {
+    local driver=controller/appimage/build-docker.sh
+    if [[ ! -x "$driver" ]]; then
+        warn "Controller AppImage driver $driver missing — skipping"
+        return
+    fi
+    log "Building controller AppImage (linux/amd64 Docker; Rosetta on Apple Silicon)"
+    if ! "$driver" 2>&1; then
+        warn "Controller AppImage build failed — leaving existing staged bundle (if any)"
+        return
     fi
 }
 
 if (( SKIP_FIRMWARE )); then
-    log "Skipping firmware staging (--skip-firmware)"
-    rm -rf saint_os/resources/firmware/*
+    log "Skipping firmware + controller staging (--skip-firmware)"
+    rm -rf server/resources/firmware/*
 elif (( FETCH_FIRMWARE )); then
     command -v gh >/dev/null || die "--fetch-firmware needs the gh CLI"
-    log "Fetching latest CI firmware artifacts from main"
+    log "Fetching latest CI firmware + controller artifacts from main"
     rm -rf _fw && mkdir -p _fw
     # Pick the latest successful dist.yml run on main.
     RUN_ID=$(gh run list --workflow=dist.yml --branch=main \
@@ -270,21 +306,30 @@ elif (( FETCH_FIRMWARE )); then
     [[ -n "$RUN_ID" ]] || die "No successful dist.yml runs on main found"
     log "Using run ${RUN_ID}"
     gh run download "$RUN_ID" --dir _fw \
-        --name firmware-rp2040 --name firmware-teensy41 --name firmware-rpi5
-    mkdir -p saint_os/resources/firmware/{rp2040,teensy41,rpi5}
+        --name firmware-rp2040 --name firmware-teensy41 --name firmware-rpi5 \
+        --name appimage-controller
+    mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5,controller}
     [[ -d _fw/firmware-rp2040 ]] && find _fw/firmware-rp2040 -type f \
         \( -name '*.uf2' -o -name '*.elf' \) \
-        -exec cp {} saint_os/resources/firmware/rp2040/ \;
+        -exec cp {} server/resources/firmware/rp2040/ \;
     [[ -d _fw/firmware-teensy41 ]] && find _fw/firmware-teensy41 -type f \
-        -name '*.hex' -exec cp {} saint_os/resources/firmware/teensy41/ \;
-    [[ -d _fw/firmware-rpi5 ]] && cp -r _fw/firmware-rpi5/. saint_os/resources/firmware/rpi5/
+        -name '*.hex' -exec cp {} server/resources/firmware/teensy41/ \;
+    [[ -d _fw/firmware-rpi5 ]] && cp -r _fw/firmware-rpi5/. server/resources/firmware/rpi5/
+    # Controller artifact ships the .AppImage + info.json already shaped
+    # for the firmware-list endpoint — just copy it over verbatim.
+    [[ -d _fw/appimage-controller ]] && cp -r _fw/appimage-controller/. server/resources/firmware/controller/
 elif (( SKIP_FIRMWARE_BUILD )); then
-    log "Using existing saint_os/resources/firmware/ (--skip-firmware-build)"
+    log "Using existing server/resources/firmware/ (--skip-firmware-build)"
 else
-    log "Building firmware locally so the server tarball contains the latest"
+    log "Building firmware + controller locally so the server tarball contains the latest"
     build_firmware_rp2040
     build_firmware_teensy41
     build_firmware_rpi5
+    if (( SKIP_CONTROLLER_BUILD )); then
+        log "Skipping controller AppImage build (--skip-controller-build); using existing staged bundle if any"
+    else
+        build_controller_appimage
+    fi
 fi
 
 # --- bundled apt deps (cached) ---------------------------------------------
@@ -323,6 +368,7 @@ iw
 avahi-daemon
 libnss-mdns
 dnsmasq
+zstd
 DEB_LIST
 
 DEB_LIST_HASH=$(printf '%s' "$RUNTIME_DEB_LIST" | shasum -a 256 | awk '{print $1}' | cut -c1-12)
@@ -377,21 +423,21 @@ cp -a "$DEB_CACHE_DIR"/. _debs/
 #
 # Runs on the host. The output is platform-independent static assets, so
 # there's no reason to do this inside the arm64 Debian container. setup.py
-# globs saint_os/web/dist/ into the colcon install tree, so this step has
+# globs server/web/dist/ into the colcon install tree, so this step has
 # to complete before the colcon container runs below.
 
 if (( SKIP_WEB_BUILD )); then
-    if [[ -d saint_os/web/dist && -f saint_os/web/dist/index.html ]]; then
-        log "Reusing existing saint_os/web/dist/ (--skip-web-build)"
+    if [[ -d server/web/dist && -f server/web/dist/index.html ]]; then
+        log "Reusing existing server/web/dist/ (--skip-web-build)"
     else
-        warn "--skip-web-build set but saint_os/web/dist/ is empty —"
+        warn "--skip-web-build set but server/web/dist/ is empty —"
         warn "the tarball will ship without the Vue UI (legacy.html only)."
     fi
 else
     command -v node >/dev/null || die "node is required (or pass --skip-web-build)"
     command -v npm  >/dev/null || die "npm is required (or pass --skip-web-build)"
     log "Building web/dist via Vite"
-    ( cd saint_os/web
+    ( cd server/web
       # Use `npm ci` when a lockfile exists for reproducible installs;
       # fall back to `npm install` on first build so the tree can be set up.
       if [[ -f package-lock.json ]]; then
@@ -401,9 +447,9 @@ else
       fi
       npm run build
     )
-    [[ -f saint_os/web/dist/index.html ]] \
-        || die "Vite build did not produce saint_os/web/dist/index.html"
-    log "Web build size: $(du -sh saint_os/web/dist | cut -f1)"
+    [[ -f server/web/dist/index.html ]] \
+        || die "Vite build did not produce server/web/dist/index.html"
+    log "Web build size: $(du -sh server/web/dist | cut -f1)"
 fi
 
 # --- build saint_os against bundled ROS2 -----------------------------------
@@ -433,11 +479,25 @@ mkdir -p "/opt/ros/${ROS_DISTRO}"
 cp -a "/work/_ros2/opt/ros/${ROS_DISTRO}/install" "/opt/ros/${ROS_DISTRO}/install"
 source "/opt/ros/${ROS_DISTRO}/install/setup.bash"
 
+# --base-paths server: scope colcon's package discovery to the one
+# directory that actually contains the ROS package. Without it colcon
+# crawls the whole tree (controller/node_modules, pico-sdk, _ros2/, …)
+# and on macOS bind mounts the walk has been observed to silently
+# truncate after large subtrees like pico-sdk, ending with
+# "ignoring unknown package 'saint_os' in --packages-select" and an
+# empty install/. Explicit base-paths is also ~30s faster on a cold
+# discovery and keeps CI and local in sync.
 colcon build \
+    --base-paths server \
     --merge-install \
     --packages-select saint_os \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 
+# Fail loud if the build produced no library output — the dist tarball
+# is useless without install/lib, but make-dist.sh has been seen to
+# happily package an empty install/ tree.
+[[ -d install/lib ]] \
+    || { echo "ERROR: install/lib missing after colcon build" >&2; exit 1; }
 ls install/setup.bash >/dev/null
 echo "saint_os build size: $(du -sh install | cut -f1)"
 CONTAINER_EOF
@@ -445,9 +505,9 @@ CONTAINER_EOF
 # --- assemble tarball -------------------------------------------------------
 
 log "Assembling dist tarball"
-.github/scripts/make-dist.sh "${VERSION}" "${ARCH}" "${ROS_DISTRO}"
+scripts/make-dist.sh "${VERSION}" "${ARCH}" "${ROS_DISTRO}"
 
-TARBALL=$(ls -t dist/saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}.tar.gz 2>/dev/null | head -n1)
+TARBALL=$(ls -t dist/saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}.tar.zst 2>/dev/null | head -n1)
 [[ -f "$TARBALL" ]] || die "make-dist.sh did not produce a tarball"
 
 log "Done."
@@ -458,5 +518,8 @@ echo "  SHA-256:   $($SHA256 "$TARBALL" | cut -d' ' -f1)"
 echo
 echo "  Copy to USB and use the dashboard's 'Install from USB' flow, or:"
 echo "    scp ${TARBALL} pi@opensaint.local:/tmp/"
-echo "    ssh pi@opensaint.local 'cd /tmp && tar xzf $(basename "$TARBALL") && sudo $(basename "$TARBALL" .tar.gz)/install.sh'"
+# tar -xaf auto-detects compression from the extension — works for both
+# .tar.gz (legacy) and .tar.zst (current). Requires GNU tar 1.32+, which
+# is on every supported target.
+echo "    ssh pi@opensaint.local 'cd /tmp && tar -xaf $(basename "$TARBALL") && sudo $(basename "$TARBALL" .tar.zst)/install.sh'"
 echo

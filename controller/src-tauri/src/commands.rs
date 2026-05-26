@@ -1,23 +1,41 @@
 use crate::bindings::{BindingProfile, InputMapper};
+use crate::discovery::{DiscoveredServer, DiscoveryService};
 use crate::input::InputManager;
 use crate::protocol::{ConnectionState, WebSocketClient};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Runtime, State, WebviewWindow};
 
 pub struct AppState {
     pub input_manager: InputManager,
     pub ws_client: WebSocketClient,
     pub mapper: RwLock<InputMapper>,
+    /// mDNS discovery / resolution helper. Optional because the daemon
+    /// can fail to bind its UDP socket on locked-down hosts (the
+    /// Steam Deck Game Mode sandbox notably) — in that case we still
+    /// want the rest of the app to work, just without auto-discovery.
+    pub discovery: Option<DiscoveryService>,
 }
 
 impl AppState {
     pub fn new() -> Self {
+        // Best-effort start. If mDNS doesn't come up we log it and
+        // keep going; the operator can still connect by typing an IP
+        // address manually.
+        let discovery = match DiscoveryService::start() {
+            Ok(d) => Some(d),
+            Err(e) => {
+                log::warn!("mDNS discovery disabled: {}", e);
+                None
+            }
+        };
         Self {
             input_manager: InputManager::new(),
             ws_client: WebSocketClient::new(),
             mapper: RwLock::new(InputMapper::new()),
+            discovery,
         }
     }
 }
@@ -28,7 +46,16 @@ impl Default for AppState {
     }
 }
 
-/// Connect to the SAINT.OS server
+/// Connect to the SAINT.OS server.
+///
+/// If `host` is a `.local` hostname, we try to resolve it through our
+/// own embedded mDNS client BEFORE handing it to the WebSocket library.
+/// `tokio-tungstenite` calls getaddrinfo internally, and on Steam Deck
+/// (and many other Linux setups) getaddrinfo doesn't know how to
+/// resolve `.local` — so resolving in-process is the difference
+/// between "Connect" working and the operator having to type an IP.
+/// Non-`.local` hosts (IPs, normal DNS names) skip the resolution and
+/// flow straight through to the existing connect path.
 #[tauri::command]
 pub fn connect<R: Runtime + 'static>(
     app_handle: AppHandle<R>,
@@ -37,7 +64,41 @@ pub fn connect<R: Runtime + 'static>(
     port: u16,
     password: String,
 ) -> Result<(), String> {
-    state.ws_client.connect(app_handle, &host, port, &password)
+    let effective_host = maybe_resolve_local(&state, &host);
+    state
+        .ws_client
+        .connect(app_handle, &effective_host, port, &password)
+}
+
+/// Return the bare-IP form of `host` if it's a `.local` name that
+/// resolves through the mDNS client, else `host` unchanged. Two-second
+/// timeout — long enough for the multicast round-trip on a quiet LAN,
+/// short enough that a wrong hostname surfaces a connect error
+/// promptly instead of looking like a hang.
+fn maybe_resolve_local(state: &State<'_, Arc<AppState>>, host: &str) -> String {
+    if !host.ends_with(".local") && !host.ends_with(".local.") {
+        return host.to_string();
+    }
+    let Some(d) = state.discovery.as_ref() else {
+        log::warn!("Host '{}' looks like mDNS but discovery is disabled", host);
+        return host.to_string();
+    };
+    match d.resolve(host, Duration::from_secs(2)) {
+        Some(ip) => {
+            log::info!("Resolved '{}' → {} via embedded mDNS", host, ip);
+            ip.to_string()
+        }
+        None => {
+            // Let the existing connect path try anyway — it'll fail
+            // with a clear error in the dashboard. We don't want to
+            // pre-empt the connect attempt with our own error here
+            // because some hosts (Linux desktops with nss-mdns) will
+            // resolve through the OS even though mDNS didn't answer
+            // our query in time.
+            log::warn!("mDNS resolve for '{}' returned no answer", host);
+            host.to_string()
+        }
+    }
 }
 
 /// Disconnect from the server
@@ -111,6 +172,47 @@ pub fn discover_controllable(state: State<'_, Arc<AppState>>) -> Result<(), Stri
     state.ws_client.request_discover_controllable()
 }
 
+/// Request enumeration of ROS topics + their scalar channels. Result
+/// is delivered out-of-band via the `discovery-topic-channels` Tauri
+/// event for the bindings UI.
+#[tauri::command]
+pub fn discover_topic_channels(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_discover_topic_channels()
+}
+
+/// Push a single scalar value onto a ROS topic channel via the server.
+/// Replaces send_function_control for bindings authored against the new
+/// topic/channel picker.
+#[tauri::command]
+pub fn send_topic_channel_value(
+    state: State<'_, Arc<AppState>>,
+    topic: String,
+    channel: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    state.ws_client.send_topic_channel_value(&topic, &channel, value)
+}
+
+/// Request enumeration of WS-input slots across all routing sheets.
+/// Result is delivered on the `discovery-ws-inputs` Tauri event.
+#[tauri::command]
+pub fn discover_ws_inputs(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_discover_ws_inputs()
+}
+
+/// Push a scalar value into a sheet's WS-input slot. The bindings
+/// runtime calls this on every gamepad-axis tick that maps to a WS
+/// input — the value flows straight into the routing evaluator.
+#[tauri::command]
+pub fn send_ws_input_value(
+    state: State<'_, Arc<AppState>>,
+    sheet_id: String,
+    input_id: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    state.ws_client.send_ws_input_value(&sheet_id, &input_id, value)
+}
+
 /// Check if a gamepad is connected
 #[tauri::command]
 pub fn is_gamepad_connected(state: State<'_, Arc<AppState>>) -> bool {
@@ -138,11 +240,11 @@ pub fn activate_preset(state: State<'_, Arc<AppState>>, preset_id: String) -> Re
     // Execute the preset based on its type
     match &preset.data {
         crate::bindings::config::PresetData::Servo(servo_data) => {
-            // Send servo positions using role/function abstraction
+            // Send each servo position as a topic/channel scalar.
             for position in &servo_data.positions {
-                state.ws_client.send_function_control(
-                    &position.role,
-                    &position.function,
+                state.ws_client.send_topic_channel_value(
+                    &position.topic,
+                    &position.channel,
                     serde_json::Value::from(position.value),
                 )?;
             }
@@ -152,14 +254,14 @@ pub fn activate_preset(state: State<'_, Arc<AppState>>, preset_id: String) -> Re
             log::info!("Playing animation preset: {} ({} keyframes)", preset_id, anim_data.keyframes.len());
         }
         crate::bindings::config::PresetData::Sound(sound_data) => {
-            // Send sound play command using role/function abstraction
-            state.ws_client.send_function_control(
-                "sound",
+            // Sound presets publish onto /sound with a structured payload.
+            state.ws_client.send_topic_channel_value(
+                "/sound",
                 "play",
                 serde_json::json!({
                     "soundId": sound_data.sound_id,
                     "volume": sound_data.volume,
-                    "priority": sound_data.priority
+                    "priority": sound_data.priority,
                 }),
             )?;
         }
@@ -427,4 +529,224 @@ pub fn hide_keyboard() -> Result<(), String> {
         log::info!("hide_keyboard called on non-Linux platform (no-op)");
         Ok(())
     }
+}
+
+/// Snapshot of SAINT.OS servers the embedded mDNS browser has seen
+/// since the controller launched. Returns an empty list (not an
+/// error) when discovery is disabled — the UI treats missing results
+/// the same as "found nothing" and falls back to the typed-host form.
+#[tauri::command]
+pub fn discover_servers(state: State<'_, Arc<AppState>>) -> Vec<DiscoveredServer> {
+    match state.discovery.as_ref() {
+        Some(d) => d.snapshot(),
+        None => Vec::new(),
+    }
+}
+
+/// Resolve a `.local` hostname through the embedded mDNS client and
+/// return the dotted-IP string. Exposed for the connect form so the
+/// frontend can pre-flight a hostname and show a helpful error before
+/// the user clicks Connect. Returns Err on timeout or when discovery
+/// is disabled.
+#[tauri::command]
+pub fn resolve_host(
+    state: State<'_, Arc<AppState>>,
+    host: String,
+) -> Result<String, String> {
+    let Some(d) = state.discovery.as_ref() else {
+        return Err("mDNS discovery is disabled on this host".into());
+    };
+    match d.resolve(&host, Duration::from_secs(2)) {
+        Some(ip) => Ok(ip.to_string()),
+        None => Err(format!("No mDNS answer for '{}' within 2 s", host)),
+    }
+}
+
+/// Pick the path on disk to write a new AppImage to.
+///
+/// Prefers `$APPIMAGE` (the AppImage runtime sets this to the absolute
+/// path of the file that was launched) so OTA updates overwrite the
+/// same file the Steam shortcut points at — the shortcut keeps working
+/// across versions without us touching `shortcuts.vdf`. Falls back to a
+/// canonical XDG location when not running inside an AppImage (dev
+/// mode, `tauri dev`, raw binary), so first-time installs from inside
+/// the app still go somewhere predictable.
+fn target_appimage_path() -> Result<std::path::PathBuf, String> {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("APPIMAGE") {
+        let path = PathBuf::from(p);
+        if path.parent().is_some_and(|parent| parent.is_dir()) {
+            return Ok(path);
+        }
+    }
+    let data_home = dirs::data_dir()
+        .ok_or_else(|| "no XDG data dir available".to_string())?;
+    let install_dir = data_home.join("saint-controller");
+    std::fs::create_dir_all(&install_dir)
+        .map_err(|e| format!("mkdir {}: {}", install_dir.display(), e))?;
+    Ok(install_dir.join("SAINT-Controller.AppImage"))
+}
+
+/// Stable XDG location for install metadata (`installed.json`).
+///
+/// Distinct from the AppImage's path on purpose: the binary could land
+/// anywhere depending on `$APPIMAGE`, but `installed.json` always lives
+/// here so update-detection can find it deterministically.
+fn metadata_dir() -> Result<std::path::PathBuf, String> {
+    let data_home = dirs::data_dir()
+        .ok_or_else(|| "no XDG data dir available".to_string())?;
+    let dir = data_home.join("saint-controller");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
+    Ok(dir)
+}
+
+/// Install a freshly-downloaded controller .AppImage.
+///
+/// JS gates this behind a SHA-256 verification on the downloaded body,
+/// so the bytes we receive here are trusted. `version`, `filename`,
+/// and `checksum` come from the same `info.json` the bytes were
+/// fetched against — they get recorded into `installed.json` so the
+/// next update check can compare both fields against the server. This
+/// is what catches "same version string, different content" rebuilds:
+/// the version may not have changed but the checksum did, so an
+/// update is still offered.
+///
+/// Target path resolution: see `target_appimage_path()` — prefers
+/// `$APPIMAGE` so the file the Steam shortcut points at gets
+/// overwritten in-place. Linux's `rename(2)` is safe to apply over a
+/// busy executable; the running process keeps the old inode via its
+/// open fd, while the next launch execs the new file.
+///
+/// Returning `Ok` does NOT mean the new version is running — the
+/// operator still has to relaunch the app (Steam tile, file launcher,
+/// or running the AppImage path directly) before the new code takes
+/// effect.
+#[tauri::command]
+pub fn install_controller_update(
+    bytes: Vec<u8>,
+    version: String,
+    filename: String,
+    checksum: String,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let target = target_appimage_path()?;
+
+    // `with_extension` would replace `.AppImage` outright; we want to
+    // append, so build the staging filename manually.
+    let mut staging = target.clone();
+    let staging_name = format!("{}.new", target
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "SAINT-Controller.AppImage".to_string()));
+    staging.set_file_name(staging_name);
+
+    std::fs::write(&staging, &bytes)
+        .map_err(|e| format!("write {}: {}", staging.display(), e))?;
+    let mut perms = std::fs::metadata(&staging)
+        .map_err(|e| format!("stat {}: {}", staging.display(), e))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&staging, perms)
+        .map_err(|e| format!("chmod {}: {}", staging.display(), e))?;
+
+    std::fs::rename(&staging, &target)
+        .map_err(|e| format!("rename {} -> {}: {}", staging.display(), target.display(), e))?;
+    log::info!(
+        "Installed {} byte controller AppImage at {}",
+        bytes.len(),
+        target.display(),
+    );
+
+    // installed.json sidecar — version + checksum stored alongside in
+    // a stable XDG location, regardless of where the binary went. The
+    // update-detection logic in settings.component.ts reads this back
+    // and compares both fields.
+    let meta_path = metadata_dir()?.join("installed.json");
+    let installed_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let installed = serde_json::json!({
+        "version": version,
+        "checksum": checksum,
+        "filename": filename,
+        "installed_at_unix": installed_at_unix,
+        "path": target.to_string_lossy(),
+    });
+    std::fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(&installed).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| format!("write {}: {}", meta_path.display(), e))?;
+
+    // .desktop entry pointing at the install path. For OTA updates
+    // this just keeps the entry in sync if the path changed; for
+    // first-time installs it's how GUI launchers find the app.
+    let applications_dir = dirs::data_dir()
+        .ok_or_else(|| "no XDG data dir available".to_string())?
+        .join("applications");
+    std::fs::create_dir_all(&applications_dir)
+        .map_err(|e| format!("mkdir {}: {}", applications_dir.display(), e))?;
+    let desktop_path = applications_dir.join("saint-controller.desktop");
+    let desktop_contents = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=SAINT Controller\n\
+         Comment=Operator interface for SAINT.OS robots\n\
+         Exec={} %U\n\
+         Icon=saint-controller\n\
+         Terminal=false\n\
+         Categories=Utility;\n\
+         StartupNotify=true\n",
+        target.display()
+    );
+    std::fs::write(&desktop_path, desktop_contents)
+        .map_err(|e| format!("write {}: {}", desktop_path.display(), e))?;
+
+    log::info!("Operator must relaunch the app to pick up the new version");
+    Ok(())
+}
+
+/// Read the `installed.json` sidecar that records what was installed
+/// by the last successful `install_controller_update` call. Returns
+/// `None` when the file doesn't exist — typically a fresh install
+/// from a hand-downloaded AppImage where the in-app OTA never ran.
+/// The caller falls back to a looser version-string comparison in
+/// that case.
+#[tauri::command]
+pub fn get_installed_controller_info() -> Result<Option<serde_json::Value>, String> {
+    let meta_path = metadata_dir()?.join("installed.json");
+    if !meta_path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&meta_path)
+        .map_err(|e| format!("read {}: {}", meta_path.display(), e))?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("parse {}: {}", meta_path.display(), e))?;
+    Ok(Some(json))
+}
+
+/// Return the build identity baked into this binary at compile time.
+///
+/// `version` is the canonical SAINT version string — same format the
+/// AppImage filename uses (e.g. `0.5.0-local.d85dad7`). When the dist
+/// build script (`build-bundle.sh`) drives the build, it exports
+/// `SAINT_BUILD_VERSION` so the embedded string is byte-identical to
+/// the AppImage filename. For raw `cargo build` / `tauri dev`, build.rs
+/// reconstructs the local-channel form itself.
+///
+/// `built_at_unix` is the build's Unix timestamp; the UI converts it
+/// to the local timezone for display.
+///
+/// Both fields are compile-time constants — zero runtime cost, no
+/// filesystem reads, can't go stale relative to the running code.
+#[tauri::command]
+pub fn get_build_info() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("SAINT_BUILD_VERSION"),
+        "built_at_unix": env!("SAINT_BUILD_UNIX").parse::<u64>().unwrap_or(0),
+    })
 }

@@ -1,5 +1,6 @@
 mod bindings;
 mod commands;
+mod discovery;
 mod input;
 mod protocol;
 
@@ -52,13 +53,16 @@ pub fn run() {
                     for event in events {
                         match event {
                             ActionEvent::Command(cmd) => {
-                                // Send control command to server (logging is at trace level in client)
-                                if let Err(e) = state_for_processing.ws_client.send_function_control(
-                                    &cmd.role,
-                                    &cmd.function,
-                                    cmd.value,
-                                ) {
-                                    // Only log errors, don't spam for "not connected"
+                                use bindings::mapper::MappedCommand;
+                                let result = match cmd {
+                                    MappedCommand::Topic { topic, channel, value } =>
+                                        state_for_processing.ws_client.send_topic_channel_value(
+                                            &topic, &channel, value),
+                                    MappedCommand::WsInput { sheet_id, input_id, value } =>
+                                        state_for_processing.ws_client.send_ws_input_value(
+                                            &sheet_id, &input_id, value),
+                                };
+                                if let Err(e) = result {
                                     if !e.contains("Not connected") {
                                         log::error!("Failed to send command: {}", e);
                                     }
@@ -114,6 +118,10 @@ pub fn run() {
             commands::send_function_control,
             commands::discover_roles,
             commands::discover_controllable,
+            commands::discover_topic_channels,
+            commands::send_topic_channel_value,
+            commands::discover_ws_inputs,
+            commands::send_ws_input_value,
             commands::is_gamepad_connected,
             commands::emergency_stop,
             commands::get_gamepad_debug_info,
@@ -127,6 +135,11 @@ pub fn run() {
             commands::log_frontend,
             commands::show_keyboard,
             commands::hide_keyboard,
+            commands::discover_servers,
+            commands::resolve_host,
+            commands::install_controller_update,
+            commands::get_installed_controller_info,
+            commands::get_build_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

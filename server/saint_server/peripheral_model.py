@@ -1,0 +1,1297 @@
+"""SAINT.OS peripheral / route / widget data model.
+
+Replaces the old pin-centric `pin_config` abstraction. Peripherals are
+the primary concept now: everything attached to a node — from a single-
+pin button to a multi-channel sensor — is a peripheral that owns one or
+more physical pins and exposes a list of named channels.
+
+System-wide, Routes connect peripheral channels to logical signals and
+to dashboard Widgets. Routes and Widgets live outside any individual
+node since they cross node boundaries.
+
+The catalog of *peripheral types* (FAS100, Button, LED, NeoPixel, …) is
+defined here too. Channel definitions live with the type so the rest of
+the server can ask "what does an instance of this peripheral expose?"
+without consulting the firmware. (When a node reports its capabilities
+the firmware can declare additional/built-in peripheral types; those
+get merged into this catalog at runtime.)
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Peripheral catalog
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# pin_kind values:
+#   "gpio"     — one GPIO pin (in or out, depending on direction)
+#   "pwm"      — one PWM-capable pin
+#   "adc"      — one ADC-capable pin
+#   "uart"     — a UART pin pair (tx, rx)
+#   "i2c"      — an I2C pin pair (sda, scl)
+#   "builtin"  — the peripheral is hardwired on the board; pins are fixed
+#
+# channel direction:
+#   "in"  — peripheral produces this value (sensor reading)
+#   "out" — peripheral consumes this value (motor command, LED state)
+#
+# capability:
+#   short type tag used by routes to verify that a source-and-sink pair
+#   are compatible. Compared verbatim today; could grow into a richer
+#   type system later (analog/digital, value ranges, etc.).
+
+
+@dataclass
+class PeripheralChannel:
+    """One named input or output of a peripheral type."""
+    id: str
+    display: str
+    dir: str           # "in" | "out"
+    cap: str           # capability tag
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class PeripheralTypeParam:
+    """A configurable parameter on a peripheral type."""
+    id: str
+    label: str
+    type: str          # "bool" | "int" | "float" | "string" | "gpio"
+                       # "gpio" tells the UI to render this param as a
+                       # dropdown of the controller's GPIO pins, filtered
+                       # to those not already claimed by another
+                       # peripheral. Stored as an integer on the wire,
+                       # so the firmware-side parser stays unchanged.
+    default: Any
+    min: Optional[float] = None
+    max: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        # Drop unset min/max so the JSON is compact.
+        if d["min"] is None:
+            d.pop("min")
+        if d["max"] is None:
+            d.pop("max")
+        return d
+
+
+@dataclass
+class PeripheralType:
+    """Static metadata about a kind of peripheral."""
+    id: str
+    label: str
+    description: str
+    pin_kind: str
+    channels: List[PeripheralChannel] = field(default_factory=list)
+    params: List[PeripheralTypeParam] = field(default_factory=list)
+    # Built-in types are automatically instantiated when a node is adopted
+    # and can't be removed by the operator. Examples: the Feather's
+    # onboard NeoPixel.
+    builtin_only: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "description": self.description,
+            "pin_kind": self.pin_kind,
+            "channels": [c.to_dict() for c in self.channels],
+            "params": [p.to_dict() for p in self.params],
+            "builtin_only": self.builtin_only,
+        }
+
+
+# Default catalog. Mirrors the firmware's runtime drivers + adds generic
+# single-pin peripherals (Button, LED, AnalogInput, Servo) plus built-in
+# board peripherals (NeoPixel).
+DEFAULT_CATALOG: Dict[str, PeripheralType] = {
+    "button": PeripheralType(
+        id="button", label="Button",
+        description="A momentary or latching switch on a GPIO pin.",
+        pin_kind="gpio",
+        channels=[PeripheralChannel("pressed", "Pressed", "in", "digital_in")],
+        params=[
+            PeripheralTypeParam("pull_up",     "Pull-up resistor",      "bool", True),
+            PeripheralTypeParam("active_low",  "Active low",            "bool", True),
+            PeripheralTypeParam("debounce_ms", "Debounce (ms)",         "int",  20, min=0, max=500),
+        ],
+    ),
+    "led": PeripheralType(
+        id="led", label="LED",
+        description="A digital output on a GPIO pin.",
+        pin_kind="gpio",
+        channels=[PeripheralChannel("on", "On", "out", "digital_out")],
+        params=[
+            PeripheralTypeParam("active_low", "Active low", "bool", False),
+            PeripheralTypeParam("initial_on", "Initial on", "bool", False),
+        ],
+    ),
+    "analog_in": PeripheralType(
+        id="analog_in", label="Analog Input",
+        description="Voltage reading on an ADC pin.",
+        pin_kind="adc",
+        channels=[PeripheralChannel("voltage", "Voltage", "in", "analog")],
+        params=[
+            PeripheralTypeParam("divider_ratio", "Voltage divider ratio", "float", 1.0),
+        ],
+    ),
+    "servo": PeripheralType(
+        id="servo", label="Servo (PWM)",
+        description="Hobby servo on a PWM-capable pin.",
+        pin_kind="pwm",
+        channels=[PeripheralChannel("angle", "Angle", "out", "analog")],
+        params=[
+            PeripheralTypeParam("min_pulse_us", "Min pulse (µs)", "int",  500, min=100, max=3000),
+            PeripheralTypeParam("max_pulse_us", "Max pulse (µs)", "int", 2500, min=100, max=3000),
+        ],
+    ),
+    "neopixel": PeripheralType(
+        id="neopixel", label="NeoPixel (RGB)",
+        description="WS2812 RGB LED, typically hardwired on the board.",
+        pin_kind="builtin",
+        channels=[
+            PeripheralChannel("color",      "Color (RGB)", "out", "rgb"),
+            PeripheralChannel("brightness", "Brightness",  "out", "analog"),
+        ],
+        params=[
+            PeripheralTypeParam("default_color", "Idle color (hex)", "string", "#1e293b"),
+        ],
+        builtin_only=True,
+    ),
+    "fas100": PeripheralType(
+        id="fas100", label="FAS100",
+        description="FrSky FAS100 ADV current/voltage/temperature sensor over S.Port UART.",
+        pin_kind="uart",
+        channels=[
+            PeripheralChannel("amps",  "Current (A)", "in", "analog"),
+            PeripheralChannel("volts", "Voltage (V)", "in", "analog"),
+            PeripheralChannel("temp1", "Temp 1 (°C)", "in", "analog"),
+            PeripheralChannel("temp2", "Temp 2 (°C)", "in", "analog"),
+        ],
+        params=[
+            PeripheralTypeParam("poll_interval_ms", "Poll interval (ms)", "int", 50, min=20, max=1000),
+        ],
+    ),
+    "syren": PeripheralType(
+        id="syren", label="SyRen Motor",
+        description="Sabertooth SyRen motor controller over packetized serial.",
+        pin_kind="uart",
+        channels=[PeripheralChannel("motor", "Motor power", "out", "analog")],
+        params=[
+            PeripheralTypeParam("address",  "Address",  "int", 128, min=128, max=135),
+            PeripheralTypeParam("deadband", "Deadband", "int",   3, min=0,   max=127),
+        ],
+    ),
+    "roboclaw": PeripheralType(
+        id="roboclaw", label="RoboClaw Motor",
+        description="RoboClaw Solo 60A motor controller with telemetry.",
+        pin_kind="uart",
+        channels=[
+            PeripheralChannel("motor",   "Motor duty",     "out", "analog"),
+            PeripheralChannel("encoder", "Encoder",        "in",  "analog"),
+            PeripheralChannel("voltage", "Bus voltage",    "in",  "analog"),
+            PeripheralChannel("current", "Motor current",  "in",  "analog"),
+            PeripheralChannel("temp",    "Temperature",    "in",  "analog"),
+        ],
+        params=[
+            PeripheralTypeParam("address",        "Address",         "int", 128, min=128, max=135),
+            PeripheralTypeParam("deadband",       "Deadband",        "int",   0, min=0,   max=127),
+            PeripheralTypeParam("max_current_ma", "Max current (mA)","int",   0, min=0,   max=60000),
+            # Optional GPIO the PCB wires from this MCU to the
+            # RoboClaw's S3 (E-stop) input. When set (1..29), the
+            # firmware drives the pin LOW (deasserted) the moment
+            # the peripheral config is applied or restored from
+            # flash, so a floating boot-time signal can't trip the
+            # controller's latching S3 E-stop input. Leave at 0
+            # (the default) on PCBs that don't route an E-stop wire
+            # — in that case the operator must configure S3 to a
+            # non-latching mode on the RoboClaw side or the
+            # controller will silently lock out motor commands the
+            # first time the MCU resets.
+            PeripheralTypeParam("estop_pin", "E-stop pin", "gpio", 0, min=0, max=29),
+            # When True, firmware uses a PIO-based UART so the TX/RX
+            # GPIOs can be any pin (not the silicon-fixed UART0
+            # GP0/GP1 pair). Set this on custom PCBs where the wires
+            # to the controller's S1/S2 are routed such that the
+            # MCU's expected TX pin is physically wired to the
+            # controller's TX (and vice versa) — the hardware UART
+            # can't swap directions; PIO can. Default False: use the
+            # hardware UART exactly as before.
+            PeripheralTypeParam("uart_swap", "Use PIO UART (swap TX/RX)", "bool", False),
+            # When true, positive duty commands drive the motor in
+            # reverse (and vice versa). Use when the motor wiring or
+            # mechanical mounting inverts the operator-intended
+            # direction and physically re-wiring is inconvenient.
+            # Inversion happens at the wire level in the firmware;
+            # encoder readings are NOT auto-inverted.
+            PeripheralTypeParam("invert_direction", "Invert motor direction", "bool", False),
+        ],
+    ),
+    "pathfinder_bms": PeripheralType(
+        id="pathfinder_bms", label="Pathfinder BMS",
+        description="JBD-compatible battery management system.",
+        pin_kind="uart",
+        channels=[
+            PeripheralChannel("pack_voltage", "Pack voltage",   "in", "analog"),
+            PeripheralChannel("current",      "Current",        "in", "analog"),
+            PeripheralChannel("soc",          "State of charge","in", "analog"),
+            PeripheralChannel("temp_1",       "Temp 1",         "in", "analog"),
+            PeripheralChannel("temp_2",       "Temp 2",         "in", "analog"),
+        ],
+        params=[
+            PeripheralTypeParam("poll_interval_ms", "Poll interval (ms)", "int", 1000, min=100, max=10000),
+        ],
+    ),
+    "system_monitor": PeripheralType(
+        id="system_monitor", label="System Monitor",
+        description="Host controller telemetry: CPU/memory usage, temperature, throttle status, uptime, WiFi link health.",
+        pin_kind="builtin",
+        channels=[
+            PeripheralChannel("cpu_usage", "CPU usage (%)",    "in", "analog"),
+            PeripheralChannel("cpu_temp",  "CPU temp (°C)",    "in", "analog"),
+            PeripheralChannel("mem_usage", "Memory usage (%)", "in", "analog"),
+            PeripheralChannel("throttle",  "Throttled",        "in", "digital_in"),
+            PeripheralChannel("uptime",    "Uptime (s)",       "in", "analog"),
+            # WiFi link health — populated from `iw dev` + /proc/net/wireless
+            # when the host has a wireless interface. See wifi_stats.py
+            # for the data sources and what each number means.
+            PeripheralChannel("wifi_signal",    "WiFi signal (dBm)",     "in", "analog"),
+            PeripheralChannel("wifi_retry_pct", "WiFi tx retry (%)",     "in", "analog"),
+            PeripheralChannel("wifi_noise",     "WiFi noise floor (dBm)", "in", "analog"),
+            PeripheralChannel("wifi_bitrate",   "WiFi tx bitrate (Mbps)", "in", "analog"),
+        ],
+        params=[],
+        builtin_only=True,
+    ),
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-node state
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class PeripheralInstance:
+    """One peripheral attached to a specific node."""
+    id: str
+    type: str
+    label: str
+    pins: Dict[str, int] = field(default_factory=dict)
+    params: Dict[str, Any] = field(default_factory=dict)
+    builtin: bool = False
+    log_enabled: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "PeripheralInstance":
+        return cls(
+            id=d["id"],
+            type=d["type"],
+            label=d.get("label", d["id"]),
+            pins=dict(d.get("pins", {})),
+            params=dict(d.get("params", {})),
+            builtin=bool(d.get("builtin", False)),
+            log_enabled=bool(d.get("log_enabled", False)),
+        )
+
+    def channels(self, catalog: Dict[str, PeripheralType]) -> List[PeripheralChannel]:
+        t = catalog.get(self.type)
+        return list(t.channels) if t else []
+
+    def claimed_gpios(self, catalog: Dict[str, PeripheralType]) -> Dict[str, int]:
+        """All GPIO numbers this peripheral claims, by source label.
+
+        Combines `pins` (UART tx/rx, single-gpio peripherals, etc.) with
+        any `params` whose schema declares type == "gpio" — those are
+        configurable pin assignments stored alongside the peripheral's
+        other parameters (e.g. RoboClaw's `estop_pin`). A param value of
+        0 is the "no pin assigned" sentinel and is excluded.
+
+        Both `detect_pin_conflicts` (here) and the dashboard's pin-
+        availability widget need to see GPIO-typed params or they'd let
+        the operator double-claim the same pin (e.g. RoboClaw's E-stop +
+        a Button on the same GPIO) without warning.
+        """
+        out: Dict[str, int] = {}
+        for k, v in self.pins.items():
+            if isinstance(v, int) and v > 0:
+                out[k] = v
+        t = catalog.get(self.type)
+        if t is None:
+            return out
+        for p in t.params:
+            if p.type != "gpio":
+                continue
+            v = self.params.get(p.id)
+            if isinstance(v, int) and v > 0:
+                out[p.id] = v
+        return out
+
+
+@dataclass
+class NodePeripheralConfig:
+    """Per-node config: just the list of peripherals attached.
+
+    Version increments on any change, used to detect drift between the
+    server's view and what the node has running. sync_status reports
+    whether the firmware is currently running the same config.
+    """
+    version: int = 0
+    peripherals: List[PeripheralInstance] = field(default_factory=list)
+    sync_status: str = "unknown"   # unknown | pending | synced | error
+    last_synced: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version": self.version,
+            "peripherals": [p.to_dict() for p in self.peripherals],
+            "sync_status": self.sync_status,
+            "last_synced": self.last_synced,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "NodePeripheralConfig":
+        return cls(
+            version=int(d.get("version", 0)),
+            peripherals=[PeripheralInstance.from_dict(p) for p in d.get("peripherals", [])],
+            sync_status=d.get("sync_status", "unknown"),
+            last_synced=d.get("last_synced"),
+        )
+
+    def get(self, peripheral_id: str) -> Optional[PeripheralInstance]:
+        for p in self.peripherals:
+            if p.id == peripheral_id:
+                return p
+        return None
+
+    def upsert(self, peripheral: PeripheralInstance) -> None:
+        for i, existing in enumerate(self.peripherals):
+            if existing.id == peripheral.id:
+                self.peripherals[i] = peripheral
+                self.version += 1
+                self.sync_status = "pending"
+                return
+        self.peripherals.append(peripheral)
+        self.version += 1
+        self.sync_status = "pending"
+
+    def remove(self, peripheral_id: str) -> bool:
+        before = len(self.peripherals)
+        self.peripherals = [p for p in self.peripherals
+                            if not (p.id == peripheral_id and not p.builtin)]
+        if len(self.peripherals) < before:
+            self.version += 1
+            self.sync_status = "pending"
+            return True
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# System-wide routing: per-node sheets + dashboard widgets
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# A routing sheet is owned by a controller node and contains everything
+# needed to compute that node's peripheral inputs from external sources.
+# Each sheet holds:
+#
+#   - InputNodes      ROS topic sources (topic + scalar field)
+#   - OperatorNodes   server-evaluated transforms (Max/Min/Clamp/Lerp/…)
+#   - Wires           edges from (input|operator) output → (operator pin |
+#                                                            peripheral channel |
+#                                                            widget input)
+#
+# Sheets are hard-scoped to one controller node: if the same topic feeds
+# two controllers, it appears as an InputNode on each sheet. The special
+# pseudo-sheet "dashboard" hosts the widget sinks. Endpoint kinds are:
+#
+#   kind == "input":      parts = [input_id]            (ROS-topic input; pin always "out")
+#   kind == "ws_input":   parts = [ws_input_id]         (controller-driven input; pin always "out")
+#   kind == "operator":   parts = [op_id, pin]          (pin = "out" or input id)
+#   kind == "output":     parts = [output_id]           (ROS-topic output; valid as sink and tap source)
+#   kind == "peripheral": parts = [node_id, peripheral_id, channel_id]
+#   kind == "widget":     parts = [widget_id, input_id]
+
+
+@dataclass
+class RouteEndpoint:
+    """One end of a wire."""
+    kind: str
+    parts: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "parts": list(self.parts)}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "RouteEndpoint":
+        return cls(kind=d["kind"], parts=list(d.get("parts", [])))
+
+    def describe(self) -> str:
+        return f"{self.kind}:{'/'.join(self.parts)}"
+
+
+@dataclass
+class InputNode:
+    """A ROS topic source on a sheet.
+
+    `topic` is the canonical endpoint path (e.g. "/joy", "/cmd_vel"),
+    `field` is a flattened scalar path into the message (e.g. "axes[0]",
+    "linear.x", "value"). The evaluator subscribes once per (topic, field)
+    pair across all sheets that reference it.
+    """
+    id: str
+    topic: str
+    field: str
+    label: str = ""
+    position: Tuple[int, int] = (0, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "topic": self.topic,
+            "field": self.field,
+            "label": self.label,
+            "position": list(self.position),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "InputNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            topic=d["topic"],
+            field=d.get("field", "value"),
+            label=d.get("label", ""),
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+        )
+
+
+@dataclass
+class WebSocketInputNode:
+    """A controller-driven input on a sheet (no ROS topic involved).
+
+    Distinct from InputNode (which subscribes to a real ROS topic). A
+    controller binding addresses this node by (sheet_id, input_id) over
+    the websocket and the value flows straight into the routing
+    evaluator's source cache. Used for joystick/gamepad axes whose only
+    purpose is to drive operators and peripheral channels — no need to
+    round-trip through ROS or pretend they're state topics.
+
+    The ``kind`` field distinguishes two flavors of WS input:
+
+      * ``"command"`` — a target a controller binding writes TO. Default
+        for operator-added inputs; what the binding picker should
+        offer. These are the actual "drive this motor" slots.
+      * ``"state"`` — an echo node, produced by the migration of
+        state-only ROS endpoints (``endpoints.yaml`` entries with
+        ``state_type`` and no ``command_type``). These exist so wires
+        downstream can still tap the value, but binding a CONTROLLER
+        to one doesn't make sense — controllers don't produce state,
+        sensors do. The binding picker filters these out.
+
+    Default ``"command"`` so anything added in code paths that don't
+    set it explicitly behaves as before (operator-added inputs).
+    """
+    id: str
+    label: str = ""
+    position: Tuple[int, int] = (0, 0)
+    kind: str = "command"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "position": list(self.position),
+            "kind": self.kind,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WebSocketInputNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            label=d.get("label", ""),
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+            # Default "command" preserves the meaning of existing
+            # persisted sheets that pre-date the kind field.
+            kind=d.get("kind", "command"),
+        )
+
+
+@dataclass
+class OutputNode:
+    """A ROS topic sink that also taps the value as a wire source.
+
+    A wire feeding this node's `value` sink gets published onto
+    `topic.field` via the bridge's set_topic_channel buffer. The same
+    value is exposed as a wire *source* (kind="output", parts=[id]) so
+    the sheet can fan the same value onward to a peripheral — letting a
+    single sheet describe controller-input → math → ROS-publish →
+    peripheral end to end.
+    """
+    id: str
+    topic: str
+    field: str
+    label: str = ""
+    position: Tuple[int, int] = (0, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "topic": self.topic,
+            "field": self.field,
+            "label": self.label,
+            "position": list(self.position),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "OutputNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            topic=d["topic"],
+            field=d.get("field", "value"),
+            label=d.get("label", ""),
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+        )
+
+
+@dataclass
+class OperatorNode:
+    """A server-evaluated transform on a sheet.
+
+    `op` selects an entry from OPERATOR_CATALOG. `params` are static
+    config (e.g. the curve exponent). `defaults` are per-input fallback
+    constants used when no wire is connected to that input pin — this is
+    how the operator lets the operator type in literal min/max values
+    directly on the node card.
+    """
+    id: str
+    op: str
+    label: str = ""
+    params: Dict[str, Any] = field(default_factory=dict)
+    defaults: Dict[str, float] = field(default_factory=dict)
+    position: Tuple[int, int] = (0, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "op": self.op,
+            "label": self.label,
+            "params": dict(self.params),
+            "defaults": {k: float(v) for k, v in self.defaults.items()},
+            "position": list(self.position),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "OperatorNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            op=d["op"],
+            label=d.get("label", ""),
+            params=dict(d.get("params", {})),
+            defaults={k: float(v) for k, v in (d.get("defaults") or {}).items()},
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+        )
+
+
+@dataclass
+class Wire:
+    """One edge on a sheet — a value flowing from source to sink."""
+    id: str
+    source: RouteEndpoint
+    sink: RouteEndpoint
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "source": self.source.to_dict(),
+            "sink": self.sink.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Wire":
+        return cls(
+            id=d["id"],
+            source=RouteEndpoint.from_dict(d["source"]),
+            sink=RouteEndpoint.from_dict(d["sink"]),
+        )
+
+
+# Sentinel used by the legacy widgets-only sheet; kept so old yaml files
+# loaded by from_dict can be migrated (widgets moved onto a real sheet),
+# but no longer exposed in the routing UI.
+DASHBOARD_SHEET_ID = "_dashboard"
+
+
+@dataclass
+class NodeSheet:
+    """All routing state owned by one controller node.
+
+    A sheet contains the ROS topic Inputs, Operator transforms, Output
+    topic publishers, Widget sinks, and the Wires connecting them. Each
+    sheet is hard-scoped to one controller node — the peripherals
+    visible on the canvas are exactly that node's peripherals, and
+    widgets here are surfaced on that controller's dashboard view.
+    """
+    node_id: str
+    inputs: List[InputNode] = field(default_factory=list)
+    ws_inputs: List[WebSocketInputNode] = field(default_factory=list)
+    outputs: List["OutputNode"] = field(default_factory=list)
+    operators: List[OperatorNode] = field(default_factory=list)
+    widgets: List["WidgetInstance"] = field(default_factory=list)
+    wires: List[Wire] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "inputs": [n.to_dict() for n in self.inputs],
+            "ws_inputs": [n.to_dict() for n in self.ws_inputs],
+            "outputs": [n.to_dict() for n in self.outputs],
+            "operators": [n.to_dict() for n in self.operators],
+            "widgets": [w.to_dict() for w in self.widgets],
+            "wires": [w.to_dict() for w in self.wires],
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "NodeSheet":
+        # Forward reference: WidgetInstance is declared below.
+        return cls(
+            node_id=d["node_id"],
+            inputs=[InputNode.from_dict(x) for x in d.get("inputs", [])],
+            ws_inputs=[WebSocketInputNode.from_dict(x) for x in d.get("ws_inputs", [])],
+            outputs=[OutputNode.from_dict(x) for x in d.get("outputs", [])],
+            operators=[OperatorNode.from_dict(x) for x in d.get("operators", [])],
+            widgets=[WidgetInstance.from_dict(x) for x in d.get("widgets", [])],
+            wires=[Wire.from_dict(x) for x in d.get("wires", [])],
+        )
+
+    def _next_id(self, prefix: str, existing_ids) -> str:
+        n = 1
+        while f"{prefix}{n}" in existing_ids:
+            n += 1
+        return f"{prefix}{n}"
+
+    def add_input(self, topic: str, field: str, label: str = "",
+                  position: Tuple[int, int] = (0, 0)) -> InputNode:
+        existing = {n.id for n in self.inputs}
+        node = InputNode(
+            id=self._next_id("in", existing),
+            topic=topic, field=field,
+            label=label or f"{topic}{('.' + field) if field else ''}",
+            position=position,
+        )
+        self.inputs.append(node)
+        return node
+
+    def add_ws_input(self, label: str = "",
+                     position: Tuple[int, int] = (0, 0)) -> WebSocketInputNode:
+        existing = {n.id for n in self.ws_inputs}
+        node = WebSocketInputNode(
+            id=self._next_id("wsin", existing),
+            label=label,
+            position=position,
+        )
+        self.ws_inputs.append(node)
+        return node
+
+    def add_output(self, topic: str, field: str, label: str = "",
+                   position: Tuple[int, int] = (0, 0)) -> OutputNode:
+        existing = {n.id for n in self.outputs}
+        node = OutputNode(
+            id=self._next_id("out", existing),
+            topic=topic, field=field,
+            label=label or f"{topic}{('.' + field) if field else ''}",
+            position=position,
+        )
+        self.outputs.append(node)
+        return node
+
+    def add_operator(self, op: str, label: str = "",
+                     params: Optional[Dict[str, Any]] = None,
+                     defaults: Optional[Dict[str, float]] = None,
+                     position: Tuple[int, int] = (0, 0)) -> OperatorNode:
+        existing = {n.id for n in self.operators}
+        node = OperatorNode(
+            id=self._next_id("op", existing),
+            op=op, label=label,
+            params=dict(params or {}),
+            defaults=dict(defaults or {}),
+            position=position,
+        )
+        self.operators.append(node)
+        return node
+
+    def add_widget(self, type_id: str, label: str,
+                   position: Tuple[int, int] = (0, 0),
+                   params: Optional[Dict[str, Any]] = None,
+                   extra_existing_ids: Optional[Set[str]] = None) -> "WidgetInstance":
+        # Widget IDs must be unique GLOBALLY across all sheets, not just
+        # within this sheet — the dashboard's WidgetsDashboard keys its
+        # DOM elements, _lastValues map, and history map by bare widget
+        # ID, and its wire-lookup helper (`_findWidgetSheet`) treats the
+        # first sheet containing a given widget ID as authoritative.
+        # Two sheets each adding their first roboclaw_monitor would
+        # otherwise both pick "roboclaw_monitor-1" and render onto the
+        # same DOM nodes. State manager passes the set of widget IDs
+        # already in use elsewhere via extra_existing_ids.
+        existing = {w.id for w in self.widgets}
+        if extra_existing_ids:
+            existing = existing | extra_existing_ids
+        n = sum(1 for w in self.widgets if w.type == type_id) + 1
+        while f"{type_id}-{n}" in existing:
+            n += 1
+        widget = WidgetInstance(id=f"{type_id}-{n}", type=type_id,
+                                label=label or type_id,
+                                position=position, params=dict(params or {}))
+        self.widgets.append(widget)
+        return widget
+
+    def add_wire(self, source: RouteEndpoint, sink: RouteEndpoint) -> Wire:
+        existing = {w.id for w in self.wires}
+        # Replace any existing wire feeding the same sink — sinks accept
+        # one value, last writer wins.
+        self.wires = [w for w in self.wires
+                      if not (w.sink.kind == sink.kind and w.sink.parts == sink.parts)]
+        wire = Wire(id=self._next_id("w", existing), source=source, sink=sink)
+        self.wires.append(wire)
+        return wire
+
+    def remove_input(self, input_id: str) -> bool:
+        before = len(self.inputs)
+        self.inputs = [n for n in self.inputs if n.id != input_id]
+        if len(self.inputs) == before:
+            return False
+        self.wires = [w for w in self.wires
+                      if not (w.source.kind == "input" and w.source.parts and w.source.parts[0] == input_id)]
+        return True
+
+    def remove_ws_input(self, input_id: str) -> bool:
+        before = len(self.ws_inputs)
+        self.ws_inputs = [n for n in self.ws_inputs if n.id != input_id]
+        if len(self.ws_inputs) == before:
+            return False
+        self.wires = [w for w in self.wires
+                      if not (w.source.kind == "ws_input"
+                              and w.source.parts and w.source.parts[0] == input_id)]
+        return True
+
+    def remove_output(self, output_id: str) -> bool:
+        before = len(self.outputs)
+        self.outputs = [n for n in self.outputs if n.id != output_id]
+        if len(self.outputs) == before:
+            return False
+        # Output participates as both sink (publish) and source (tap);
+        # drop wires that reference it on either end.
+        self.wires = [
+            w for w in self.wires
+            if not ((w.sink.kind == "output" and w.sink.parts and w.sink.parts[0] == output_id)
+                    or (w.source.kind == "output" and w.source.parts and w.source.parts[0] == output_id))
+        ]
+        return True
+
+    def remove_operator(self, op_id: str) -> bool:
+        before = len(self.operators)
+        self.operators = [n for n in self.operators if n.id != op_id]
+        if len(self.operators) == before:
+            return False
+        self.wires = [
+            w for w in self.wires
+            if not ((w.source.kind == "operator" and w.source.parts and w.source.parts[0] == op_id)
+                    or (w.sink.kind == "operator" and w.sink.parts and w.sink.parts[0] == op_id))
+        ]
+        return True
+
+    def remove_widget(self, widget_id: str) -> bool:
+        before = len(self.widgets)
+        self.widgets = [w for w in self.widgets if w.id != widget_id]
+        if len(self.widgets) == before:
+            return False
+        self.wires = [
+            w for w in self.wires
+            if not (w.sink.kind == "widget" and w.sink.parts and w.sink.parts[0] == widget_id)
+        ]
+        return True
+
+    def remove_wire(self, wire_id: str) -> bool:
+        before = len(self.wires)
+        self.wires = [w for w in self.wires if w.id != wire_id]
+        return len(self.wires) < before
+
+    def find_input(self, input_id: str) -> Optional[InputNode]:
+        return next((n for n in self.inputs if n.id == input_id), None)
+
+    def find_ws_input(self, input_id: str) -> Optional[WebSocketInputNode]:
+        return next((n for n in self.ws_inputs if n.id == input_id), None)
+
+    def find_output(self, output_id: str) -> Optional[OutputNode]:
+        return next((n for n in self.outputs if n.id == output_id), None)
+
+    def find_operator(self, op_id: str) -> Optional[OperatorNode]:
+        return next((n for n in self.operators if n.id == op_id), None)
+
+    def find_widget(self, widget_id: str) -> Optional["WidgetInstance"]:
+        return next((w for w in self.widgets if w.id == widget_id), None)
+
+
+# ── Operator catalog ──────────────────────────────────────────────────
+
+
+@dataclass
+class OperatorInputSpec:
+    id: str
+    label: str
+    default: float = 0.0
+
+
+@dataclass
+class OperatorParamSpec:
+    id: str
+    label: str
+    type: str          # "float" | "int" | "bool"
+    default: Any
+
+
+@dataclass
+class OperatorType:
+    id: str
+    label: str
+    description: str
+    inputs: List[OperatorInputSpec]
+    params: List[OperatorParamSpec] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "description": self.description,
+            "inputs": [asdict(i) for i in self.inputs],
+            "params": [asdict(p) for p in self.params],
+        }
+
+
+# Catalog of pure float→float operators. The evaluator computes each
+# operator's single output value from its input pins; inputs without a
+# wired source fall back to the OperatorNode.defaults map, or to the
+# spec default if absent.
+OPERATOR_CATALOG: Dict[str, OperatorType] = {
+    "add": OperatorType(
+        "add", "Add", "out = a + b",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "subtract": OperatorType(
+        "subtract", "Subtract", "out = a − b",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "multiply": OperatorType(
+        "multiply", "Multiply", "out = a × b",
+        inputs=[OperatorInputSpec("a", "A", 1.0), OperatorInputSpec("b", "B", 1.0)],
+    ),
+    "scale": OperatorType(
+        "scale", "Scale", "out = value × factor",
+        inputs=[OperatorInputSpec("value", "Value"), OperatorInputSpec("factor", "Factor", 1.0)],
+    ),
+    "max": OperatorType(
+        "max", "Max", "out = max(a, b)",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "min": OperatorType(
+        "min", "Min", "out = min(a, b)",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "clamp": OperatorType(
+        "clamp", "Clamp", "Clamp value into [min, max].",
+        inputs=[
+            OperatorInputSpec("value", "Value"),
+            OperatorInputSpec("min",   "Min", -1.0),
+            OperatorInputSpec("max",   "Max",  1.0),
+        ],
+    ),
+    "map_range": OperatorType(
+        "map_range", "Map Range",
+        "Linearly remap value from [in_min, in_max] to [out_min, out_max].",
+        inputs=[
+            OperatorInputSpec("value",   "Value"),
+            OperatorInputSpec("in_min",  "In Min", -1.0),
+            OperatorInputSpec("in_max",  "In Max",  1.0),
+            OperatorInputSpec("out_min", "Out Min", 0.0),
+            OperatorInputSpec("out_max", "Out Max", 1.0),
+        ],
+        params=[OperatorParamSpec("clamp_output", "Clamp output to range", "bool", True)],
+    ),
+    "lerp": OperatorType(
+        "lerp", "Lerp", "out = a + (b − a) × t",
+        inputs=[
+            OperatorInputSpec("a", "A"),
+            OperatorInputSpec("b", "B"),
+            OperatorInputSpec("t", "T", 0.5),
+        ],
+    ),
+    "invert": OperatorType(
+        "invert", "Invert", "out = −value",
+        inputs=[OperatorInputSpec("value", "Value")],
+    ),
+    "abs": OperatorType(
+        "abs", "Absolute", "out = |value|",
+        inputs=[OperatorInputSpec("value", "Value")],
+    ),
+    "deadband": OperatorType(
+        "deadband", "Deadband",
+        "Pass through value if |value| > threshold; else 0.",
+        inputs=[
+            OperatorInputSpec("value",     "Value"),
+            OperatorInputSpec("threshold", "Threshold", 0.05),
+        ],
+    ),
+    "curve": OperatorType(
+        "curve", "Curve (Expo)",
+        "out = sign(value) × |value|^exponent — common joystick expo curve.",
+        inputs=[
+            OperatorInputSpec("value",    "Value"),
+            OperatorInputSpec("exponent", "Exponent", 2.0),
+        ],
+    ),
+}
+
+
+@dataclass
+class WidgetInstance:
+    """A dashboard widget — a sink for one or more peripheral channels."""
+    id: str
+    type: str
+    label: str
+    position: Tuple[int, int] = (0, 0)
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "label": self.label,
+            "position": list(self.position),
+            "params": dict(self.params),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WidgetInstance":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            type=d["type"],
+            label=d.get("label", d["id"]),
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+            params=dict(d.get("params", {})),
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Widget catalog
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class WidgetInputSpec:
+    id: str
+    display: str
+    cap: str          # which channel capability tags can route into this input
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class WidgetType:
+    id: str
+    label: str
+    description: str
+    inputs: List[WidgetInputSpec] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "description": self.description,
+            "inputs": [i.to_dict() for i in self.inputs],
+        }
+
+
+DEFAULT_WIDGET_CATALOG: Dict[str, WidgetType] = {
+    "battery_monitor": WidgetType(
+        id="battery_monitor", label="FAS100 Power Monitor",
+        description="FrSky FAS100 battery telemetry: current, voltage, and "
+                    "two temperature sensors. Rendered as the dashboard's "
+                    "amber-accented power card.",
+        inputs=[
+            WidgetInputSpec("current", "Current Draw",    "analog"),
+            WidgetInputSpec("voltage", "Battery Voltage", "analog"),
+            WidgetInputSpec("temp1",   "Temp 1",          "analog"),
+            WidgetInputSpec("temp2",   "Temp 2",          "analog"),
+        ],
+    ),
+    "estop_indicator": WidgetType(
+        id="estop_indicator", label="E-Stop Indicator",
+        description="Lights up when an e-stop signal goes high.",
+        inputs=[WidgetInputSpec("triggered", "Triggered", "digital_in")],
+    ),
+    "single_gauge": WidgetType(
+        id="single_gauge", label="Single-value Gauge",
+        description="One numeric reading with a meter.",
+        inputs=[WidgetInputSpec("value", "Value", "analog")],
+    ),
+    "status_led_indicator": WidgetType(
+        id="status_led_indicator", label="Status Indicator",
+        description="Reflects a digital signal as an on-screen LED.",
+        inputs=[WidgetInputSpec("state", "State", "digital_in")],
+    ),
+    "roboclaw_monitor": WidgetType(
+        id="roboclaw_monitor", label="RoboClaw Motor Monitor",
+        description="RoboClaw motor controller telemetry: commanded duty, "
+                    "encoder, bus voltage, motor current, and controller "
+                    "temperature. Rendered as the dashboard's violet-"
+                    "accented motor card with per-row sparklines.",
+        inputs=[
+            WidgetInputSpec("motor",   "Motor Duty",     "analog"),
+            WidgetInputSpec("encoder", "Encoder",        "analog"),
+            WidgetInputSpec("voltage", "Bus Voltage",    "analog"),
+            WidgetInputSpec("current", "Motor Current",  "analog"),
+            WidgetInputSpec("temp",    "Temperature",    "analog"),
+        ],
+    ),
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# System routing aggregate (routes + widgets + version)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class SystemRouting:
+    version: int = 0
+    # Sheets keyed by owning controller node_id. Each sheet owns its
+    # own inputs / outputs / operators / widgets / wires.
+    sheets: Dict[str, NodeSheet] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version": self.version,
+            "sheets":  {nid: s.to_dict() for nid, s in self.sheets.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "SystemRouting":
+        sheets_in = d.get("sheets") or {}
+        sheets: Dict[str, NodeSheet] = {}
+        for nid, sd in sheets_in.items():
+            # Stored sheet dicts may omit node_id; trust the key.
+            sd = dict(sd)
+            sd.setdefault("node_id", nid)
+            sheets[nid] = NodeSheet.from_dict(sd)
+        # Migration: legacy yamls held a top-level `widgets` list (the
+        # old global dashboard). Stash any survivors on the legacy
+        # DASHBOARD_SHEET_ID sheet so the operator can re-place them
+        # rather than silently losing them.
+        legacy_widgets = d.get("widgets") or []
+        if legacy_widgets:
+            legacy = sheets.setdefault(DASHBOARD_SHEET_ID, NodeSheet(node_id=DASHBOARD_SHEET_ID))
+            for w in legacy_widgets:
+                legacy.widgets.append(WidgetInstance.from_dict(w))
+
+        # Migration: resolve widget-ID collisions across sheets. The
+        # pre-fix NodeSheet.add_widget scoped its uniqueness check to
+        # the current sheet only, so two sheets that each added their
+        # first widget of a given type would collide on "<type>-1".
+        # The dashboard's WidgetsDashboard uses widget IDs as DOM keys
+        # and as keys into its live-value map; collisions cause one
+        # widget's values to silently overwrite the other's. We rename
+        # the *second* (and any further) collisions to a fresh
+        # globally-unique ID and rewrite the wires in the affected
+        # sheet so the binding is preserved.
+        seen_widget_ids: Set[str] = set()
+        for sheet_id, sheet in sheets.items():
+            for widget in sheet.widgets:
+                if widget.id not in seen_widget_ids:
+                    seen_widget_ids.add(widget.id)
+                    continue
+                # Pick a fresh suffix that's globally unique. Start at
+                # 2 so the first survivor keeps "<type>-1".
+                base = widget.type
+                n = 2
+                while f"{base}-{n}" in seen_widget_ids:
+                    n += 1
+                new_id = f"{base}-{n}"
+                old_id = widget.id
+                widget.id = new_id
+                # Update wires in this sheet that reference the old
+                # widget. Widget endpoints only appear as wire sinks
+                # (you can't wire FROM a widget), so we only check
+                # `sink`.
+                for wire in sheet.wires:
+                    if (wire.sink.kind == "widget"
+                            and wire.sink.parts
+                            and wire.sink.parts[0] == old_id):
+                        wire.sink.parts[0] = new_id
+                seen_widget_ids.add(new_id)
+        return cls(
+            version=int(d.get("version", 0)),
+            sheets=sheets,
+        )
+
+    # ── Sheet access ──────────────────────────────────────────────────
+
+    def get_sheet(self, node_id: str) -> NodeSheet:
+        """Return the sheet for `node_id`, creating an empty one if needed."""
+        sheet = self.sheets.get(node_id)
+        if sheet is None:
+            sheet = NodeSheet(node_id=node_id)
+            self.sheets[node_id] = sheet
+        return sheet
+
+    def drop_sheet(self, node_id: str) -> bool:
+        if node_id in self.sheets:
+            del self.sheets[node_id]
+            self.version += 1
+            return True
+        return False
+
+    def bump_version(self) -> None:
+        self.version += 1
+
+    # ── Cascade helpers ──────────────────────────────────────────────
+
+    def wires_touching_peripheral(self, node_id: str, peripheral_id: str) -> List[Wire]:
+        """All wires across all sheets that reference (node_id, peripheral_id)."""
+        out: List[Wire] = []
+        for sheet in self.sheets.values():
+            for w in sheet.wires:
+                for ep in (w.source, w.sink):
+                    if ep.kind == "peripheral" and len(ep.parts) >= 2 \
+                            and ep.parts[0] == node_id and ep.parts[1] == peripheral_id:
+                        out.append(w)
+                        break
+        return out
+
+    def wires_touching_widget(self, widget_id: str) -> List[Wire]:
+        out: List[Wire] = []
+        for sheet in self.sheets.values():
+            for w in sheet.wires:
+                for ep in (w.source, w.sink):
+                    if ep.kind == "widget" and ep.parts and ep.parts[0] == widget_id:
+                        out.append(w)
+                        break
+        return out
+
+    def drop_wires_touching_peripheral(self, node_id: str, peripheral_id: str) -> int:
+        """Remove every wire that mentions the given peripheral. Returns count dropped."""
+        dropped = 0
+        for sheet in self.sheets.values():
+            before = len(sheet.wires)
+            sheet.wires = [
+                w for w in sheet.wires
+                if not any(
+                    ep.kind == "peripheral" and len(ep.parts) >= 2
+                    and ep.parts[0] == node_id and ep.parts[1] == peripheral_id
+                    for ep in (w.source, w.sink)
+                )
+            ]
+            dropped += before - len(sheet.wires)
+        if dropped:
+            self.version += 1
+        return dropped
+
+    # ── Widget lookup across sheets (used by `wires_touching_widget`) ──
+
+    def find_widget(self, widget_id: str) -> Optional[Tuple[NodeSheet, WidgetInstance]]:
+        """Locate which sheet owns the widget, if any."""
+        for sheet in self.sheets.values():
+            w = sheet.find_widget(widget_id)
+            if w is not None:
+                return sheet, w
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def detect_pin_conflicts(config: NodePeripheralConfig,
+                         uart_pairs: Optional[List[Dict[str, int]]] = None,
+                         catalog: Optional[Dict[str, PeripheralType]] = None,
+                         ) -> List[str]:
+    """Return a list of human-readable conflict messages, or empty.
+
+    Catalog is needed so the conflict check can also see GPIO-typed
+    `params` (e.g. RoboClaw's `estop_pin`), not just `pins`. Without it,
+    we'd let the operator double-claim the same GPIO between a
+    RoboClaw's E-stop and another peripheral's primary pin. The
+    parameter is Optional for backwards compatibility with callers
+    that haven't been updated yet; in that case we fall back to the
+    pins-only check and silently miss GPIO-typed params.
+    """
+    errors: List[str] = []
+    by_pin: Dict[int, PeripheralInstance] = {}
+    cat = catalog or {}
+    for p in config.peripherals:
+        claimed = p.claimed_gpios(cat) if cat else dict(p.pins)
+        for pin in claimed.values():
+            if pin in by_pin:
+                other = by_pin[pin]
+                errors.append(
+                    f"Pin GP{pin}: claimed by both '{other.label}' and '{p.label}'"
+                )
+            else:
+                by_pin[pin] = p
+
+    # UART conflicts: two peripherals on the same UART instance.
+    if uart_pairs:
+        # Map (tx, rx) -> uart instance
+        pair_index = {(u["tx"], u["rx"]): u["uart"] for u in uart_pairs}
+        seen: Dict[int, PeripheralInstance] = {}
+        for p in config.peripherals:
+            tx = p.pins.get("uart_tx")
+            rx = p.pins.get("uart_rx")
+            if tx is None or rx is None:
+                continue
+            uart_instance = pair_index.get((tx, rx))
+            if uart_instance is None:
+                continue
+            if uart_instance in seen and seen[uart_instance].id != p.id:
+                other = seen[uart_instance]
+                errors.append(
+                    f"UART{uart_instance}: '{other.label}' and '{p.label}' both claim it"
+                )
+            else:
+                seen[uart_instance] = p
+    return errors
+
+
+def validate_route_compatibility(source_cap: str, sink_cap: str) -> bool:
+    """Return True if a value of `source_cap` can flow into a `sink_cap`.
+
+    Currently a permissive exact-match-or-analog check. Easy to harden
+    later (range checks, unit conversion, etc.).
+    """
+    if source_cap == sink_cap:
+        return True
+    # 'any' is the wildcard used by logical-signal endpoints
+    if source_cap == "any" or sink_cap == "any":
+        return True
+    # Analog signals can drive analog sinks regardless of finer subtype
+    if source_cap == "analog" and sink_cap == "analog":
+        return True
+    return False

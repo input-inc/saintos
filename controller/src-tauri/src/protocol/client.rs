@@ -101,6 +101,13 @@ impl WebSocketClient {
         let mut s = self.state.write();
         s.status = ConnectionStatus::Disconnected;
         s.error = None;
+        // Clear the estop mirror on disconnect. The bootstrap on the
+        // next connect (subscribe + get_estop_state) will re-set it
+        // from the authoritative server-side value. Without this we
+        // could end up gating outgoing streaming control while
+        // disconnected, then briefly while reconnecting to a different
+        // server that has estop released.
+        s.estop_active = false;
     }
 
     /// Legacy command using node_id + pin_id (deprecated)
@@ -221,6 +228,173 @@ impl WebSocketClient {
                 log::error!("Failed to send discovery request: {}", e);
                 format!("Failed to send discovery request: {}", e)
             })
+    }
+
+    /// Request enumeration of ROS topics and the scalar channels each
+    /// message exposes. Server responds via a `discovery-topic-channels`
+    /// Tauri event so the binding UI can populate its Topic/Channel
+    /// pickers (the role/function picker's replacement).
+    pub fn request_discover_topic_channels(&self) -> Result<(), String> {
+        log::info!("Requesting topic-channel discovery from server...");
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| {
+                log::warn!("request_discover_topic_channels: Not connected");
+                "Not connected".to_string()
+            })?;
+
+        let msg = OutgoingMessage::discover_topic_channels();
+        log::debug!("Sending discover_topic_channels: {}", msg.to_json());
+
+        tx.blocking_send(msg)
+            .map_err(|e| {
+                log::error!("Failed to send discovery request: {}", e);
+                format!("Failed to send discovery request: {}", e)
+            })
+    }
+
+    /// Request enumeration of WebSocket-input slots defined across all
+    /// routing sheets. Server replies with `discovery-ws-inputs`.
+    pub fn request_discover_ws_inputs(&self) -> Result<(), String> {
+        log::info!("Requesting WS-input discovery from server...");
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| {
+                log::warn!("request_discover_ws_inputs: Not connected");
+                "Not connected".to_string()
+            })?;
+
+        let msg = OutgoingMessage::list_websocket_inputs();
+        log::debug!("Sending list_websocket_inputs: {}", msg.to_json());
+
+        tx.blocking_send(msg)
+            .map_err(|e| {
+                log::error!("Failed to send WS-input discovery: {}", e);
+                format!("Failed to send WS-input discovery: {}", e)
+            })
+    }
+
+    /// Push a scalar onto a sheet's WebSocket-input slot. The binding
+    /// runtime calls this on every gamepad-axis tick that maps to a WS
+    /// input — same throttle policy as the legacy topic/channel path.
+    pub fn send_ws_input_value(&self, sheet_id: &str, input_id: &str, value: Value)
+        -> Result<(), String>
+    {
+        if sheet_id.is_empty() || input_id.is_empty() {
+            log::warn!(
+                "send_ws_input_value: empty sheet_id ('{}') or input_id ('{}'); \
+                 re-bind this axis in the bindings UI",
+                sheet_id, input_id
+            );
+            return Ok(());
+        }
+        // E-Stop gate. Server's routing evaluator drops these too, but
+        // we drop at the client to keep the WS quiet (an engaged
+        // estop on a tank with both sticks deflected would otherwise
+        // dump 100 Hz of unused traffic into the socket for every
+        // axis).
+        if self.state.read().estop_active {
+            return Ok(());
+        }
+        let is_stop_command = match &value {
+            Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
+            _ => false,
+        };
+        let throttle_key = format!("ws::{}::{}", sheet_id, input_id);
+        if !is_stop_command {
+            let mut times = self.last_command_times.write();
+            let now = Instant::now();
+            if let Some(last_time) = times.get(&throttle_key) {
+                if now.duration_since(*last_time) < Duration::from_millis(THROTTLE_MS) {
+                    return Ok(());
+                }
+            }
+            times.insert(throttle_key, now);
+        }
+        log::debug!("→ set_ws_input {}::{} = {}", sheet_id, input_id, value);
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+
+        let msg = OutgoingMessage::set_ws_input(sheet_id, input_id, value);
+        match tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                log::trace!("Channel full, dropped ws_input write for {}::{}", sheet_id, input_id);
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err("Connection closed".to_string())
+            }
+        }
+    }
+
+    /// Push a single scalar onto a ROS topic channel. Used by the
+    /// bindings runtime: a joystick axis movement results in
+    /// `set_topic_channel(topic, channel, value)` which the server
+    /// merges into its per-topic buffer and republishes.
+    pub fn send_topic_channel_value(&self, topic: &str, channel: &str, value: Value)
+        -> Result<(), String>
+    {
+        if topic.is_empty() || channel.is_empty() {
+            // Common failure mode: a binding was saved with the old
+            // role/function schema and the migration left topic/channel
+            // empty. Flag it once at warn so the operator sees why
+            // nothing is happening.
+            log::warn!(
+                "send_topic_channel_value: empty topic ('{}') or channel ('{}'); \
+                 re-bind this axis in the bindings UI",
+                topic, channel
+            );
+            return Ok(());
+        }
+        // E-Stop gate — same rationale as send_ws_input_value.
+        if self.state.read().estop_active {
+            return Ok(());
+        }
+        let is_stop_command = match &value {
+            Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
+            _ => false,
+        };
+        let throttle_key = format!("{}::{}", topic, channel);
+        if !is_stop_command {
+            let mut times = self.last_command_times.write();
+            let now = Instant::now();
+            if let Some(last_time) = times.get(&throttle_key) {
+                if now.duration_since(*last_time) < Duration::from_millis(THROTTLE_MS) {
+                    return Ok(());
+                }
+            }
+            times.insert(throttle_key, now);
+        }
+        log::debug!("→ set_topic_channel {}::{} = {}", topic, channel, value);
+
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+
+        let msg = OutgoingMessage::set_topic_channel(topic, channel, value);
+        match tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                log::trace!("Channel full, dropped command for {}::{}", topic, channel);
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err("Connection closed".to_string())
+            }
+        }
     }
 
     /// Send emergency stop command (bypasses throttling)
@@ -384,6 +558,23 @@ async fn handle_connection<R: Runtime>(
 ) -> bool {
     let (mut write, mut read) = ws_stream.split();
 
+    // Bootstrap the e-stop mirror so a controller joining mid-session
+    // immediately picks up the latched state. The subscribe registers
+    // us for future toggle broadcasts on the 'estop' topic; the
+    // get_estop_state management call returns the current value right
+    // away without waiting for the next toggle. Failures here are
+    // non-fatal — worst case the controller doesn't know the system
+    // is safed and the server's routing gate (added in the same
+    // change) still blocks motor commands.
+    let estop_subscribe = OutgoingMessage::subscribe(&["estop"]);
+    if let Err(e) = write.send(Message::Text(estop_subscribe.to_json())).await {
+        tracing::warn!("Failed to subscribe to estop topic: {}", e);
+    }
+    let estop_query = OutgoingMessage::get_estop_state();
+    if let Err(e) = write.send(Message::Text(estop_query.to_json())).await {
+        tracing::warn!("Failed to query initial estop state: {}", e);
+    }
+
     loop {
         tokio::select! {
             msg = read.next() => {
@@ -418,6 +609,46 @@ async fn handle_connection<R: Runtime>(
                                             tracing::error!("Failed to emit discovery-active-roles: {}", e);
                                         }
                                     }
+                                    // Check for topic-channels response (legacy bindings picker).
+                                    if data.get("topics").is_some() {
+                                        tracing::info!("Emitting discovery-topic-channels event to frontend");
+                                        if let Err(e) = app_handle.emit("discovery-topic-channels", data) {
+                                            tracing::error!("Failed to emit discovery-topic-channels: {}", e);
+                                        }
+                                    }
+                                    // Check for WS-input response (new bindings picker).
+                                    if data.get("ws_inputs").is_some() {
+                                        tracing::info!("Emitting discovery-ws-inputs event to frontend");
+                                        if let Err(e) = app_handle.emit("discovery-ws-inputs", data) {
+                                            tracing::error!("Failed to emit discovery-ws-inputs: {}", e);
+                                        }
+                                    }
+                                    // Response to our get_estop_state bootstrap.
+                                    // `data` shape: { "active": bool, "changed_at": float }.
+                                    // The state-topic broadcast handler below
+                                    // catches subsequent toggles; this catches
+                                    // the initial value so a freshly-connected
+                                    // controller knows the latched state
+                                    // without waiting for the next toggle.
+                                    if let Some(active) = data.get("active").and_then(|v| v.as_bool()) {
+                                        update_estop_state(state, app_handle, active);
+                                    }
+                                }
+                            }
+
+                            // State-topic broadcast handler. The server
+                            // broadcasts on 'estop' with shape:
+                            //   { type: "state", node: "estop", data: { active, changed_at, node_count } }
+                            if incoming.msg_type == "state"
+                                && incoming.node.as_deref() == Some("estop")
+                            {
+                                if let Some(active) = incoming
+                                    .data
+                                    .as_ref()
+                                    .and_then(|d| d.get("active"))
+                                    .and_then(|v| v.as_bool())
+                                {
+                                    update_estop_state(state, app_handle, active);
                                 }
                             }
                         } else {
@@ -471,6 +702,34 @@ async fn handle_connection<R: Runtime>(
                 return false;
             }
         }
+    }
+}
+
+/// Mirror an authoritative server-side e-stop value into our local
+/// `ConnectionState.estop_active` and emit a Tauri event so the
+/// frontend can show the banner + skip rendering joystick output
+/// while engaged. Called from both the `get_estop_state` response
+/// branch (bootstrap on connect) and the `state/estop` broadcast
+/// branch (subsequent toggles).
+fn update_estop_state<R: Runtime>(
+    state: &Arc<RwLock<ConnectionState>>,
+    app_handle: &AppHandle<R>,
+    active: bool,
+) {
+    let changed;
+    {
+        let mut s = state.write();
+        changed = s.estop_active != active;
+        s.estop_active = active;
+    }
+    if changed {
+        tracing::warn!(
+            "E-STOP state from server: {}",
+            if active { "ENGAGED" } else { "RELEASED" }
+        );
+    }
+    if let Err(e) = app_handle.emit("estop-state", serde_json::json!({ "active": active })) {
+        tracing::error!("Failed to emit estop-state event: {}", e);
     }
 }
 

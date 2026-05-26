@@ -25,7 +25,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/ros2-build.yml'
-      - '.github/scripts/build-ros2-in-container.sh'
+      - 'scripts/build-ros2-in-container.sh'
 
 concurrency:
   group: ros2-build-${{ github.event.inputs.ros_distro || 'jazzy' }}
@@ -121,8 +121,8 @@ jobs:
           DEBIAN_RELEASE: ${{ env.DEBIAN_RELEASE }}
         run: |
           set -eo pipefail
-          chmod +x .github/scripts/build-ros2-in-container.sh
-          .github/scripts/build-ros2-in-container.sh
+          chmod +x scripts/build-ros2-in-container.sh
+          scripts/build-ros2-in-container.sh
 
       # ----------------------------------------------------------------------
       - name: Publish GitHub Release

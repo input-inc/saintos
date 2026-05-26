@@ -354,10 +354,10 @@ cd SaintOS/source
 source /opt/ros/humble/setup.bash
 
 # Build using the build script
-./saint_os/scripts/build.sh
+./server/scripts/build.sh
 
 # Or using the Python script
-python3 saint_os/scripts/build.py
+python3 server/scripts/build.py
 ```
 
 #### Windows
@@ -371,13 +371,13 @@ cd SaintOS\source
 call C:\opt\ros\humble\setup.bat
 
 # Build using PowerShell script
-.\saint_os\scripts\build.ps1
+.\server\scripts\build.ps1
 
 # Or using batch file
-.\saint_os\scripts\build.bat
+.\server\scripts\build.bat
 
 # Or using Python script
-python saint_os\scripts\build.py
+python server\scripts\build.py
 ```
 
 ### Build Options
@@ -399,13 +399,13 @@ All build scripts support the following options:
 
 ```bash
 # Clean build with tests
-./saint_os/scripts/build.sh --clean --test
+./server/scripts/build.sh --clean --test
 
 # Debug build with 4 parallel jobs
-./saint_os/scripts/build.sh --debug -j 4
+./server/scripts/build.sh --debug -j 4
 
 # Install dependencies and build
-./saint_os/scripts/build.sh --install-deps --dev
+./server/scripts/build.sh --install-deps --dev
 ```
 
 ### Manual Build (Using colcon directly)
@@ -413,7 +413,7 @@ All build scripts support the following options:
 If you prefer to build manually:
 
 ```bash
-# Navigate to workspace (parent of saint_os)
+# Navigate to workspace (parent of server)
 cd SaintOS/source
 
 # Source ROS2 (Linux)
@@ -460,7 +460,7 @@ conda activate ros2_env
 ### Teensy 4.1
 
 ```bash
-cd saint_os/firmware/teensy41
+cd firmware/teensy41
 
 # Build for hardware (real Teensy)
 pio run -e hardware
@@ -479,7 +479,7 @@ Or use the build script:
 ### RP2040
 
 ```bash
-cd saint_os/firmware/rp2040
+cd firmware/rp2040
 
 ./build.sh hw    # Hardware build
 ./build.sh sim   # Simulation build
@@ -513,7 +513,7 @@ ros2 run saint_os saint_server --ros-args \
 
 The web interface requires a password for WebSocket connections. The default password is `12345`.
 
-To change it, edit `saint_os/saint_server/config/server_config.yaml`:
+To change it, edit `server/saint_server/config/server_config.yaml`:
 
 ```yaml
 websocket:
@@ -552,17 +552,17 @@ source venv/bin/activate  # Linux/macOS
 # or: venv\Scripts\activate  # Windows
 
 # Install development dependencies
-pip install -e saint_os/.[dev]
+pip install -e server/.[dev]
 
 # Build in debug mode
-./saint_os/scripts/build.sh --debug --install-deps --dev
+./server/scripts/build.sh --debug --install-deps --dev
 ```
 
 ### Running Tests
 
 ```bash
 # Run all tests
-./saint_os/scripts/build.sh --test
+./server/scripts/build.sh --test
 
 # Or manually
 source install/setup.bash
@@ -570,7 +570,7 @@ colcon test
 colcon test-result --verbose
 
 # Run specific tests with pytest
-pytest saint_os/test/test_server.py -v
+pytest server/test/test_server.py -v
 ```
 
 ### Code Style
@@ -583,12 +583,12 @@ The project uses:
 
 ```bash
 # Format code
-black saint_os/
-isort saint_os/
+black server/
+isort server/
 
 # Lint
-flake8 saint_os/
-mypy saint_os/
+flake8 server/
+mypy server/
 ```
 
 ---
@@ -622,11 +622,11 @@ Install ROS2 dependencies:
 ```bash
 # Linux
 sudo apt install python3-rosdep
-rosdep install --from-paths saint_os --ignore-src -r -y
+rosdep install --from-paths server --ignore-src -r -y
 
 # macOS
 pip3 install rosdep
-rosdep install --from-paths saint_os --ignore-src -r -y
+rosdep install --from-paths server --ignore-src -r -y
 ```
 
 #### Python package import errors
@@ -654,7 +654,7 @@ If you encounter architecture-related issues on M1/M2/M3/M4 Macs:
 arch -arm64 python3 -m pip install <package>
 
 # Or run the build under Rosetta if needed
-arch -x86_64 ./saint_os/scripts/build.sh
+arch -x86_64 ./server/scripts/build.sh
 ```
 
 #### macOS: CMake cannot find Python
@@ -703,7 +703,7 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 After successful installation:
 
 1. Review the [SAINT_OS_SPEC.md](SAINT_OS_SPEC.md) for system architecture
-2. Configure the server in `saint_os/saint_server/config/server_config.yaml`
+2. Configure the server in `server/saint_server/config/server_config.yaml`
 3. Set up your network (internal Ethernet + external WiFi)
 4. Access the web administration interface at `http://<server-ip>/`
 

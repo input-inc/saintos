@@ -1,0 +1,221 @@
+/**
+ * SAINT.OS Firmware - Shared Pin Types
+ *
+ * Platform-agnostic pin capability flags, mode enums, and configuration structures.
+ */
+
+#ifndef PIN_TYPES_H
+#define PIN_TYPES_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+// =============================================================================
+// Pin Capability Flags
+// =============================================================================
+
+#define PIN_CAP_NONE            0x00
+#define PIN_CAP_DIGITAL_IN      0x01
+#define PIN_CAP_DIGITAL_OUT     0x02
+#define PIN_CAP_PWM             0x04
+#define PIN_CAP_ADC             0x08
+#define PIN_CAP_I2C_SDA         0x10
+#define PIN_CAP_I2C_SCL         0x20
+#define PIN_CAP_UART_TX         0x40
+#define PIN_CAP_UART_RX         0x80
+#define PIN_CAP_SPI             0x100
+#define PIN_CAP_MAESTRO_SERVO   0x200
+#define PIN_CAP_SYREN_MOTOR     0x400
+#define PIN_CAP_FAS100_SENSOR   0x800
+#define PIN_CAP_ROBOCLAW_MOTOR  0x1000
+#define PIN_CAP_PATHFINDER_BMS  0x2000
+
+// Convenience combinations
+#define PIN_CAP_GPIO            (PIN_CAP_DIGITAL_IN | PIN_CAP_DIGITAL_OUT)
+#define PIN_CAP_GPIO_PWM        (PIN_CAP_GPIO | PIN_CAP_PWM)
+#define PIN_CAP_GPIO_ADC        (PIN_CAP_GPIO | PIN_CAP_ADC)
+
+// =============================================================================
+// Pin Mode Enumeration
+// =============================================================================
+
+typedef enum {
+    PIN_MODE_UNCONFIGURED = 0,
+    PIN_MODE_DIGITAL_IN,
+    PIN_MODE_DIGITAL_OUT,
+    PIN_MODE_PWM,
+    PIN_MODE_SERVO,
+    PIN_MODE_ADC,
+    PIN_MODE_I2C_SDA,
+    PIN_MODE_I2C_SCL,
+    PIN_MODE_UART_TX,
+    PIN_MODE_UART_RX,
+    PIN_MODE_RESERVED,
+    PIN_MODE_MAESTRO_SERVO,
+    PIN_MODE_SYREN_MOTOR,
+    PIN_MODE_FAS100_SENSOR,
+    PIN_MODE_ROBOCLAW_MOTOR,
+    PIN_MODE_PATHFINDER_BMS
+} pin_mode_t;
+
+// =============================================================================
+// Configuration Constants
+// =============================================================================
+
+#define PIN_CONFIG_MAX_NAME_LEN 32
+#define PIN_CONFIG_VERSION      1
+
+// Default PWM settings
+#define PIN_CONFIG_DEFAULT_PWM_FREQ     1000    // 1 kHz
+#define PIN_CONFIG_SERVO_PWM_FREQ       50      // 50 Hz for servos
+
+// Default servo pulse range
+#define PIN_CONFIG_SERVO_MIN_PULSE_US   500     // 0.5ms
+#define PIN_CONFIG_SERVO_MAX_PULSE_US   2500    // 2.5ms
+
+// =============================================================================
+// Pin Configuration Structure
+// =============================================================================
+
+typedef struct {
+    uint8_t gpio;
+    pin_mode_t mode;
+    char logical_name[PIN_CONFIG_MAX_NAME_LEN];
+    union {
+        struct {
+            uint32_t frequency;
+            uint16_t duty_cycle;
+        } pwm;
+        struct {
+            uint32_t frequency;     // Always 50Hz for servo
+            uint16_t min_pulse_us;  // Default 500 (0.5ms)
+            uint16_t max_pulse_us;  // Default 2500 (2.5ms)
+        } servo;
+        struct {
+            bool pull_up;
+            bool pull_down;
+        } digital_in;
+        struct {
+            bool initial_state;
+        } digital_out;
+        struct {
+            uint16_t min_pulse_us;
+            uint16_t max_pulse_us;
+            uint16_t neutral_us;
+            uint16_t speed;
+            uint16_t acceleration;
+            uint16_t home_us;
+        } maestro;
+        struct {
+            uint8_t address;
+            uint8_t deadband;
+            uint8_t ramping;
+            uint8_t reserved;
+            uint16_t timeout_ms;
+        } syren;
+        struct {
+            uint8_t poll_interval_ms;
+        } fas100;
+        struct {
+            uint8_t address;
+            uint8_t deadband;
+            uint16_t max_current_ma;
+            // Optional GPIO wired to this RoboClaw's S3 input (or
+            // whatever pin the PCB routes to the controller's E-stop
+            // input). 0xFF = "no E-stop pin assigned for this unit"
+            // (the firmware then doesn't touch any GPIO for E-stop;
+            // the controller's S3 mode must be set to something other
+            // than 'Default → E-Stop (Latching)' on this PCB or the
+            // floating-pin latch bug will recur).
+            //
+            // When set to a valid GPIO (0..29 on RP2040), the firmware:
+            //   1. Configures that GPIO as a digital output the moment
+            //      the RoboClaw peripheral is initialized (drv_load
+            //      from flash OR drv_apply_config from a fresh sync).
+            //   2. Drives it LOW (deasserted) so the RoboClaw doesn't
+            //      see a glitch on S3 and latch into E-stop.
+            //   3. (Future) routes the per-channel "tripped" toggle
+            //      from the State tab here, and honors a dashboard
+            //      E-stop broadcast by driving HIGH to assert.
+            //
+            // Polarity is fixed at "LOW = deasserted, HIGH = tripped"
+            // because that matches the only documented behavior of
+            // S3 in RC/Serial modes (RC-flip-switch convention: pulse
+            // or HIGH on the pin = active). If a future revision of
+            // the PCB inverts the signal, add an `estop_active_high`
+            // bool here alongside this field.
+            uint8_t estop_pin;
+            // When 1, the driver uses the PIO UART (any GPIO can be
+            // TX or RX) instead of the hardware UART (silicon-fixed
+            // TX/RX pin map). Set this on custom PCBs whose wiring
+            // doesn't match the hardware UART's GP0=TX / GP1=RX
+            // assignment — e.g. when GP0 is wired to the controller's
+            // S2 (TX-from-controller) and GP1 is wired to S1
+            // (RX-into-controller). The driver then runs TX on GP1
+            // and RX on GP0 via two PIO state machines on PIO1.
+            // 0 (default) = use hardware UART exactly as before.
+            uint8_t uart_swap;
+            // When 1, positive duty commands drive the motor in
+            // reverse (and vice versa). Use on rigs where the motor
+            // wiring or mechanical mounting inverts the operator-
+            // intended direction and physically re-wiring isn't
+            // convenient. The inversion is applied at the wire-level
+            // (in set_duty and the keepalive resend) so units[].duty
+            // still stores the operator's commanded value — the
+            // dashboard slider position matches what the operator
+            // expected. Encoder readings are NOT auto-inverted.
+            // 0 (default) = no inversion.
+            uint8_t invert_direction;
+        } roboclaw;
+        struct {
+            uint16_t poll_interval_ms;
+        } pathfinder_bms;
+    } params;
+} pin_config_t;
+
+// =============================================================================
+// Pin Configuration Storage (for flash persistence)
+// =============================================================================
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t pin_count;
+    uint8_t reserved[2];
+    struct __attribute__((packed)) {
+        uint8_t gpio;
+        uint8_t mode;
+        char logical_name[PIN_CONFIG_MAX_NAME_LEN];
+        uint32_t param1;
+        uint16_t param2;
+        uint8_t reserved[2];
+    } pins[16];     // Uses inline constant to avoid circular dependency with per-platform MAX_PINS
+} pin_config_storage_t;
+
+// =============================================================================
+// Function Declarations (per-platform implementations)
+// =============================================================================
+
+void pin_config_init(void);
+const pin_config_t* pin_config_get(uint8_t gpio);
+const pin_config_t* pin_config_get_all(uint8_t* count);
+bool pin_config_apply_json(const char* json, size_t json_len);
+bool pin_config_save(void);
+bool pin_config_load(void);
+void pin_config_reset(void);
+bool pin_config_has_configured_pins(void);
+bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name);
+bool pin_config_set_pwm_params(uint8_t gpio, uint32_t frequency, uint16_t duty_cycle);
+bool pin_config_set_digital_in_params(uint8_t gpio, bool pull_up, bool pull_down);
+bool pin_config_set_servo_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t max_pulse_us);
+bool pin_config_set_maestro_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t max_pulse_us,
+                                    uint16_t neutral_us, uint16_t speed, uint16_t acceleration,
+                                    uint16_t home_us);
+bool pin_config_set_fas100_params(uint8_t gpio, uint8_t poll_interval_ms);
+bool pin_config_set_roboclaw_params(uint8_t gpio, uint8_t address, uint8_t deadband,
+                                     uint16_t max_current_ma);
+void pin_config_apply_hardware(void);
+const char* pin_mode_to_string(pin_mode_t mode);
+pin_mode_t pin_mode_from_string(const char* str);
+
+#endif // PIN_TYPES_H

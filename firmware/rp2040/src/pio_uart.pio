@@ -1,0 +1,149 @@
+;
+; PIO UART for the RP2040 RoboClaw driver
+;
+; The RP2040 hardware UART has silicon-fixed pin assignments — UART0
+; TX is GP0 only, UART0 RX is GP1 only. When a custom PCB routes the
+; controller's TX/RX such that the MCU pin which needs to TRANSMIT is
+; physically GP1, there's no way to use the hardware UART. PIO can
+; do it: any GPIO can be a state-machine TX or RX pin.
+;
+; Both programs are standard 8N1 (1 start, 8 data LSB-first, 1 stop).
+; The state-machine clock divider is set so each bit takes exactly
+; 8 PIO cycles. The C wrapper computes the divider as
+;     clk_sys_hz / (8 * baud)
+; — 38400 baud at 125 MHz yields a divider of ~407, well within the
+; PIO clock generator's 16.16 fixed-point range, with bit-cell error
+; far below the UART receiver's ±2% tolerance.
+;
+; TX adapted from pico-examples/pio/uart_tx/uart_tx.pio (BSD-3).
+; RX adapted from pico-examples/pio/uart_rx/uart_rx.pio (BSD-3),
+; with an explicit `push` so the C side can read via the RX FIFO
+; without relying on autopush threshold magic.
+
+; -----------------------------------------------------------------------------
+; TX program — drive one GPIO as a UART output.
+; -----------------------------------------------------------------------------
+;
+; OUT pin 0 and side-set pin 0 are both mapped to the same GPIO. The
+; OUT field shifts data bits onto the wire; side-set drives constant
+; values for start/stop bits without consuming the OSR.
+
+.program pio_uart_tx
+.side_set 1 opt
+
+    pull       side 1 [7]      ; Pull next byte from TX FIFO. While stalled
+                               ; (FIFO empty), drives stop / idle HIGH. Once
+                               ; the byte arrives, holds line HIGH for the
+                               ; stop bit (8 cycles).
+    set x, 7   side 0 [7]      ; Drive LOW for the start bit (8 cycles).
+                               ; Pre-load the data-bit counter (8 bits).
+bitloop:
+    out pins, 1                ; Shift one bit (LSB-first) from OSR to pin.
+    jmp x-- bitloop  [6]       ; 1 (jmp) + 6 (delay) + 1 (out) = 8 cycles/bit.
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline void pio_uart_tx_program_init(PIO pio, uint sm, uint offset,
+                                             uint pin_tx, uint baud) {
+    // Drive the pin HIGH BEFORE muxing it to the PIO, so the line
+    // doesn't glitch LOW during init (a glitch LOW on a UART TX line
+    // looks like a start bit to a half-duplex peer).
+    pio_sm_set_pins_with_mask(pio, sm, 1u << pin_tx, 1u << pin_tx);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin_tx, 1u << pin_tx);
+    pio_gpio_init(pio, pin_tx);
+
+    pio_sm_config c = pio_uart_tx_program_get_default_config(offset);
+
+    // OUT shifts right (LSB-first); no autopull — `pull` instruction
+    // refreshes the OSR explicitly per byte.
+    sm_config_set_out_shift(&c, true, false, 32);
+
+    // OUT and side-set share the same pin.
+    sm_config_set_out_pins(&c, pin_tx, 1);
+    sm_config_set_sideset_pins(&c, pin_tx);
+
+    // TX-only state machine: join FIFO halves for an 8-deep TX FIFO
+    // (the RX half is unused on this SM).
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+
+    // 8 PIO cycles per bit.
+    float div = (float)clock_get_hz(clk_sys) / (8.0f * (float)baud);
+    sm_config_set_clkdiv(&c, div);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void pio_uart_tx_putc(PIO pio, uint sm, uint8_t b) {
+    pio_sm_put_blocking(pio, sm, (uint32_t)b);
+}
+%}
+
+; -----------------------------------------------------------------------------
+; RX program — sample one GPIO as a UART input.
+; -----------------------------------------------------------------------------
+;
+; IN pin 0 is the RX GPIO. The state machine spins on `wait 0 pin 0`
+; until it sees a start bit (LOW), then delays to the middle of bit 0
+; and samples each of 8 data bits at 8-cycle intervals (matching the
+; TX bit time). After 8 bits, the assembled byte is pushed into the
+; RX FIFO so the C side can read it via pio_sm_get(...).
+
+.program pio_uart_rx
+
+start:
+    wait 0 pin 0          ; Stall until start bit (RX line goes LOW).
+    set x, 7   [10]       ; 1 (set) + 10 (delay) = 11 cycles after the
+                          ; wait completes (which consumed 1 cycle). Combined
+                          ; with the wait's 1 cycle we're at cycle 12 from
+                          ; the start-bit edge — middle of bit 0 (start
+                          ; bit is cycles 0..7, bit 0 is cycles 8..15,
+                          ; mid-bit-0 is cycle 12).
+bitloop:
+    in pins, 1            ; Sample one bit into the ISR (shift right →
+                          ; first sample lands in ISR[24], last in ISR[31];
+                          ; after 8 samples ISR[31:24] = byte LSB-to-MSB).
+    jmp x-- bitloop  [6]  ; 8 cycles/bit, matching TX.
+    push                  ; Push the assembled byte into the RX FIFO. With
+                          ; shift-right + threshold 32 + autopush off, we
+                          ; control push timing — exactly once per byte.
+    jmp start             ; Wait for the next start bit.
+
+% c-sdk {
+static inline void pio_uart_rx_program_init(PIO pio, uint sm, uint offset,
+                                             uint pin_rx, uint baud) {
+    // Configure the pin as PIO-driven input. Enable the internal pull-
+    // up so the line idles HIGH even if the peer hasn't started driving
+    // yet (matches what the RoboClaw driver does on the hardware UART
+    // path; see comment there for why a stronger physical pull is still
+    // worth adding on long bus runs).
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_rx, 1, false);
+    pio_gpio_init(pio, pin_rx);
+    gpio_pull_up(pin_rx);
+
+    pio_sm_config c = pio_uart_rx_program_get_default_config(offset);
+
+    // IN pin (also used by WAIT) is pin_rx; same for the jmp-pin (unused
+    // here, but harmless to set).
+    sm_config_set_in_pins(&c, pin_rx);
+    sm_config_set_jmp_pin(&c, pin_rx);
+
+    // IN shifts right, autopush off (manual `push` once per byte —
+    // see program above for why), threshold 32.
+    sm_config_set_in_shift(&c, true, false, 32);
+
+    // RX-only SM: join FIFO halves for a 16-deep RX FIFO. That gives
+    // ~4 ms of buffering at 38400 baud (16 bytes × 10 bits/byte ÷
+    // 38400 ≈ 4.2 ms) before the C side must drain — comfortably
+    // longer than the main-loop cycle.
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+
+    // 8 PIO cycles per bit (matches TX).
+    float div = (float)clock_get_hz(clk_sys) / (8.0f * (float)baud);
+    sm_config_set_clkdiv(&c, div);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

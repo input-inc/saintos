@@ -23,14 +23,14 @@ eggs/
 lib/
 lib64/
 # Firmware vendor libraries (submodules) are real source, not Python build dirs
-!saint_os/firmware/*/lib/
-!saint_os/firmware/*/lib/**
+!firmware/*/lib/
+!firmware/*/lib/**
 # CI installer payload is source, not a Python build dir
 !.github/dist/
 !.github/dist/**
 # Web frontend's bundled JS libraries are checked-in source
-!saint_os/web/js/lib/
-!saint_os/web/js/lib/**
+!server/web/js/lib/
+!server/web/js/lib/**
 
 # Local-builder scratch dirs (scripts/build-local-dist.sh)
 /_debs/
@@ -40,16 +40,16 @@ lib64/
 # Locally-built firmware artifacts staged into the dist tarball.
 # The committed info.json files (manifests) ARE tracked, but the actual
 # binaries are build outputs — let CI / local builds regenerate them.
-# Host-runnable test binaries (built by saint_os/firmware/rp2040/tests/run_tests.sh)
-/saint_os/firmware/rp2040/tests/test_fas100_parser
-/saint_os/firmware/rp2040/tests/test_roboclaw_driver
-/saint_os/firmware/rp2040/tests/*.dSYM/
-/saint_os/resources/firmware/rp2040/*.uf2
-/saint_os/resources/firmware/rp2040/*.elf
-/saint_os/resources/firmware/rp2040/*.bin
-/saint_os/resources/firmware/rp2040/generated/
-/saint_os/resources/firmware/teensy41/*.hex
-/saint_os/resources/firmware/rpi5/saint_firmware_rpi5_*-local.*.zip
+# Host-runnable test binaries (built by firmware/rp2040/tests/run_tests.sh)
+/firmware/rp2040/tests/test_fas100_parser
+/firmware/rp2040/tests/test_roboclaw_driver
+/firmware/rp2040/tests/*.dSYM/
+/server/resources/firmware/rp2040/*.uf2
+/server/resources/firmware/rp2040/*.elf
+/server/resources/firmware/rp2040/*.bin
+/server/resources/firmware/rp2040/generated/
+/server/resources/firmware/teensy41/*.hex
+/server/resources/firmware/rpi5/saint_firmware_rpi5_*-local.*.zip
 parts/
 sdist/
 var/
@@ -170,10 +170,17 @@ $RECYCLE.BIN/
 # =============================================================================
 # Firmware Build Outputs
 # =============================================================================
-saint_os/firmware/current/
-saint_os/firmware/archive/
+firmware/current/
+firmware/archive/
 *.img
 *.img.sha256
+
+# =============================================================================
+# Vendored SDKs (large, fetched separately)
+# =============================================================================
+# Pico SDK lives at the repo root so the RP2040 build can pick it up via
+# PICO_SDK_PATH. It's not part of our source tree.
+/pico-sdk/
 
 # =============================================================================
 # Logs and Databases
@@ -206,9 +213,14 @@ credentials.json
 # =============================================================================
 controller/node_modules/
 controller/dist/
-controller/.angular/
 controller/src-tauri/target/
 controller/src-tauri/gen/
+
+# Built AppImage artifacts (output of controller/appimage/build-bundle.sh).
+# These get staged into server/resources/firmware/controller/ at build
+# time, then bundled into the dist tarball — they're regenerated from
+# source on every build, no reason to keep them in git history.
+server/resources/firmware/controller/*.AppImage
 
 # =============================================================================
 # Node.js / NPM
@@ -223,5 +235,9 @@ yarn-error.log*
 # Rust
 # =============================================================================
 target/
-Cargo.lock
+# Cargo.lock IS committed: the only Rust crate in this repo
+# (controller/src-tauri/) is a binary, where checking in the lock file
+# guarantees reproducible offline builds. Without it the Steam Deck
+# (and any other build host) has to re-resolve the dependency graph
+# from crates.io on every fresh checkout, which fails without network.
 **/*.rs.bk

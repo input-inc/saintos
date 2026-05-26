@@ -70,15 +70,15 @@ pub enum AnalogAction {
         transform: InputTransform,
     },
     /// Differential drive - channel mixing for tank drive
-    /// Takes stick X (turn) and Y (throttle) and outputs to left/right motors
-    /// Mixing: left = throttle + turn, right = throttle - turn
+    /// Takes stick X (turn) and Y (throttle) and outputs to left/right channels
+    /// of the same topic. Mixing: left = throttle + turn, right = throttle - turn
     DifferentialDrive {
-        /// Role name (e.g., "tracks")
-        role: String,
-        /// Function name for left motor (e.g., "left_velocity")
-        left_function: String,
-        /// Function name for right motor (e.g., "right_velocity")
-        right_function: String,
+        /// ROS topic (e.g., "/tracks")
+        topic: String,
+        /// Channel field for the left motor (e.g., "left_velocity")
+        left_channel: String,
+        /// Channel field for the right motor (e.g., "right_velocity")
+        right_channel: String,
         /// Transform applied to throttle (Y axis)
         throttle_transform: InputTransform,
         /// Transform applied to turn (X axis)
@@ -152,12 +152,36 @@ pub enum ModifierEffect {
 // Targets and Transforms
 // ============================================================================
 
+/// What a binding writes into. WsInput addresses a sheet's WebSocket
+/// input slot (the new path); Topic addresses a raw ROS topic/channel
+/// pair (legacy, kept so existing profiles.json files load unchanged).
+///
+/// Untagged so the JSON shape on disk decides the variant — old
+/// profiles persist with {topic, channel, name} and parse as Topic; new
+/// bindings authored against the WS-input picker persist with
+/// {sheet_id, input_id, name} and parse as WsInput.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControlTarget {
-    pub role: String,
-    pub function: String,
-    /// Human-readable name
-    pub name: Option<String>,
+#[serde(untagged)]
+pub enum ControlTarget {
+    WsInput {
+        sheet_id: String,
+        input_id: String,
+        name: Option<String>,
+    },
+    Topic {
+        topic: String,
+        channel: String,
+        name: Option<String>,
+    },
+}
+
+impl ControlTarget {
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            ControlTarget::Topic { name, .. } | ControlTarget::WsInput { name, .. } =>
+                name.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,8 +270,8 @@ pub struct ServoPresetData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServoPosition {
-    pub role: String,
-    pub function: String,
+    pub topic: String,
+    pub channel: String,
     pub value: f32,
 }
 
