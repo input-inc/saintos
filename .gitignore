@@ -213,7 +213,6 @@ credentials.json
 # =============================================================================
 controller/node_modules/
 controller/dist/
-controller/.angular/
 controller/src-tauri/target/
 controller/src-tauri/gen/
 

@@ -1,3 +1,12 @@
+/*
+ * Global styles for the Vue rewrite. Imports the same fonts +
+ * Material Icons/Symbols the Angular app used, then defines the
+ * `.card` / `.btn` / `.input` / `.status-indicator` component
+ * primitives via Tailwind's @apply. Identical to controller/
+ * src/styles.css — the cutover at the end of the migration drops
+ * that file and this one becomes the sole copy.
+ */
+
 /* Fonts - bundled locally */
 @import '@fontsource/inter/400.css';
 @import '@fontsource/inter/500.css';
@@ -11,13 +20,9 @@
 @import 'material-icons/iconfont/material-icons.css';
 
 /* Material Symbols - bundled locally (NOT from fonts.googleapis.com).
-   The CDN URL we used to import here only resolved when the device
-   had internet, which the Steam Deck attached to the rover's network
-   does not. The bindings tabs + moods area use these glyphs, and
-   they came up as blank rectangles whenever offline. The
-   `material-symbols` npm package ships the same outlined variable
-   font and font-face declarations locally — bundle it into the
-   Tauri build so the icons work in any environment. */
+   The Steam Deck attached to the rover's network doesn't have
+   internet, and the bindings tabs use these glyphs — bundling the
+   local font keeps them visible offline. */
 @import 'material-symbols/outlined.css';
 
 @tailwind base;
@@ -25,246 +30,188 @@
 @tailwind utilities;
 
 @layer base {
-  html, body {
-    @apply h-full m-0 p-0 overflow-hidden;
-    /* Prevent text selection during touch scrolling */
-    -webkit-user-select: none;
-    user-select: none;
-    /* Enable touch scrolling */
-    -webkit-overflow-scrolling: touch;
-    /* Disable touch gestures at the document root. gamescope (Steam
-       Deck Game Mode) forwards swipe-from-edge gestures the same
-       way it forwards interior touches, so without this an upward
-       drag from the screen bottom — or a drag on a scrollbar near
-       the edge — gets interpreted as an attempt to grab the window
-       (looks like a resize, since the window is fullscreen and
-       can't actually move). Scrollable containers below re-enable
-       pan-y for their own contents.
-       overscroll-behavior: none stops the WebKit pull-to-refresh /
-       rubber-band that otherwise fires when you drag a scrollbar
-       past its end. */
-    touch-action: none;
-    overscroll-behavior: none;
-  }
+    html, body {
+        @apply h-full m-0 p-0 overflow-hidden;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-overflow-scrolling: touch;
+        /* See styles.css in the Angular src/ for the gamescope
+           edge-swipe rationale; same constraints apply here. */
+        touch-action: none;
+        overscroll-behavior: none;
+    }
 
-  /* Allow text selection only in input fields */
-  input, textarea, [contenteditable="true"] {
-    -webkit-user-select: text;
-    user-select: text;
-    touch-action: auto;
-  }
+    input, textarea, [contenteditable="true"] {
+        -webkit-user-select: text;
+        user-select: text;
+        touch-action: auto;
+    }
 
-  /* Ensure scrollable containers work properly with touch. pan-y
-     re-enables vertical-only panning inside these (we said `none`
-     at the root); overscroll-behavior: contain keeps the gesture
-     from leaking back out to the document and re-triggering the
-     "edge grab looks like resize" bug. */
-  .overflow-y-auto, .overflow-auto, [class*="overflow-y-scroll"] {
-    touch-action: pan-y;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
-  }
+    .overflow-y-auto, .overflow-auto, [class*="overflow-y-scroll"] {
+        touch-action: pan-y;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+    }
 
-  /* Prevent tap highlighting that interferes with scrolling */
-  * {
-    -webkit-tap-highlight-color: transparent;
-  }
+    * {
+        -webkit-tap-highlight-color: transparent;
+    }
 
-  /* Main content scrolling - ensure touch events work for scrolling */
-  main {
-    touch-action: pan-y;
-    overscroll-behavior: contain;
-  }
+    main {
+        touch-action: pan-y;
+        overscroll-behavior: contain;
+    }
 
-  main > div {
-    touch-action: pan-y;
-    overscroll-behavior: contain;
-  }
+    main > div {
+        touch-action: pan-y;
+        overscroll-behavior: contain;
+    }
 
-  ::-webkit-scrollbar {
-    @apply w-2;
-  }
+    ::-webkit-scrollbar {
+        @apply w-2;
+    }
 
-  ::-webkit-scrollbar-track {
-    @apply bg-saint-background;
-  }
+    ::-webkit-scrollbar-track {
+        @apply bg-saint-background;
+    }
 
-  ::-webkit-scrollbar-thumb {
-    @apply bg-saint-surface-light rounded-full;
-  }
+    ::-webkit-scrollbar-thumb {
+        @apply bg-saint-surface-light rounded-full;
+    }
 
-  ::-webkit-scrollbar-thumb:hover {
-    @apply bg-saint-text-muted;
-  }
+    ::-webkit-scrollbar-thumb:hover {
+        @apply bg-saint-text-muted;
+    }
 }
 
 @layer components {
-  .btn {
-    @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
-  }
+    .btn {
+        @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
+    }
 
-  .btn-primary {
-    @apply bg-saint-primary text-white hover:bg-blue-600;
-  }
+    .btn-primary {
+        @apply bg-saint-primary text-white hover:bg-blue-600;
+    }
 
-  .btn-secondary {
-    @apply bg-saint-surface text-saint-text hover:bg-saint-surface-light;
-  }
+    .btn-secondary {
+        @apply bg-saint-surface text-saint-text hover:bg-saint-surface-light;
+    }
 
-  .btn-danger {
-    @apply bg-saint-error text-white hover:bg-red-600;
-  }
+    .btn-danger {
+        @apply bg-saint-error text-white hover:bg-red-600;
+    }
 
-  .card {
-    @apply bg-saint-surface rounded-xl p-4 border border-saint-surface-light;
-  }
+    .card {
+        @apply bg-saint-surface rounded-xl p-4 border border-saint-surface-light;
+    }
 
-  .input {
-    @apply bg-saint-background border border-saint-surface-light rounded-lg px-3 py-2
-           text-saint-text placeholder-saint-text-muted focus:outline-none
-           focus:border-saint-primary focus:ring-1 focus:ring-saint-primary;
-  }
+    .input {
+        @apply bg-saint-background border border-saint-surface-light rounded-lg px-3 py-2
+               text-saint-text placeholder-saint-text-muted focus:outline-none
+               focus:border-saint-primary focus:ring-1 focus:ring-saint-primary;
+    }
 
-  /* Style all select/dropdown elements with dark theme */
-  select,
-  .select {
-    @apply bg-saint-background border border-saint-surface-light rounded-lg px-3 py-2
-           text-saint-text focus:outline-none focus:border-saint-primary
-           focus:ring-1 focus:ring-saint-primary;
-    /* Style the dropdown arrow */
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2394a3b8'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 0.5rem center;
-    background-size: 1.5rem;
-    padding-right: 2.5rem;
-    appearance: none;
-    -webkit-appearance: none;
-  }
+    /* Native <select> styling is kept for backward compatibility — most
+       dropdowns in the Vue app use <SaintSelect> (a Headless UI
+       Listbox), but if anything ends up with a stock <select> it gets
+       the dark theme treatment instead of the browser default. */
+    select,
+    .select {
+        @apply bg-saint-background border border-saint-surface-light rounded-lg px-3 py-2
+               text-saint-text focus:outline-none focus:border-saint-primary
+               focus:ring-1 focus:ring-saint-primary;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2394a3b8'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 0.5rem center;
+        background-size: 1.5rem;
+        padding-right: 2.5rem;
+        appearance: none;
+        -webkit-appearance: none;
+    }
 
-  select option,
-  .select option {
-    @apply bg-saint-background text-saint-text;
-  }
+    select option, .select option {
+        @apply bg-saint-background text-saint-text;
+    }
 
-  .status-indicator {
-    @apply w-3 h-3 rounded-full;
-  }
+    .status-indicator { @apply w-3 h-3 rounded-full; }
+    .status-connected { @apply bg-saint-success animate-pulse; }
+    .status-disconnected { @apply bg-saint-error; }
+    .status-connecting { @apply bg-saint-warning animate-pulse; }
 
-  .status-connected {
-    @apply bg-saint-success animate-pulse;
-  }
+    .touch-scroll {
+        touch-action: pan-y;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+    }
 
-  .status-disconnected {
-    @apply bg-saint-error;
-  }
+    .material-icons.md-18 { font-size: 18px; }
+    .material-icons.md-20 { font-size: 20px; }
+    .material-icons.md-24 { font-size: 24px; }
+    .material-icons.md-36 { font-size: 36px; }
+    .material-icons.md-48 { font-size: 48px; }
+    .material-icons.icon-sm { font-size: 16px; }
+    .material-icons.icon-md { font-size: 24px; }
+    .material-icons.icon-lg { font-size: 64px; }
 
-  .status-connecting {
-    @apply bg-saint-warning animate-pulse;
-  }
+    .material-symbols-outlined {
+        font-family: 'Material Symbols Outlined';
+        font-weight: normal;
+        font-style: normal;
+        font-size: 24px;
+        line-height: 1;
+        letter-spacing: normal;
+        text-transform: none;
+        display: inline-block;
+        white-space: nowrap;
+        word-wrap: normal;
+        direction: ltr;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+        font-feature-settings: 'liga';
+    }
 
-  /* Touch-friendly scrollable content */
-  .touch-scroll {
-    touch-action: pan-y;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
-  }
-
-  /* Material Icons size variants */
-  .material-icons.md-18 { font-size: 18px; }
-  .material-icons.md-20 { font-size: 20px; }
-  .material-icons.md-24 { font-size: 24px; }
-  .material-icons.md-36 { font-size: 36px; }
-  .material-icons.md-48 { font-size: 48px; }
-  .material-icons.icon-sm { font-size: 16px; }
-  .material-icons.icon-md { font-size: 24px; }
-  .material-icons.icon-lg { font-size: 64px; }
-
-  /* Material Symbols base style */
-  .material-symbols-outlined {
-    font-family: 'Material Symbols Outlined';
-    font-weight: normal;
-    font-style: normal;
-    font-size: 24px;
-    line-height: 1;
-    letter-spacing: normal;
-    text-transform: none;
-    display: inline-block;
-    white-space: nowrap;
-    word-wrap: normal;
-    direction: ltr;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-    text-rendering: optimizeLegibility;
-    font-feature-settings: 'liga';
-  }
-
-  /* Virtual Keyboard Dark Theme - must match specificity of .hg-theme-default */
-  .simple-keyboard.hg-theme-default {
-    background: transparent;
-    font-family: 'Inter', sans-serif;
-    padding: 0;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-row {
-    margin-bottom: 0.5rem;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-row:not(:last-child) {
-    margin-bottom: 0.5rem;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-button {
-    background: #334155;
-    border: 1px solid #475569;
-    border-bottom: 1px solid #475569;
-    border-radius: 0.5rem;
-    color: #f1f5f9;
-    font-size: 1.125rem;
-    height: 3.5rem;
-    margin: 0;
-    transition: all 0.15s ease;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-  }
-
-  .simple-keyboard.hg-theme-default .hg-row .hg-button:not(:last-child) {
-    margin-right: 0.5rem;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-button:hover {
-    background: #475569;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-button:active,
-  .simple-keyboard.hg-theme-default .hg-button.hg-activeButton {
-    background: #3b82f6;
-    border-color: #60a5fa;
-    transform: translateY(1px);
-    box-shadow: none;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-button.hg-functionBtn {
-    background: #1e293b;
-    max-width: none;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-button.hg-functionBtn:hover {
-    background: #334155;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-button.hg-functionBtn:active {
-    background: #3b82f6;
-  }
-
-  .simple-keyboard.hg-theme-default .hg-button.hg-selectedButton {
-    background: #3b82f6;
-    color: #fff;
-  }
-
-  /* Ensure touch events work on keyboard buttons */
-  .simple-keyboard.hg-theme-default .hg-button {
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: rgba(59, 130, 246, 0.3);
-    user-select: none;
-    -webkit-user-select: none;
-  }
+    /* Virtual keyboard (simple-keyboard) dark theme — see
+       components/VirtualKeyboard.vue for the rendering side. */
+    .simple-keyboard.hg-theme-default {
+        background: transparent;
+        font-family: 'Inter', sans-serif;
+        padding: 0;
+    }
+    .simple-keyboard.hg-theme-default .hg-row { margin-bottom: 0.5rem; }
+    .simple-keyboard.hg-theme-default .hg-row:not(:last-child) { margin-bottom: 0.5rem; }
+    .simple-keyboard.hg-theme-default .hg-button {
+        background: #334155;
+        border: 1px solid #475569;
+        border-radius: 0.5rem;
+        color: #f1f5f9;
+        font-size: 1.125rem;
+        height: 3.5rem;
+        margin: 0;
+        transition: all 0.15s ease;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: rgba(59, 130, 246, 0.3);
+        user-select: none;
+        -webkit-user-select: none;
+    }
+    .simple-keyboard.hg-theme-default .hg-row .hg-button:not(:last-child) { margin-right: 0.5rem; }
+    .simple-keyboard.hg-theme-default .hg-button:hover { background: #475569; }
+    .simple-keyboard.hg-theme-default .hg-button:active,
+    .simple-keyboard.hg-theme-default .hg-button.hg-activeButton {
+        background: #3b82f6;
+        border-color: #60a5fa;
+        transform: translateY(1px);
+        box-shadow: none;
+    }
+    .simple-keyboard.hg-theme-default .hg-button.hg-functionBtn {
+        background: #1e293b;
+        max-width: none;
+    }
+    .simple-keyboard.hg-theme-default .hg-button.hg-functionBtn:hover { background: #334155; }
+    .simple-keyboard.hg-theme-default .hg-button.hg-functionBtn:active { background: #3b82f6; }
+    .simple-keyboard.hg-theme-default .hg-button.hg-selectedButton {
+        background: #3b82f6;
+        color: #fff;
+    }
 }

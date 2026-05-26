@@ -4,10 +4,10 @@
   "version": "0.5.0",
   "identifier": "com.saintos.controller",
   "build": {
-    "beforeDevCommand": "npm run start",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:4200",
     "beforeBuildCommand": "npm run build",
-    "frontendDist": "../dist/saint-controller/browser"
+    "frontendDist": "../dist"
   },
   "app": {
     "windows": [
