@@ -1,0 +1,61 @@
+[Unit]
+Description=SAINT.OS Server
+Documentation=https://github.com/input-inc/saintos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+
+Environment=ROS_DOMAIN_ID=0
+Environment=PYTHONUNBUFFERED=1
+Environment=SAINT_CONFIG_DIR=@CONFIG_DIR@
+Environment=SAINT_STATE_DIR=@STATE_DIR@
+Environment=SAINT_LOG_DIR=@LOG_DIR@
+
+ExecStart=/bin/bash -lc 'source /opt/ros/@ROS_DISTRO@/install/setup.bash && source @PREFIX@/install/setup.bash && exec ros2 launch saint_os server.launch.py'
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+# Capability for binding port 80 without running as root. Ambient
+# capability — granted to the process at start, no setuid binary
+# needed.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# CapabilityBoundingSet is intentionally NOT restricted. The service
+# invokes a small set of sudoers-restricted root wrappers
+# (apply-update.sh, usb-helper.sh, `iw scan`, `nmcli` for the WiFi
+# AP, `journalctl` for the log tail). Setting the bounding set to
+# CAP_NET_BIND_SERVICE alone — as we used to — caps every child
+# process at that capability, which makes sudo's setuid(0) fail with
+# EPERM ("unable to change to root gid: Operation not permitted").
+# The bounding set is a defense-in-depth lever; the real privilege
+# boundary is the sudoers config that whitelists exactly which
+# commands the service user can elevate to. Leaving the bounding set
+# at its default (full set) is what makes that whitelist usable.
+
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+# NoNewPrivileges intentionally OFF: the server invokes a small set of
+# sudoers-restricted root wrappers (apply-update.sh, usb-helper.sh,
+# `iw scan`, `nmcli`) and the web terminal lets operators run
+# `sudo <cmd>` for admin tasks. NoNewPrivileges=true is kernel-enforced
+# and blocks setuid binaries (including sudo) regardless of sudoers
+# config, so it directly breaks every escalation path we rely on.
+# Other hardening (ProtectSystem, ProtectHome, PrivateTmp,
+# ReadWritePaths) remains in place.
+NoNewPrivileges=false
+
+ReadWritePaths=@STATE_DIR@ @LOG_DIR@ @CONFIG_DIR@
+# /tmp is private to this service (PrivateTmp=true). The update applier
+# writes its install log under /var/log/saint-os/ which is already in
+# ReadWritePaths above.
+
+[Install]
+WantedBy=multi-user.target

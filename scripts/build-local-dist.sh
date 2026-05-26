@@ -466,7 +466,7 @@ CONTAINER_EOF
 # --- assemble tarball -------------------------------------------------------
 
 log "Assembling dist tarball"
-.github/scripts/make-dist.sh "${VERSION}" "${ARCH}" "${ROS_DISTRO}"
+scripts/make-dist.sh "${VERSION}" "${ARCH}" "${ROS_DISTRO}"
 
 TARBALL=$(ls -t dist/saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}.tar.zst 2>/dev/null | head -n1)
 [[ -f "$TARBALL" ]] || die "make-dist.sh did not produce a tarball"

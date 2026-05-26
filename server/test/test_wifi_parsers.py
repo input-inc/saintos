@@ -88,14 +88,18 @@ def test_retry_pct_math_in_collect_path():
     """The retry_pct calculation lives inside collect(); we exercise it
     by mocking the subprocess + /proc reads. Validates the math, not
     the iw invocation."""
+    # collect() now calls _read_proc_wireless for noise + signal
+    # fallback. Returning a full dict here exercises that path.
+    proc_dict = {"link": 53.0, "level": -57.0, "noise": -95.0, "retry": 0}
     with patch.object(wifi_stats, "_run") as run, \
-         patch.object(wifi_stats, "_read_noise_floor", return_value=-95.0), \
+         patch.object(wifi_stats, "_read_proc_wireless", return_value=proc_dict), \
          patch.object(wifi_stats, "detect_wifi_interface", return_value="wlan0"):
         run.return_value = _STATION_DUMP
         snap = wifi_stats.collect()
         # 5023 / (81204 + 5023) * 100 ≈ 5.82
         assert snap.retry_pct is not None
         assert 5.5 < snap.retry_pct < 6.0
+        # Station dump's signal avg (-56) wins over /proc's level (-57).
         assert snap.signal_dbm == -56
         assert snap.bitrate_mbps == 144.4
         assert snap.noise_dbm == -95.0

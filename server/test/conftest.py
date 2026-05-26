@@ -87,8 +87,40 @@ except ImportError:
         CLOSED = 0x100
         ERROR  = 0x101
     _aio.WSMsgType = _WSMsgType
+
+    # Minimal Response stand-in. Carries status + headers so middleware
+    # tests can poke at them; the real aiohttp class is much richer
+    # but the bits we exercise from tests are just these two.
+    class _Response:
+        def __init__(self, *, status=200, text=None, headers=None):
+            self.status = status
+            self.text = text
+            self.headers = dict(headers or {})
+    _aio_web.Response = _Response
+
+    # HTTPException tree used by the CORS middleware tests. aiohttp's
+    # real class is in aiohttp.web_exceptions; we surface the bare
+    # minimum here so `raise web.HTTPNotFound(...)` works in tests.
+    class _HTTPException(Exception):
+        status = 500
+        def __init__(self, *, text=None, headers=None):
+            super().__init__(text or "")
+            self.headers = dict(headers or {})
+            self.text = text
+    class _HTTPNotFound(_HTTPException):
+        status = 404
+    _aio_web.HTTPException = _HTTPException
+    _aio_web.HTTPNotFound  = _HTTPNotFound
+
+    # `@web.middleware` is a marker decorator in real aiohttp (sets
+    # __middleware_version__ on the function). Tests don't go through
+    # aiohttp's dispatch loop, so a pass-through is sufficient.
+    def _middleware(fn):
+        fn.__middleware_version__ = 1
+        return fn
+    _aio_web.middleware = _middleware
+
     _aio_web.Request  = type("Request", (), {})
-    _aio_web.Response = type("Response", (), {})
     _aio_web.json_response = lambda *a, **kw: None
     _aio_web.FileResponse  = type("FileResponse", (), {})
     _aio_web.WebSocketResponse = type("WebSocketResponse", (), {})

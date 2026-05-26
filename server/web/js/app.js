@@ -1065,8 +1065,27 @@ class SaintApp {
         if (!channels.length) {
             tbody.innerHTML =
                 `<tr><td colspan="6" class="p-4 text-center text-slate-500">No channels available</td></tr>`;
+            this._renderWifiChannelSummary(null);
             return;
         }
+
+        // Pick a "Best" recommendation. The backend already sorts by
+        // (current → ap_count asc → signal asc), so we just have to
+        // skip the current row and prefer a non-DFS candidate when one
+        // exists at the same busyness tier — DFS channels work but
+        // come with the CAC silence delay, so they're a less-friendly
+        // first suggestion. If only DFS alternatives are available,
+        // recommend the best DFS one anyway.
+        const alternatives = channels.filter(c => !c.is_current);
+        let best = null;
+        if (alternatives.length > 0) {
+            const minApCount = alternatives[0].ap_count;
+            const tied = alternatives.filter(c => c.ap_count === minApCount);
+            best = tied.find(c => !c.is_dfs) || tied[0];
+        }
+
+        this._renderWifiChannelSummary(best);
+
         tbody.innerHTML = channels.map((c, i) => {
             const bandLabel = c.band === '5' ? '5 GHz' : '2.4 GHz';
             const sig = (c.strongest_signal_dbm != null)
@@ -1074,38 +1093,106 @@ class SaintApp {
                 : '—';
             const badges = [];
             if (c.is_current) badges.push(
-                '<span class="px-1.5 py-0.5 text-xs rounded bg-cyan-500/20 text-cyan-300">Current</span>');
+                '<span class="px-1.5 py-0.5 text-xs rounded bg-cyan-500/20 text-cyan-300" ' +
+                'title="The AP is currently on this channel.">Current</span>');
+            if (best && c === best) badges.push(
+                '<span class="px-1.5 py-0.5 text-xs rounded bg-emerald-500/20 text-emerald-300" ' +
+                'title="Fewest nearby APs among non-current channels. Non-DFS preferred when available.">Best</span>');
             if (c.is_dfs) badges.push(
-                '<span class="px-1.5 py-0.5 text-xs rounded bg-amber-500/20 text-amber-300">DFS</span>');
-            const apClass = c.ap_count === 0
-                ? 'text-emerald-400'
-                : (c.ap_count <= 2 ? 'text-slate-300' : 'text-amber-300');
+                '<span class="px-1.5 py-0.5 text-xs rounded bg-amber-500/20 text-amber-300 cursor-help" ' +
+                'title="DFS — Dynamic Frequency Selection. 5 GHz channels overlapping ' +
+                'weather/military radar bands. On activation: 60 s silent listen before transmit ' +
+                '(CAC). After activation: if the radio detects a radar pulse it must vacate the ' +
+                'channel within seconds. Usually fine for ground robots; avoid near airports / ' +
+                'weather radar installations. Quieter than non-DFS 5 GHz channels because most ' +
+                'consumer gear avoids them.">DFS</span>');
+
+            // AP-count color steps tuned to consumer-WiFi reality:
+            // 0 = clear, 1-2 = light traffic, 3-5 = busy, 6+ = avoid.
+            // Anything past ~5 co-channel APs in scan distance means
+            // sustained airtime contention even when none are active.
+            const apClass =
+                c.ap_count === 0      ? 'text-emerald-400 font-semibold' :
+                c.ap_count <= 2       ? 'text-slate-300' :
+                c.ap_count <= 5       ? 'text-amber-300' :
+                                        'text-red-300 font-semibold';
+
+            const rowClass =
+                (best && c === best)  ? 'bg-emerald-500/10 hover:bg-emerald-500/20' :
+                c.is_current          ? 'bg-cyan-500/5 hover:bg-cyan-500/10' :
+                                        'hover:bg-slate-700/30';
+
             return `
-                <tr class="border-t border-slate-700 hover:bg-slate-700/30 cursor-pointer"
+                <tr class="border-t border-slate-700 cursor-pointer ${rowClass}"
                     data-channel-idx="${i}"
                     data-band="${c.band === '5' ? 'a' : 'bg'}"
-                    data-channel-num="${c.channel}">
+                    data-channel-num="${c.channel}"
+                    data-is-current="${c.is_current ? '1' : '0'}">
                     <td class="p-2 text-slate-300">${bandLabel}</td>
                     <td class="p-2 font-mono">${c.channel}</td>
                     <td class="p-2 text-slate-500 text-xs">${c.freq_mhz} MHz</td>
                     <td class="p-2 ${apClass}">${c.ap_count}</td>
                     <td class="p-2 text-slate-400">${sig}</td>
-                    <td class="p-2 flex gap-1">${badges.join('')}</td>
+                    <td class="p-2 flex gap-1 flex-wrap">${badges.join('')}</td>
                 </tr>
             `;
         }).join('');
 
         tbody.querySelectorAll('tr[data-channel-idx]').forEach(row => {
             row.addEventListener('click', () => {
-                tbody.querySelectorAll('tr').forEach(r => r.classList.remove('bg-cyan-500/10'));
-                row.classList.add('bg-cyan-500/10');
+                // Clear all selection rings, restore baseline row tinting.
+                tbody.querySelectorAll('tr').forEach(r => r.classList.remove('ring-2', 'ring-cyan-400'));
+                row.classList.add('ring-2', 'ring-cyan-400');
                 this._wifiSelectedChannel = {
                     band: row.dataset.band,
                     channel: parseInt(row.dataset.channelNum, 10),
                 };
-                document.getElementById('wifi-channel-apply-btn').disabled = false;
+                // Disable Apply when the operator picks the row they're
+                // already on — restarting the AP to switch to the same
+                // channel is just an outage with no benefit.
+                const applyBtn = document.getElementById('wifi-channel-apply-btn');
+                if (applyBtn) {
+                    applyBtn.disabled = row.dataset.isCurrent === '1';
+                }
             });
         });
+    }
+
+    /** Top-of-modal summary line — names the recommended channel + why,
+     *  so the operator doesn't have to read the table to find it.
+     *  Expands into a two-line caveat when the recommendation is a
+     *  DFS channel, because "Best pick: ch 100" without the radar-
+     *  silence-on-activation context is misleading. */
+    _renderWifiChannelSummary(best) {
+        const el = document.getElementById('wifi-channel-summary');
+        if (!el) return;
+        if (!best) {
+            el.classList.add('hidden');
+            el.textContent = '';
+            return;
+        }
+        const bandLabel = best.band === '5' ? '5 GHz' : '2.4 GHz';
+        const apsText = best.ap_count === 0
+            ? 'no nearby APs'
+            : `${best.ap_count} nearby AP${best.ap_count === 1 ? '' : 's'}`;
+        const dfsCaveat = best.is_dfs
+            ? `<div class="text-xs text-amber-200/90 mt-1">
+                   <span class="material-icons icon-sm align-middle">info</span>
+                   This is a DFS channel. Activation requires a 60-second silent
+                   listen for radar before the AP comes back up, and the radio
+                   may move off this channel later if it detects a radar pulse.
+                   Generally fine for indoor / yard operation; avoid if you're
+                   near an airport or weather radar installation.
+               </div>`
+            : '';
+        el.innerHTML =
+            `<div>
+                 <span class="material-icons icon-sm align-middle text-emerald-300">recommend</span>
+                 Best pick: <strong>${bandLabel} channel ${best.channel}</strong>
+                 (${apsText}).
+             </div>` +
+            dfsCaveat;
+        el.classList.remove('hidden');
     }
 
     closeWifiChannelModal() {

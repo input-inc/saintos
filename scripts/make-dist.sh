@@ -72,18 +72,18 @@ if [[ -d _debs ]] && ls _debs/*.deb >/dev/null 2>&1; then
 fi
 
 # Installer + systemd unit template + privilege wrapper.
-cp .github/dist/install.sh "${PKG_DIR}/install.sh"
+cp packaging/install.sh "${PKG_DIR}/install.sh"
 chmod +x "${PKG_DIR}/install.sh"
-if [[ -f .github/dist/apply-update.sh ]]; then
-    cp .github/dist/apply-update.sh "${PKG_DIR}/apply-update.sh"
+if [[ -f packaging/apply-update.sh ]]; then
+    cp packaging/apply-update.sh "${PKG_DIR}/apply-update.sh"
     chmod +x "${PKG_DIR}/apply-update.sh"
 fi
-if [[ -f .github/dist/usb-helper.sh ]]; then
-    cp .github/dist/usb-helper.sh "${PKG_DIR}/usb-helper.sh"
+if [[ -f packaging/usb-helper.sh ]]; then
+    cp packaging/usb-helper.sh "${PKG_DIR}/usb-helper.sh"
     chmod +x "${PKG_DIR}/usb-helper.sh"
 fi
 mkdir -p "${PKG_DIR}/systemd"
-cp .github/dist/saint-os.service "${PKG_DIR}/systemd/saint-os.service"
+cp packaging/saint-os.service "${PKG_DIR}/systemd/saint-os.service"
 
 # Manifest. Checksums are computed over the staged tree (deterministic-ish).
 GIT_SHA="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"

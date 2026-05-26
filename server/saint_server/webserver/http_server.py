@@ -17,6 +17,55 @@ from saint_server.webserver.state_manager import StateManager
 from saint_server.webserver.websocket_handler import WebSocketHandler
 
 
+# CORS policy. Required because the SAINT Controller AppImage (Tauri
+# webview) runs with origin `tauri://localhost` and cross-origin-fetches
+# this server's /api/firmware/* endpoints during the in-app update
+# check. Without these headers WebKit blocks the response with the
+# canonical "TypeError: Load failed" — same symptom on any future tool
+# that serves the SPA from a different origin.
+#
+# Security note: the server lives on a private AP behind WPA2.
+# `Access-Control-Allow-Origin: *` here only changes what the browser
+# will let JS read from the response — it doesn't grant any access the
+# network itself wouldn't already provide. Stuff that should be
+# authenticated (WebSocket management actions) uses its own password
+# auth flow, untouched by these headers.
+CORS_ALLOW_ORIGIN = "*"
+CORS_ALLOW_METHODS = "GET, POST, OPTIONS"
+CORS_ALLOW_HEADERS = "Content-Type, Authorization"
+CORS_MAX_AGE = "600"
+
+
+@web.middleware
+async def cors_middleware(request, handler):
+    """Aiohttp middleware that attaches CORS headers to every response
+    and short-circuits OPTIONS preflight requests with 204 + the
+    headers the browser wants. Lifted to module scope so the
+    behaviour can be regression-tested without standing up a full
+    WebServer instance."""
+    if request.method == "OPTIONS":
+        # Short-circuit preflight requests. Some Tauri webviews preflight
+        # simple GETs too, which would 404 against our routes if we let
+        # them through. 204 No Content + the CORS headers is the canonical
+        # response.
+        return web.Response(status=204, headers={
+            "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
+            "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
+            "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
+            "Access-Control-Max-Age": CORS_MAX_AGE,
+        })
+    try:
+        response = await handler(request)
+    except web.HTTPException as e:
+        # Errors raised as HTTPException objects still need CORS headers
+        # — otherwise the browser hides the error body and the operator
+        # sees "Load failed" instead of "HTTP 404 firmware/foo not found".
+        e.headers["Access-Control-Allow-Origin"] = CORS_ALLOW_ORIGIN
+        raise
+    response.headers["Access-Control-Allow-Origin"] = CORS_ALLOW_ORIGIN
+    return response
+
+
 class WebServer:
     """HTTP server for static files and WebSocket endpoint."""
 
@@ -82,6 +131,11 @@ class WebServer:
                 raise
 
         self.app.middlewares.append(debug_middleware)
+
+        # CORS for the Tauri webview's cross-origin firmware fetches.
+        # Defined at module scope (see top of file) so it's importable
+        # by the test suite without spinning up a WebServer.
+        self.app.middlewares.append(cors_middleware)
 
         # Add routes
         self.app.router.add_get('/api/ws', self.ws_handler.handle_connection)
