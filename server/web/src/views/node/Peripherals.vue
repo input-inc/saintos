@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
+import { useChannelHistory } from '@/composables/useChannelHistory'
 import AppModal from '@/components/AppModal.vue'
 
 const props = defineProps({
@@ -11,9 +12,12 @@ const props = defineProps({
 
 const ws = useWsStore()
 const catalog = usePeripheralCatalog()
+const history = useChannelHistory()
 const peripherals = ref([])
 const syncStatus  = ref('unknown')
 const capabilities = ref(null)        // { pins, uart_pairs, reserved_pins }
+const logErrors = ref({})              // peripheral_id -> inline error message
+const logPending = ref({})             // peripheral_id -> true while in-flight
 
 const modalOpen = ref(false)
 const modalMode = ref('add')          // 'add' | 'edit'
@@ -45,11 +49,28 @@ const typesById = computed(() => {
   return out
 })
 
+// "GPIO number → peripheral that owns it" — covers both `pins` (the
+// peripheral's pin_kind assignment: gpio, uart_tx/rx) AND any `params`
+// whose catalog schema declares type === "gpio" (e.g. RoboClaw's
+// estop_pin). Mirrors PeripheralInstance.claimed_gpios() on the server
+// so the dashboard's pin/gpio dropdowns flag the same conflicts the
+// upsert path will reject. A param value of 0 is the "no pin" sentinel
+// and is skipped.
 const claimedPins = computed(() => {
   const out = {}
   for (const p of peripherals.value) {
     if (modalMode.value === 'edit' && p.id === modalEditingId.value) continue
-    for (const v of Object.values(p.pins || {})) out[v] = p
+    for (const v of Object.values(p.pins || {})) {
+      if (typeof v === 'number') out[v] = p
+    }
+    const t = typesById.value[p.type]
+    if (t && t.params) {
+      for (const param of t.params) {
+        if (param.type !== 'gpio') continue
+        const v = p.params ? p.params[param.id] : undefined
+        if (typeof v === 'number' && v > 0) out[v] = p
+      }
+    }
   }
   return out
 })
@@ -122,6 +143,43 @@ async function removeIt (id) {
   }
 }
 
+function readableChannelsOf (p) {
+  const t = typesById.value[p.type]
+  return (t?.channels || []).filter(c => c.dir === 'in')
+}
+
+async function toggleLog (p) {
+  if (logPending.value[p.id]) return
+  const inputs = readableChannelsOf(p)
+  if (!inputs.length) return
+  const want = !p.log_enabled
+  // Optimistic flip so the pill state matches the click immediately.
+  p.log_enabled = want
+  logPending.value[p.id] = true
+  logErrors.value[p.id] = ''
+  try {
+    const r = await ws.management('set_peripheral_log_enabled', {
+      node_id: props.nodeId,
+      peripheral_id: p.id,
+      enabled: want,
+    })
+    if (r && r.success === false) throw new Error(r.message || 'Failed to toggle logging')
+    if (want) {
+      // Backfill so the Live tab sparkline is ready next visit.
+      for (const ch of inputs) {
+        history.fetchHistory(props.nodeId, p.id, ch.id)
+      }
+    } else {
+      history.clearHistory(props.nodeId, p.id)
+    }
+  } catch (e) {
+    p.log_enabled = !want                    // revert
+    logErrors.value[p.id] = e.message || String(e)
+  } finally {
+    logPending.value[p.id] = false
+  }
+}
+
 async function sync () {
   try {
     await ws.management('sync_node_peripherals', { node_id: props.nodeId })
@@ -173,6 +231,23 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
             </p>
           </div>
           <div class="flex items-center gap-1">
+            <button
+              :class="[
+                'px-2 py-1 text-xs font-medium rounded-full border transition-colors',
+                readableChannelsOf(p).length === 0
+                  ? 'bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed'
+                  : p.log_enabled
+                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/30'
+                    : 'bg-slate-700/40 text-slate-300 border-slate-600 hover:bg-slate-700'
+              ]"
+              :disabled="readableChannelsOf(p).length === 0 || !!logPending[p.id]"
+              :title="readableChannelsOf(p).length === 0
+                ? 'No input channels to log'
+                : (p.log_enabled ? 'Disable 30s history + NDJSON log' : 'Enable 30s history + NDJSON log')"
+              @click="toggleLog(p)"
+            >
+              Log {{ readableChannelsOf(p).length === 0 ? '—' : (p.log_enabled ? 'on' : 'off') }}
+            </button>
             <button class="btn-sm bg-slate-700 hover:bg-slate-600 text-slate-200" @click="openEdit(p)" title="Edit">
               <span class="material-icons icon-sm">edit</span>
             </button>
@@ -181,6 +256,9 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
             </button>
           </div>
         </header>
+        <div v-if="logErrors[p.id]" class="mb-2 px-2 py-1 text-xs rounded bg-red-500/20 border border-red-500/40 text-red-300">
+          {{ logErrors[p.id] }}
+        </div>
 
         <div class="text-xs text-slate-400 space-y-1 font-mono">
           <div v-for="(v, k) in p.pins" :key="k">{{ k }}: GP{{ v }}</div>
@@ -271,6 +349,31 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
               <input type="checkbox" v-model="modalParams[p.id]" class="rounded bg-slate-700 border-slate-600" />
               {{ p.label }}
             </label>
+            <!--
+              gpio-typed params (e.g. RoboClaw estop_pin) render as a
+              pin picker rather than a freeform int so the operator
+              can only pick a real pin on this node. Pins already
+              claimed by OTHER peripherals are disabled with a hint;
+              the one currently held by the peripheral being edited
+              stays enabled so it can be reselected. Value 0 is the
+              "no pin / feature disabled" sentinel.
+            -->
+            <select
+              v-else-if="p.type === 'gpio'"
+              class="input-field w-full"
+              :value="String(modalParams[p.id] ?? 0)"
+              @change="(e) => modalParams[p.id] = parseInt(e.target.value, 10) || 0"
+            >
+              <option value="0">— None —</option>
+              <option
+                v-for="pin in (capabilities?.pins || [])"
+                :key="pin.gpio"
+                :value="pin.gpio"
+                :disabled="!!claimedPins[pin.gpio]"
+              >
+                GP{{ pin.gpio }} ({{ pin.name }}){{ claimedPins[pin.gpio] ? ` (claimed by ${claimedPins[pin.gpio].label || claimedPins[pin.gpio].id})` : '' }}
+              </option>
+            </select>
             <input
               v-else-if="p.type === 'int' || p.type === 'float'"
               type="number"

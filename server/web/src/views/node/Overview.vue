@@ -1,12 +1,23 @@
 <script setup>
+import { computed, ref } from 'vue'
 import { useDisplayStore } from '@/stores/display'
+import FirmwareUpdateModal from '@/components/FirmwareUpdateModal.vue'
 
-defineProps({
+const props = defineProps({
   nodeId: { type: String, required: true },
   node:   { type: Object, default: null },
 })
 
 const display = useDisplayStore()
+
+const fwUpdateAvailable = computed(() =>
+  !!(props.node?.firmware_update_available && props.node?.server_firmware_version)
+)
+const fwTooltip = computed(() =>
+  `Installed: ${props.node?.firmware_version || '—'} → Available: ${props.node?.server_firmware_version || '—'}`
+)
+
+const firmwareModalOpen = ref(false)
 </script>
 
 <template>
@@ -37,11 +48,33 @@ const display = useDisplayStore()
       <div class="grid grid-cols-2 gap-4">
         <div class="stat-item"><span class="stat-label">IP</span><span class="stat-value text-sm font-mono">{{ node?.ip_address || '—' }}</span></div>
         <div class="stat-item"><span class="stat-label">MAC</span><span class="stat-value text-sm font-mono">{{ node?.mac_address || '—' }}</span></div>
-        <div class="stat-item"><span class="stat-label">Firmware</span><span class="stat-value text-sm font-mono">{{ node?.firmware_version || '—' }}</span></div>
+        <div class="stat-item">
+          <span class="stat-label">Firmware</span>
+          <span class="stat-value text-sm font-mono flex items-center gap-2">
+            <span>{{ node?.firmware_version || '—' }}</span>
+            <button
+              v-if="fwUpdateAvailable"
+              type="button"
+              class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 transition-colors cursor-pointer"
+              :title="fwTooltip"
+              @click="firmwareModalOpen = true"
+            >
+              Update available
+            </button>
+          </span>
+        </div>
         <div class="stat-item"><span class="stat-label">Bootloader</span><span class="stat-value text-sm font-mono">{{ node?.bootloader_version || '—' }}</span></div>
         <div class="stat-item"><span class="stat-label">CPU temp</span><span class="stat-value text-sm">{{ display.formatTemperature(node?.cpu_temp) }}</span></div>
         <div class="stat-item"><span class="stat-label">Uptime (s)</span><span class="stat-value text-sm">{{ node?.uptime_seconds ?? '—' }}</span></div>
       </div>
     </div>
+
+    <FirmwareUpdateModal
+      v-if="firmwareModalOpen"
+      :node-id="nodeId"
+      :current-version="node?.firmware_version"
+      :node="node"
+      @close="firmwareModalOpen = false"
+    />
   </div>
 </template>

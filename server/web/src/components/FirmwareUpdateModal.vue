@@ -1,89 +1,163 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import AppModal from './AppModal.vue'
 
 const props = defineProps({
   nodeId:         { type: String, required: true },
   currentVersion: { type: String, default: '' },
+  node:           { type: Object, default: null },
 })
 const emit = defineEmits(['close', 'updated'])
 
 const ws = useWsStore()
-const builds = ref([])
-const selected = ref(null)
-const force = ref(false)
+
+const builds = ref({ simulation: null, hardware: null })
+const loading = ref(true)
 const sending = ref(false)
+const sendingType = ref(null)        // 'simulation' | 'hardware' while in-flight
+const force = ref(false)
 const error = ref('')
+const success = ref('')
+
+// Filter which build buttons to show by chip family. RP2040 / Teensy can run
+// either sim (Renode) or hardware firmware. Pi 5 has no sim image — it runs
+// the server-side ROS node directly. Unknown chips: show both and let the
+// operator pick (the server still validates).
+const chip = computed(() => (props.node?.chip_family || '').toLowerCase())
+const hwModel = computed(() => (props.node?.hardware_model || '').toLowerCase())
+const isRpi = computed(() =>
+  chip.value.includes('rpi') || chip.value.includes('pi5') ||
+  hwModel.value.includes('rpi') || hwModel.value.includes('raspberry')
+)
+const showSim = computed(() => !isRpi.value)
+const showHw  = computed(() => true)
+
+function buildLabel (b) {
+  if (!b || !b.available) return 'Not available on server'
+  const ver = b.version_full || b.version || '—'
+  const built = b.build_date ? ` · ${b.build_date}` : ''
+  return `${ver}${built}`
+}
 
 async function load () {
+  loading.value = true
+  error.value = ''
   try {
     const r = await ws.management('get_firmware_builds', {})
-    builds.value = r?.builds || []
-  } catch (e) { error.value = e.message || String(e) }
+    builds.value = {
+      simulation: r?.simulation || null,
+      hardware:   r?.hardware || null,
+    }
+  } catch (e) {
+    error.value = e.message || String(e)
+  } finally {
+    loading.value = false
+  }
 }
 onMounted(load)
 
-async function send () {
+async function send (buildType) {
   if (sending.value) return
+  const b = builds.value[buildType]
+  if (!b || !b.available) return
+
   sending.value = true
+  sendingType.value = buildType
   error.value = ''
+  success.value = ''
   try {
-    if (force.value && selected.value) {
-      await ws.management('force_firmware_update', {
-        node_id: props.nodeId,
-        build_type: selected.value,
-      })
-    } else {
-      await ws.management('update_firmware', { node_id: props.nodeId })
-    }
+    const r = await ws.management('force_firmware_update', {
+      node_id:    props.nodeId,
+      build_type: buildType,
+      force:      force.value,
+    })
+    success.value = r?.message || `Firmware update initiated (${buildType})`
     emit('updated')
-    emit('close')
+    // Brief confirmation, then auto-close.
+    setTimeout(() => emit('close'), 1200)
   } catch (e) {
     error.value = e.message || String(e)
   } finally {
     sending.value = false
+    sendingType.value = null
   }
 }
 </script>
 
 <template>
-  <AppModal title="Update firmware" width="max-w-xl" @close="emit('close')">
+  <AppModal title="Force Firmware Update" width="max-w-md" @close="emit('close')">
     <div v-if="error" class="mb-3 p-2 rounded bg-red-500/20 border border-red-500/40 text-sm text-red-300">{{ error }}</div>
+    <div v-if="success" class="mb-3 p-2 rounded bg-emerald-500/20 border border-emerald-500/40 text-sm text-emerald-300">{{ success }}</div>
 
     <p class="text-sm text-slate-400 mb-4">
-      Sends a firmware update to <code class="text-cyan-300 font-mono">{{ nodeId }}</code>.
-      Current version: <span class="font-mono text-slate-300">{{ currentVersion || '—' }}</span>.
+      Select which firmware build to upload to
+      <code class="text-cyan-300 font-mono">{{ nodeId }}</code>.
+      Installed version:
+      <span class="font-mono text-slate-300">{{ currentVersion || '—' }}</span>.
     </p>
 
-    <div class="space-y-3">
-      <div class="card bg-slate-900/60 border-slate-700">
-        <h4 class="text-sm font-semibold text-white mb-2">Standard update</h4>
-        <p class="text-xs text-slate-400">Server picks the matching build for this node's chip family and pushes it. Use this for routine updates.</p>
+    <div v-if="sending" class="mb-4">
+      <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
+        <span>Uploading {{ sendingType }} build…</span>
       </div>
-
-      <div class="card bg-slate-900/60 border-slate-700">
-        <h4 class="text-sm font-semibold text-white mb-2">Force a specific build</h4>
-        <p class="text-xs text-slate-400 mb-3">Useful when reflashing to a different build type (sim/hw/etc).</p>
-        <label class="flex items-center gap-2 mb-3 text-sm text-slate-300">
-          <input v-model="force" type="checkbox" class="rounded bg-slate-700 border-slate-600" />
-          Force build
-        </label>
-        <select v-model="selected" :disabled="!force" class="input-field w-full">
-          <option :value="null">-- Available builds --</option>
-          <option v-for="b in builds" :key="b.type" :value="b.type">
-            {{ b.type }} · {{ b.version || '—' }}
-          </option>
-        </select>
+      <div class="w-full h-1.5 bg-slate-700 rounded-full overflow-hidden">
+        <div class="h-full bg-cyan-500 animate-pulse" style="width: 100%"></div>
       </div>
     </div>
 
-    <template #actions>
-      <button class="btn-secondary" @click="emit('close')">Cancel</button>
-      <button class="btn-primary" :disabled="sending || (force && !selected)" @click="send">
-        <span class="material-icons icon-sm">system_update</span>
-        {{ sending ? 'Sending…' : (force ? 'Force update' : 'Update') }}
+    <div class="space-y-3 mb-4">
+      <button
+        v-if="showSim"
+        type="button"
+        class="w-full p-4 rounded-lg border border-slate-700 hover:border-cyan-500 hover:bg-cyan-500/10 transition-all text-left disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-700 disabled:hover:bg-transparent"
+        :disabled="sending || !builds.simulation?.available"
+        @click="send('simulation')"
+      >
+        <div class="flex items-center gap-3">
+          <span class="material-icons text-cyan-400">computer</span>
+          <div class="flex-1">
+            <div class="font-medium text-white">Simulation Build</div>
+            <div class="text-xs text-slate-400">
+              <span v-if="loading">Checking…</span>
+              <span v-else>{{ buildLabel(builds.simulation) }}</span>
+            </div>
+          </div>
+        </div>
       </button>
+
+      <button
+        v-if="showHw"
+        type="button"
+        class="w-full p-4 rounded-lg border border-slate-700 hover:border-violet-500 hover:bg-violet-500/10 transition-all text-left disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-700 disabled:hover:bg-transparent"
+        :disabled="sending || !builds.hardware?.available"
+        @click="send('hardware')"
+      >
+        <div class="flex items-center gap-3">
+          <span class="material-icons text-violet-400">memory</span>
+          <div class="flex-1">
+            <div class="font-medium text-white">Hardware Build</div>
+            <div class="text-xs text-slate-400">
+              <span v-if="loading">Checking…</span>
+              <span v-else>{{ buildLabel(builds.hardware) }}</span>
+            </div>
+          </div>
+        </div>
+      </button>
+    </div>
+
+    <label class="flex items-center gap-2 text-sm text-slate-300 mt-2">
+      <input
+        v-model="force"
+        type="checkbox"
+        class="rounded bg-slate-700 border-slate-600"
+        :disabled="sending"
+      />
+      Install even if same version
+    </label>
+
+    <template #actions>
+      <button class="btn-secondary" :disabled="sending" @click="emit('close')">Cancel</button>
     </template>
   </AppModal>
 </template>

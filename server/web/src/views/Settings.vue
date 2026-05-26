@@ -5,6 +5,8 @@ import { useSettingsStore } from '@/stores/settings'
 import { useDisplayStore } from '@/stores/display'
 import { useWsTopic } from '@/composables/useWsTopic'
 import BoardEditorModal from '@/components/BoardEditorModal.vue'
+import WifiChannelModal from '@/components/WifiChannelModal.vue'
+import WifiSwitchingOverlay from '@/components/WifiSwitchingOverlay.vue'
 import Updates from '@/views/Updates.vue'
 
 const ws = useWsStore()
@@ -15,11 +17,84 @@ const tab = ref('server')
 
 // Server-side data
 const clients = ref([])
-const firmwareBuilds = ref([])
+// `get_firmware_builds` returns a dict keyed by firmware type:
+//   { simulation, hardware, rpi5, controller, (teensy41?) }
+// Each entry has at least { available, version, build_date, ... } —
+// the exact extras depend on the type (rp2040 has git_hash/version_full,
+// rpi5/controller have filename/checksum, teensy41 has bin_size/crc32).
+const firmwareBuilds = ref({})
+const firmwareLastChecked = ref(null)  // ms epoch — drives the "checked 5s ago" label
 
 // Boards
 const boards = ref([])
 const boardModal = ref({ open: false, boardId: null })
+
+// Wireless tab
+const wifi = ref({ ssid: '', password: '', band: null, channel: null, loaded: false })
+const wifiShowPassword = ref(false)
+const wifiCredsStatus = ref({ text: '', tone: 'slate' })  // tone: slate|emerald|red
+const wifiModalOpen = ref(false)
+const wifiSwitching = ref(null)
+
+async function loadWifi () {
+  try {
+    const cfg = await ws.management('wifi_get_config', {})
+    if (!cfg || !cfg.ok) return
+    wifi.value = {
+      ssid: cfg.ssid || '',
+      password: cfg.password || '',
+      band: cfg.band || null,
+      channel: cfg.channel ?? null,
+      loaded: true,
+    }
+  } catch (e) {
+    // Non-fatal — host may not have iw / wifi_admin available.
+  }
+}
+
+const wifiBandLabel = computed(() => {
+  const b = wifi.value.band
+  if (b === 'a')  return '5 GHz'
+  if (b === 'bg') return '2.4 GHz'
+  return b || '?'
+})
+const wifiCurrentChannelText = computed(() => {
+  if (!wifi.value.loaded) return '--'
+  return wifi.value.channel
+    ? `Currently ${wifiBandLabel.value}, channel ${wifi.value.channel}`
+    : `Currently ${wifiBandLabel.value}, channel auto`
+})
+
+async function saveWifiCredentials () {
+  const ssid = wifi.value.ssid || ''
+  const password = wifi.value.password || ''
+  if (!confirm(
+    `Save new credentials and restart the AP?\n\n` +
+    `New SSID: ${ssid}\n\n` +
+    `Every connected client will drop and reconnect (~5–10 s). ` +
+    `If you change the SSID, your laptop/phone will need to reconnect ` +
+    `to the new network name manually.`
+  )) return
+  try {
+    const r = await ws.management('wifi_set_credentials', { ssid, password })
+    if (r && r.switching) {
+      wifiSwitching.value = {
+        detail: `New SSID: ${ssid}. If the dashboard doesn't reconnect within 30 s, refresh after rejoining the WiFi network manually.`,
+      }
+    } else {
+      wifiCredsStatus.value = { text: 'Saved.', tone: 'emerald' }
+    }
+  } catch (err) {
+    console.error('wifi_set_credentials failed:', err)
+    wifiCredsStatus.value = { text: `Save failed: ${err.message || err}`, tone: 'red' }
+  }
+}
+
+function onWifiSwitching (info) { wifiSwitching.value = info || { detail: '' } }
+function onWifiSwitchingDone () {
+  wifiSwitching.value = null
+  loadWifi()
+}
 
 // LiveLink live status (already broadcast on the 'livelink' topic).
 const livelink = useWsTopic(() => 'livelink')
@@ -38,6 +113,7 @@ onMounted(async () => {
   reloadClients()
   reloadBuilds()
   reloadBoards()
+  loadWifi()
 })
 
 async function reloadClients () {
@@ -45,8 +121,18 @@ async function reloadClients () {
   catch (_) {}
 }
 async function reloadBuilds () {
-  try { const r = await ws.management('get_firmware_builds', {}); firmwareBuilds.value = r?.builds || [] }
-  catch (_) {}
+  try {
+    // Response is the dict from state_manager.get_all_firmware_builds() —
+    // keyed by firmware type, each value is the per-type info dict (or
+    // {available: false, ...} when nothing is staged).
+    const r = await ws.management('get_firmware_builds', {})
+    firmwareBuilds.value = r || {}
+    firmwareLastChecked.value = Date.now()
+  } catch (e) {
+    console.warn('get_firmware_builds failed:', e)
+    firmwareBuilds.value = {}
+    firmwareLastChecked.value = Date.now()
+  }
 }
 async function reloadBoards () {
   try { const r = await ws.management('list_boards', {}); boards.value = r?.boards || [] }
@@ -88,12 +174,121 @@ function fmtDuration (sec) {
   return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`
 }
 
+// ── Firmware-tab formatters ─────────────────────────────────────────
+// File size in binary units. Backend returns `bin_size` for RP2040/Teensy
+// and (sometimes) raw `size` for rpi5/controller from info.json packages
+// array — but `get_firmware_info_for_type` doesn't lift `size` into the
+// top-level dict today, so for rpi5/controller this returns "—".
+function fmtBytes (bytes) {
+  if (bytes == null) return '—'
+  const KiB = 1024, MiB = KiB * 1024
+  if (bytes < KiB) return `${bytes} B`
+  if (bytes < MiB) return `${(bytes / KiB).toFixed(1)} KB`
+  return `${(bytes / MiB).toFixed(2)} MB`
+}
+
+// Build date arrives in two shapes:
+//   - RP2040/Teensy: "YYYY-MM-DD HH:MM:SS" (local-time string)
+//   - rpi5/controller: ISO "2026-05-26T02:58:32Z"
+// Parse both, fall back to the raw string if parsing fails.
+function parseBuildDate (s) {
+  if (!s) return null
+  const direct = Date.parse(s)
+  if (!Number.isNaN(direct)) return new Date(direct)
+  // Coerce "YYYY-MM-DD HH:MM:SS" → "YYYY-MM-DDTHH:MM:SS" for older Safari.
+  const alt = Date.parse(String(s).replace(' ', 'T'))
+  if (!Number.isNaN(alt)) return new Date(alt)
+  return null
+}
+function fmtBuildDate (s) {
+  if (!s) return '—'
+  const d = parseBuildDate(s)
+  if (!d) return s
+  const ageMs = Date.now() - d.getTime()
+  if (ageMs < 0) return d.toLocaleString()  // future-dated, just show absolute
+  const sec = Math.floor(ageMs / 1000)
+  if (sec < 60)        return `${sec} sec ago`
+  if (sec < 3600)      return `${Math.floor(sec / 60)} min ago`
+  if (sec < 86400)     return `${Math.floor(sec / 3600)} hr ago`
+  if (sec < 86400 * 7) return `${Math.floor(sec / 86400)} days ago`
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+// Short hash for display. Accepts sha256 (rpi5/controller) or git hash (rp2040).
+function fmtShortHash (h) {
+  if (!h) return null
+  const s = String(h)
+  return s.length > 12 ? s.slice(0, 12) + '…' : s
+}
+
+function fmtChecked (ms) {
+  if (!ms) return ''
+  const sec = Math.floor((Date.now() - ms) / 1000)
+  if (sec < 5)    return 'just now'
+  if (sec < 60)   return `${sec} sec ago`
+  if (sec < 3600) return `${Math.floor(sec / 60)} min ago`
+  return new Date(ms).toLocaleTimeString()
+}
+
+// Static descriptors for each firmware type. Cards render in this order;
+// teensy41 only appears when the backend actually returned an entry for it.
+const FIRMWARE_TYPES = [
+  { key: 'simulation', label: 'RP2040 Simulation Build',  detail: 'For Renode-simulated RP2040 nodes',          icon: 'computer',         iconClass: 'text-cyan-400'   },
+  { key: 'hardware',   label: 'RP2040 Hardware Build',    detail: 'For physical Feather RP2040 + Ethernet nodes', icon: 'developer_board',  iconClass: 'text-violet-400' },
+  { key: 'teensy41',   label: 'Teensy 4.1 Hardware Build', detail: 'For physical Teensy 4.1 nodes',             icon: 'developer_board',  iconClass: 'text-amber-400'  },
+  { key: 'rpi5',       label: 'Raspberry Pi 5 Production Build', detail: 'For Raspberry Pi 5 nodes with GPIO control', icon: 'memory',     iconClass: 'text-rose-400'   },
+  { key: 'controller', label: 'Steam Deck Controller AppImage', detail: 'Tauri operator app — self-contained AppImage', icon: 'sports_esports', iconClass: 'text-cyan-400' },
+]
+
+const firmwareCards = computed(() => {
+  const builds = firmwareBuilds.value || {}
+  return FIRMWARE_TYPES
+    // Hide Teensy entirely when the backend didn't include it (current
+    // get_all_firmware_builds() doesn't, but we surface it if it shows up).
+    .filter(t => t.key !== 'teensy41' || t.key in builds)
+    .map(t => {
+      const info = builds[t.key]
+      const present = info != null
+      const available = !!(info && info.available)
+      const version = info?.version_full || info?.version || null
+      const buildDate = info?.build_date || null
+      const size = info?.bin_size ?? info?.size ?? null
+      const hash = info?.git_hash || info?.checksum || info?.bin_crc32 || null
+      // Status badge: "Available" when staged; "Missing" when entry
+      // exists but available=false; "Unknown" when the backend didn't
+      // return the type at all (only possible if FIRMWARE_TYPES grew
+      // beyond get_all_firmware_builds()'s keys).
+      let status, statusClass
+      if (!present) {
+        status = 'Unknown'
+        statusClass = 'bg-slate-700 text-slate-400'
+      } else if (available) {
+        status = 'Available'
+        statusClass = 'bg-emerald-500/20 text-emerald-400'
+      } else {
+        status = 'Missing'
+        statusClass = 'bg-slate-700 text-slate-400'
+      }
+      return {
+        ...t,
+        version,
+        buildDate,
+        size,
+        hash,
+        filename: info?.filename || null,
+        status,
+        statusClass,
+      }
+    })
+})
+
 const receiver = computed(() => livelink.value?.receiver || {})
 const router   = computed(() => livelink.value?.router   || {})
 
 const tabs = [
   { id: 'server',    label: 'Server',    icon: 'dns' },
   { id: 'interface', label: 'Interface', icon: 'display_settings' },
+  { id: 'wireless',  label: 'Wireless',  icon: 'wifi' },
   { id: 'updates',   label: 'Updates',   icon: 'system_update' },
   { id: 'livelink',  label: 'LiveLink',  icon: 'face' },
   { id: 'firmware',  label: 'Firmware',  icon: 'memory' },
@@ -254,6 +449,85 @@ const tabs = [
       </div>
     </div>
 
+    <!-- ─── Wireless ────────────────────────────────────────────────────── -->
+    <!-- Operator-managed AP credentials + channel picker. Backed by
+         wifi_admin on the server (NetworkManager). Every save here
+         triggers an AP restart and a ~5-10 s WS outage; the overlay
+         covers the gap and ws.js auto-reconnects. -->
+    <div v-show="tab === 'wireless'" class="space-y-6">
+      <div class="card">
+        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <span class="material-icons text-cyan-400">wifi</span>
+          Wireless AP
+        </h3>
+        <div class="text-xs text-slate-400 mb-4 p-3 rounded bg-amber-900/30 border border-amber-700/50">
+          <span class="material-icons text-amber-400 text-sm align-middle">warning</span>
+          Saving credentials or switching the channel restarts the AP.
+          Every connected client (including this dashboard) will drop and
+          reconnect — expect a ~5-10 s blackout. Do it while the robot is idle.
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="block text-sm font-medium text-slate-300 mb-1">SSID</label>
+            <input v-model="wifi.ssid" type="text" maxlength="32" placeholder="OpenSAINT" class="input-field w-full" />
+            <p class="text-xs text-slate-500 mt-1">1-32 printable ASCII characters.</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+            <div class="flex gap-2">
+              <input
+                v-model="wifi.password"
+                :type="wifiShowPassword ? 'text' : 'password'"
+                minlength="8"
+                maxlength="63"
+                placeholder="••••••••"
+                class="input-field w-full"
+              />
+              <button
+                type="button"
+                class="btn-secondary text-xs"
+                title="Show / hide password"
+                @click="wifiShowPassword = !wifiShowPassword"
+              >
+                <span class="material-icons icon-sm">{{ wifiShowPassword ? 'visibility_off' : 'visibility' }}</span>
+              </button>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">8-63 characters (WPA2-PSK).</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-3 mb-6">
+          <button class="btn-primary" @click="saveWifiCredentials">
+            <span class="material-icons icon-sm">save</span>
+            Save credentials &amp; restart AP
+          </button>
+          <span
+            v-if="wifiCredsStatus.text"
+            :class="{
+              'text-sm': true,
+              'text-slate-500':  wifiCredsStatus.tone === 'slate',
+              'text-emerald-400': wifiCredsStatus.tone === 'emerald',
+              'text-red-300':    wifiCredsStatus.tone === 'red',
+            }"
+          >{{ wifiCredsStatus.text }}</span>
+        </div>
+
+        <div class="pt-4 border-t border-slate-700">
+          <div class="flex items-center justify-between mb-2">
+            <h4 class="text-sm font-semibold text-slate-300">Channel</h4>
+            <span class="text-xs text-slate-500">{{ wifiCurrentChannelText }}</span>
+          </div>
+          <p class="text-xs text-slate-500 mb-3">
+            Scan nearby APs to see which channels are busy, then pick a quieter one.
+            Brief beacon interruption during scan; full disconnect on apply.
+          </p>
+          <button class="btn-secondary" @click="wifiModalOpen = true">
+            <span class="material-icons icon-sm">radar</span>
+            Find Better Channel…
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- ─── Updates ─────────────────────────────────────────────────────── -->
     <div v-show="tab === 'updates'">
       <Updates embedded />
@@ -300,29 +574,81 @@ const tabs = [
     </div>
 
     <!-- ─── Firmware ────────────────────────────────────────────────────── -->
+    <!-- Firmware builds staged on the server. The list mirrors the legacy
+         dashboard Firmware tab: RP2040 sim+hw, Teensy 4.1 (when present),
+         Pi 5, and the Steam Deck controller AppImage (added in a2e788a). -->
     <div v-show="tab === 'firmware'" class="space-y-6">
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-          <span class="material-icons text-cyan-400">memory</span>
-          Firmware builds on this server
-        </h3>
-        <div v-if="!firmwareBuilds.length" class="text-sm text-slate-400 italic">No firmware bundled.</div>
-        <ul v-else class="divide-y divide-slate-700/50 text-sm">
-          <li v-for="b in firmwareBuilds" :key="b.type" class="py-3 grid grid-cols-3 gap-3">
-            <div>
-              <div class="font-semibold text-white">{{ b.type }}</div>
-              <div class="text-xs text-slate-500">{{ b.chip_family || '' }}</div>
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+            <span class="material-icons text-cyan-400">memory</span>
+            Firmware builds on this server
+          </h3>
+          <div class="flex items-center gap-3">
+            <span v-if="firmwareLastChecked" class="text-xs text-slate-500">
+              Checked {{ fmtChecked(firmwareLastChecked) }}
+            </span>
+            <button class="btn-secondary text-sm" @click="reloadBuilds">
+              <span class="material-icons icon-sm">refresh</span>
+              Refresh
+            </button>
+          </div>
+        </div>
+        <p class="text-sm text-slate-400 mb-4">
+          OTA targets staged under <code class="text-cyan-300 text-xs">server/resources/firmware/</code>.
+          Adopted nodes (and the controller app) fetch from here.
+        </p>
+
+        <div v-if="!firmwareCards.length" class="text-sm text-slate-400 italic">
+          No firmware bundled.
+        </div>
+        <div v-else class="space-y-3">
+          <div
+            v-for="card in firmwareCards"
+            :key="card.key"
+            class="bg-slate-800/50 rounded-lg p-4 border border-slate-700"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="material-icons" :class="card.iconClass">{{ card.icon }}</span>
+                <div class="min-w-0">
+                  <h4 class="font-medium text-white truncate">{{ card.label }}</h4>
+                  <p class="text-xs text-slate-500 truncate">{{ card.detail }}</p>
+                </div>
+              </div>
+              <span :class="['px-2 py-1 text-xs font-medium rounded-full whitespace-nowrap', card.statusClass]">
+                {{ card.status }}
+              </span>
             </div>
-            <div>
-              <div class="stat-label">Version</div>
-              <div class="font-mono">{{ b.version || '—' }}</div>
+            <div class="mt-3 ml-8 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm">
+              <div>
+                <div class="stat-label">Version</div>
+                <div class="font-mono text-white">{{ card.version || '—' }}</div>
+              </div>
+              <div>
+                <div class="stat-label">Built</div>
+                <div class="font-mono text-xs text-white" :title="card.buildDate || ''">
+                  {{ fmtBuildDate(card.buildDate) }}
+                </div>
+              </div>
+              <div v-if="card.filename" class="sm:col-span-2">
+                <div class="stat-label">Package</div>
+                <div class="font-mono text-xs text-white break-all">{{ card.filename }}</div>
+              </div>
+              <div>
+                <div class="stat-label">Size</div>
+                <div class="font-mono text-xs text-white">{{ fmtBytes(card.size) }}</div>
+              </div>
+              <div>
+                <div class="stat-label">Checksum</div>
+                <div
+                  class="font-mono text-xs text-white"
+                  :title="card.hash || ''"
+                >{{ fmtShortHash(card.hash) || '—' }}</div>
+              </div>
             </div>
-            <div>
-              <div class="stat-label">Built</div>
-              <div class="font-mono text-xs">{{ b.build_date || '—' }}</div>
-            </div>
-          </li>
-        </ul>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -366,6 +692,17 @@ const tabs = [
       :board-id="boardModal.boardId"
       @close="boardModal = { open: false, boardId: null }"
       @saved="reloadBoards()"
+    />
+
+    <WifiChannelModal
+      v-if="wifiModalOpen"
+      @close="wifiModalOpen = false"
+      @switching="onWifiSwitching"
+    />
+    <WifiSwitchingOverlay
+      v-if="wifiSwitching"
+      :detail="wifiSwitching.detail"
+      @close="onWifiSwitchingDone"
     />
   </section>
 </template>

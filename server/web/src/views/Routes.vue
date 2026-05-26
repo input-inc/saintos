@@ -1,53 +1,158 @@
 <script setup>
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
+// Per-sheet routing editor. One sheet per adopted controller node, plus
+// an optional dashboard sheet for cross-controller widgets.
+//
+// Tab bar lives here. The canvas + per-sheet graph state lives in
+// RoutingSheet.vue, re-keyed by sheetId so all transient state
+// (positions ref, drag/connect, value pills) is naturally isolated.
+//
+// Live `routing_values` snapshot is subscribed here and passed down to
+// the active sheet so it can light up its peripheral sinks / operator
+// outputs / widget input pills.
+import { computed, onMounted, ref, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { useNodesStore } from '@/stores/nodes'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useWsTopic } from '@/composables/useWsTopic'
 import AppModal from '@/components/AppModal.vue'
+import RoutingSheet from '@/components/RoutingSheet.vue'
+
+const DASHBOARD_SHEET_ID = '_dashboard'
+const ACTIVE_SHEET_KEY   = 'routing_active_sheet_id'
 
 const ws = useWsStore()
 const nodes = useNodesStore()
 const catalog = usePeripheralCatalog()
-const live = useWsTopic(() => 'system_routing')
 
-const routing = ref({ version: 0, routes: [], widgets: [] })
-const nodePeripherals = ref({})       // node_id -> peripherals[]
-const widgetCatalog = ref([])
+const systemRouting = useWsTopic(() => 'system_routing')
+const routingValues = useWsTopic(() => 'routing_values')
 
-const positionsKey = 'saint_routing_positions'
-const pendingSignalsKey = 'saint_routing_pending_signals'
+const routing = ref({ version: 0, sheets: {} })
+const topicCatalog = ref([])
+const operatorTypes = ref([])
+const nodePeripherals = ref({})  // node_id -> peripherals[]
 
-const positions = ref(loadJson(positionsKey, {}))
-const pendingSignals = ref(loadJson(pendingSignalsKey, []))
+const activeSheetId = ref(loadActiveSheet())
+const sheetRef = ref(null)
 
-const canvas = ref(null)
-const connecting = ref(null)          // { fromHandle, fromDir }
-const dragging = ref(null)            // { nodeId, offsetX, offsetY }
-const cursor = ref({ x: 0, y: 0 })
-
-// Deterministic pin geometry — must match the CSS rules below.
-const NODE_WIDTH    = 220
-const HEADER_HEIGHT = 48
-const PIN_ROW       = 22
-const PIN_OFFSET_X  = 6
-
-function loadJson (key, fallback) {
-  try { return JSON.parse(localStorage.getItem(key)) || fallback }
-  catch (_) { return fallback }
+function loadActiveSheet () {
+  try { return localStorage.getItem(ACTIVE_SHEET_KEY) || null } catch (_) { return null }
 }
-function saveJson (key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)) } catch (_) {}
+function saveActiveSheet () {
+  try { localStorage.setItem(ACTIVE_SHEET_KEY, activeSheetId.value || '') } catch (_) {}
 }
 
+// ── Live routing snapshot ────────────────────────────────────────────
+const liveRouting = computed(() => systemRouting.value || routing.value)
+const sheets = computed(() => liveRouting.value?.sheets || {})
+
+// All controllers (adopted nodes whose role is "controller") + any
+// sheet on disk that isn't backed by an adopted node ("orphan"). The
+// dashboard sheet always shows up if it exists on disk OR if anyone
+// has widgets they'd like to host outside a controller sheet.
+const sheetEntries = computed(() => {
+  const entries = []
+  const seen = new Set()
+  for (const n of nodes.all) {
+    if (n.role && n.role !== 'controller') continue
+    entries.push({
+      id: n.node_id,
+      label: n.display_name || n.node_id,
+      kind: 'controller',
+      node: n,
+      orphan: false,
+    })
+    seen.add(n.node_id)
+  }
+  for (const sid of Object.keys(sheets.value)) {
+    if (seen.has(sid)) continue
+    if (sid === DASHBOARD_SHEET_ID) continue
+    entries.push({
+      id: sid,
+      label: `${sid} (no node)`,
+      kind: 'controller',
+      node: null,
+      orphan: true,
+    })
+    seen.add(sid)
+  }
+  // Always offer a dashboard tab — it's where global widgets live.
+  entries.push({
+    id: DASHBOARD_SHEET_ID,
+    label: 'Dashboard',
+    kind: 'dashboard',
+    node: null,
+    orphan: false,
+  })
+  return entries
+})
+
+function ensureActiveSheet () {
+  const ids = sheetEntries.value.map(e => e.id)
+  if (!ids.includes(activeSheetId.value)) {
+    activeSheetId.value = ids[0] || null
+    saveActiveSheet()
+  }
+}
+
+const activeEntry = computed(() =>
+  sheetEntries.value.find(e => e.id === activeSheetId.value) || null,
+)
+const activeSheet = computed(() => {
+  const id = activeSheetId.value
+  if (!id) return null
+  return sheets.value[id] || {
+    node_id: id, inputs: [], ws_inputs: [], outputs: [],
+    operators: [], widgets: [], wires: [],
+  }
+})
+const activeValues = computed(() => {
+  const id = activeSheetId.value
+  return id ? (routingValues.value?.sheets?.[id] || {}) : {}
+})
+const activePeripherals = computed(() => {
+  const id = activeSheetId.value
+  return id ? (nodePeripherals.value[id] || []) : []
+})
+
+// ── Routes list (active sheet only) ──────────────────────────────────
+const activeWires = computed(() => activeSheet.value?.wires || [])
+
+function endpointLabel (ep) {
+  if (!ep) return ''
+  if (ep.kind === 'input')      return `in:${ep.parts[0]}`
+  if (ep.kind === 'ws_input')   return `ws:${ep.parts[0]}`
+  if (ep.kind === 'operator')   return `op:${ep.parts.join('/')}`
+  if (ep.kind === 'output')     return `out:${ep.parts[0]}`
+  if (ep.kind === 'widget')     return `w:${ep.parts.join('/')}`
+  if (ep.kind === 'peripheral') return `p:${ep.parts.join('/')}`
+  return (ep.parts || []).join('/')
+}
+
+async function removeWire (wireId) {
+  if (!confirm('Remove this wire?')) return
+  try { await ws.management('remove_routing_wire', { node_id: activeSheetId.value, wire_id: wireId }) }
+  catch (e) { console.warn('remove_routing_wire failed:', e) }
+}
+
+// ── Initial load ─────────────────────────────────────────────────────
 async function loadAll () {
+  await catalog.ensureLoaded()
+  try {
+    const r = await ws.management('get_peripheral_catalog', {})
+    operatorTypes.value = r?.operator_types || []
+  } catch (_) {}
   try {
     const r = await ws.management('get_system_routing', {})
-    routing.value = r || { version: 0, routes: [], widgets: [] }
+    routing.value = r || { version: 0, sheets: {} }
   } catch (e) { console.warn('routing load failed:', e) }
-  await catalog.ensureLoaded()
-  widgetCatalog.value = catalog.widgetTypes
+  try {
+    const r = await ws.send('ros', 'list_topic_channels', {})
+    topicCatalog.value = r?.topics || []
+  } catch (_) {}
   await nodes.fetchAll().catch(() => {})
+  // Pre-fetch peripherals for all adopted nodes — small, and the active
+  // sheet may change quickly so we want them ready.
   for (const n of nodes.all) {
     if (nodePeripherals.value[n.node_id]) continue
     try {
@@ -55,329 +160,162 @@ async function loadAll () {
       nodePeripherals.value[n.node_id] = r?.peripherals || []
     } catch (_) {}
   }
+  ensureActiveSheet()
 }
-onMounted(() => { catalog.ensureLoaded(); loadAll() })
+onMounted(loadAll)
 
-const currentRouting = computed(() => live.value || routing.value)
-const routes  = computed(() => currentRouting.value.routes  || [])
-const widgets = computed(() => currentRouting.value.widgets || [])
+// Re-ensure active sheet if the list mutates.
+watch(sheetEntries, () => ensureActiveSheet())
 
-// ── Graph node assembly ──────────────────────────────────────────────────
+function selectSheet (id) {
+  activeSheetId.value = id
+  saveActiveSheet()
+}
 
-function toPin (c) { return { id: c.id, label: c.display || c.id, cap: c.cap } }
-function widgetType (id) { return widgetCatalog.value.find(t => t.id === id) }
-
-const graphNodes = computed(() => {
-  const out = []
-  let pCount = 0
-  for (const n of nodes.all) {
-    for (const p of (nodePeripherals.value[n.node_id] || [])) {
-      const id = `p::${n.node_id}::${p.id}`
-      const type = catalog.byType(p.type)
-      const channels = type?.channels || []
-      // Legacy convention: channel.dir === 'in' means the peripheral
-      // *produces* this value (e.g. a sensor reading), so it becomes a
-      // graph OUTPUT (right side, amber). dir === 'out' means the
-      // peripheral *consumes* this value (e.g. an actuator), so it
-      // becomes a graph INPUT (left side, cyan).
-      const inputs  = channels.filter(c => c.dir === 'out').map(toPin)
-      const outputs = channels.filter(c => c.dir === 'in').map(toPin)
-      const pos = positions.value[id] || autoPos('peripheral', pCount++)
-      out.push({
-        id, kind: 'peripheral',
-        nodeId: n.node_id, nodeLabel: n.display_name || n.node_id,
-        peripheral: p, typeLabel: type?.label || p.type,
-        builtin: !!p.builtin,
-        inputs, outputs, x: pos.x, y: pos.y,
+// ── Add-input / output / operator / widget modals ────────────────────
+const inputModal = ref({ open: false, kind: 'ws_input', topic: '', field: '', label: '', error: '' })
+function openAddInput () {
+  if (!activeSheetId.value) return
+  const first = topicCatalog.value[0]
+  inputModal.value = {
+    open: true, kind: 'ws_input',
+    topic: first?.topic || '', field: first?.channels?.[0]?.field || '',
+    label: '', error: '',
+  }
+}
+const inputTopicChannels = computed(() =>
+  topicCatalog.value.find(t => t.topic === inputModal.value.topic)?.channels || [],
+)
+async function saveAddInput () {
+  const { kind, topic, field, label } = inputModal.value
+  let derivedLabel = label.trim()
+  if (!derivedLabel && topic) derivedLabel = field ? `${topic}.${field}` : topic
+  inputModal.value.error = ''
+  try {
+    let r
+    if (kind === 'ws_input') {
+      r = await ws.management('add_routing_ws_input', { node_id: activeSheetId.value, label: derivedLabel })
+    } else {
+      if (!topic) { inputModal.value.error = 'Pick a ROS topic'; return }
+      r = await ws.management('add_routing_input', {
+        node_id: activeSheetId.value, topic, field, label: derivedLabel,
       })
     }
-  }
-  let wCount = 0
-  for (const w of widgets.value) {
-    const id = `w::${w.id}`
-    const type = widgetType(w.type)
-    const inputs = (type?.inputs || []).map(i => ({ id: i.id, label: i.display || i.id, cap: i.cap }))
-    const pos = positions.value[id] || autoPos('widget', wCount++)
-    out.push({ id, kind: 'widget', widget: w, typeLabel: type?.label || w.type,
-               inputs, outputs: [], x: pos.x, y: pos.y })
-  }
-  const sigPaths = new Set(pendingSignals.value)
-  for (const r of routes.value) {
-    if (r.source?.kind === 'signal') sigPaths.add(r.source.parts[0])
-    if (r.sink?.kind   === 'signal') sigPaths.add(r.sink.parts[0])
-  }
-  let sCount = 0
-  for (const path of sigPaths) {
-    const id = `s::${path}`
-    const pos = positions.value[id] || autoPos('signal', sCount++)
-    out.push({
-      id, kind: 'signal', signal: path,
-      inputs:  [{ id: 'in',  label: 'in',  cap: 'any' }],
-      outputs: [{ id: 'out', label: 'out', cap: 'any' }],
-      x: pos.x, y: pos.y,
-    })
-  }
-  return out
-})
-
-function autoPos (kind, n) {
-  const cols = { peripheral: 30, signal: 380, widget: 730 }
-  return { x: cols[kind], y: 30 + n * 140 }
-}
-
-// ── Pin geometry — matches CSS row heights ───────────────────────────────
-
-function pinPosition (handle) {
-  if (!handle) return null
-  const slash = handle.indexOf('/')
-  const nodeId = handle.slice(0, slash)
-  const pinId  = handle.slice(slash + 1)
-  const g = graphNodes.value.find(n => n.id === nodeId)
-  if (!g) return null
-  const inIdx  = g.inputs.findIndex(p => p.id === pinId)
-  if (inIdx >= 0) {
-    return {
-      x: g.x - PIN_OFFSET_X + 6,                          // pin is 12px wide, centered on -6px left
-      y: g.y + HEADER_HEIGHT + inIdx * PIN_ROW + PIN_ROW / 2,
-    }
-  }
-  const outIdx = g.outputs.findIndex(p => p.id === pinId)
-  if (outIdx >= 0) {
-    const row = g.inputs.length + outIdx
-    return {
-      x: g.x + NODE_WIDTH + PIN_OFFSET_X - 6,
-      y: g.y + HEADER_HEIGHT + row * PIN_ROW + PIN_ROW / 2,
-    }
-  }
-  return null
-}
-
-// ── Endpoint <-> handle translation ──────────────────────────────────────
-
-function handleToEndpoint (handle) {
-  const slash = handle.indexOf('/')
-  const nodeId = handle.slice(0, slash)
-  const pinId  = handle.slice(slash + 1)
-  if (nodeId.startsWith('p::')) {
-    const rest = nodeId.slice(3)
-    const idx = rest.lastIndexOf('::')
-    return { kind: 'peripheral', parts: [rest.slice(0, idx), rest.slice(idx + 2), pinId] }
-  }
-  if (nodeId.startsWith('s::')) return { kind: 'signal', parts: [nodeId.slice(3)] }
-  if (nodeId.startsWith('w::')) return { kind: 'widget', parts: [nodeId.slice(3), pinId] }
-  return null
-}
-
-// `dir` disambiguates the signal-node side: routes point to its 'in' pin on
-// the sink end and its 'out' pin on the source end.
-function endpointToHandle (ep, dir) {
-  if (!ep) return null
-  if (ep.kind === 'peripheral') return `p::${ep.parts[0]}::${ep.parts[1]}/${ep.parts[2]}`
-  if (ep.kind === 'signal')     return `s::${ep.parts[0]}/${dir}`
-  if (ep.kind === 'widget')     return `w::${ep.parts[0]}/${ep.parts[1]}`
-  return null
-}
-
-// ── Wires ────────────────────────────────────────────────────────────────
-
-function bezier (a, b) {
-  const dx = Math.max(Math.abs(b.x - a.x) * 0.5, 30)
-  return `M ${a.x},${a.y} C ${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`
-}
-
-const wires = computed(() => {
-  const out = []
-  for (const r of routes.value) {
-    const a = pinPosition(endpointToHandle(r.source, 'out'))
-    const b = pinPosition(endpointToHandle(r.sink,   'in'))
-    if (a && b) out.push({ id: r.id, d: bezier(a, b), pending: false })
-  }
-  if (connecting.value) {
-    const a = pinPosition(connecting.value.fromHandle)
-    if (a) out.push({ id: '_pending', d: bezier(a, cursor.value), pending: true })
-  }
-  return out
-})
-
-// ── Drag handling (header only) ──────────────────────────────────────────
-
-function startDrag (evt, g) {
-  if (evt.target.closest('.routing-pin')) return
-  if (evt.target.closest('button')) return
-  dragging.value = {
-    nodeId: g.id,
-    offsetX: evt.clientX - g.x,
-    offsetY: evt.clientY - g.y,
-  }
-  evt.preventDefault()
-}
-function onMouseMove (evt) {
-  const rect = canvas.value?.getBoundingClientRect()
-  if (rect) cursor.value = { x: evt.clientX - rect.left, y: evt.clientY - rect.top }
-  if (dragging.value) {
-    const id = dragging.value.nodeId
-    positions.value = {
-      ...positions.value,
-      [id]: {
-        x: Math.max(0, evt.clientX - dragging.value.offsetX),
-        y: Math.max(0, evt.clientY - dragging.value.offsetY),
-      },
-    }
-  }
-}
-function onMouseUp () {
-  if (dragging.value) {
-    saveJson(positionsKey, positions.value)
-    dragging.value = null
-  }
-}
-onMounted(() => {
-  window.addEventListener('mousemove', onMouseMove)
-  window.addEventListener('mouseup', onMouseUp)
-})
-onBeforeUnmount(() => {
-  window.removeEventListener('mousemove', onMouseMove)
-  window.removeEventListener('mouseup', onMouseUp)
-})
-
-// ── Pin click / drag / wire creation ─────────────────────────────────────
-//
-// Two interaction styles are supported:
-//   1. Click pin A, click pin B (legacy behavior — connecting state persists
-//      between separate clicks).
-//   2. Press pin A, drag, release on pin B (node-editor UX).
-// Both end in `completeConnection(toHandle, toDir)` which submits add_route.
-
-function isConnectingHandle (nodeId, pinId) {
-  return connecting.value?.fromHandle === `${nodeId}/${pinId}`
-}
-
-function cancelConnecting () { connecting.value = null }
-
-function pinMouseDown (evt, g, pinId, dir) {
-  evt.stopPropagation()
-  const handle = `${g.id}/${pinId}`
-  // Click-click finalize: a second mousedown on a *different* pin completes.
-  if (connecting.value && connecting.value.fromHandle !== handle) {
-    completeConnection(handle, dir)
-    return
-  }
-  // Start (or restart) a connection from this pin.
-  connecting.value = { fromHandle: handle, fromDir: dir }
-}
-
-function pinMouseUp (evt, g, pinId, dir) {
-  evt.stopPropagation()
-  const handle = `${g.id}/${pinId}`
-  // Drag-release finalize: only fires when the mouseup pin is different
-  // from where the connecting state started (the same-pin mouseup at the
-  // end of a click should not auto-cancel the in-progress connection).
-  if (connecting.value && connecting.value.fromHandle !== handle) {
-    completeConnection(handle, dir)
+    if (r && r.success === false) { inputModal.value.error = r.message || 'Failed'; return }
+    inputModal.value.open = false
+  } catch (e) {
+    inputModal.value.error = e.message || String(e)
   }
 }
 
-async function completeConnection (toHandle, toDir) {
-  if (!connecting.value) return
-  let source, sink
-  if (connecting.value.fromDir === 'out' && toDir === 'in') {
-    source = connecting.value.fromHandle; sink = toHandle
-  } else if (connecting.value.fromDir === 'in' && toDir === 'out') {
-    source = toHandle; sink = connecting.value.fromHandle
-  } else {
-    cancelConnecting(); return            // can't connect in→in or out→out
+const outputModal = ref({ open: false, topic: '', field: '', label: '', error: '' })
+function openAddOutput () {
+  if (!activeSheetId.value) return
+  const first = topicCatalog.value[0]
+  outputModal.value = {
+    open: true,
+    topic: first?.topic || '', field: first?.channels?.[0]?.field || '',
+    label: '', error: '',
   }
-  cancelConnecting()
+}
+const outputTopicChannels = computed(() =>
+  topicCatalog.value.find(t => t.topic === outputModal.value.topic)?.channels || [],
+)
+async function saveAddOutput () {
+  const { topic, field, label } = outputModal.value
+  outputModal.value.error = ''
+  if (!topic) { outputModal.value.error = 'Pick a ROS topic'; return }
   try {
-    await ws.management('add_route', {
-      source: handleToEndpoint(source),
-      sink:   handleToEndpoint(sink),
+    const r = await ws.management('add_routing_output', {
+      node_id: activeSheetId.value, topic, field, label: label.trim(),
     })
-  } catch (e) { console.warn('add_route failed:', e) }
-}
-
-async function clickWire (id) {
-  if (!confirm('Remove this route?')) return
-  try { await ws.management('remove_route', { route_id: id }) }
-  catch (e) { console.warn('remove_route failed:', e) }
-}
-
-// ── Add / remove signals + widgets ───────────────────────────────────────
-
-function promptAddSignal () {
-  const name = prompt('Logical signal path (e.g. /battery/main/current):')
-  if (!name) return
-  const path = name.trim()
-  if (!path) return
-  if (!pendingSignals.value.includes(path)) {
-    pendingSignals.value = [...pendingSignals.value, path]
-    saveJson(pendingSignalsKey, pendingSignals.value)
+    if (r && r.success === false) { outputModal.value.error = r.message || 'Failed'; return }
+    outputModal.value.open = false
+  } catch (e) {
+    outputModal.value.error = e.message || String(e)
   }
 }
 
-async function removeGraphNode (graphId) {
-  if (graphId.startsWith('s::')) {
-    const path = graphId.slice(3)
-    if (!confirm(`Remove signal "${path}" and all routes touching it?`)) return
-    pendingSignals.value = pendingSignals.value.filter(s => s !== path)
-    saveJson(pendingSignalsKey, pendingSignals.value)
-    const touching = routes.value.filter(r =>
-      (r.source?.kind === 'signal' && r.source.parts[0] === path) ||
-      (r.sink?.kind   === 'signal' && r.sink.parts[0]   === path))
-    for (const r of touching) {
-      try { await ws.management('remove_route', { route_id: r.id }) }
-      catch (e) { console.warn('remove_route failed:', e) }
-    }
-    return
+const operatorModal = ref({ open: false, op: '', label: '', error: '' })
+function openAddOperator () {
+  if (!activeSheetId.value) return
+  operatorModal.value = {
+    open: true, op: operatorTypes.value[0]?.id || '', label: '', error: '',
   }
-  if (graphId.startsWith('w::')) {
-    const widgetId = graphId.slice(3)
-    if (!confirm('Remove this widget? Any routes wired to it will be deleted too.')) return
-    try { await ws.management('remove_widget', { widget_id: widgetId }) }
-    catch (e) { console.warn('remove_widget failed:', e) }
+}
+const operatorDesc = computed(() =>
+  operatorTypes.value.find(t => t.id === operatorModal.value.op)?.description || '',
+)
+async function saveAddOperator () {
+  const { op, label } = operatorModal.value
+  operatorModal.value.error = ''
+  if (!op) { operatorModal.value.error = 'Pick an operator'; return }
+  try {
+    const r = await ws.management('add_routing_operator', {
+      node_id: activeSheetId.value, op, label: label.trim(),
+    })
+    if (r && r.success === false) { operatorModal.value.error = r.message || 'Failed'; return }
+    operatorModal.value.open = false
+  } catch (e) {
+    operatorModal.value.error = e.message || String(e)
   }
-  // Peripheral graph nodes can't be removed here — operator must edit the
-  // node's Peripherals tab to do that.
 }
 
 const widgetModal = ref({ open: false, type: '', label: '', error: '' })
 function openAddWidget () {
-  const first = widgetCatalog.value?.[0]?.id || ''
+  if (!activeSheetId.value) return
+  const first = catalog.widgetTypes?.[0]?.id || ''
   widgetModal.value = { open: true, type: first, label: '', error: '' }
 }
-const widgetTypeDesc = computed(() =>
-  widgetCatalog.value?.find(t => t.id === widgetModal.value.type)?.description || '',
+const widgetDesc = computed(() =>
+  catalog.widgetTypes.find(t => t.id === widgetModal.value.type)?.description || '',
 )
 async function saveAddWidget () {
-  const type = widgetModal.value.type
-  if (!type) { widgetModal.value.error = 'Pick a widget type.'; return }
-  const fallbackLabel = widgetType(type)?.label || type
-  const label = (widgetModal.value.label || '').trim() || fallbackLabel
+  const { type, label } = widgetModal.value
   widgetModal.value.error = ''
+  if (!type) { widgetModal.value.error = 'Pick a widget type'; return }
+  const labelOrFallback = label.trim() || (catalog.widgetType(type)?.label || type)
   try {
-    await ws.management('add_widget', { type, label, position: [720, 20] })
+    const r = await ws.management('add_widget', {
+      node_id: activeSheetId.value, type, label: labelOrFallback, position: [640, 20],
+    })
+    if (r && r.success === false) { widgetModal.value.error = r.message || 'Failed'; return }
     widgetModal.value.open = false
   } catch (e) {
     widgetModal.value.error = e.message || String(e)
   }
 }
 
-function autoLayout () {
-  positions.value = {}
-  saveJson(positionsKey, positions.value)
-}
+function autoLayout () { sheetRef.value?.autoLayout() }
 
-// Title / subtitle for the node header.
-function titleFor (g) {
-  if (g.kind === 'peripheral') return g.peripheral.label || g.peripheral.id
-  if (g.kind === 'signal')     return g.signal
-  return g.widget.label || g.widget.id
-}
-function subtitleFor (g) {
-  if (g.kind === 'peripheral') return `${g.typeLabel} on ${g.nodeLabel}`
-  if (g.kind === 'signal')     return 'logical signal'
-  return `${g.typeLabel} widget`
-}
+// ── Debug log gate ───────────────────────────────────────────────────
+// Surfaces every value snapshot in devtools when the global is on; off
+// by default so the console isn't flooded. Toggle from the console:
+//   window.__SAINT_DEBUG_ROUTING__ = true
+watch(routingValues, (v) => {
+  if (typeof window !== 'undefined' && window.__SAINT_DEBUG_ROUTING__) {
+    const keys = Object.keys(v?.sheets || {})
+    // eslint-disable-next-line no-console
+    console.debug('[routing] routing_values', {
+      active: activeSheetId.value, sheets: keys,
+      sheet_data: v?.sheets?.[activeSheetId.value],
+    })
+  }
+})
+
+// Counters for sheet subtitle.
+const sheetCounts = computed(() => {
+  const s = activeSheet.value || {}
+  return {
+    inputs:    (s.inputs || []).length,
+    ws_inputs: (s.ws_inputs || []).length,
+    outputs:   (s.outputs || []).length,
+    operators: (s.operators || []).length,
+    widgets:   (s.widgets || []).length,
+    wires:     (s.wires || []).length,
+    peripherals: activePeripherals.value.length,
+  }
+})
 </script>
 
 <template>
@@ -385,128 +323,204 @@ function subtitleFor (g) {
     <div class="flex items-center justify-between mb-4">
       <div>
         <h2 class="text-2xl font-bold text-white">Routing</h2>
-        <p class="text-sm text-slate-400">Connect peripheral channels to widgets and logical signals.</p>
+        <p class="text-sm text-slate-400">One sheet per controller node, plus a dashboard sheet for cross-system widgets.</p>
       </div>
       <div class="flex items-center gap-2">
-        <button class="btn-secondary text-sm" @click="promptAddSignal">
-          <span class="material-icons icon-sm">add</span> Signal
+        <button class="btn-secondary text-sm" :disabled="!activeSheetId" @click="openAddInput">
+          <span class="material-icons icon-sm">input</span> Input
         </button>
-        <button class="btn-secondary text-sm" @click="openAddWidget">
+        <button class="btn-secondary text-sm" :disabled="!activeSheetId" @click="openAddOutput">
+          <span class="material-icons icon-sm">output</span> Output
+        </button>
+        <button class="btn-secondary text-sm" :disabled="!activeSheetId" @click="openAddOperator">
+          <span class="material-icons icon-sm">functions</span> Operator
+        </button>
+        <button class="btn-secondary text-sm" :disabled="!activeSheetId" @click="openAddWidget">
           <span class="material-icons icon-sm">widgets</span> Widget
         </button>
-        <button class="btn-secondary text-sm" title="Auto-arrange nodes" @click="autoLayout">
+        <button class="btn-secondary text-sm" :disabled="!activeSheetId" title="Auto-arrange nodes" @click="autoLayout">
           <span class="material-icons icon-sm">grid_view</span> Auto-layout
         </button>
       </div>
     </div>
 
-    <div class="card">
-      <p class="text-xs text-slate-400 mb-3">
-        Drag node headers to reposition. Drag from an
-        <span class="inline-block align-middle" style="width:10px;height:10px;background:#f59e0b;border-radius:50%;"></span>
-        output to an
-        <span class="inline-block align-middle" style="width:10px;height:10px;background:#06b6d4;border-radius:50%;"></span>
-        input to wire them (or click each in turn). Click a wire to delete it.
-      </p>
-
-      <div
-        ref="canvas"
-        class="routing-canvas"
-        @click.self="cancelConnecting"
+    <!-- Tab bar -->
+    <div class="routing-tabs">
+      <button
+        v-for="e in sheetEntries"
+        :key="e.id"
+        :class="['routing-tab', activeSheetId === e.id ? 'active' : '', e.orphan ? 'orphan' : '']"
+        :title="e.orphan ? 'Orphan sheet — owning node is no longer adopted' : ''"
+        @click="selectSheet(e.id)"
       >
-        <svg class="routing-wires" width="100%" height="100%" preserveAspectRatio="none">
-          <path
-            v-for="w in wires"
-            :key="w.id"
-            :d="w.d"
-            fill="none"
-            :stroke="w.pending ? '#34d399' : '#06b6d4'"
-            stroke-width="2"
-            :stroke-dasharray="w.pending ? '4,3' : ''"
-            :class="['routing-wire', w.pending ? 'pending' : '']"
-            @click.stop="!w.pending && clickWire(w.id)"
-          />
-        </svg>
+        <span class="material-icons icon-sm">
+          {{ e.kind === 'dashboard' ? 'dashboard' : (e.orphan ? 'help_outline' : 'memory') }}
+        </span>
+        <span class="truncate">{{ e.label }}</span>
+        <span v-if="sheets[e.id]?.wires?.length" class="routing-tab-count">
+          {{ sheets[e.id].wires.length }}
+        </span>
+      </button>
+    </div>
 
-        <div
-          v-for="g in graphNodes"
-          :key="g.id"
-          :class="['routing-node', dragging?.nodeId === g.id ? 'dragging' : '']"
-          :data-kind="g.kind"
-          :data-builtin="g.builtin ? 'true' : 'false'"
-          :style="{ left: g.x + 'px', top: g.y + 'px', width: NODE_WIDTH + 'px' }"
-        >
-          <div class="routing-node-header" @mousedown="startDrag($event, g)">
-            <div class="min-w-0">
-              <div class="truncate">{{ titleFor(g) }}</div>
-              <div class="routing-node-kind truncate">{{ subtitleFor(g) }}</div>
-            </div>
-            <button
-              v-if="g.kind !== 'peripheral'"
-              class="text-slate-200 hover:text-rose-400 text-base leading-none ml-1"
-              title="Remove from graph"
-              @click.stop="removeGraphNode(g.id)"
-            >✕</button>
-          </div>
-          <div class="routing-node-body">
-            <div
-              v-for="p in g.inputs"
-              :key="'i-' + p.id"
-              class="routing-pin-row input"
-            >
-              <div
-                :class="['routing-pin dir-in', isConnectingHandle(g.id, p.id) ? 'connecting' : '']"
-                :title="`${p.label} (in)`"
-                @mousedown.stop="pinMouseDown($event, g, p.id, 'in')"
-                @mouseup.stop="pinMouseUp($event, g, p.id, 'in')"
-              />
-              <span class="routing-pin-label-in">{{ p.label }}</span>
-            </div>
-            <div
-              v-for="p in g.outputs"
-              :key="'o-' + p.id"
-              class="routing-pin-row output"
-            >
-              <span class="routing-pin-label-out">{{ p.label }}</span>
-              <div
-                :class="['routing-pin dir-out', isConnectingHandle(g.id, p.id) ? 'connecting' : '']"
-                :title="`${p.label} (out)`"
-                @mousedown.stop="pinMouseDown($event, g, p.id, 'out')"
-                @mouseup.stop="pinMouseUp($event, g, p.id, 'out')"
-              />
-            </div>
-          </div>
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <div class="min-w-0">
+          <h3 class="text-sm font-semibold text-white truncate">{{ activeEntry?.label || 'Routing' }}</h3>
+          <p class="text-xs text-slate-500 truncate">
+            <template v-if="activeEntry?.kind === 'dashboard'">
+              Cross-controller widgets · {{ sheetCounts.widgets }} widget{{ sheetCounts.widgets === 1 ? '' : 's' }} · {{ sheetCounts.wires }} wire{{ sheetCounts.wires === 1 ? '' : 's' }}
+            </template>
+            <template v-else-if="activeEntry">
+              {{ sheetCounts.peripherals }} peripheral{{ sheetCounts.peripherals === 1 ? '' : 's' }} ·
+              {{ sheetCounts.inputs }} in · {{ sheetCounts.ws_inputs }} ws-in ·
+              {{ sheetCounts.outputs }} out · {{ sheetCounts.operators }} op ·
+              {{ sheetCounts.widgets }} widget{{ sheetCounts.widgets === 1 ? '' : 's' }} ·
+              {{ sheetCounts.wires }} wire{{ sheetCounts.wires === 1 ? '' : 's' }}
+            </template>
+            <template v-else>Adopt a controller node to start.</template>
+          </p>
         </div>
+        <p class="text-xs text-slate-500">
+          Drag node headers. Drag pin → pin to wire (or click pin then pin). Click a wire to delete.
+        </p>
+      </div>
+
+      <RoutingSheet
+        v-if="activeSheetId && activeEntry"
+        ref="sheetRef"
+        :key="activeSheetId"
+        :sheet-id="activeSheetId"
+        :sheet="activeSheet"
+        :node="activeEntry.node"
+        :peripherals="activePeripherals"
+        :topic-catalog="topicCatalog"
+        :values="activeValues"
+        :is-dashboard="activeEntry.kind === 'dashboard'"
+      />
+      <div v-else class="text-slate-400 italic text-sm py-12 text-center">
+        No sheets yet. Adopt a controller node to start.
       </div>
     </div>
 
+    <!-- Routes list for the active sheet only -->
     <div class="card mt-4">
       <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-semibold text-white">All routes ({{ routes.length }})</h3>
+        <h3 class="text-sm font-semibold text-white">Wires on this sheet ({{ activeWires.length }})</h3>
       </div>
-      <ul v-if="routes.length" class="divide-y divide-slate-700/50 text-xs font-mono">
-        <li v-for="r in routes" :key="r.id" class="flex items-center gap-2 py-1.5">
-          <span class="text-slate-500 w-10">{{ r.id }}</span>
-          <span class="text-amber-300">{{ (r.source?.parts || []).join('/') }}</span>
+      <ul v-if="activeWires.length" class="divide-y divide-slate-700/50 text-xs font-mono">
+        <li v-for="w in activeWires" :key="w.id" class="flex items-center gap-2 py-1.5">
+          <span class="text-slate-500 w-10">{{ w.id }}</span>
+          <span class="text-amber-300">{{ endpointLabel(w.source) }}</span>
           <span class="material-icons icon-sm text-slate-500">arrow_forward</span>
-          <span class="text-cyan-300">{{ (r.sink?.parts || []).join('/') }}</span>
+          <span class="text-cyan-300">{{ endpointLabel(w.sink) }}</span>
           <span class="flex-1" />
-          <button class="text-slate-500 hover:text-rose-400" @click="clickWire(r.id)">
+          <button class="text-slate-500 hover:text-rose-400" @click="removeWire(w.id)">
             <span class="material-icons icon-sm">delete</span>
           </button>
         </li>
       </ul>
-      <p v-else class="text-sm text-slate-400 italic">No routes yet.</p>
+      <p v-else class="text-sm text-slate-400 italic">No wires on this sheet yet.</p>
     </div>
 
+    <!-- Add Input modal -->
+    <AppModal v-if="inputModal.open" title="Add input node" @close="inputModal.open = false">
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">Kind</label>
+          <select v-model="inputModal.kind" class="input-field w-full">
+            <option value="ws_input">WebSocket Input (controller-driven)</option>
+            <option value="topic">ROS Topic (subscribe to state)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
+          <select v-model="inputModal.topic" class="input-field w-full">
+            <option v-for="t in topicCatalog" :key="t.topic" :value="t.topic">{{ t.topic }}</option>
+            <option v-if="!topicCatalog.length" value="">(no ROS topics discovered)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
+          <select v-model="inputModal.field" class="input-field w-full">
+            <option v-for="c in inputTopicChannels" :key="c.field" :value="c.field">
+              {{ c.label }} ({{ c.type || 'num' }})
+            </option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+          <input v-model="inputModal.label" type="text" class="input-field w-full" placeholder="Defaults to topic.channel" />
+        </div>
+        <p v-if="inputModal.error" class="text-sm text-red-300">{{ inputModal.error }}</p>
+      </div>
+      <template #actions>
+        <button class="btn-secondary" @click="inputModal.open = false">Cancel</button>
+        <button class="btn-primary" @click="saveAddInput">Add</button>
+      </template>
+    </AppModal>
+
+    <!-- Add Output modal -->
+    <AppModal v-if="outputModal.open" title="Add output" @close="outputModal.open = false">
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
+          <select v-model="outputModal.topic" class="input-field w-full">
+            <option v-for="t in topicCatalog" :key="t.topic" :value="t.topic">{{ t.topic }}</option>
+            <option v-if="!topicCatalog.length" value="">(no ROS topics discovered)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
+          <select v-model="outputModal.field" class="input-field w-full">
+            <option v-for="c in outputTopicChannels" :key="c.field" :value="c.field">
+              {{ c.label }} ({{ c.type || 'num' }})
+            </option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+          <input v-model="outputModal.label" type="text" class="input-field w-full" placeholder="Defaults to topic.channel" />
+        </div>
+        <p v-if="outputModal.error" class="text-sm text-red-300">{{ outputModal.error }}</p>
+      </div>
+      <template #actions>
+        <button class="btn-secondary" @click="outputModal.open = false">Cancel</button>
+        <button class="btn-primary" @click="saveAddOutput">Add</button>
+      </template>
+    </AppModal>
+
+    <!-- Add Operator modal -->
+    <AppModal v-if="operatorModal.open" title="Add operator" @close="operatorModal.open = false">
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">Operator</label>
+          <select v-model="operatorModal.op" class="input-field w-full">
+            <option v-for="t in operatorTypes" :key="t.id" :value="t.id">{{ t.label }}</option>
+          </select>
+          <p v-if="operatorDesc" class="text-xs text-slate-500 mt-1">{{ operatorDesc }}</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+          <input v-model="operatorModal.label" type="text" class="input-field w-full" placeholder="Defaults to operator name" />
+        </div>
+        <p v-if="operatorModal.error" class="text-sm text-red-300">{{ operatorModal.error }}</p>
+      </div>
+      <template #actions>
+        <button class="btn-secondary" @click="operatorModal.open = false">Cancel</button>
+        <button class="btn-primary" @click="saveAddOperator">Add</button>
+      </template>
+    </AppModal>
+
+    <!-- Add Widget modal -->
     <AppModal v-if="widgetModal.open" title="Add widget" @close="widgetModal.open = false">
       <div class="space-y-3">
         <div>
           <label class="block text-sm font-medium text-slate-300 mb-1">Widget type</label>
           <select v-model="widgetModal.type" class="input-field w-full">
-            <option v-for="t in widgetCatalog" :key="t.id" :value="t.id">{{ t.label }}</option>
+            <option v-for="t in catalog.widgetTypes" :key="t.id" :value="t.id">{{ t.label }}</option>
           </select>
-          <p v-if="widgetTypeDesc" class="text-xs text-slate-500 mt-1">{{ widgetTypeDesc }}</p>
+          <p v-if="widgetDesc" class="text-xs text-slate-500 mt-1">{{ widgetDesc }}</p>
         </div>
         <div>
           <label class="block text-sm font-medium text-slate-300 mb-1">Label</label>
@@ -523,65 +537,49 @@ function subtitleFor (g) {
 </template>
 
 <style scoped>
-.routing-canvas {
-  position: relative;
-  height: 640px;
-  background:
-    radial-gradient(circle at 1px 1px, #334155 1px, transparent 1px) 0 0 / 24px 24px,
-    #0b1220;
-  border: 1px solid #334155;
-  border-radius: 0.5rem;
-  overflow: hidden;
-  user-select: none;
-}
-.routing-canvas svg.routing-wires {
-  position: absolute; inset: 0; pointer-events: none;
-  z-index: 1; width: 100%; height: 100%; overflow: visible;
-}
-.routing-canvas svg.routing-wires path { pointer-events: stroke; cursor: pointer; }
-.routing-canvas svg.routing-wires path:hover { stroke: #f87171 !important; }
-.routing-canvas svg.routing-wires path.pending { pointer-events: none; }
-
-.routing-node {
-  position: absolute; min-width: 180px;
-  background: #1e293b; border: 1px solid #475569; border-radius: 0.5rem;
-  z-index: 2; box-shadow: 0 4px 12px rgba(0,0,0,0.4); color: #e2e8f0;
-}
-.routing-node.dragging { z-index: 10; opacity: 0.9; }
-.routing-node-header {
-  height: 48px; box-sizing: border-box;
-  padding: 0.5rem 0.75rem;
+.routing-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  overflow-x: auto;
   border-bottom: 1px solid #334155;
-  font-size: 0.75rem; font-weight: 600;
-  cursor: move; display: flex; align-items: center;
-  justify-content: space-between; gap: 0.25rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.25rem;
 }
-.routing-node-kind { font-size: 0.65rem; color: #94a3b8; font-weight: 400; }
-.routing-node-body { padding: 0; }
-.routing-pin-row {
-  display: flex; align-items: center; padding: 0 0.5rem;
-  font-size: 0.7rem; gap: 0.35rem; position: relative;
-  height: 22px;
+.routing-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 0.4rem 0.4rem 0 0;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease;
 }
-.routing-pin-row.input  { justify-content: flex-start; }
-.routing-pin-row.output { justify-content: flex-end; }
-.routing-pin {
-  width: 12px; height: 12px; border-radius: 50%;
-  background: #475569; border: 2px solid #1e293b;
-  cursor: pointer; position: absolute;
-  top: 50%; transform: translateY(-50%);
+.routing-tab:hover {
+  background: #1e293b;
 }
-.routing-pin-row.input  .routing-pin { left: -6px; }
-.routing-pin-row.output .routing-pin { right: -6px; }
-.routing-pin.dir-in  { background: #06b6d4; }
-.routing-pin.dir-out { background: #f59e0b; }
-.routing-pin:hover    { transform: translateY(-50%) scale(1.3); }
-.routing-pin.connecting { background: #34d399; box-shadow: 0 0 8px #34d399; }
-.routing-pin-label-in  { margin-left: 0.75rem; color: #cbd5e1; }
-.routing-pin-label-out { margin-right: 0.75rem; color: #cbd5e1; }
-
-.routing-node[data-kind="peripheral"] .routing-node-header { background: #0f4c5c; }
-.routing-node[data-kind="signal"]     .routing-node-header { background: #4a3b5c; }
-.routing-node[data-kind="widget"]     .routing-node-header { background: #5c4a0f; }
-.routing-node[data-builtin="true"]    .routing-node-header { background: #1e3a4a; }
+.routing-tab.active {
+  background: #1e293b;
+  border-color: #334155;
+  border-bottom: 1px solid #1e293b;
+  color: #ffffff;
+  margin-bottom: -1px;
+}
+.routing-tab.orphan {
+  color: #fb923c;
+}
+.routing-tab-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.65rem;
+  background: #334155;
+  border-radius: 999px;
+  padding: 0 0.4rem;
+  color: #e2e8f0;
+}
 </style>

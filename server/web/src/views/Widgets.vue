@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useWsTopic } from '@/composables/useWsTopic'
+import RoboClawMonitor from '@/components/widgets/RoboClawMonitor.vue'
 
 defineProps({ embedded: { type: Boolean, default: false } })
 
@@ -59,32 +60,43 @@ function sourceLabel (route) {
     </div>
 
     <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      <div v-for="w in widgets" :key="w.id" class="card">
-        <header class="flex items-center justify-between mb-3">
-          <div>
-            <h4 class="text-base font-semibold text-white">{{ w.label || w.id }}</h4>
-            <p class="text-xs text-slate-500">{{ widgetType(w.type)?.label || w.type }}</p>
-          </div>
-          <span class="material-icons text-slate-500">{{ widgetType(w.type)?.icon || 'widgets' }}</span>
-        </header>
+      <template v-for="w in widgets" :key="w.id">
+        <!-- Type-specific renderers come first so they can opt out of
+             the generic card layout. The dispatcher is a simple switch
+             on widget.type — small enough to keep here, will grow into
+             a Map<typeId, Component> if we sprout more bespoke types. -->
+        <RoboClawMonitor
+          v-if="w.type === 'roboclaw_monitor'"
+          :widget="w"
+          :routes="routes"
+        />
+        <div v-else class="card">
+          <header class="flex items-center justify-between mb-3">
+            <div>
+              <h4 class="text-base font-semibold text-white">{{ w.label || w.id }}</h4>
+              <p class="text-xs text-slate-500">{{ widgetType(w.type)?.label || w.type }}</p>
+            </div>
+            <span class="material-icons text-slate-500">{{ widgetType(w.type)?.icon || 'widgets' }}</span>
+          </header>
 
-        <div v-if="!(widgetType(w.type)?.inputs?.length)" class="text-xs text-slate-500 italic">
-          No declared inputs.
-        </div>
-        <div v-else class="space-y-1">
-          <div
-            v-for="inp in widgetType(w.type).inputs"
-            :key="inp.id"
-            class="flex items-center justify-between text-sm border-b border-slate-700/40 py-1 font-mono"
-          >
-            <span class="text-slate-400">{{ inp.display || inp.id }}</span>
-            <span v-if="routesIntoWidget(w.id, inp.id).length" class="text-cyan-300 text-xs">
-              ← {{ sourceLabel(routesIntoWidget(w.id, inp.id)[0]) }}
-            </span>
-            <span v-else class="text-slate-500 text-xs">unconnected</span>
+          <div v-if="!(widgetType(w.type)?.inputs?.length)" class="text-xs text-slate-500 italic">
+            No declared inputs.
+          </div>
+          <div v-else class="space-y-1">
+            <div
+              v-for="inp in widgetType(w.type).inputs"
+              :key="inp.id"
+              class="flex items-center justify-between text-sm border-b border-slate-700/40 py-1 font-mono"
+            >
+              <span class="text-slate-400">{{ inp.display || inp.id }}</span>
+              <span v-if="routesIntoWidget(w.id, inp.id).length" class="text-cyan-300 text-xs">
+                ← {{ sourceLabel(routesIntoWidget(w.id, inp.id)[0]) }}
+              </span>
+              <span v-else class="text-slate-500 text-xs">unconnected</span>
+            </div>
           </div>
         </div>
-      </div>
+      </template>
     </div>
   </section>
 </template>
