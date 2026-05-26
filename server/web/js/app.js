@@ -954,6 +954,9 @@ class SaintApp {
         const toggleBtn = document.getElementById('wifi-password-toggle');
         const findBtn = document.getElementById('wifi-find-channel-btn');
         const applyBtn = document.getElementById('wifi-channel-apply-btn');
+        // Second "Find better channel" entry-point on the dashboard's
+        // WiFi Status card — same handler as the settings page button.
+        const dashFindBtn = document.getElementById('wifi-status-find-channel-btn');
 
         if (saveBtn && !saveBtn.dataset.bound) {
             saveBtn.dataset.bound = '1';
@@ -970,6 +973,10 @@ class SaintApp {
         if (findBtn && !findBtn.dataset.bound) {
             findBtn.dataset.bound = '1';
             findBtn.addEventListener('click', () => this.openWifiChannelModal());
+        }
+        if (dashFindBtn && !dashFindBtn.dataset.bound) {
+            dashFindBtn.dataset.bound = '1';
+            dashFindBtn.addEventListener('click', () => this.openWifiChannelModal());
         }
         if (applyBtn && !applyBtn.dataset.bound) {
             applyBtn.dataset.bound = '1';
@@ -1543,6 +1550,12 @@ class SaintApp {
         } catch (e) {
             // Non-fatal.
         }
+
+        // Wire the dashboard's "Find better channel" button. Same
+        // handler as the settings page copy; setupWirelessCardHandlers
+        // is idempotent (data-bound guard) so this is safe to call
+        // from both code paths.
+        this.setupWirelessCardHandlers();
     }
 
     /**

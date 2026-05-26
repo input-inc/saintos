@@ -96,6 +96,22 @@ else
     fi
 fi
 
+# Compute the canonical SAINT version string early so we can export
+# it to the Tauri build. build.rs in src-tauri reads SAINT_BUILD_VERSION
+# and bakes it into the binary as a compile-time constant — that's
+# what the runtime About + Software Update screens display. The same
+# string is also used to name the .AppImage further down, so the
+# embedded version and the on-disk filename can never disagree.
+#
+# Honor an inbound override (e.g. CI passing a tag-derived value);
+# otherwise reconstruct the local-channel form from VERSION + git sha.
+if [ -z "${SAINT_BUILD_VERSION:-}" ]; then
+    _base_version=$(tr -d '[:space:]' < "$CONTROLLER_DIR/VERSION")
+    _git_sha=$(cd "$REPO_ROOT" && git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+    export SAINT_BUILD_VERSION="${_base_version}-local.${_git_sha}"
+fi
+echo "==> Build version: $SAINT_BUILD_VERSION"
+
 echo "==> Running tauri build --bundles appimage"
 # We treat tauri's own bundling step as best-effort: it produces the
 # AppDir we want (binary + icon + .desktop + Steam library art under
@@ -211,10 +227,11 @@ popd >/dev/null
 # server/resources/firmware/rpi5/info.json, nothing on the server
 # needs to know this happened.
 
-VERSION_FILE="$CONTROLLER_DIR/VERSION"
-BASE_VERSION=$(tr -d '[:space:]' < "$VERSION_FILE")
-GIT_SHA=$(cd "$REPO_ROOT" && git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
-VERSION="${BASE_VERSION}-local.${GIT_SHA}"
+# Reuse the same version string the binary baked in at compile time
+# (see the SAINT_BUILD_VERSION export near the top of this script).
+# That guarantees the AppImage filename and the embedded version
+# match — which is the whole reason this got centralized.
+VERSION="$SAINT_BUILD_VERSION"
 FILENAME="saint_firmware_controller_${VERSION}.AppImage"
 DEST_DIR="$REPO_ROOT/server/resources/firmware/controller"
 

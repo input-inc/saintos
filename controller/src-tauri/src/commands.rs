@@ -728,3 +728,25 @@ pub fn get_installed_controller_info() -> Result<Option<serde_json::Value>, Stri
         .map_err(|e| format!("parse {}: {}", meta_path.display(), e))?;
     Ok(Some(json))
 }
+
+/// Return the build identity baked into this binary at compile time.
+///
+/// `version` is the canonical SAINT version string — same format the
+/// AppImage filename uses (e.g. `0.5.0-local.d85dad7`). When the dist
+/// build script (`build-bundle.sh`) drives the build, it exports
+/// `SAINT_BUILD_VERSION` so the embedded string is byte-identical to
+/// the AppImage filename. For raw `cargo build` / `tauri dev`, build.rs
+/// reconstructs the local-channel form itself.
+///
+/// `built_at_unix` is the build's Unix timestamp; the UI converts it
+/// to the local timezone for display.
+///
+/// Both fields are compile-time constants — zero runtime cost, no
+/// filesystem reads, can't go stale relative to the running code.
+#[tauri::command]
+pub fn get_build_info() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("SAINT_BUILD_VERSION"),
+        "built_at_unix": env!("SAINT_BUILD_UNIX").parse::<u64>().unwrap_or(0),
+    })
+}

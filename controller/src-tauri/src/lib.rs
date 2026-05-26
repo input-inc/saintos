@@ -139,6 +139,7 @@ pub fn run() {
             commands::resolve_host,
             commands::install_controller_update,
             commands::get_installed_controller_info,
+            commands::get_build_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

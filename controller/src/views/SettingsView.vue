@@ -61,10 +61,33 @@ let discoveryPollHandle: ReturnType<typeof setInterval> | null = null;
 
 const currentVersion = ref<string | null>(null);
 const installedInfo = ref<{ version?: string; checksum?: string; filename?: string } | null>(null);
+// Compile-time canonical build version, baked into the binary by
+// build.rs. Same format the AppImage filename uses
+// (e.g. "0.5.0-local.d85dad7") so an operator can correlate the
+// running build with the file on disk at a glance. Falls back to
+// the bare Tauri `getVersion()` if the new command isn't available
+// (e.g. running an older controller against a newer dashboard).
+const buildInfo = ref<{ version: string; built_at_unix: number } | null>(null);
 const updateInfo = ref<FirmwareInfo | null>(null);
 const updateState = ref<UpdateState>('not-connected');
 const updateError = ref<string>('');
 const updateProgress = ref<string>('');
+
+// Canonical version string shown in About + Software Update. The
+// fallback to `currentVersion` (Tauri's getVersion, just "0.5.0")
+// covers the brief window before get_build_info resolves on mount.
+const buildLabel = computed<string>(() =>
+    buildInfo.value?.version || currentVersion.value || '…');
+
+const buildBuiltAtLabel = computed<string>(() => {
+    const ts = buildInfo.value?.built_at_unix;
+    if (!ts) return '';
+    try {
+        return new Date(ts * 1000).toLocaleString();
+    } catch {
+        return '';
+    }
+});
 
 const scaleOptions = [
     { value: 1.0, label: '100% (Default)' },
@@ -183,6 +206,45 @@ async function initializeVersion(): Promise<void> {
         console.error('[Settings] get_installed_controller_info failed:', err);
         installedInfo.value = null;
     }
+    try {
+        // Compile-time build identity. Always present (build.rs writes
+        // "unknown" as the fallback hash when git isn't available); a
+        // failure here only happens if the new command isn't registered
+        // — log and continue so the rest of the screen stays usable.
+        buildInfo.value = await invoke<typeof buildInfo.value>('get_build_info');
+    } catch (err) {
+        console.error('[Settings] get_build_info failed:', err);
+        buildInfo.value = null;
+    }
+}
+
+// Pre-resolve .local hostnames through the embedded mDNS resolver
+// before handing the URL to fetch(). WebKitGTK inside the AppImage
+// bundles its own libc and doesn't see the host's libnss-mdns, so
+// fetch('http://opensaint.local/...') fails with the canonical
+// "TypeError: Load failed" — even though the WebSocket connection
+// works fine, because that one goes through Tauri/tokio which uses
+// the embedded mDNS client (commands::resolve_host). We piggy-back
+// on the same code path here.
+//
+// Skip non-.local hosts (plain IPs, regular DNS names): resolve_host
+// only knows about mDNS and would just timeout after 2 s.
+function looksLikeIp(host: string): boolean {
+    return /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+async function resolveHostForFetch(host: string): Promise<string> {
+    if (looksLikeIp(host)) return host;
+    if (!host.endsWith('.local')) return host;
+    try {
+        return await invoke<string>('resolve_host', { host });
+    } catch (err) {
+        // Fall through with the original host so the operator gets a
+        // clean HTTP/network error rather than silent "Load failed"
+        // when their mDNS record genuinely doesn't resolve.
+        console.warn(`[Settings] mDNS resolve failed for ${host}: ${err}`);
+        return host;
+    }
 }
 
 async function checkForUpdate(): Promise<void> {
@@ -196,7 +258,8 @@ async function checkForUpdate(): Promise<void> {
     if (!cfg) { updateState.value = 'not-connected'; return; }
     updateState.value = 'checking';
     try {
-        const resp = await fetch(`http://${cfg.host}:${cfg.port}/api/firmware/controller`);
+        const host = await resolveHostForFetch(cfg.host);
+        const resp = await fetch(`http://${host}:${cfg.port}/api/firmware/controller`);
         if (!resp.ok) {
             if (resp.status === 404) {
                 updateInfo.value = null;
@@ -212,10 +275,18 @@ async function checkForUpdate(): Promise<void> {
             updateState.value = 'up-to-date';
         } else {
             const installed = installedInfo.value;
+            // Fallback for fresh installs (no installed.json yet) compares
+            // the server's canonical version string ("0.5.0-local.d85dad7")
+            // to the binary's baked-in build version — same format — so
+            // a first run after a fresh AppImage install reports up-to-date
+            // correctly instead of always offering itself as an "update".
+            // currentVersion (bare Tauri getVersion, just "0.5.0") would
+            // never match the hashed form on the server.
+            const runningVersion = buildInfo.value?.version || currentVersion.value;
             const upToDate = installed?.version && installed.checksum
                 ? installed.version === info.latest_version
                     && installed.checksum === info.latest_checksum
-                : info.latest_version === currentVersion.value;
+                : info.latest_version === runningVersion;
             updateState.value = upToDate ? 'up-to-date' : 'available';
         }
     } catch (err) {
@@ -236,7 +307,12 @@ async function installUpdate(): Promise<void> {
         updateState.value = 'downloading';
         updateProgress.value = '';
 
-        const url = `http://${cfg.host}:${cfg.port}/api/firmware/controller/${info.latest_package}`;
+        // Same .local pre-resolve dance as checkForUpdate — fetch
+        // through WebKitGTK skips the embedded mDNS resolver, so we
+        // hand it a literal IP when the operator's pointed at a
+        // .local host.
+        const host = await resolveHostForFetch(cfg.host);
+        const url = `http://${host}:${cfg.port}/api/firmware/controller/${info.latest_package}`;
         const resp = await fetch(url);
         if (!resp.ok) throw new Error(`download HTTP ${resp.status}`);
         const buf = await resp.arrayBuffer();
@@ -473,7 +549,13 @@ onBeforeUnmount(() => {
         <div class="card">
             <h2 class="text-lg font-semibold mb-4">About</h2>
             <div class="space-y-2 text-sm text-saint-text-muted">
-                <p><span class="text-saint-text">SAINT Controller</span> v{{ currentVersion || '…' }}</p>
+                <p>
+                    <span class="text-saint-text">SAINT Controller</span>
+                    <span class="font-mono">v{{ buildLabel }}</span>
+                </p>
+                <p v-if="buildBuiltAtLabel" class="text-xs">
+                    Built: {{ buildBuiltAtLabel }}
+                </p>
                 <p>A Tauri-based controller application for SAINT.OS robots.</p>
                 <p>Supports gamepad, gyroscope, and touch input.</p>
             </div>
@@ -493,11 +575,11 @@ onBeforeUnmount(() => {
             <div class="space-y-3 text-sm">
                 <div class="flex items-center justify-between">
                     <span class="text-saint-text-muted">Installed</span>
-                    <span class="font-mono">{{ currentVersion || '…' }}</span>
+                    <span class="font-mono text-right">{{ buildLabel }}</span>
                 </div>
                 <div v-if="updateInfo?.latest_version" class="flex items-center justify-between">
                     <span class="text-saint-text-muted">Latest on server</span>
-                    <span class="font-mono">{{ updateInfo.latest_version }}</span>
+                    <span class="font-mono text-right">{{ updateInfo.latest_version }}</span>
                 </div>
 
                 <template v-if="updateState === 'not-connected'">

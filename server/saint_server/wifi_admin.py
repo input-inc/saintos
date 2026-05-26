@@ -201,7 +201,17 @@ def survey() -> Dict:
     # iw scan needs root to put the interface into scan mode while
     # it's in AP mode. The service user has NOPASSWD sudo (install.sh
     # writes the sudoers rule for it).
-    scan_out = _run(["sudo", "-n", "iw", "dev", iface, "scan"], timeout=10.0)
+    #
+    # log_failures=True so the "see server log" hint in the
+    # operator-facing error is actually backed by a log entry. Common
+    # cause on the Pi 4: brcmfmac firmware doesn't allow scan while
+    # the radio is operating as an AP — the journal line will look
+    # like "command failed: Device or resource busy (-16)".
+    scan_out = _run(
+        ["sudo", "-n", "iw", "dev", iface, "scan"],
+        timeout=10.0,
+        log_failures=True,
+    )
     if scan_out is None:
         return {"ok": False, "iface": iface, "current_channel": None,
                 "channels": [], "error":
