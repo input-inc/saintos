@@ -29,7 +29,9 @@ const routingValues = useWsTopic(() => 'routing_values')
 
 const routing = ref({ version: 0, sheets: {} })
 const topicCatalog = ref([])
-const operatorTypes = ref([])
+// Operator types come from the shared peripheralCatalog store now —
+// single fetch per page load, shared with RoutingSheet.vue.
+const operatorTypes = computed(() => catalog.operatorTypes || [])
 const nodePeripherals = ref({})  // node_id -> peripherals[]
 
 const activeSheetId = ref(loadActiveSheet())
@@ -115,33 +117,9 @@ const activePeripherals = computed(() => {
   return id ? (nodePeripherals.value[id] || []) : []
 })
 
-// ── Routes list (active sheet only) ──────────────────────────────────
-const activeWires = computed(() => activeSheet.value?.wires || [])
-
-function endpointLabel (ep) {
-  if (!ep) return ''
-  if (ep.kind === 'input')      return `in:${ep.parts[0]}`
-  if (ep.kind === 'ws_input')   return `ws:${ep.parts[0]}`
-  if (ep.kind === 'operator')   return `op:${ep.parts.join('/')}`
-  if (ep.kind === 'output')     return `out:${ep.parts[0]}`
-  if (ep.kind === 'widget')     return `w:${ep.parts.join('/')}`
-  if (ep.kind === 'peripheral') return `p:${ep.parts.join('/')}`
-  return (ep.parts || []).join('/')
-}
-
-async function removeWire (wireId) {
-  if (!confirm('Remove this wire?')) return
-  try { await ws.management('remove_routing_wire', { node_id: activeSheetId.value, wire_id: wireId }) }
-  catch (e) { console.warn('remove_routing_wire failed:', e) }
-}
-
 // ── Initial load ─────────────────────────────────────────────────────
 async function loadAll () {
   await catalog.ensureLoaded()
-  try {
-    const r = await ws.management('get_peripheral_catalog', {})
-    operatorTypes.value = r?.operator_types || []
-  } catch (_) {}
   try {
     const r = await ws.management('get_system_routing', {})
     routing.value = r || { version: 0, sheets: {} }
@@ -173,22 +151,59 @@ function selectSheet (id) {
 }
 
 // ── Add-input / output / operator / widget modals ────────────────────
-const inputModal = ref({ open: false, kind: 'ws_input', topic: '', field: '', label: '', error: '' })
+// `labelEdited` mirrors vanilla: as long as the operator hasn't typed
+// into the label field, picking a different topic/channel rewrites the
+// label to "topic.channel". Once they edit by hand we stop clobbering.
+const inputModal = ref({
+  open: false, kind: 'ws_input', topic: '', field: '',
+  label: '', labelEdited: false, error: '',
+})
+function inputDerivedLabel () {
+  const t = inputModal.value.topic || ''
+  const f = inputModal.value.field || ''
+  return t ? (f ? `${t}.${f}` : t) : ''
+}
 function openAddInput () {
   if (!activeSheetId.value) return
   const first = topicCatalog.value[0]
+  const topic = first?.topic || ''
+  const field = first?.channels?.[0]?.field || ''
   inputModal.value = {
     open: true, kind: 'ws_input',
-    topic: first?.topic || '', field: first?.channels?.[0]?.field || '',
-    label: '', error: '',
+    topic, field,
+    label: topic ? (field ? `${topic}.${field}` : topic) : '',
+    labelEdited: false,
+    error: '',
   }
 }
 const inputTopicChannels = computed(() =>
   topicCatalog.value.find(t => t.topic === inputModal.value.topic)?.channels || [],
 )
+const inputIsWs = computed(() => inputModal.value.kind === 'ws_input')
+const inputTopicFieldLabel = computed(() =>
+  inputIsWs.value ? 'Pick a topic to copy its name (optional)' : 'ROS topic',
+)
+const inputLabelPlaceholder = computed(() =>
+  inputIsWs.value
+    ? 'Defaults to topic.channel — or type a custom name'
+    : 'Defaults to topic.channel',
+)
+// Auto-derive label on topic/field changes — but only until the user
+// types something into the label box.
+watch(() => [inputModal.value.topic, inputModal.value.field], () => {
+  if (inputModal.value.open && !inputModal.value.labelEdited) {
+    inputModal.value.label = inputDerivedLabel()
+  }
+})
+function onInputLabelInput (evt) {
+  inputModal.value.label = evt.target.value
+  inputModal.value.labelEdited = !!evt.target.value.trim()
+}
 async function saveAddInput () {
   const { kind, topic, field, label } = inputModal.value
   let derivedLabel = label.trim()
+  // Belt-and-suspenders: if the operator cleared the label after
+  // picking a topic/channel, fall back to the derived name.
   if (!derivedLabel && topic) derivedLabel = field ? `${topic}.${field}` : topic
   inputModal.value.error = ''
   try {
@@ -208,15 +223,15 @@ async function saveAddInput () {
   }
 }
 
-const outputModal = ref({ open: false, topic: '', field: '', label: '', error: '' })
+const outputModal = ref({
+  open: false, topic: '', field: '', label: '', error: '',
+})
 function openAddOutput () {
   if (!activeSheetId.value) return
   const first = topicCatalog.value[0]
-  outputModal.value = {
-    open: true,
-    topic: first?.topic || '', field: first?.channels?.[0]?.field || '',
-    label: '', error: '',
-  }
+  const topic = first?.topic || ''
+  const field = first?.channels?.[0]?.field || ''
+  outputModal.value = { open: true, topic, field, label: '', error: '' }
 }
 const outputTopicChannels = computed(() =>
   topicCatalog.value.find(t => t.topic === outputModal.value.topic)?.channels || [],
@@ -243,9 +258,10 @@ function openAddOperator () {
     open: true, op: operatorTypes.value[0]?.id || '', label: '', error: '',
   }
 }
-const operatorDesc = computed(() =>
-  operatorTypes.value.find(t => t.id === operatorModal.value.op)?.description || '',
-)
+const operatorDesc = computed(() => {
+  const t = operatorTypes.value.find(x => x.id === operatorModal.value.op)
+  return t?.description || ''
+})
 async function saveAddOperator () {
   const { op, label } = operatorModal.value
   operatorModal.value.error = ''
@@ -289,11 +305,11 @@ async function saveAddWidget () {
 function autoLayout () { sheetRef.value?.autoLayout() }
 
 // ── Debug log gate ───────────────────────────────────────────────────
-// Surfaces every value snapshot in devtools when the global is on; off
-// by default so the console isn't flooded. Toggle from the console:
-//   window.__SAINT_DEBUG_ROUTING__ = true
+// Matches vanilla: log every value snapshot unless explicitly opted
+// out. Silence from the console with:
+//   window.__SAINT_DEBUG_ROUTING__ = false
 watch(routingValues, (v) => {
-  if (typeof window !== 'undefined' && window.__SAINT_DEBUG_ROUTING__) {
+  if (typeof window !== 'undefined' && window.__SAINT_DEBUG_ROUTING__ !== false) {
     const keys = Object.keys(v?.sheets || {})
     // eslint-disable-next-line no-console
     console.debug('[routing] routing_values', {
@@ -319,108 +335,94 @@ const sheetCounts = computed(() => {
 </script>
 
 <template>
-  <section>
-    <div class="flex items-center justify-between mb-4">
-      <div>
-        <h2 class="text-2xl font-bold text-white">Routing</h2>
-        <p class="text-sm text-slate-400">One sheet per controller node, plus a dashboard sheet for cross-system widgets.</p>
-      </div>
-      <div class="flex items-center gap-2">
-        <button class="btn-secondary text-sm" :disabled="!activeSheetId" @click="openAddInput">
-          <span class="material-icons icon-sm">input</span> Input
-        </button>
-        <button class="btn-secondary text-sm" :disabled="!activeSheetId" @click="openAddOutput">
-          <span class="material-icons icon-sm">output</span> Output
-        </button>
-        <button class="btn-secondary text-sm" :disabled="!activeSheetId" @click="openAddOperator">
-          <span class="material-icons icon-sm">functions</span> Operator
-        </button>
-        <button class="btn-secondary text-sm" :disabled="!activeSheetId" @click="openAddWidget">
-          <span class="material-icons icon-sm">widgets</span> Widget
-        </button>
-        <button class="btn-secondary text-sm" :disabled="!activeSheetId" title="Auto-arrange nodes" @click="autoLayout">
-          <span class="material-icons icon-sm">grid_view</span> Auto-layout
-        </button>
-      </div>
-    </div>
-
-    <!-- Tab bar -->
-    <div class="routing-tabs">
-      <button
-        v-for="e in sheetEntries"
-        :key="e.id"
-        :class="['routing-tab', activeSheetId === e.id ? 'active' : '', e.orphan ? 'orphan' : '']"
-        :title="e.orphan ? 'Orphan sheet — owning node is no longer adopted' : ''"
-        @click="selectSheet(e.id)"
-      >
-        <span class="material-icons icon-sm">
-          {{ e.kind === 'dashboard' ? 'dashboard' : (e.orphan ? 'help_outline' : 'memory') }}
-        </span>
-        <span class="truncate">{{ e.label }}</span>
-        <span v-if="sheets[e.id]?.wires?.length" class="routing-tab-count">
-          {{ sheets[e.id].wires.length }}
-        </span>
-      </button>
-    </div>
-
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <div class="min-w-0">
-          <h3 class="text-sm font-semibold text-white truncate">{{ activeEntry?.label || 'Routing' }}</h3>
-          <p class="text-xs text-slate-500 truncate">
-            <template v-if="activeEntry?.kind === 'dashboard'">
-              Cross-controller widgets · {{ sheetCounts.widgets }} widget{{ sheetCounts.widgets === 1 ? '' : 's' }} · {{ sheetCounts.wires }} wire{{ sheetCounts.wires === 1 ? '' : 's' }}
-            </template>
-            <template v-else-if="activeEntry">
-              {{ sheetCounts.peripherals }} peripheral{{ sheetCounts.peripherals === 1 ? '' : 's' }} ·
-              {{ sheetCounts.inputs }} in · {{ sheetCounts.ws_inputs }} ws-in ·
-              {{ sheetCounts.outputs }} out · {{ sheetCounts.operators }} op ·
-              {{ sheetCounts.widgets }} widget{{ sheetCounts.widgets === 1 ? '' : 's' }} ·
-              {{ sheetCounts.wires }} wire{{ sheetCounts.wires === 1 ? '' : 's' }}
-            </template>
-            <template v-else>Adopt a controller node to start.</template>
-          </p>
+  <section class="page routing-page">
+    <div class="routing-shell">
+      <!-- Left rail: one entry per controller node sheet -->
+      <aside class="routing-sidebar">
+        <div class="routing-sidebar-header">
+          <span class="text-xs uppercase tracking-wide text-slate-400">Sheets</span>
         </div>
-        <p class="text-xs text-slate-500">
-          Drag node headers. Drag pin → pin to wire (or click pin then pin). Click a wire to delete.
-        </p>
-      </div>
+        <div class="routing-sheet-list">
+          <div
+            v-for="e in sheetEntries"
+            :key="e.id"
+            :class="['routing-sheet-item', activeSheetId === e.id ? 'active' : '', e.orphan ? 'orphan' : '']"
+            :title="e.orphan ? 'Orphan sheet — owning node is no longer adopted' : ''"
+            @click="selectSheet(e.id)"
+          >
+            <span class="material-icons">{{ e.orphan ? 'help_outline' : 'memory' }}</span>
+            <span class="truncate">{{ e.label }}</span>
+            <span v-if="sheets[e.id]?.wires?.length" class="routing-sheet-count">
+              {{ sheets[e.id].wires.length }}
+            </span>
+          </div>
+          <div v-if="!sheetEntries.length" class="text-xs text-slate-500 p-2">
+            No controller nodes adopted yet.
+          </div>
+        </div>
+      </aside>
 
-      <RoutingSheet
-        v-if="activeSheetId && activeEntry"
-        ref="sheetRef"
-        :key="activeSheetId"
-        :sheet-id="activeSheetId"
-        :sheet="activeSheet"
-        :node="activeEntry.node"
-        :peripherals="activePeripherals"
-        :topic-catalog="topicCatalog"
-        :values="activeValues"
-        :is-dashboard="activeEntry.kind === 'dashboard'"
-      />
-      <div v-else class="text-slate-400 italic text-sm py-12 text-center">
-        No sheets yet. Adopt a controller node to start.
-      </div>
-    </div>
+      <!-- Main area: per-sheet toolbar + canvas -->
+      <div class="routing-main">
+        <div class="routing-toolbar">
+          <div class="min-w-0">
+            <h2 class="text-lg font-semibold text-white truncate">{{ activeEntry?.label || 'Routing' }}</h2>
+            <p class="text-xs text-slate-400 truncate">
+              <template v-if="activeEntry">
+                {{ sheetCounts.peripherals }} peripheral{{ sheetCounts.peripherals === 1 ? '' : 's' }} ·
+                {{ sheetCounts.inputs }} in ·
+                {{ sheetCounts.ws_inputs }} ws-in ·
+                {{ sheetCounts.outputs }} out ·
+                {{ sheetCounts.operators }} op ·
+                {{ sheetCounts.widgets }} widget{{ sheetCounts.widgets === 1 ? '' : 's' }} ·
+                {{ sheetCounts.wires }} wire{{ sheetCounts.wires === 1 ? '' : 's' }}
+              </template>
+              <template v-else>
+                Pick a sheet on the left to wire its peripherals.
+              </template>
+            </p>
+          </div>
+          <div class="flex gap-2 items-center">
+            <button class="btn-secondary" :disabled="!activeSheetId" @click="openAddInput">
+              <span class="material-icons icon-sm">login</span>
+              Input
+            </button>
+            <button class="btn-secondary" :disabled="!activeSheetId" @click="openAddOutput">
+              <span class="material-icons icon-sm">logout</span>
+              Output
+            </button>
+            <button class="btn-secondary" :disabled="!activeSheetId" @click="openAddOperator">
+              <span class="material-icons icon-sm">functions</span>
+              Operator
+            </button>
+            <button class="btn-secondary" :disabled="!activeSheetId" @click="openAddWidget">
+              <span class="material-icons icon-sm">widgets</span>
+              Widget
+            </button>
+            <button class="btn-secondary" :disabled="!activeSheetId" title="Auto-arrange nodes" @click="autoLayout">
+              <span class="material-icons icon-sm">grid_view</span>
+            </button>
+          </div>
+        </div>
 
-    <!-- Routes list for the active sheet only -->
-    <div class="card mt-4">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-semibold text-white">Wires on this sheet ({{ activeWires.length }})</h3>
+        <RoutingSheet
+          v-if="activeSheetId && activeEntry"
+          ref="sheetRef"
+          :key="activeSheetId"
+          :sheet-id="activeSheetId"
+          :sheet="activeSheet"
+          :node="activeEntry.node"
+          :peripherals="activePeripherals"
+          :topic-catalog="topicCatalog"
+          :values="activeValues"
+          :is-dashboard="activeEntry.kind === 'dashboard'"
+        />
+        <div v-else class="routing-canvas">
+          <div class="routing-empty">
+            <p class="text-slate-400">No sheets yet. Adopt a controller node to start.</p>
+          </div>
+        </div>
       </div>
-      <ul v-if="activeWires.length" class="divide-y divide-slate-700/50 text-xs font-mono">
-        <li v-for="w in activeWires" :key="w.id" class="flex items-center gap-2 py-1.5">
-          <span class="text-slate-500 w-10">{{ w.id }}</span>
-          <span class="text-amber-300">{{ endpointLabel(w.source) }}</span>
-          <span class="material-icons icon-sm text-slate-500">arrow_forward</span>
-          <span class="text-cyan-300">{{ endpointLabel(w.sink) }}</span>
-          <span class="flex-1" />
-          <button class="text-slate-500 hover:text-rose-400" @click="removeWire(w.id)">
-            <span class="material-icons icon-sm">delete</span>
-          </button>
-        </li>
-      </ul>
-      <p v-else class="text-sm text-slate-400 italic">No wires on this sheet yet.</p>
     </div>
 
     <!-- Add Input modal -->
@@ -434,7 +436,7 @@ const sheetCounts = computed(() => {
           </select>
         </div>
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
+          <label class="block text-sm font-medium text-slate-300 mb-1">{{ inputTopicFieldLabel }}</label>
           <select v-model="inputModal.topic" class="input-field w-full">
             <option v-for="t in topicCatalog" :key="t.topic" :value="t.topic">{{ t.topic }}</option>
             <option v-if="!topicCatalog.length" value="">(no ROS topics discovered)</option>
@@ -450,7 +452,13 @@ const sheetCounts = computed(() => {
         </div>
         <div>
           <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
-          <input v-model="inputModal.label" type="text" class="input-field w-full" placeholder="Defaults to topic.channel" />
+          <input
+            :value="inputModal.label"
+            type="text"
+            class="input-field w-full"
+            :placeholder="inputLabelPlaceholder"
+            @input="onInputLabelInput"
+          />
         </div>
         <p v-if="inputModal.error" class="text-sm text-red-300">{{ inputModal.error }}</p>
       </div>
@@ -480,7 +488,12 @@ const sheetCounts = computed(() => {
         </div>
         <div>
           <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
-          <input v-model="outputModal.label" type="text" class="input-field w-full" placeholder="Defaults to topic.channel" />
+          <input
+            v-model="outputModal.label"
+            type="text"
+            class="input-field w-full"
+            placeholder="Defaults to topic.channel"
+          />
         </div>
         <p v-if="outputModal.error" class="text-sm text-red-300">{{ outputModal.error }}</p>
       </div>

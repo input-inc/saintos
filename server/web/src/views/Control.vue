@@ -1,28 +1,18 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { useWsStore } from '@/stores/ws'
 import { useNodesStore } from '@/stores/nodes'
 import Moods from '@/views/Moods.vue'
 
-const ws = useWsStore()
 const nodes = useNodesStore()
 const tab = ref('nodes')
 
 onMounted(() => nodes.fetchAll().catch(() => {}))
-
-async function estopAll () {
-  try { await ws.command('system', 'estop', { target: 'all' }) } catch (_) {}
-}
 </script>
 
 <template>
   <section>
     <div class="flex items-center justify-between mb-6">
       <h2 class="text-2xl font-bold text-white">Control Panel</h2>
-      <button class="btn-danger" @click="estopAll">
-        <span class="material-icons icon-sm">warning</span>
-        E-Stop all
-      </button>
     </div>
 
     <div class="flex items-center gap-1 mb-6 border-b border-slate-700/50">

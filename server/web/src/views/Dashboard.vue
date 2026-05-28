@@ -2,7 +2,6 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useNodesStore } from '@/stores/nodes'
 import { useDisplayStore } from '@/stores/display'
-import { useActivityStore } from '@/stores/activity'
 import { useWsStore } from '@/stores/ws'
 import { useWsTopic } from '@/composables/useWsTopic'
 import Widgets from '@/views/Widgets.vue'
@@ -11,7 +10,6 @@ import WifiSwitchingOverlay from '@/components/WifiSwitchingOverlay.vue'
 
 const nodes = useNodesStore()
 const display = useDisplayStore()
-const activity = useActivityStore()
 const ws = useWsStore()
 const systemStatus = useWsTopic(() => 'system_status')
 // Live WiFi metrics (signal/retry/noise/bitrate) ride the same
@@ -39,13 +37,51 @@ onMounted(() => {
   loadWifiConfig()
 })
 
-const online  = computed(() => nodes.all.filter(n => n.online).length)
-const offline = computed(() => nodes.all.length - online.value)
-
 const cpu = computed(() => systemStatus.value?.cpu_usage ?? null)
 const mem = computed(() => systemStatus.value?.memory_usage ?? null)
-const temp = computed(() => systemStatus.value?.cpu_temp ?? null)
-const uptime = computed(() => systemStatus.value?.uptime ?? null)
+// Server publishes Celsius as `cpu_temp_c`; color logic stays in Celsius
+// regardless of the operator's display-unit preference.
+const tempC = computed(() => {
+  const v = systemStatus.value?.cpu_temp_c
+  return typeof v === 'number' ? v : null
+})
+const uptime = computed(() => systemStatus.value?.uptime_seconds ?? null)
+const serverName = computed(() => systemStatus.value?.server_name || '--')
+
+// CPU temp color thresholds match vanilla (warns at 65 °C, critical at
+// 80 °C where the Pi enters soft-throttle).
+const tempClass = computed(() => {
+  const t = tempC.value
+  if (t == null) return 'stat-value text-slate-500'
+  if (t >= 80) return 'stat-value text-red-400'
+  if (t >= 65) return 'stat-value text-amber-400'
+  return 'stat-value text-emerald-400'
+})
+const tempText = computed(() => tempC.value == null ? '--' : display.formatTemperature(tempC.value))
+
+// Throttle dict shape from server: { raw, status: 'ok'|'warning'|'critical',
+// summary, flags[], descriptions[] } — or null on non-Pi hosts.
+const throttle = computed(() => systemStatus.value?.throttle ?? null)
+const throttleText = computed(() => {
+  const t = throttle.value
+  if (!t) return 'n/a'
+  if (t.status === 'ok') return 'OK'
+  if (t.status === 'warning') return 'Past events'
+  return 'Active'
+})
+const throttleClass = computed(() => {
+  const t = throttle.value
+  if (!t) return 'stat-value text-sm text-slate-500'
+  if (t.status === 'ok') return 'stat-value text-sm text-emerald-400'
+  if (t.status === 'warning') return 'stat-value text-sm text-amber-400'
+  return 'stat-value text-sm text-red-400'
+})
+const throttleTitle = computed(() => {
+  const t = throttle.value
+  if (!t) return 'vcgencmd not available on this host'
+  if (t.status === 'ok') return `${t.summary} (${t.raw})`
+  return `${t.summary} (${t.raw}): ${(t.descriptions || []).join(', ')}`
+})
 
 // Walk host_controller's channel list once per frame, extract the
 // system_monitor.wifi_* readings. Missing channels (e.g. host without
@@ -100,15 +136,6 @@ function fmtUptime (sec) {
   if (h) return `${h}h ${m}m`
   return `${m}m`
 }
-
-function fmtTime (ts) {
-  if (!ts) return ''
-  const t = new Date(ts * 1000)
-  return t.toLocaleTimeString([], { hour12: false })
-}
-function classFor (level) {
-  return ({ error: 'error', warn: 'warn', info: 'info', debug: 'debug' }[(level || 'info').toLowerCase()]) || 'info'
-}
 </script>
 
 <template>
@@ -121,10 +148,10 @@ function classFor (level) {
       </button>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div class="card">
         <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-white">System status</h3>
+          <h3 class="text-lg font-semibold text-white">System Status</h3>
           <span class="px-2 py-1 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400">Online</span>
         </div>
         <div class="grid grid-cols-2 gap-4">
@@ -133,11 +160,11 @@ function classFor (level) {
             <span class="stat-value">{{ fmtUptime(uptime) }}</span>
           </div>
           <div class="stat-item">
-            <span class="stat-label">CPU temp</span>
-            <span class="stat-value">{{ display.formatTemperature(temp) }}</span>
+            <span class="stat-label">Server Name</span>
+            <span class="stat-value">{{ serverName }}</span>
           </div>
           <div class="stat-item">
-            <span class="stat-label">CPU usage</span>
+            <span class="stat-label">CPU Usage</span>
             <div class="flex items-center gap-2">
               <div class="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
                 <div class="h-full bg-cyan-500 transition-all duration-300" :style="{ width: `${cpu ?? 0}%` }" />
@@ -146,7 +173,7 @@ function classFor (level) {
             </div>
           </div>
           <div class="stat-item">
-            <span class="stat-label">Memory</span>
+            <span class="stat-label">Memory Usage</span>
             <div class="flex items-center gap-2">
               <div class="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
                 <div class="h-full bg-violet-500 transition-all duration-300" :style="{ width: `${mem ?? 0}%` }" />
@@ -154,34 +181,14 @@ function classFor (level) {
               <span class="stat-value text-sm w-12 text-right">{{ mem != null ? `${mem.toFixed(0)}%` : '--' }}</span>
             </div>
           </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-white">Nodes</h3>
-          <RouterLink to="/nodes" class="text-xs text-cyan-400 hover:text-cyan-300 underline">manage</RouterLink>
-        </div>
-        <div class="grid grid-cols-3 gap-4">
           <div class="stat-item">
-            <span class="stat-label">Adopted</span>
-            <span class="stat-value text-2xl">{{ nodes.all.length }}</span>
+            <span class="stat-label">CPU Temp</span>
+            <span :class="tempClass">{{ tempText }}</span>
           </div>
           <div class="stat-item">
-            <span class="stat-label">Online</span>
-            <span class="stat-value text-2xl text-emerald-400">{{ online }}</span>
+            <span class="stat-label">Throttle</span>
+            <span :class="throttleClass" :title="throttleTitle">{{ throttleText }}</span>
           </div>
-          <div class="stat-item">
-            <span class="stat-label">Offline</span>
-            <span class="stat-value text-2xl text-slate-400">{{ offline }}</span>
-          </div>
-        </div>
-        <div v-if="nodes.unadopted.length" class="mt-4 pt-4 border-t border-slate-700/50 flex items-center justify-between">
-          <span class="text-sm text-amber-300 flex items-center gap-2">
-            <span class="material-icons icon-sm">new_releases</span>
-            {{ nodes.unadopted.length }} unadopted node{{ nodes.unadopted.length === 1 ? '' : 's' }}
-          </span>
-          <RouterLink to="/nodes" class="text-xs text-amber-300 hover:text-amber-200 underline">adopt now →</RouterLink>
         </div>
       </div>
 
@@ -230,21 +237,6 @@ function classFor (level) {
             <span class="material-icons icon-sm">wifi_find</span>
             Find better channel
           </button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3 class="text-lg font-semibold text-white mb-3">Recent activity</h3>
-      <div v-if="!activity.entries.length" class="text-sm text-slate-400 italic">No activity yet.</div>
-      <div v-else class="font-mono text-xs space-y-1 max-h-64 overflow-y-auto">
-        <div
-          v-for="(e, i) in activity.entries.slice().reverse().slice(0, 100)"
-          :key="i"
-          :class="['log-entry', classFor(e.level)]"
-        >
-          <span class="text-slate-500 mr-2">{{ fmtTime(e.time) }}</span>
-          {{ e.text }}
         </div>
       </div>
     </div>

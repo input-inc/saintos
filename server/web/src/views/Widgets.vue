@@ -9,7 +9,7 @@ defineProps({ embedded: { type: Boolean, default: false } })
 
 const ws = useWsStore()
 const catalog = usePeripheralCatalog()
-const routing = ref({ widgets: [], routes: [] })
+const routing = ref({ sheets: {} })
 const widgetCatalog = ref([])
 
 const systemRouting = useWsTopic(() => 'system_routing')
@@ -17,7 +17,7 @@ const systemRouting = useWsTopic(() => 'system_routing')
 async function load () {
   try {
     const r = await ws.management('get_system_routing', {})
-    routing.value = r || { widgets: [], routes: [] }
+    routing.value = r || { sheets: {} }
   } catch (e) {
     console.warn('widgets load failed:', e)
   }
@@ -26,8 +26,24 @@ onMounted(() => { catalog.ensureLoaded().then(() => widgetCatalog.value = catalo
 
 // Keep in sync with server broadcasts.
 const live = computed(() => systemRouting.value || routing.value)
-const widgets = computed(() => live.value.widgets || [])
-const routes  = computed(() => live.value.routes  || [])
+
+// Per-sheet routing model: flatten widgets and wires across all sheets so
+// the Widgets page lists every widget regardless of which controller-node
+// sheet (or _dashboard sheet) owns it.
+const widgets = computed(() => {
+  const all = []
+  for (const s of Object.values(live.value.sheets || {})) {
+    for (const w of (s.widgets || [])) all.push(w)
+  }
+  return all
+})
+const routes = computed(() => {
+  const all = []
+  for (const s of Object.values(live.value.sheets || {})) {
+    for (const w of (s.wires || [])) all.push(w)
+  }
+  return all
+})
 
 function widgetType (id) { return widgetCatalog.value.find(t => t.id === id) }
 function routesIntoWidget (widgetId, inputId) {

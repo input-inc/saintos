@@ -1,49 +1,67 @@
 <script setup>
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useWsTopic } from '@/composables/useWsTopic'
 
 const livelink = useWsTopic(() => 'livelink')
 const clients = useWsTopic(() => 'clients')
+const router = useRouter()
 const status = computed(() => livelink.value || {})
 const receiver = computed(() => status.value.receiver || {})
-const router = computed(() => status.value.router || {})
 const clientList = computed(() => clients.value?.clients || [])
+
+// Mirrors vanilla updateInputsSummary(): badge text changes between
+// Connected / Listening / Disconnected based on receiver state.
+const badgeText = computed(() => {
+  if (receiver.value.connected) return 'Connected'
+  if (receiver.value.running)   return 'Listening'
+  return 'Disconnected'
+})
+const badgeClass = computed(() => {
+  if (receiver.value.connected) return 'bg-emerald-500/20 text-emerald-400'
+  if (receiver.value.running)   return 'bg-amber-500/20 text-amber-400'
+  return 'bg-slate-500/20 text-slate-400'
+})
+const statusText = computed(() => {
+  if (receiver.value.connected) return 'Receiving data'
+  if (receiver.value.running)   return 'Waiting for connection'
+  return 'Not running'
+})
+
+function viewDetails () { router.push('/livelink') }
 </script>
 
 <template>
   <section>
-    <div class="flex items-center justify-between mb-6">
-      <h2 class="text-2xl font-bold text-white">Inputs</h2>
-      <RouterLink to="/livelink" class="btn-secondary">
-        <span class="material-icons icon-sm">open_in_new</span>
-        LiveLink detail
-      </RouterLink>
-    </div>
+    <h2 class="text-2xl font-bold text-white mb-6">Inputs</h2>
 
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
       <div class="card">
-        <div class="flex items-center justify-between mb-3">
-          <h3 class="text-lg font-semibold text-white flex items-center gap-2">
-            <span class="material-icons text-cyan-400 icon-md">face</span>
-            LiveLink Face
-          </h3>
-          <span :class="['px-2 py-1 text-xs font-medium rounded-full', receiver.connected ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-500/20 text-slate-400']">
-            {{ receiver.connected ? 'Connected' : 'Disconnected' }}
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-semibold text-white">LiveLink Face</h3>
+          <span :class="['px-2 py-1 text-xs font-medium rounded-full', badgeClass]">
+            {{ badgeText }}
           </span>
         </div>
-        <div class="space-y-2 text-sm">
+        <div class="space-y-3">
           <div class="stat-item">
-            <span class="stat-label">Source</span>
-            <span class="stat-value text-sm font-mono">{{ receiver.source_address || '—' }}</span>
+            <span class="stat-label">Status</span>
+            <span class="stat-value text-sm">{{ statusText }}</span>
           </div>
           <div class="stat-item">
-            <span class="stat-label">Frames received</span>
-            <span class="stat-value text-sm">{{ receiver.frames_received ?? 0 }}</span>
+            <span class="stat-label">Port</span>
+            <span class="stat-value text-sm font-mono">{{ receiver.port ?? 11111 }}</span>
           </div>
           <div class="stat-item">
-            <span class="stat-label">Routes</span>
-            <span class="stat-value text-sm">{{ router.routes_count ?? 0 }}</span>
+            <span class="stat-label">Packets</span>
+            <span class="stat-value text-sm">{{ (receiver.packet_count ?? 0).toLocaleString() }}</span>
           </div>
+        </div>
+        <div class="mt-4 pt-4 border-t border-slate-700">
+          <button class="btn-secondary w-full justify-center" @click="viewDetails">
+            <span class="material-icons icon-sm">visibility</span>
+            View Details
+          </button>
         </div>
       </div>
 

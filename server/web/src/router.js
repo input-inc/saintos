@@ -16,7 +16,7 @@ export const router = createRouter({
         { path: 'state',        name: 'node-state',       component: () => import('@/views/node/State.vue') },
         { path: 'live',         name: 'node-live',        component: () => import('@/views/node/Live.vue') },
         { path: 'logs',         name: 'node-logs',        component: () => import('@/views/node/Logs.vue') },
-        { path: 'boards',       name: 'node-boards',      component: () => import('@/views/node/Boards.vue') },
+        { path: 'control',      name: 'node-control',     component: () => import('@/views/node/Control.vue') },
       ],
     },
     { path: '/routes',          name: 'routes',      component: () => import('@/views/Routes.vue') },

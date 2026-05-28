@@ -1,7 +1,6 @@
 <script setup>
 import { computed, onMounted } from 'vue'
 import { useNodesStore } from '@/stores/nodes'
-import NodeActions from '@/components/NodeActions.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 const nodes = useNodesStore()
@@ -15,7 +14,7 @@ const tabs = [
   { name: 'node-live',        label: 'Live readings' },
   { name: 'node-state',       label: 'State' },
   { name: 'node-logs',        label: 'Logs' },
-  { name: 'node-boards',      label: 'Boards' },
+  { name: 'node-control',     label: 'Control' },
 ]
 
 const title = computed(() => node.value?.display_name || props.id)
@@ -50,13 +49,6 @@ const online = computed(() => node.value?.online !== false)
       </RouterLink>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
-      <div class="lg:col-span-3">
-        <RouterView :node-id="id" :node="node" />
-      </div>
-      <div class="lg:col-span-1">
-        <NodeActions :node="node" @changed="nodes.fetchAll()" />
-      </div>
-    </div>
+    <RouterView :node-id="id" :node="node" />
   </section>
 </template>

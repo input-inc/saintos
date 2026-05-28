@@ -36,9 +36,8 @@ const positions = ref(loadPositions())
 
 // ── Interaction state — sheet-scoped (component is re-keyed per sheet) ──
 const canvasEl = ref(null)
-const connecting = ref(null)        // { fromHandle, fromDir }
+const connecting = ref(null)        // { fromHandle, fromDir, cursor }
 const dragging = ref(null)          // { nodeId, offsetX, offsetY }
-const cursor = ref({ x: 0, y: 0 })
 
 const NODE_WIDTH    = 220
 const HEADER_HEIGHT = 48
@@ -46,20 +45,11 @@ const PIN_ROW       = 22
 const PIN_OFFSET_X  = 6
 
 // ── Catalog helpers ─────────────────────────────────────────────────────
+// All three type lists live in the shared peripheralCatalog store — one
+// fetch per page load, populated by Routes.vue's loadAll().
 const peripheralType = (id) => catalog.byType(id)
 const widgetType = (id) => catalog.widgetType(id)
-// Operator type catalog isn't on the shared catalog store yet — fetch
-// once per RoutingSheet mount. Cheap (already cached server-side).
-const operatorTypes = ref([])
-const operatorType = (id) => operatorTypes.value.find(t => t.id === id) || null
-async function ensureOperatorTypes () {
-  if (operatorTypes.value.length) return
-  try {
-    const r = await ws.management('get_peripheral_catalog', {})
-    operatorTypes.value = r?.operator_types || []
-  } catch (_) {}
-}
-onMounted(ensureOperatorTypes)
+const operatorType = (id) => catalog.operatorType(id)
 
 // ── Graph node assembly ─────────────────────────────────────────────────
 function positionFor (id, fallback) {
@@ -280,9 +270,9 @@ const wires = computed(() => {
     const b = pinPosition(endpointToHandle(w.sink, 'in'))
     if (a && b) out.push({ id: w.id, d: bezier(a, b), pending: false })
   }
-  if (connecting.value) {
+  if (connecting.value?.cursor) {
     const a = pinPosition(connecting.value.fromHandle)
-    if (a) out.push({ id: '_pending', d: bezier(a, cursor.value), pending: true })
+    if (a) out.push({ id: '_pending', d: bezier(a, connecting.value.cursor), pending: true })
   }
   return out
 })
@@ -296,11 +286,6 @@ function startDrag (evt, g) {
   evt.preventDefault()
 }
 function onMouseMove (evt) {
-  const rect = canvasEl.value?.getBoundingClientRect()
-  if (rect) cursor.value = {
-    x: evt.clientX - rect.left + (canvasEl.value?.scrollLeft || 0),
-    y: evt.clientY - rect.top  + (canvasEl.value?.scrollTop  || 0),
-  }
   if (dragging.value) {
     const id = dragging.value.nodeId
     positions.value = {
@@ -308,6 +293,16 @@ function onMouseMove (evt) {
       [`${props.sheetId}:${id}`]: {
         x: Math.max(0, evt.clientX - dragging.value.offsetX),
         y: Math.max(0, evt.clientY - dragging.value.offsetY),
+      },
+    }
+  }
+  if (connecting.value && canvasEl.value) {
+    const cr = canvasEl.value.getBoundingClientRect()
+    connecting.value = {
+      ...connecting.value,
+      cursor: {
+        x: evt.clientX - cr.left + canvasEl.value.scrollLeft,
+        y: evt.clientY - cr.top + canvasEl.value.scrollTop,
       },
     }
   }

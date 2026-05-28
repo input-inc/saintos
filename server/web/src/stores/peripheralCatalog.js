@@ -9,6 +9,7 @@ export const usePeripheralCatalog = defineStore('peripheralCatalog', () => {
   const ws = useWsStore()
   const types = ref([])
   const widgetTypes = ref([])
+  const operatorTypes = ref([])
   const loaded = ref(false)
   let inflight = null
 
@@ -18,6 +19,7 @@ export const usePeripheralCatalog = defineStore('peripheralCatalog', () => {
     inflight = ws.management('get_peripheral_catalog', {}).then(r => {
       types.value = r?.peripheral_types || []
       widgetTypes.value = r?.widget_types || []
+      operatorTypes.value = r?.operator_types || []
       loaded.value = true
       inflight = null
     }).catch(e => {
@@ -33,6 +35,12 @@ export const usePeripheralCatalog = defineStore('peripheralCatalog', () => {
   function widgetType (id) {
     return widgetTypes.value.find(t => t.id === id) || null
   }
+  function operatorType (id) {
+    return operatorTypes.value.find(t => t.id === id) || null
+  }
 
-  return { types, widgetTypes, loaded, ensureLoaded, byType, widgetType }
+  return {
+    types, widgetTypes, operatorTypes, loaded,
+    ensureLoaded, byType, widgetType, operatorType,
+  }
 })

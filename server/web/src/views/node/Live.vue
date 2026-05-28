@@ -96,13 +96,19 @@ function sparkSamples (nodeId, peripheralId, channelId) {
 
 <template>
   <div>
-    <div class="flex items-center justify-between mb-4">
+    <div class="flex items-center justify-between mb-3">
       <h3 class="text-lg font-semibold text-white">Live readings</h3>
       <span v-if="lastFeedback" :class="['text-xs', stale ? 'text-amber-400' : 'text-emerald-400']">
         {{ stale ? 'Stale feed' : 'Live feed' }}
       </span>
       <span v-else class="text-xs text-slate-500">No feedback yet</span>
     </div>
+    <p class="text-xs text-slate-400 mb-4">
+      Raw per-channel values streaming from the firmware via the
+      routing system. If a peripheral's card shows <span class="font-mono">—</span>,
+      either the firmware isn't sampling that channel yet or the
+      driver reports the peripheral as disconnected.
+    </p>
 
     <div v-if="!peripherals.length" class="card text-center py-10">
       <span class="material-icons icon-lg text-slate-600">sensors</span>
