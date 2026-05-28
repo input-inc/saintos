@@ -68,7 +68,7 @@
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .page-fade { animation: fadeIn 0.2s ease-out; }
 
-/* ── Components — ported verbatim from legacy.html's component styles ── */
+/* ── Components ── */
 
 /* Navigation */
 .nav-link {

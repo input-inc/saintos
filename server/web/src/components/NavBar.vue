@@ -1,7 +1,4 @@
 <script setup>
-// Top-level nav. Mirrors legacy.html's horizontal nav strip with the
-// same icons + ordering — operators look here first, so it pays to
-// match the muscle memory.
 const links = [
   { to: '/dashboard', icon: 'dashboard', label: 'Dashboard' },
   { to: '/nodes',     icon: 'dns',       label: 'Nodes' },

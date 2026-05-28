@@ -4,24 +4,28 @@ Branch: `frontend-vue`.
 
 ## Current state
 
-Scaffolding is in place. One real slice is ported (State tab); every other
-route renders a `<PendingPort>` placeholder that links back to the legacy
-vanilla UI at `/legacy.html`.
+Migration is complete. The legacy vanilla UI (`legacy.html`, `web/js/`,
+`web/css/`) has been deleted; `web/dist/` is the only thing the server
+serves.
 
 ```
 web/
 ├── package.json, vite.config.js, tailwind.config.js, postcss.config.js
 ├── index.html              ← Vite entry, mounts <App>
-├── legacy.html             ← old vanilla UI, kept reachable during migration
 ├── src/
 │   ├── main.js, App.vue, router.js, style.css
-│   ├── stores/             ← ws, nodes, peripheralCatalog
-│   ├── composables/        ← useWsTopic, useThrottledSend
-│   ├── components/         ← NavSidebar, ConnectionBadge, PeripheralCard,
-│   │                          channel/{ChannelSlider,Toggle,Color,Spec}
-│   └── views/              ← Dashboard, Nodes, NodeDetail (+ node/*), and
-│                              one stub per remaining top-level route
-├── js/, css/               ← legacy vanilla assets, untouched
+│   ├── stores/             ← ws, nodes, peripheralCatalog, settings,
+│   │                          display, activity
+│   ├── composables/        ← useWsTopic, useThrottledSend, useChannelHistory
+│   ├── components/         ← AppHeader, NavBar, AppModal, LoginScreen,
+│   │                          PeripheralCard + channel/{Slider,Toggle,Color,Spec},
+│   │                          AdoptModal, NodeActions, FirmwareUpdateModal,
+│   │                          BoardEditorModal, NodeEditModal, PendingPort,
+│   │                          WifiChannelModal, WifiSwitchingOverlay,
+│   │                          Sparkline, RoutingSheet, AppFooter
+│   └── views/              ← Dashboard, Nodes, NodeDetail (+ node/*),
+│                              Routes, Widgets, Inputs, LiveLink, Control,
+│                              Moods, Logs, Terminal, Updates, Settings
 └── dist/                   ← Vite build output (gitignored)
 ```
 
@@ -38,12 +42,14 @@ Pi keeps serving the backend while you iterate on UI on a dev machine.
 
 ## Cutover
 
+Done. Reference for what was changed:
+
 1. `npm run build` — outputs to `web/dist/`.
-2. Update the call site in `saint_server/server_node.py` (or wherever the
-   web server is constructed) to pass `web_root=<repo>/web/dist` instead of
-   `<repo>/web`.
-3. Delete `web/legacy.html` and `web/js/`, `web/css/` once the new UI is
-   fully fledged.
+2. `saint_server/server_node.py` constructs `WebServer` with
+   `web_root=<share>/saint_os/web/dist` (prod) or `<repo>/web/dist` (dev).
+3. `web/legacy.html`, `web/js/`, and `web/css/` are gone.
+4. `setup.py` no longer installs legacy `*.html` / `js/*.js` — only the
+   `web/dist/` tree.
 
 ## Building a release tarball
 
@@ -83,10 +89,8 @@ target, the assets land at:
 
 ```
 /opt/saint-os/share/saint_os/web/
-├── index.html, legacy.html, …      ← top-level html (incl. legacy during migration)
-├── js/                              ← legacy vanilla js (during migration)
 └── dist/
-    ├── index.html                   ← Vue entry — point web_root here at cutover
+    ├── index.html                   ← Vue entry — server_node.py points web_root here
     └── assets/<hashed>.{js,css}     ← Vite bundle output
 ```
 
@@ -112,7 +116,7 @@ called out explicitly.
 | `views/node/Live.vue` | `js/nodelive.js` | Per-peripheral channel readings. |
 | `views/node/State.vue` | `js/statecontrols.js` | Channel-addressed sliders/toggles/color via `set_channel_value`. |
 | `views/node/Logs.vue` | `js/nodelogs.js` | History + live tail, scroll-to-bottom, clear. |
-| `views/node/Boards.vue` | `js/boards.js` | Lists registered boards and highlights the node's current one. The editor lives on Settings. |
+| `views/node/Control.vue` | `js/controlpage.js` | Per-node operator controls. |
 | `views/Routes.vue` | `js/routing.js` | SVG graph editor with draggable peripheral/signal/widget nodes and bezier wires. Click a channel handle to start a wire, click another compatible handle to complete it. Position persisted to localStorage. Buttons to add signals/widgets and auto-layout. Route list below the canvas for raw view + delete. |
 | `views/Widgets.vue` | `js/widgets.js` | Read-only widget cards with input → route summary. |
 | `views/Inputs.vue` | `js/livelink.js` (summary) | LiveLink summary card. |

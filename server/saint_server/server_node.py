@@ -1254,13 +1254,14 @@ class SaintServerNode(Node):
             # Import here to avoid circular imports
             from saint_server.webserver import WebServer
 
-            # Get web root path from package share directory
+            # Vue build output lives under web/dist/ — that's the
+            # production UI. See web/MIGRATION.md.
             try:
                 from ament_index_python.packages import get_package_share_directory
-                web_root = os.path.join(get_package_share_directory('saint_os'), 'web')
+                web_root = os.path.join(get_package_share_directory('saint_os'), 'web', 'dist')
             except Exception:
                 # Fallback for development
-                web_root = os.path.join(os.path.dirname(__file__), '..', 'web')
+                web_root = os.path.join(os.path.dirname(__file__), '..', 'web', 'dist')
 
             # Create and start web server with shared state manager
             self.web_server = WebServer(

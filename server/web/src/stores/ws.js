@@ -4,7 +4,7 @@ import { reactive, ref } from 'vue'
 // WebSocket store — single shared connection, reactive state, and the
 // command/subscribe surface every other store and component leans on.
 //
-// Wire-protocol parity with the legacy `web/js/websocket.js`:
+// Wire protocol:
 //   - Reconnect with exponential backoff up to maxReconnectAttempts.
 //   - Request/response correlation via incrementing message id.
 //   - Topic subscriptions emit `state` frames keyed by `{node, data}`.
