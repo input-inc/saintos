@@ -1,0 +1,65 @@
+# Board definition: PJRC Teensy 4.1 + built-in Ethernet (via NativeEthernet).
+#
+# Layers on top of ../global.yaml for the teensy41 chip. Every digital
+# header pin (0..41) is broken out and operator-configurable. The
+# 10/100 Ethernet MAC is wired internally to the iMXRT1062 RMII pins
+# and connects to a magjack on the dedicated 6-pin bottom-side header,
+# so none of the main GPIOs are reserved for networking.
+
+board_id: teensy41_native_eth
+display_name: "PJRC Teensy 4.1 (Native Ethernet)"
+chip_family: teensy41
+builtin: true        # shipped with SAINT.OS — UI marks uneditable
+
+# All 42 digital header pins are available. Pin 13 doubles as the
+# onboard LED — operators can still re-purpose it; the LED just
+# mirrors whatever the pin is driving.
+available_pins:
+  - {gpio:  0, name: "D0"}
+  - {gpio:  1, name: "D1"}
+  - {gpio:  2, name: "D2"}
+  - {gpio:  3, name: "D3"}
+  - {gpio:  4, name: "D4"}
+  - {gpio:  5, name: "D5"}
+  - {gpio:  6, name: "D6"}
+  - {gpio:  7, name: "D7"}
+  - {gpio:  8, name: "D8"}
+  - {gpio:  9, name: "D9"}
+  - {gpio: 10, name: "D10"}
+  - {gpio: 11, name: "D11"}
+  - {gpio: 12, name: "D12"}
+  - {gpio: 13, name: "D13 (LED)"}
+  - {gpio: 14, name: "D14 / A0"}
+  - {gpio: 15, name: "D15 / A1"}
+  - {gpio: 16, name: "D16 / A2"}
+  - {gpio: 17, name: "D17 / A3"}
+  - {gpio: 18, name: "D18 / A4"}
+  - {gpio: 19, name: "D19 / A5"}
+  - {gpio: 20, name: "D20 / A6"}
+  - {gpio: 21, name: "D21 / A7"}
+  - {gpio: 22, name: "D22 / A8"}
+  - {gpio: 23, name: "D23 / A9"}
+  - {gpio: 24, name: "D24 / A10"}
+  - {gpio: 25, name: "D25 / A11"}
+  - {gpio: 26, name: "D26 / A12"}
+  - {gpio: 27, name: "D27 / A13"}
+  - {gpio: 28, name: "D28"}
+  - {gpio: 29, name: "D29"}
+  - {gpio: 30, name: "D30"}
+  - {gpio: 31, name: "D31"}
+  - {gpio: 32, name: "D32"}
+  - {gpio: 33, name: "D33"}
+  - {gpio: 34, name: "D34"}
+  - {gpio: 35, name: "D35"}
+  - {gpio: 36, name: "D36"}
+  - {gpio: 37, name: "D37"}
+  - {gpio: 38, name: "D38 / A14"}
+  - {gpio: 39, name: "D39 / A15"}
+  - {gpio: 40, name: "D40 / A16"}
+  - {gpio: 41, name: "D41 / A17"}
+
+# Ethernet RMII pins live on the dedicated bottom-side magjack header,
+# not the main GPIO rails, so there's nothing to reserve here.
+reserved_pins: []
+
+builtin_peripherals: []

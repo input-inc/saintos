@@ -1,0 +1,87 @@
+# Chip family definition for the NXP iMXRT1062 (the SoC on the PJRC
+# Teensy 4.1 module).
+#
+# Describes what's possible at the silicon level — every legal GPIO,
+# every legal UART pair, ADC pins, etc. Board files in the same
+# directory layer on top of this with board-specific subsets.
+#
+# The server loads this once at startup and reuses it across every
+# board in this directory.
+
+chip_family: teensy41
+display_name: "PJRC Teensy 4.1"
+description: "NXP iMXRT1062 (Cortex-M7 @ 600 MHz), 42 GPIO, 8 hardware UARTs, 3 I²C, 3 SPI, 18 ADC inputs, built-in 10/100 Ethernet MAC."
+
+# The Teensy 4.1's iMXRT1062 doesn't have a single CHIP_ID register the
+# firmware can read the way the RP2040 does, so we don't sanity-check
+# against a fixed value here. The firmware announces chip_family alone.
+
+gpio_count: 42
+
+# Per-GPIO capabilities at the chip level. A board's available_pins
+# entries reference these by digital-pin number — the capability list
+# is the union of everything possible at the silicon level. The
+# Teensy 4.1 routes peripherals through the iMXRT IOMUX, so most pins
+# can be configured for many roles; the entries below mark only the
+# pins that the Teensy core (NXP HAL + cores/teensy4) actually wires
+# to a given peripheral instance.
+pin_capabilities:
+  - {gpio:  0, default_name: "D0",  caps: ["digital_in", "digital_out", "pwm", "uart_tx", "spi_cs"]}     # UART1 TX, SPI1 CS
+  - {gpio:  1, default_name: "D1",  caps: ["digital_in", "digital_out", "pwm", "uart_rx", "spi_rx"]}     # UART1 RX, SPI1 MISO
+  - {gpio:  2, default_name: "D2",  caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio:  3, default_name: "D3",  caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio:  4, default_name: "D4",  caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio:  5, default_name: "D5",  caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio:  6, default_name: "D6",  caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio:  7, default_name: "D7",  caps: ["digital_in", "digital_out", "pwm", "uart_rx"]}               # UART2 RX
+  - {gpio:  8, default_name: "D8",  caps: ["digital_in", "digital_out", "pwm", "uart_tx"]}               # UART2 TX
+  - {gpio:  9, default_name: "D9",  caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio: 10, default_name: "D10", caps: ["digital_in", "digital_out", "pwm", "spi_cs"]}                # SPI0 CS
+  - {gpio: 11, default_name: "D11", caps: ["digital_in", "digital_out", "pwm", "spi_tx"]}                # SPI0 MOSI
+  - {gpio: 12, default_name: "D12", caps: ["digital_in", "digital_out", "pwm", "spi_rx"]}                # SPI0 MISO
+  - {gpio: 13, default_name: "D13", caps: ["digital_in", "digital_out", "pwm", "spi_sck"]}               # SPI0 SCK + onboard LED
+  - {gpio: 14, default_name: "D14", caps: ["digital_in", "digital_out", "pwm", "uart_tx", "adc"]}        # UART3 TX, A0
+  - {gpio: 15, default_name: "D15", caps: ["digital_in", "digital_out", "pwm", "uart_rx", "adc"]}        # UART3 RX, A1
+  - {gpio: 16, default_name: "D16", caps: ["digital_in", "digital_out", "pwm", "uart_rx", "i2c_scl", "adc"]} # UART4 RX, Wire1 SCL, A2
+  - {gpio: 17, default_name: "D17", caps: ["digital_in", "digital_out", "pwm", "uart_tx", "i2c_sda", "adc"]} # UART4 TX, Wire1 SDA, A3
+  - {gpio: 18, default_name: "D18", caps: ["digital_in", "digital_out", "pwm", "i2c_sda", "adc"]}        # Wire SDA, A4
+  - {gpio: 19, default_name: "D19", caps: ["digital_in", "digital_out", "pwm", "i2c_scl", "adc"]}        # Wire SCL, A5
+  - {gpio: 20, default_name: "D20", caps: ["digital_in", "digital_out", "pwm", "uart_tx", "adc"]}        # UART5 TX, A6
+  - {gpio: 21, default_name: "D21", caps: ["digital_in", "digital_out", "pwm", "uart_rx", "adc"]}        # UART5 RX, A7
+  - {gpio: 22, default_name: "D22", caps: ["digital_in", "digital_out", "pwm", "adc"]}                   # A8
+  - {gpio: 23, default_name: "D23", caps: ["digital_in", "digital_out", "pwm", "adc"]}                   # A9
+  - {gpio: 24, default_name: "D24", caps: ["digital_in", "digital_out", "pwm", "uart_tx", "i2c_scl", "adc"]} # UART6 TX, Wire2 SCL, A10
+  - {gpio: 25, default_name: "D25", caps: ["digital_in", "digital_out", "pwm", "uart_rx", "i2c_sda", "adc"]} # UART6 RX, Wire2 SDA, A11
+  - {gpio: 26, default_name: "D26", caps: ["digital_in", "digital_out", "spi_tx", "adc"]}                # SPI1 MOSI, A12
+  - {gpio: 27, default_name: "D27", caps: ["digital_in", "digital_out", "spi_sck", "adc"]}               # SPI1 SCK, A13
+  - {gpio: 28, default_name: "D28", caps: ["digital_in", "digital_out", "pwm", "uart_rx"]}               # UART7 RX
+  - {gpio: 29, default_name: "D29", caps: ["digital_in", "digital_out", "pwm", "uart_tx"]}               # UART7 TX
+  - {gpio: 30, default_name: "D30", caps: ["digital_in", "digital_out"]}
+  - {gpio: 31, default_name: "D31", caps: ["digital_in", "digital_out"]}
+  - {gpio: 32, default_name: "D32", caps: ["digital_in", "digital_out"]}
+  - {gpio: 33, default_name: "D33", caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio: 34, default_name: "D34", caps: ["digital_in", "digital_out", "uart_rx", "spi_rx"]}            # UART8 RX, SPI2 MISO
+  - {gpio: 35, default_name: "D35", caps: ["digital_in", "digital_out", "uart_tx", "spi_tx"]}            # UART8 TX, SPI2 MOSI
+  - {gpio: 36, default_name: "D36", caps: ["digital_in", "digital_out", "pwm", "spi_cs"]}                # SPI2 CS
+  - {gpio: 37, default_name: "D37", caps: ["digital_in", "digital_out", "pwm", "spi_sck"]}               # SPI2 SCK
+  - {gpio: 38, default_name: "D38", caps: ["digital_in", "digital_out", "adc"]}                          # A14
+  - {gpio: 39, default_name: "D39", caps: ["digital_in", "digital_out", "adc"]}                          # A15
+  - {gpio: 40, default_name: "D40", caps: ["digital_in", "digital_out", "adc"]}                          # A16
+  - {gpio: 41, default_name: "D41", caps: ["digital_in", "digital_out", "adc"]}                          # A17
+
+# All UART (tx, rx) combinations legal at the chip level. The Teensy 4.1
+# exposes 8 HardwareSerial instances (Serial1..Serial8); the firmware's
+# uart_pin_pairs.cpp is the canonical source of these defaults.
+uart_pairs:
+  - {uart: 1, tx:  0, rx:  1}
+  - {uart: 2, tx:  8, rx:  7}
+  - {uart: 3, tx: 14, rx: 15}
+  - {uart: 4, tx: 17, rx: 16}
+  - {uart: 5, tx: 20, rx: 21}
+  - {uart: 6, tx: 24, rx: 25}
+  - {uart: 7, tx: 29, rx: 28}
+  - {uart: 8, tx: 35, rx: 34}
+
+# ADC-capable pins. The Teensy 4.1 has 18 analog inputs (A0..A17)
+# mapped onto digital pins 14..27 and 38..41.
+adc_pins: [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 38, 39, 40, 41]

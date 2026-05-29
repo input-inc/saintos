@@ -3080,6 +3080,7 @@ class StateManager:
         return {
             "simulation": self.get_firmware_build_info("simulation"),
             "hardware": self.get_firmware_build_info("hardware"),
+            "teensy41": self.get_firmware_info_for_type("teensy41"),
             "rpi5": self.get_firmware_info_for_type("rpi5"),
             "controller": self.get_firmware_info_for_type("controller"),
         }
