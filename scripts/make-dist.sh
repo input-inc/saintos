@@ -23,7 +23,7 @@ VERSION="${1:?version required}"
 ARCH="${2:?arch required}"
 ROS_DISTRO="${3:?ros distro required}"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 if [[ ! -d install ]]; then

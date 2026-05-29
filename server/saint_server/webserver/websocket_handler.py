@@ -2411,7 +2411,7 @@ class WebSocketHandler:
 
                 # Broadcast system status to subscribers
                 status = self.state_manager.get_system_status()
-                await self.broadcast_state('system', status)
+                await self.broadcast_state('system_status', status)
 
                 # Refresh the host controller's runtime channels with
                 # the same metrics and broadcast a pin_state so dashboard

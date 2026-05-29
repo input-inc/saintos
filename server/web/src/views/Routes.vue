@@ -48,15 +48,15 @@ function saveActiveSheet () {
 const liveRouting = computed(() => systemRouting.value || routing.value)
 const sheets = computed(() => liveRouting.value?.sheets || {})
 
-// All controllers (adopted nodes whose role is "controller") + any
-// sheet on disk that isn't backed by an adopted node ("orphan"). The
-// dashboard sheet always shows up if it exists on disk OR if anyone
-// has widgets they'd like to host outside a controller sheet.
+// Every adopted node gets a sheet entry, plus any sheet on disk that
+// isn't backed by an adopted node ("orphan"). Role is a body-part tag
+// (`tracks`, `neck`, `head`, …, `host` for the host controller), not a
+// controller/leaf distinction — legacy routing.js similarly listed every
+// adopted node regardless of role. The dashboard sheet always shows up.
 const sheetEntries = computed(() => {
   const entries = []
   const seen = new Set()
   for (const n of nodes.all) {
-    if (n.role && n.role !== 'controller') continue
     entries.push({
       id: n.node_id,
       label: n.display_name || n.node_id,

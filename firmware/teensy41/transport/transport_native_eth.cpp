@@ -38,7 +38,7 @@ static bool connected = false;
 #define DHCP_BACKOFF_SLOW_MS     5000u
 #define DHCP_FAST_ATTEMPTS       20u
 
-extern void led_update(void);  // led_status.cpp
+extern "C" void led_update(void);  // led_status.cpp
 
 extern "C" {
 

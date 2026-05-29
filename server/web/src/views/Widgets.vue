@@ -4,6 +4,7 @@ import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useWsTopic } from '@/composables/useWsTopic'
 import RoboClawMonitor from '@/components/widgets/RoboClawMonitor.vue'
+import Fas100Monitor from '@/components/widgets/Fas100Monitor.vue'
 
 defineProps({ embedded: { type: Boolean, default: false } })
 
@@ -83,6 +84,11 @@ function sourceLabel (route) {
              a Map<typeId, Component> if we sprout more bespoke types. -->
         <RoboClawMonitor
           v-if="w.type === 'roboclaw_monitor'"
+          :widget="w"
+          :routes="routes"
+        />
+        <Fas100Monitor
+          v-else-if="w.type === 'battery_monitor'"
           :widget="w"
           :routes="routes"
         />
