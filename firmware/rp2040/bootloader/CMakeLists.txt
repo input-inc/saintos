@@ -76,6 +76,7 @@ add_executable(saint_ota_bootloader
     ${SAINT_OTA_BL_DIR}/bl_info.c
     # Shared HTTP client
     ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/src/http_client.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/src/crc32.c
 )
 add_dependencies(saint_ota_bootloader generate_bl_version)
 target_include_directories(saint_ota_bootloader PRIVATE

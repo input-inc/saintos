@@ -148,6 +148,8 @@ static const char* ota_fail_reason_str(uint8_t reason)
 #include "fas100_driver.h"
 #include "roboclaw_driver.h"
 #include "pathfinder_bms_driver.h"
+#include "maestro_driver.h"
+#include "saint_log.h"
 
 #ifdef SAINT_OS_OTA_BOOTLOADER
 #include "picowota/reboot.h"
@@ -267,11 +269,6 @@ static void mark_agent_communication(void);
 static bool check_agent_connection(void);
 static bool init_micro_ros(void);
 
-// Track whether init_micro_ros() has run so saint_log_publish can be a
-// safe no-op during pre-agent boot. Set to true after the log publisher
-// is registered with the agent.
-static bool ros_log_ready = false;
-
 // Cached bootloader version string. Resolved once at boot from the
 // fixed-address descriptor in bootloader flash (see
 // shared/include/bootloader_info.h) so we don't poke memory-mapped
@@ -296,180 +293,42 @@ static void resolve_bootloader_version(void)
 #endif
 }
 
-// -----------------------------------------------------------------------------
-// Deferred boot-status logging buffer
-// -----------------------------------------------------------------------------
-//
-// The boot-log queue stores log entries created BEFORE the server has
-// created our per-node /saint/nodes/<id>/log subscription. boot_log_queue
-// and boot_log_flush_if_due (defined further down) drive its public
-// API, but the struct + globals live up here so saint_log_publish can
-// fall into the same buffer when ros_log_ready is still false.
-//
-// Bumped from 5 to 24 because saint_log_publish now also enqueues here
-// when ROS isn't ready, so every driver's boot-time log (RoboClaw
-// restored/bound/probe lines, FAS100/SyRen equivalents, etc.) has to
-// fit alongside the handful of main.c lines. 24 × ~210 B ≈ 5 KB of
-// RAM, comfortable on RP2040.
-#define BOOT_LOG_MAX        24
-#define BOOT_LOG_LEVEL_LEN  8
-#define BOOT_LOG_TEXT_LEN   200
-typedef struct {
-    char level[BOOT_LOG_LEVEL_LEN];
-    char text[BOOT_LOG_TEXT_LEN];
-} boot_log_entry_t;
-static boot_log_entry_t g_boot_log[BOOT_LOG_MAX];
-static size_t           g_boot_log_count   = 0;
-static bool             g_boot_log_flushed = false;
-static unsigned         g_announce_count   = 0;
+// Number of /announce publishes since boot. The server creates our
+// per-node /saint/nodes/<id>/log subscription lazily, on first announce —
+// so we only let saint_log drain its boot-log buffer after we've seen
+// ≥2 announces go out. (See announce_timer_callback below.)
+static unsigned g_announce_count = 0;
 
 // =============================================================================
-// Remote logging
+// Remote logging — per-platform hooks
 // =============================================================================
 //
-// saint_log_publish() ships a single line to the server over the
-// /saint/nodes/<id>/log topic AND prints to UART. When ROS isn't
-// connected yet, the entry is buffered into the boot-log queue above
-// and replayed later by boot_log_flush_if_due — that's the only way
-// early-boot driver logs (e.g. RoboClaw's "bound PIO UART" line
-// emitted from inside pin_config_load) reach the dashboard.
-// Format: {"level":"info|warn|error","text":"...","uptime_ms":N}.
-//
-// Keep individual lines under ~200 chars to fit log_buffer with the
-// JSON envelope; longer ones are truncated. Don't call from ISRs
-// (printf isn't ISR-safe) and don't call faster than ~10 Hz; this is
-// for events, not telemetry.
-void saint_log_publish(const char* level, const char* fmt, ...)
+// Shared module (shared/src/saint_log.c) owns saint_log_publish, the
+// boot-log buffer, JSON envelope assembly, and the
+// buffer-vs-publish-now branching. We provide the three hooks it
+// calls into: local print (printf), ROS emit (rcl_publish on log_pub),
+// and ms-since-boot.
+
+void saint_log_emit_local(const char* level, const char* text)
 {
-    char text[200];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(text, sizeof(text), fmt, ap);
-    va_end(ap);
-
-    // Always echo to UART so a serial dev console still sees everything.
     printf("[%s] %s\n", level, text);
+}
 
-    if (!ros_log_ready) {
-        // Buffer for later replay so early-boot driver logs (e.g.
-        // RoboClaw's "bound PIO UART" line emitted from inside
-        // pin_config_load → drv_load → roboclaw_init) survive the
-        // window where ROS isn't connected yet. boot_log_flush_if_due
-        // drains this queue once the second announcement has gone
-        // out. The buffer is bounded — once full we drop subsequent
-        // entries silently rather than evicting earlier ones, since
-        // the EARLY logs are the diagnostic gold we'd lose first
-        // otherwise. If you hit the cap, raise BOOT_LOG_MAX.
-        if (g_boot_log_count < BOOT_LOG_MAX && !g_boot_log_flushed) {
-            boot_log_entry_t* e = &g_boot_log[g_boot_log_count++];
-            snprintf(e->level, sizeof(e->level), "%s", level);
-            snprintf(e->text,  sizeof(e->text),  "%s", text);
-        }
-        return;
-    }
-
-    uint32_t up = to_ms_since_boot(get_absolute_time());
-
-    // JSON-escape inside the text so the server can json.loads() it.
-    // The big three escapes are quote, backslash, and any control char
-    // (0x00-0x1F). Control chars MUST be escaped in JSON — a literal
-    // newline in a string is the most common offender (the RoboClaw
-    // GETVERSION response ends with \n, and the version log line
-    // embeds that). Previous version of this function only escaped
-    // " and \, so the server saw `"...v4.4.8\n"` with a real newline
-    // and json.loads() bailed with "Invalid control character at
-    // line 1 column N". We now expand the common controls into their
-    // backslash forms and pass everything else through.
-    char escaped[256];
-    size_t ei = 0;
-    for (size_t i = 0; text[i] && ei < sizeof(escaped) - 7; i++) {
-        unsigned char c = (unsigned char)text[i];
-        if (c == '"' || c == '\\') {
-            escaped[ei++] = '\\';
-            escaped[ei++] = (char)c;
-        } else if (c == '\n') {
-            escaped[ei++] = '\\'; escaped[ei++] = 'n';
-        } else if (c == '\r') {
-            escaped[ei++] = '\\'; escaped[ei++] = 'r';
-        } else if (c == '\t') {
-            escaped[ei++] = '\\'; escaped[ei++] = 't';
-        } else if (c < 0x20) {
-            // Rare control char — emit \u00XX so the server stays parseable
-            // without us having to remember every escape rule.
-            static const char hex[] = "0123456789abcdef";
-            escaped[ei++] = '\\'; escaped[ei++] = 'u';
-            escaped[ei++] = '0';  escaped[ei++] = '0';
-            escaped[ei++] = hex[(c >> 4) & 0xF];
-            escaped[ei++] = hex[c & 0xF];
-        } else {
-            escaped[ei++] = (char)c;
-        }
-    }
-    escaped[ei] = '\0';
-
-    int len = snprintf(log_buffer, sizeof(log_buffer),
-        "{\"level\":\"%s\",\"text\":\"%s\",\"uptime_ms\":%lu}",
-        level, escaped, (unsigned long)up);
-    if (len < 0 || (size_t)len >= sizeof(log_buffer)) return;
-
-    log_msg.data.data = log_buffer;
-    log_msg.data.size = (size_t)len;
+bool saint_log_emit_ros(const char* json, size_t len)
+{
+    if (len >= sizeof(log_buffer)) return false;
+    memcpy(log_buffer, json, len);
+    log_msg.data.data     = log_buffer;
+    log_msg.data.size     = len;
     log_msg.data.capacity = sizeof(log_buffer);
-    /* Ignore the publish return — log is best-effort. */
-    (void)rcl_publish(&log_pub, &log_msg, NULL);
+    /* Log is best-effort — don't translate publish failure into a
+     * caller-visible error. */
+    return rcl_publish(&log_pub, &log_msg, NULL) == RCL_RET_OK;
 }
 
-// -----------------------------------------------------------------------------
-// Deferred boot-status logging
-// -----------------------------------------------------------------------------
-//
-// Why: the server creates the per-node /saint/nodes/<id>/log subscriber
-// LAZILY, on first receipt of an announcement (server_node.py
-// _on_node_announcement → _ensure_node_log_subscriber). If we
-// saint_log_publish() immediately after init_micro_ros(), it goes out
-// before any announcement has been published, so the server has no
-// subscriber yet and the message is silently dropped. Boot context
-// ("Boot OK", "Recovered from watchdog reset", "OTA failed after
-// retries: ...") is exactly the information you most need in the
-// Logs tab — so we can't lose it.
-//
-// Fix: queue those first lines in RAM and replay them from the
-// announce-timer callback once at least two announcements have gone
-// out. That window (≥1 s) is enough for the server to create its
-// subscription on receipt of the first announce.
-//
-// The buffer (boot_log_entry_t / g_boot_log[] / counters) is declared
-// up above saint_log_publish so that function can fall into the same
-// buffer when ROS isn't ready yet.
-
-static void boot_log_queue(const char* level, const char* fmt, ...)
+uint32_t saint_log_uptime_ms(void)
 {
-    // Always echo to UART so a serial dev console still sees it
-    // immediately, even before the ROS-side replay happens.
-    char text[BOOT_LOG_TEXT_LEN];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(text, sizeof(text), fmt, ap);
-    va_end(ap);
-    printf("[%s] (pending) %s\n", level, text);
-
-    if (g_boot_log_count >= BOOT_LOG_MAX) return;
-    boot_log_entry_t* e = &g_boot_log[g_boot_log_count++];
-    snprintf(e->level, sizeof(e->level), "%s", level);
-    snprintf(e->text,  sizeof(e->text),  "%s", text);
-}
-
-static void boot_log_flush_if_due(void)
-{
-    if (g_boot_log_flushed) return;
-    // Need ≥2 announcements: the first one triggers server-side
-    // subscription creation; from the second onward we know the
-    // subscriber is up.
-    if (g_announce_count < 2) return;
-    for (size_t i = 0; i < g_boot_log_count; i++) {
-        saint_log_publish(g_boot_log[i].level, "%s", g_boot_log[i].text);
-    }
-    g_boot_log_flushed = true;
+    return to_ms_since_boot(get_absolute_time());
 }
 
 // =============================================================================
@@ -1029,7 +888,12 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         // First announcement triggers server-side log subscription;
         // once we're past it, deferred boot-status lines can be sent.
         if (g_announce_count < 1000) g_announce_count++;
-        boot_log_flush_if_due();
+        // The server creates the per-node /log subscription lazily on
+        // first announce, so wait for ≥2 announces before flushing the
+        // boot-log buffer — that gives the subscriber time to come up.
+        if (g_announce_count >= 2) {
+            saint_log_drain_boot_queue();
+        }
     } else {
         printf("Announce publish failed: %d\n", ret);
     }
@@ -1215,7 +1079,7 @@ static bool init_micro_ros(void)
         return false;
     }
     printf("Created log publisher: %s\n", log_topic);
-    ros_log_ready = true;
+    saint_log_set_ros_ready(true);
 
     // Create announcement timer (1 second interval)
     ret = rclc_timer_init_default(
@@ -1314,7 +1178,7 @@ static void cleanup_micro_ros(void)
     rcl_subscription_fini(&command_sub, &ros_node);
     rcl_subscription_fini(&control_sub, &ros_node);
     rcl_subscription_fini(&config_sub, &ros_node);
-    ros_log_ready = false;
+    saint_log_set_ros_ready(false);
     rcl_publisher_fini(&log_pub, &ros_node);
     rcl_publisher_fini(&state_pub, &ros_node);
     rcl_publisher_fini(&announcement_pub, &ros_node);
@@ -1561,6 +1425,7 @@ int main(void)
     // loop runs over zero drivers and the per-driver flash data is
     // silently discarded — leaving drivers in their default state
     // even after a reboot of a previously-configured node.
+    peripheral_register(maestro_get_peripheral_driver());
     peripheral_register(syren_get_peripheral_driver());
     peripheral_register(fas100_get_peripheral_driver());
     peripheral_register(roboclaw_get_peripheral_driver());
@@ -1704,8 +1569,9 @@ int main(void)
     // These lines fire BEFORE the first announcement goes out, so the
     // server hasn't yet created its per-node log subscriber and a
     // direct saint_log_publish() would be dropped. Stage them via
-    // boot_log_queue(); the announce-timer callback replays them once
-    // the subscription is established (see boot_log_flush_if_due).
+    // saint_log_boot_queue(); the announce-timer callback drains the
+    // shared boot-log buffer once ≥2 announces have gone out (see
+    // saint_log_drain_boot_queue in shared/src/saint_log.c).
     if (boot_after_hardfault) {
         // A captured hard fault is more specific than "the watchdog
         // fired" — log it first regardless of the watchdog flag, since
@@ -1713,7 +1579,7 @@ int main(void)
         // Operator workflow: copy the PC into addr2line against the
         // matching .elf to get file:line:
         //   arm-none-eabi-addr2line -e build/saint_node.elf 0xXXXXXXXX
-        boot_log_queue("error",
+        saint_log_boot_queue("error",
             "Recovered from hard fault: PC=0x%08lX LR=0x%08lX "
             "(addr2line -e build/saint_node.elf 0x%08lX)",
             (unsigned long)crashed_pc, (unsigned long)crashed_lr,
@@ -1724,7 +1590,7 @@ int main(void)
         // (deadlock, infinite loop, blocked I/O), so there's no PC to
         // report. Operator's clue: whatever was being commanded right
         // before the reset is the suspect.
-        boot_log_queue("error",
+        saint_log_boot_queue("error",
             "Recovered from watchdog reset — main loop hung "
             "(no hard-fault PC captured)");
     } else {
@@ -1750,7 +1616,7 @@ int main(void)
         } else {
             reset_label = "unknown (no chip-reset bits set)";
         }
-        boot_log_queue("info",
+        saint_log_boot_queue("info",
             "Boot OK — fw %s, bl %s, watchdog armed at %d ms · "
             "reset cause: %s [CHIP_RESET=0x%08lX, WATCHDOG.REASON=0x%lX%s%s]",
             FIRMWARE_VERSION_FULL, g_bl_version, WATCHDOG_TIMEOUT_MS,
@@ -1768,12 +1634,12 @@ int main(void)
     if (boot_after_ota_giveup) {
         const char* reason = ota_fail_reason_str(ota_fail_reason);
         if (ota_fail_reason == 5 /* HTTP_STATUS */ && ota_fail_http) {
-            boot_log_queue("error",
+            saint_log_boot_queue("error",
                 "OTA failed after retries: %s (HTTP %u). "
                 "Running previous firmware.",
                 reason, (unsigned)ota_fail_http);
         } else {
-            boot_log_queue("error",
+            saint_log_boot_queue("error",
                 "OTA failed after retries: %s. Running previous firmware.",
                 reason);
         }
@@ -1784,12 +1650,12 @@ int main(void)
         // Node was previously adopted and has saved config
         node_set_state(NODE_STATE_ACTIVE);
         led_set_state(NODE_STATE_ACTIVE);
-        boot_log_queue("info", "Restored from saved config (ACTIVE)");
+        saint_log_boot_queue("info", "Restored from saved config (ACTIVE)");
     } else {
         // No saved config - enter unadopted state
         node_set_state(NODE_STATE_UNADOPTED);
         led_set_state(NODE_STATE_UNADOPTED);
-        boot_log_queue("info", "Waiting for adoption (UNADOPTED)");
+        saint_log_boot_queue("info", "Waiting for adoption (UNADOPTED)");
     }
     printf("========================================\n");
 

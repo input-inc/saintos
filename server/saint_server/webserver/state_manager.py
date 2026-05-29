@@ -630,6 +630,19 @@ class StateManager:
         # ROS bridge is up. Whenever sheets change we call .reconcile()
         # on it so it can refresh its subscriptions.
         self._routing_evaluator = None
+        # The animation player needs to publish to ROS topics for the
+        # trigger-track `topic` dispatch path. Wired alongside the
+        # routing evaluator at server_node startup.
+        self._ros_bridge = None
+
+        # Animation / pose stores + playback registry. Stores are
+        # immediately usable from disk; the player registry can only
+        # start animations once the routing evaluator + bridge are
+        # wired (it depends on both for the dispatch fan-out).
+        from saint_server.animation.store import AnimationStore, PoseStore
+        self.animation_store = AnimationStore(self.config_dir, logger=self.logger)
+        self.pose_store = PoseStore(self.config_dir, logger=self.logger)
+        self._animation_registry = None
 
         # Chip + board YAML catalog. Replaces the firmware-emitted
         # capability JSON as the source of truth for "what pins this
@@ -1774,17 +1787,27 @@ class StateManager:
         """Return the sheet for `node_id` (creates an empty one on demand)."""
         return self.state.system_routing.get_sheet(node_id).to_dict()
 
-    def add_routing_input(self, node_id: str, topic: str, field: str,
+    def add_routing_input(self, node_id: str, topic: str = "", field: str = "",
                           label: str = "",
-                          position: Optional[List[int]] = None) -> Dict[str, Any]:
-        if not topic:
-            return {"success": False, "message": "Missing topic"}
+                          position: Optional[List[int]] = None,
+                          kind: str = "topic",
+                          joint: str = "") -> Dict[str, Any]:
+        # Topic-kind inputs require a topic; urdf_joint-kind inputs
+        # require a joint name.
+        if kind == "urdf_joint":
+            if not joint:
+                return {"success": False, "message": "Missing joint name"}
+        else:
+            if not topic:
+                return {"success": False, "message": "Missing topic"}
         err = self._validate_sheet_owner(node_id)
         if err:
             return {"success": False, "message": err}
         pos = self._coerce_position(position)
         sheet = self.state.system_routing.get_sheet(node_id)
-        node = sheet.add_input(topic=topic, field=field or "", label=label, position=pos)
+        node = sheet.add_input(topic=topic or "", field=field or "",
+                               label=label, position=pos,
+                               kind=kind, joint=joint or "")
         self.state.system_routing.bump_version()
         self._save_system_routing()
         return {"success": True, "input": node.to_dict()}
@@ -1924,6 +1947,10 @@ class StateManager:
                 target.topic = v
             elif k == "field" and isinstance(target, (InputNode, OutputNode)) and isinstance(v, str):
                 target.field = v
+            elif k == "kind" and isinstance(target, InputNode) and isinstance(v, str):
+                target.kind = v
+            elif k == "joint" and isinstance(target, InputNode) and isinstance(v, str):
+                target.joint = v
         self.state.system_routing.bump_version()
         self._save_system_routing()
         return {"success": True}
@@ -1950,6 +1977,141 @@ class StateManager:
         self.state.system_routing.bump_version()
         self._save_system_routing()
         return {"success": True}
+
+    # ── animations & poses ──────────────────────────────────────────
+
+    def list_animations(self) -> List[Dict[str, Any]]:
+        return self.animation_store.list()
+
+    def get_animation(self, animation_id: str) -> Optional[Dict[str, Any]]:
+        anim = self.animation_store.get(animation_id)
+        return anim.to_dict() if anim else None
+
+    def save_animation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Upsert from a dict matching Animation.to_dict() shape."""
+        from saint_server.animation.models import Animation
+        try:
+            anim = Animation.from_dict(payload)
+        except (KeyError, ValueError, TypeError) as e:
+            return {"success": False, "message": f"Invalid animation payload: {e}"}
+        saved = self.animation_store.save(anim)
+        return {"success": True, "animation": saved.to_dict()}
+
+    def delete_animation(self, animation_id: str) -> Dict[str, Any]:
+        """Delete the animation and remove any sheet nodes referencing it."""
+        deleted = self.animation_store.delete(animation_id)
+        if not deleted:
+            return {"success": False, "message": "Animation not found"}
+        # Stop any running playback before scrubbing references so the
+        # evaluator's animation cache isn't fed by an already-unbound
+        # animation in the interim.
+        if self._animation_registry is not None and self._animation_registry.is_active(animation_id):
+            try:
+                import asyncio
+                asyncio.create_task(self._animation_registry.stop(animation_id))
+            except Exception:
+                pass
+        # Animations now drive routing through URDF-joint InputNodes
+        # keyed by joint name, not animation id. Deleting an animation
+        # doesn't invalidate those nodes — the joint inputs simply stop
+        # receiving values until another animation drives the same joint.
+        return {"success": True}
+
+    def list_poses(self) -> List[Dict[str, Any]]:
+        return self.pose_store.list()
+
+    def get_pose(self, pose_id: str) -> Optional[Dict[str, Any]]:
+        pose = self.pose_store.get(pose_id)
+        return pose.to_dict() if pose else None
+
+    def save_pose(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from saint_server.animation.models import Pose
+        try:
+            pose = Pose.from_dict(payload)
+        except (KeyError, ValueError, TypeError) as e:
+            return {"success": False, "message": f"Invalid pose payload: {e}"}
+        saved = self.pose_store.save(pose)
+        return {"success": True, "pose": saved.to_dict()}
+
+    def delete_pose(self, pose_id: str) -> Dict[str, Any]:
+        if not self.pose_store.delete(pose_id):
+            return {"success": False, "message": "Pose not found"}
+        return {"success": True}
+
+    def apply_pose(self, pose_id: str) -> Dict[str, Any]:
+        """Fan out a pose's setpoints into the routing evaluator's
+        WS-input cache. Each setpoint becomes a one-shot
+        ``set_ws_input(sheet, input, value)`` call — the same path the
+        controller gamepad bindings use, so peripheral routing applies
+        identically.
+        """
+        if self._routing_evaluator is None:
+            return {"success": False, "message": "Routing evaluator not ready"}
+        pose = self.pose_store.get(pose_id)
+        if pose is None:
+            return {"success": False, "message": "Pose not found"}
+        applied = 0
+        skipped: List[str] = []
+        for s in pose.setpoints:
+            try:
+                ok = self._routing_evaluator.set_ws_input(
+                    s.sheet_id, s.ws_input_id, s.value)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warn(f"apply_pose set_ws_input failed: {e}")
+                ok = False
+            if ok:
+                applied += 1
+            else:
+                skipped.append(f"{s.sheet_id}/{s.ws_input_id}")
+        return {"success": True, "applied": applied, "skipped": skipped}
+
+    async def start_animation(self, animation_id: str,
+                              loop: Optional[bool] = None) -> Dict[str, Any]:
+        if self._animation_registry is None:
+            return {"success": False, "message": "Animation engine not ready"}
+        anim = self.animation_store.get(animation_id)
+        if anim is None:
+            return {"success": False, "message": "Animation not found"}
+        await self._animation_registry.start(anim, loop=loop)
+        return {"success": True}
+
+    async def stop_animation(self, animation_id: str) -> Dict[str, Any]:
+        if self._animation_registry is None:
+            return {"success": False, "message": "Animation engine not ready"}
+        ok = await self._animation_registry.stop(animation_id)
+        if not ok:
+            return {"success": False, "message": "Animation not running"}
+        # Clear cached values so peripherals settle.
+        if self._routing_evaluator is not None:
+            try:
+                self._routing_evaluator.clear_animation_value(animation_id)
+            except Exception:
+                pass
+        return {"success": True}
+
+    def pause_animation(self, animation_id: str) -> Dict[str, Any]:
+        if self._animation_registry is None:
+            return {"success": False, "message": "Animation engine not ready"}
+        ok = self._animation_registry.pause(animation_id)
+        return {"success": ok, "message": "" if ok else "Animation not running"}
+
+    def resume_animation(self, animation_id: str) -> Dict[str, Any]:
+        if self._animation_registry is None:
+            return {"success": False, "message": "Animation engine not ready"}
+        ok = self._animation_registry.resume(animation_id)
+        return {"success": ok, "message": "" if ok else "Animation not running"}
+
+    def seek_animation(self, animation_id: str, t: float) -> Dict[str, Any]:
+        if self._animation_registry is None:
+            return {"success": False, "message": "Animation engine not ready"}
+        ok = self._animation_registry.seek(animation_id, t)
+        return {"success": ok, "message": "" if ok else "Animation not running"}
+
+    def animation_state(self) -> List[Dict[str, Any]]:
+        if self._animation_registry is None:
+            return []
+        return self._animation_registry.state()
 
     def _coerce_position(self, position) -> Tuple[int, int]:
         if isinstance(position, (list, tuple)) and len(position) >= 2:
@@ -2136,6 +2298,34 @@ class StateManager:
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"Initial routing reconcile failed: {e}")
+        self._maybe_init_animation_registry()
+
+    def set_ros_bridge(self, bridge) -> None:
+        """Wire the ROS bridge so the animation player can publish to
+        topics for trigger-track dispatch. Safe to call before the
+        evaluator is set; the registry waits for both."""
+        self._ros_bridge = bridge
+        self._maybe_init_animation_registry()
+
+    def _maybe_init_animation_registry(self) -> None:
+        if self._animation_registry is not None:
+            return
+        if self._routing_evaluator is None or self._ros_bridge is None:
+            return
+        from saint_server.animation.player import AnimationPlayerRegistry
+        evaluator = self._routing_evaluator
+        bridge = self._ros_bridge
+
+        def estop_active() -> bool:
+            return bool(getattr(evaluator, "_estop_active", False))
+
+        self._animation_registry = AnimationPlayerRegistry(
+            set_urdf_joint_value=evaluator.set_urdf_joint_value,
+            set_ws_input=evaluator.set_ws_input,
+            set_topic_channel=bridge.set_topic_channel,
+            estop_active=estop_active,
+            logger=self.logger,
+        )
 
     def set_routing_estop_active(self, active: bool) -> None:
         """Mirror the system-wide e-stop latch into the routing evaluator

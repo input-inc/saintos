@@ -28,8 +28,8 @@ const online = computed(() => node.value?.online !== false)
       <div class="flex items-center gap-3">
         <span :class="['w-3 h-3 rounded-full', online ? 'bg-emerald-500 animate-pulse-dot' : 'bg-slate-500']" />
         <div>
-          <h2 class="text-2xl font-bold text-white leading-tight">{{ title }}</h2>
-          <p class="text-xs text-slate-400 font-mono">{{ role }} · {{ id }}</p>
+          <h2 class="text-2xl font-bold text-fg-strong leading-tight">{{ title }}</h2>
+          <p class="text-xs text-fg-muted font-mono">{{ role }} · {{ id }}</p>
         </div>
       </div>
       <RouterLink :to="{ name: 'nodes' }" class="btn-secondary">
@@ -38,7 +38,7 @@ const online = computed(() => node.value?.online !== false)
       </RouterLink>
     </div>
 
-    <div class="flex gap-1 border-b border-slate-700/50 mb-6 overflow-x-auto">
+    <div class="flex gap-1 border-b border-line/50 mb-6 overflow-x-auto">
       <RouterLink
         v-for="t in tabs"
         :key="t.name"

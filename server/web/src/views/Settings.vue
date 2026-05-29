@@ -7,11 +7,16 @@ import { useWsTopic } from '@/composables/useWsTopic'
 import BoardEditorModal from '@/components/BoardEditorModal.vue'
 import WifiChannelModal from '@/components/WifiChannelModal.vue'
 import WifiSwitchingOverlay from '@/components/WifiSwitchingOverlay.vue'
+import RobotModelTab from '@/components/settings/RobotModelTab.vue'
 import Updates from '@/views/Updates.vue'
 
 const ws = useWsStore()
 const settings = useSettingsStore()
 const display = useDisplayStore()
+
+// Group themes by mode for the Appearance dropdown.
+const darkThemes  = computed(() => display.themes.filter(t => t.mode === 'dark'))
+const lightThemes = computed(() => display.themes.filter(t => t.mode === 'light'))
 
 const tab = ref('server')
 
@@ -261,13 +266,13 @@ const firmwareCards = computed(() => {
       let status, statusClass
       if (!present) {
         status = 'Unknown'
-        statusClass = 'bg-slate-700 text-slate-400'
+        statusClass = 'bg-surface text-fg-muted'
       } else if (available) {
         status = 'Available'
         statusClass = 'bg-emerald-500/20 text-emerald-400'
       } else {
         status = 'Missing'
-        statusClass = 'bg-slate-700 text-slate-400'
+        statusClass = 'bg-surface text-fg-muted'
       }
       return {
         ...t,
@@ -293,16 +298,17 @@ const tabs = [
   { id: 'livelink',  label: 'LiveLink',  icon: 'face' },
   { id: 'firmware',  label: 'Firmware',  icon: 'memory' },
   { id: 'boards',    label: 'Boards',    icon: 'developer_board' },
+  { id: 'robot',     label: 'Robot Model', icon: 'view_in_ar' },
 ]
 </script>
 
 <template>
   <section>
     <div class="flex items-center justify-between mb-6">
-      <h2 class="text-2xl font-bold text-white">Settings</h2>
+      <h2 class="text-2xl font-bold text-fg-strong">Settings</h2>
       <div class="flex items-center gap-3">
         <span v-if="settings.dirty" class="text-xs text-amber-300">Unsaved changes</span>
-        <span v-else-if="settings.saving" class="text-xs text-slate-500">Saving…</span>
+        <span v-else-if="settings.saving" class="text-xs text-fg-faint">Saving…</span>
         <button class="btn-secondary" :disabled="!settings.dirty" @click="settings.reset()">Reset</button>
         <button class="btn-primary" :disabled="!settings.dirty || settings.saving" @click="settings.save()">
           <span class="material-icons icon-sm">save</span>
@@ -313,7 +319,7 @@ const tabs = [
 
     <div v-if="settings.error" class="mb-4 p-3 bg-red-500/20 border border-red-500/40 rounded-lg text-sm text-red-300">{{ settings.error }}</div>
 
-    <div class="flex gap-1 border-b border-slate-700/50 mb-6 overflow-x-auto">
+    <div class="flex gap-1 border-b border-line/50 mb-6 overflow-x-auto">
       <button
         v-for="t in tabs"
         :key="t.id"
@@ -328,88 +334,88 @@ const tabs = [
     <!-- ─── Server ──────────────────────────────────────────────────────── -->
     <div v-show="tab === 'server'" class="space-y-6">
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-4 flex items-center gap-2">
           <span class="material-icons text-cyan-400">cable</span>
           This browser's connection
         </h3>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label class="block text-sm font-medium text-slate-300 mb-1">Server host</label>
+            <label class="block text-sm font-medium text-fg mb-1">Server host</label>
             <input v-model="conn.host" type="text" class="input-field w-full" placeholder="opensaint.local" />
           </div>
           <div>
-            <label class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+            <label class="block text-sm font-medium text-fg mb-1">Password</label>
             <input v-model="conn.password" type="password" class="input-field w-full" placeholder="Leave empty if none" />
           </div>
         </div>
         <div class="flex items-center gap-2 mt-3">
           <button class="btn-primary" @click="saveConn">Save</button>
           <button class="btn-secondary" @click="reconnect">Reconnect</button>
-          <span v-if="connMessage" class="text-xs text-slate-400 ml-2">{{ connMessage }}</span>
+          <span v-if="connMessage" class="text-xs text-fg-muted ml-2">{{ connMessage }}</span>
         </div>
       </div>
 
       <div v-if="settings.current" class="card">
-        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-4 flex items-center gap-2">
           <span class="material-icons text-cyan-400">badge</span>
           Identity
         </h3>
-        <label class="block text-sm font-medium text-slate-300 mb-1">Server name</label>
+        <label class="block text-sm font-medium text-fg mb-1">Server name</label>
         <input v-model="settings.current.server_name" type="text" class="input-field w-full max-w-md" placeholder="SAINT-01" />
-        <p class="text-xs text-slate-500 mt-1">Display name for this server instance.</p>
+        <p class="text-xs text-fg-faint mt-1">Display name for this server instance.</p>
       </div>
 
       <div v-if="settings.current" class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div class="card">
-          <h3 class="text-base font-semibold text-white mb-3 flex items-center gap-2">
+          <h3 class="text-base font-semibold text-fg-strong mb-3 flex items-center gap-2">
             <span class="material-icons text-violet-400 text-lg">lock</span>
             WebSocket
           </h3>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+          <label class="block text-sm font-medium text-fg mb-1">Password</label>
           <input v-model="settings.current.websocket.password" type="password" class="input-field w-full" placeholder="Empty = disabled" />
-          <p class="text-xs text-slate-500 mt-1 mb-3">Clients must authenticate with this.</p>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Auth timeout (sec)</label>
+          <p class="text-xs text-fg-faint mt-1 mb-3">Clients must authenticate with this.</p>
+          <label class="block text-sm font-medium text-fg mb-1">Auth timeout (sec)</label>
           <input v-model.number="settings.current.websocket.auth_timeout" type="number" min="1" max="60" class="input-field w-24" />
         </div>
         <div class="card">
-          <h3 class="text-base font-semibold text-white mb-3 flex items-center gap-2">
+          <h3 class="text-base font-semibold text-fg-strong mb-3 flex items-center gap-2">
             <span class="material-icons text-emerald-400 text-lg">language</span>
             Network
           </h3>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Web port</label>
+          <label class="block text-sm font-medium text-fg mb-1">Web port</label>
           <input v-model.number="settings.current.network.web_port" type="number" min="1" max="65535" class="input-field w-24" />
-          <p class="text-xs text-slate-500 mt-1 mb-3">Requires restart.</p>
-          <label class="block text-sm font-medium text-slate-300 mb-1">WebSocket port</label>
+          <p class="text-xs text-fg-faint mt-1 mb-3">Requires restart.</p>
+          <label class="block text-sm font-medium text-fg mb-1">WebSocket port</label>
           <input v-model.number="settings.current.network.ws_port" type="number" min="1" max="65535" class="input-field w-24" placeholder="same" />
         </div>
         <div class="card">
-          <h3 class="text-base font-semibold text-white mb-3 flex items-center gap-2">
+          <h3 class="text-base font-semibold text-fg-strong mb-3 flex items-center gap-2">
             <span class="material-icons text-orange-400 text-lg">sync_alt</span>
             ROS Bridge
           </h3>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Command throttle (ms)</label>
+          <label class="block text-sm font-medium text-fg mb-1">Command throttle (ms)</label>
           <input v-model.number="settings.current.ros_bridge.command_throttle_ms" type="number" min="10" max="1000" step="10" class="input-field w-24" />
-          <p class="text-xs text-slate-500 mt-1">Min interval between control commands.</p>
+          <p class="text-xs text-fg-faint mt-1">Min interval between control commands.</p>
         </div>
       </div>
 
       <div class="card">
         <div class="flex items-center justify-between mb-3">
-          <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+          <h3 class="text-lg font-semibold text-fg-strong flex items-center gap-2">
             <span class="material-icons text-cyan-400">people</span>
             Connected clients
           </h3>
           <button class="btn-secondary text-sm" @click="reloadClients"><span class="material-icons icon-sm">refresh</span>Refresh</button>
         </div>
-        <div v-if="!clients.length" class="text-sm text-slate-400 italic">No connected clients.</div>
-        <ul v-else class="divide-y divide-slate-700/50 text-sm">
+        <div v-if="!clients.length" class="text-sm text-fg-muted italic">No connected clients.</div>
+        <ul v-else class="divide-y divide-line/50 text-sm">
           <li v-for="c in clients" :key="c.id" class="flex items-center gap-3 py-2 font-mono">
             <span :class="['w-2 h-2 rounded-full', c.authenticated ? 'bg-emerald-500' : 'bg-amber-500']" />
             <span>{{ c.id }}</span>
-            <span class="text-slate-500">{{ c.ip || '' }}</span>
+            <span class="text-fg-faint">{{ c.ip || '' }}</span>
             <span class="flex-1" />
-            <span class="text-slate-500">{{ fmtDuration(c.connected_for) }}</span>
-            <button class="btn-sm bg-slate-700 hover:bg-red-600 text-slate-300 hover:text-white" @click="disconnectClient(c.id)">
+            <span class="text-fg-faint">{{ fmtDuration(c.connected_for) }}</span>
+            <button class="btn-sm bg-surface hover:bg-red-600 text-fg hover:text-fg-strong" @click="disconnectClient(c.id)">
               <span class="material-icons icon-sm">power_settings_new</span>
             </button>
           </li>
@@ -420,32 +426,40 @@ const tabs = [
     <!-- ─── Interface ───────────────────────────────────────────────────── -->
     <div v-show="tab === 'interface'" class="space-y-6">
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-4 flex items-center gap-2">
           <span class="material-icons text-amber-400">thermostat</span>
           Temperature display
         </h3>
         <div class="flex items-center gap-6">
           <label class="flex items-center gap-2 cursor-pointer">
-            <input v-model="display.temperatureUnit" type="radio" value="celsius" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500" />
-            <span class="text-sm text-slate-300">Celsius (°C)</span>
+            <input v-model="display.temperatureUnit" type="radio" value="celsius" class="w-4 h-4 text-cyan-600 bg-surface border-line-strong focus:ring-cyan-500" />
+            <span class="text-sm text-fg">Celsius (°C)</span>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
-            <input v-model="display.temperatureUnit" type="radio" value="fahrenheit" class="w-4 h-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500" />
-            <span class="text-sm text-slate-300">Fahrenheit (°F)</span>
+            <input v-model="display.temperatureUnit" type="radio" value="fahrenheit" class="w-4 h-4 text-cyan-600 bg-surface border-line-strong focus:ring-cyan-500" />
+            <span class="text-sm text-fg">Fahrenheit (°F)</span>
           </label>
         </div>
-        <p class="text-xs text-slate-500 mt-1">How temperatures are displayed throughout the interface.</p>
+        <p class="text-xs text-fg-faint mt-1">How temperatures are displayed throughout the interface.</p>
       </div>
 
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-4 flex items-center gap-2">
           <span class="material-icons text-purple-400">palette</span>
           Appearance
         </h3>
-        <div class="flex items-center gap-6">
-          <label class="flex items-center gap-2"><input type="radio" name="theme" value="dark" checked class="w-4 h-4" /><span class="text-sm text-slate-300">Dark</span></label>
-          <label class="flex items-center gap-2 opacity-50"><input type="radio" name="theme" value="light" disabled class="w-4 h-4" /><span class="text-sm text-slate-300">Light (coming soon)</span></label>
-        </div>
+        <label class="block">
+          <span class="block text-fg-muted text-xs mb-1">Theme</span>
+          <select v-model="display.theme" class="input-field w-full max-w-xs">
+            <optgroup label="Dark">
+              <option v-for="t in darkThemes" :key="t.value" :value="t.value">{{ t.label }}</option>
+            </optgroup>
+            <optgroup label="Light">
+              <option v-for="t in lightThemes" :key="t.value" :value="t.value">{{ t.label }}</option>
+            </optgroup>
+          </select>
+        </label>
+        <p class="text-xs text-fg-faint mt-2">Saved per browser; takes effect immediately.</p>
       </div>
     </div>
 
@@ -456,11 +470,11 @@ const tabs = [
          covers the gap and ws.js auto-reconnects. -->
     <div v-show="tab === 'wireless'" class="space-y-6">
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-4 flex items-center gap-2">
           <span class="material-icons text-cyan-400">wifi</span>
           Wireless AP
         </h3>
-        <div class="text-xs text-slate-400 mb-4 p-3 rounded bg-amber-900/30 border border-amber-700/50">
+        <div class="text-xs text-fg-muted mb-4 p-3 rounded bg-amber-900/30 border border-amber-700/50">
           <span class="material-icons text-amber-400 text-sm align-middle">warning</span>
           Saving credentials or switching the channel restarts the AP.
           Every connected client (including this dashboard) will drop and
@@ -468,12 +482,12 @@ const tabs = [
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
           <div>
-            <label class="block text-sm font-medium text-slate-300 mb-1">SSID</label>
+            <label class="block text-sm font-medium text-fg mb-1">SSID</label>
             <input v-model="wifi.ssid" type="text" maxlength="32" placeholder="OpenSAINT" class="input-field w-full" />
-            <p class="text-xs text-slate-500 mt-1">1-32 printable ASCII characters.</p>
+            <p class="text-xs text-fg-faint mt-1">1-32 printable ASCII characters.</p>
           </div>
           <div>
-            <label class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+            <label class="block text-sm font-medium text-fg mb-1">Password</label>
             <div class="flex gap-2">
               <input
                 v-model="wifi.password"
@@ -492,7 +506,7 @@ const tabs = [
                 <span class="material-icons icon-sm">{{ wifiShowPassword ? 'visibility_off' : 'visibility' }}</span>
               </button>
             </div>
-            <p class="text-xs text-slate-500 mt-1">8-63 characters (WPA2-PSK).</p>
+            <p class="text-xs text-fg-faint mt-1">8-63 characters (WPA2-PSK).</p>
           </div>
         </div>
         <div class="flex items-center gap-3 mb-6">
@@ -504,19 +518,19 @@ const tabs = [
             v-if="wifiCredsStatus.text"
             :class="{
               'text-sm': true,
-              'text-slate-500':  wifiCredsStatus.tone === 'slate',
+              'text-fg-faint':  wifiCredsStatus.tone === 'slate',
               'text-emerald-400': wifiCredsStatus.tone === 'emerald',
               'text-red-300':    wifiCredsStatus.tone === 'red',
             }"
           >{{ wifiCredsStatus.text }}</span>
         </div>
 
-        <div class="pt-4 border-t border-slate-700">
+        <div class="pt-4 border-t border-line">
           <div class="flex items-center justify-between mb-2">
-            <h4 class="text-sm font-semibold text-slate-300">Channel</h4>
-            <span class="text-xs text-slate-500">{{ wifiCurrentChannelText }}</span>
+            <h4 class="text-sm font-semibold text-fg">Channel</h4>
+            <span class="text-xs text-fg-faint">{{ wifiCurrentChannelText }}</span>
           </div>
-          <p class="text-xs text-slate-500 mb-3">
+          <p class="text-xs text-fg-faint mb-3">
             Scan nearby APs to see which channels are busy, then pick a quieter one.
             Brief beacon interruption during scan; full disconnect on apply.
           </p>
@@ -536,37 +550,37 @@ const tabs = [
     <!-- ─── LiveLink ────────────────────────────────────────────────────── -->
     <div v-show="tab === 'livelink'" class="space-y-6">
       <div v-if="settings.current?.livelink" class="card">
-        <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-4 flex items-center gap-2">
           <span class="material-icons text-pink-400">face</span>
           LiveLink receiver
         </h3>
         <label class="flex items-center gap-3 mb-4">
-          <input v-model="settings.current.livelink.enabled" type="checkbox" class="rounded bg-slate-700 border-slate-600" />
-          <span class="text-sm text-slate-300">Enable LiveLink receiver</span>
+          <input v-model="settings.current.livelink.enabled" type="checkbox" class="rounded bg-surface border-line-strong" />
+          <span class="text-sm text-fg">Enable LiveLink receiver</span>
         </label>
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">UDP port</label>
+          <label class="block text-sm font-medium text-fg mb-1">UDP port</label>
           <input v-model.number="settings.current.livelink.port" type="number" min="1024" max="65535" class="input-field w-32" />
-          <p class="text-xs text-slate-500 mt-1">Requires restart.</p>
+          <p class="text-xs text-fg-faint mt-1">Requires restart.</p>
         </div>
       </div>
 
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-3 flex items-center gap-2">
           <span class="material-icons text-pink-400">monitoring</span>
           Status
         </h3>
         <div class="space-y-2 text-sm">
-          <div class="flex items-center justify-between py-2 border-b border-slate-700/50">
-            <span class="text-slate-400">Connection</span>
+          <div class="flex items-center justify-between py-2 border-b border-line/50">
+            <span class="text-fg-muted">Connection</span>
             <span>{{ receiver.connected ? 'Connected' : 'Idle' }}</span>
           </div>
-          <div class="flex items-center justify-between py-2 border-b border-slate-700/50">
-            <span class="text-slate-400">Active source</span>
+          <div class="flex items-center justify-between py-2 border-b border-line/50">
+            <span class="text-fg-muted">Active source</span>
             <span class="font-mono">{{ receiver.source_address || '—' }}</span>
           </div>
           <div class="flex items-center justify-between py-2">
-            <span class="text-slate-400">Packets/sec</span>
+            <span class="text-fg-muted">Packets/sec</span>
             <span>{{ receiver.fps != null ? receiver.fps.toFixed(1) : '—' }}</span>
           </div>
         </div>
@@ -580,12 +594,12 @@ const tabs = [
     <div v-show="tab === 'firmware'" class="space-y-6">
       <div class="card">
         <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+          <h3 class="text-lg font-semibold text-fg-strong flex items-center gap-2">
             <span class="material-icons text-cyan-400">memory</span>
             Firmware builds on this server
           </h3>
           <div class="flex items-center gap-3">
-            <span v-if="firmwareLastChecked" class="text-xs text-slate-500">
+            <span v-if="firmwareLastChecked" class="text-xs text-fg-faint">
               Checked {{ fmtChecked(firmwareLastChecked) }}
             </span>
             <button class="btn-secondary text-sm" @click="reloadBuilds">
@@ -594,26 +608,26 @@ const tabs = [
             </button>
           </div>
         </div>
-        <p class="text-sm text-slate-400 mb-4">
+        <p class="text-sm text-fg-muted mb-4">
           OTA targets staged under <code class="text-cyan-300 text-xs">server/resources/firmware/</code>.
           Adopted nodes (and the controller app) fetch from here.
         </p>
 
-        <div v-if="!firmwareCards.length" class="text-sm text-slate-400 italic">
+        <div v-if="!firmwareCards.length" class="text-sm text-fg-muted italic">
           No firmware bundled.
         </div>
         <div v-else class="space-y-3">
           <div
             v-for="card in firmwareCards"
             :key="card.key"
-            class="bg-slate-800/50 rounded-lg p-4 border border-slate-700"
+            class="bg-panel/50 rounded-lg p-4 border border-line"
           >
             <div class="flex items-start justify-between gap-3">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="material-icons" :class="card.iconClass">{{ card.icon }}</span>
                 <div class="min-w-0">
-                  <h4 class="font-medium text-white truncate">{{ card.label }}</h4>
-                  <p class="text-xs text-slate-500 truncate">{{ card.detail }}</p>
+                  <h4 class="font-medium text-fg-strong truncate">{{ card.label }}</h4>
+                  <p class="text-xs text-fg-faint truncate">{{ card.detail }}</p>
                 </div>
               </div>
               <span :class="['px-2 py-1 text-xs font-medium rounded-full whitespace-nowrap', card.statusClass]">
@@ -623,26 +637,26 @@ const tabs = [
             <div class="mt-3 ml-8 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm">
               <div>
                 <div class="stat-label">Version</div>
-                <div class="font-mono text-white">{{ card.version || '—' }}</div>
+                <div class="font-mono text-fg-strong">{{ card.version || '—' }}</div>
               </div>
               <div>
                 <div class="stat-label">Built</div>
-                <div class="font-mono text-xs text-white" :title="card.buildDate || ''">
+                <div class="font-mono text-xs text-fg-strong" :title="card.buildDate || ''">
                   {{ fmtBuildDate(card.buildDate) }}
                 </div>
               </div>
               <div v-if="card.filename" class="sm:col-span-2">
                 <div class="stat-label">Package</div>
-                <div class="font-mono text-xs text-white break-all">{{ card.filename }}</div>
+                <div class="font-mono text-xs text-fg-strong break-all">{{ card.filename }}</div>
               </div>
               <div>
                 <div class="stat-label">Size</div>
-                <div class="font-mono text-xs text-white">{{ fmtBytes(card.size) }}</div>
+                <div class="font-mono text-xs text-fg-strong">{{ fmtBytes(card.size) }}</div>
               </div>
               <div>
                 <div class="stat-label">Checksum</div>
                 <div
-                  class="font-mono text-xs text-white"
+                  class="font-mono text-xs text-fg-strong"
                   :title="card.hash || ''"
                 >{{ fmtShortHash(card.hash) || '—' }}</div>
               </div>
@@ -656,7 +670,7 @@ const tabs = [
     <div v-show="tab === 'boards'" class="space-y-4">
       <div class="card">
         <div class="flex items-center justify-between mb-3">
-          <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+          <h3 class="text-lg font-semibold text-fg-strong flex items-center gap-2">
             <span class="material-icons text-cyan-400">developer_board</span>
             Board configurations
           </h3>
@@ -665,26 +679,31 @@ const tabs = [
             New board
           </button>
         </div>
-        <p class="text-sm text-slate-400 mb-4">
+        <p class="text-sm text-fg-muted mb-4">
           Pin layouts and built-in peripherals per board. Built-in entries ship with SAINT.OS and are read-only; operator-authored entries are stored as YAML under <code class="text-cyan-300 text-xs">saint_os/config/boards/&lt;chip&gt;/</code>.
         </p>
-        <ul v-if="boards.length" class="divide-y divide-slate-700/50 text-sm">
+        <ul v-if="boards.length" class="divide-y divide-line/50 text-sm">
           <li v-for="b in boards" :key="b.board_id" class="flex items-center gap-3 py-2">
-            <span class="material-icons icon-sm" :class="b.builtin ? 'text-slate-500' : 'text-cyan-400'">developer_board</span>
+            <span class="material-icons icon-sm" :class="b.builtin ? 'text-fg-faint' : 'text-cyan-400'">developer_board</span>
             <span class="font-mono">{{ b.board_id }}</span>
-            <span class="text-xs text-slate-500">{{ b.display_name }}</span>
-            <span v-if="b.builtin" class="px-2 py-0.5 text-xs rounded-full bg-slate-700 text-slate-300">Built-in</span>
+            <span class="text-xs text-fg-faint">{{ b.display_name }}</span>
+            <span v-if="b.builtin" class="px-2 py-0.5 text-xs rounded-full bg-surface text-fg">Built-in</span>
             <span class="flex-1" />
-            <button class="btn-sm bg-slate-700 hover:bg-slate-600 text-slate-200" @click="boardModal = { open: true, boardId: b.board_id }">
+            <button class="btn-sm bg-surface hover:bg-surface-2 text-fg-strong" @click="boardModal = { open: true, boardId: b.board_id }">
               <span class="material-icons icon-sm">{{ b.builtin ? 'visibility' : 'edit' }}</span>
             </button>
-            <button v-if="!b.builtin" class="btn-sm bg-slate-700 hover:bg-red-600 text-slate-300 hover:text-white" @click="removeBoard(b.board_id)">
+            <button v-if="!b.builtin" class="btn-sm bg-surface hover:bg-red-600 text-fg hover:text-fg-strong" @click="removeBoard(b.board_id)">
               <span class="material-icons icon-sm">delete</span>
             </button>
           </li>
         </ul>
-        <p v-else class="text-sm text-slate-400 italic">No boards registered.</p>
+        <p v-else class="text-sm text-fg-muted italic">No boards registered.</p>
       </div>
+    </div>
+
+    <!-- ─── Robot Model ─────────────────────────────────────────────────── -->
+    <div v-show="tab === 'robot'">
+      <RobotModelTab />
     </div>
 
     <BoardEditorModal

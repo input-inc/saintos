@@ -30,7 +30,7 @@ const history = useChannelHistory()
 //   'none'          — no bar (e.g. encoder counts)
 const ROW_META = {
   motor:   { color: 'bg-violet-500', text: 'text-violet-300', bar: 'bidirectional' },
-  encoder: { color: 'bg-slate-500',  text: 'text-slate-200',  bar: 'none' },
+  encoder: { color: 'bg-slate-500',  text: 'text-fg-strong',  bar: 'none' },
   voltage: { color: 'bg-amber-500',  text: 'text-amber-300',  bar: 'unipolar', max: 30 },
   current: { color: 'bg-cyan-500',   text: 'text-cyan-300',   bar: 'unipolar', max: 60 },
   temp:    { color: 'bg-rose-500',   text: 'text-rose-300',   bar: 'unipolar', max: 80 },
@@ -263,7 +263,7 @@ function sourceLabel (inputId) {
     <div class="flex items-center justify-between mb-3">
       <div class="flex items-center gap-2">
         <span class="material-icons text-violet-400 icon-md">precision_manufacturing</span>
-        <h4 class="text-base font-semibold text-white">{{ widget.label || widget.id }}</h4>
+        <h4 class="text-base font-semibold text-fg-strong">{{ widget.label || widget.id }}</h4>
       </div>
       <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-violet-900/40 text-violet-200">
         RoboClaw
@@ -275,18 +275,18 @@ function sourceLabel (inputId) {
       <div
         v-for="inp in inputs"
         :key="inp.id"
-        class="border-t border-slate-700/60 pt-2 mt-2 first:border-t-0 first:pt-0 first:mt-0"
+        class="border-t border-line/60 pt-2 mt-2 first:border-t-0 first:pt-0 first:mt-0"
       >
         <div class="flex items-center justify-between">
           <span class="stat-label">{{ inp.display || inp.id }}</span>
           <span class="inline-flex items-center gap-2">
             <Sparkline :samples="samplesFor(inp.id)" :width="140" :height="24" />
             <span class="stat-value" :class="ROW_META[inp.id]?.text">{{ valueText(inp.id) }}</span>
-            <span class="text-xs text-slate-500">{{ unitText(inp.id) }}</span>
+            <span class="text-xs text-fg-faint">{{ unitText(inp.id) }}</span>
           </span>
         </div>
         <div class="flex items-center mt-1">
-          <div class="text-[0.65rem] text-slate-500 truncate flex-1" :title="sourceLabel(inp.id)">
+          <div class="text-[0.65rem] text-fg-faint truncate flex-1" :title="sourceLabel(inp.id)">
             <template v-if="isRouted(inp.id)">← {{ sourceLabel(inp.id) }}</template>
             <template v-else>unrouted</template>
           </div>
@@ -295,7 +295,7 @@ function sourceLabel (inputId) {
                and a violet fill that grows L/R from 50% as duty signs. -->
           <div
             v-if="ROW_META[inp.id]?.bar === 'bidirectional'"
-            class="relative flex-1 h-1 bg-slate-700 rounded-full overflow-hidden ml-2"
+            class="relative flex-1 h-1 bg-surface rounded-full overflow-hidden ml-2"
           >
             <div class="absolute inset-y-0 left-1/2 w-px bg-slate-500"></div>
             <div
@@ -308,7 +308,7 @@ function sourceLabel (inputId) {
           <!-- Unipolar bar: voltage / current / temperature. -->
           <div
             v-else-if="ROW_META[inp.id]?.bar === 'unipolar'"
-            class="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden ml-2"
+            class="flex-1 h-1 bg-surface rounded-full overflow-hidden ml-2"
           >
             <div
               class="h-full transition-all"

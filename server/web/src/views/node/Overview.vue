@@ -45,7 +45,7 @@ function formatLastSeen (ts) {
     <!-- Node Information card -->
     <div class="card">
       <div class="flex items-center justify-between mb-4">
-        <h3 class="text-lg font-semibold text-white">Node Information</h3>
+        <h3 class="text-lg font-semibold text-fg-strong">Node Information</h3>
         <button class="btn-secondary text-sm" @click="editModalOpen = true">
           <span class="material-icons icon-sm">edit</span>
           Edit
@@ -78,12 +78,12 @@ function formatLastSeen (ts) {
               Update Available
             </button>
           </div>
-          <span class="text-xs text-slate-500 block">{{ node?.firmware_build ? `Built: ${node.firmware_build}` : '' }}</span>
+          <span class="text-xs text-fg-faint block">{{ node?.firmware_build ? `Built: ${node.firmware_build}` : '' }}</span>
         </div>
         <div class="stat-item">
           <span class="stat-label">Bootloader</span>
           <span class="stat-value text-sm">{{ node?.bootloader_version || 'unknown' }}</span>
-          <span class="text-xs text-slate-500 block">Not OTA-updatable</span>
+          <span class="text-xs text-fg-faint block">Not OTA-updatable</span>
         </div>
         <div class="stat-item">
           <span class="stat-label">IP Address</span>
@@ -98,7 +98,7 @@ function formatLastSeen (ts) {
 
     <!-- Status card -->
     <div class="card">
-      <h3 class="text-lg font-semibold text-white mb-4">Status</h3>
+      <h3 class="text-lg font-semibold text-fg-strong mb-4">Status</h3>
       <div class="space-y-4">
         <div class="stat-item">
           <span class="stat-label">CPU Temperature</span>

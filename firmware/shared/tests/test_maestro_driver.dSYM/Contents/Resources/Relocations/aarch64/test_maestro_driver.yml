@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/shared/tests/test_maestro_driver'
+relocations:     []
+...

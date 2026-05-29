@@ -74,6 +74,13 @@ class RoutingEvaluator:
         self._sources: Dict[SourceKey, float] = {}
         # Latest scalar value pushed by a controller into each WS input.
         self._ws_input_values: Dict[WSInputKey, float] = {}
+        # Latest frame value pushed by an animation player, keyed by
+        # URDF joint name. One cache shared across every sheet — any
+        # input whose ``kind == "urdf_joint"`` and whose ``joint`` field
+        # matches the key reads its value from here. The animation
+        # player calls ``set_urdf_joint_value`` once per tick per
+        # active value track.
+        self._urdf_joint_values: Dict[str, float] = {}
         # Currently-subscribed topics on behalf of the routing graph.
         self._subscribed_topics: Set[str] = set()
         # Snapshot of the routing graph used for evaluation; refreshed
@@ -122,7 +129,10 @@ class RoutingEvaluator:
         needed: Set[str] = set()
         for sheet in routing.sheets.values():
             for inp in sheet.inputs:
-                if inp.topic:
+                # Only ROS-topic inputs drive subscription state; URDF-
+                # joint inputs read from the animation cache and don't
+                # need a ROS subscription.
+                if inp.kind == "topic" and inp.topic:
                     needed.add(inp.topic)
 
         with self._lock:
@@ -189,6 +199,64 @@ class RoutingEvaluator:
             except Exception as e:
                 self._log("error", f"routing_values broadcast failed: {e}")
         return True
+
+    def set_urdf_joint_value(self, joint: str, value: float) -> bool:
+        """Push a URDF-joint setpoint (typically from an animation
+        player tick) into the source cache.
+
+        Any ``InputNode`` with ``kind="urdf_joint"`` and matching
+        ``joint`` reads from this cache, so the value flows through
+        wires the same way a ROS-topic input does. Joints are global
+        identifiers — multiple sheets can reference the same joint and
+        they all see the same value per tick.
+
+        Returns False if the routing graph isn't loaded yet so the
+        caller can decide whether to retry later.
+        """
+        routing = self._routing
+        if routing is None:
+            return False
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError):
+            self._log("warn",
+                      f"set_urdf_joint_value: non-numeric {joint}={value!r}")
+            return False
+
+        with self._lock:
+            self._urdf_joint_values[joint] = scalar
+
+        # Find every sheet wiring an InputNode for this joint and re-evaluate.
+        touched: List[NodeSheet] = []
+        for sheet in routing.sheets.values():
+            for inp in sheet.inputs:
+                if inp.kind == "urdf_joint" and inp.joint == joint:
+                    touched.append(sheet)
+                    break
+        for sheet in touched:
+            try:
+                self._evaluate_sheet(sheet)
+            except Exception as e:
+                self._log("error",
+                          f"Sheet '{sheet.node_id}' evaluation failed: {e}")
+
+        if touched and self._on_values_changed is not None:
+            try:
+                self._on_values_changed(self.get_value_snapshot())
+            except Exception as e:
+                self._log("error", f"routing_values broadcast failed: {e}")
+        return True
+
+    def clear_urdf_joint_value(self, joint: Optional[str] = None) -> None:
+        """Drop cached URDF joint values. If ``joint`` is None, clear
+        the entire cache (typically called when no animations are
+        playing).
+        """
+        with self._lock:
+            if joint is not None:
+                self._urdf_joint_values.pop(joint, None)
+            else:
+                self._urdf_joint_values.clear()
 
     def on_topic_message(self, topic: str, data: Dict[str, Any]) -> None:
         """Hot path: a ROS message arrived for `topic`. Re-evaluate any
@@ -266,8 +334,14 @@ class RoutingEvaluator:
         sheet_peripheral_vals: Dict[str, float] = {}
 
         # Capture input values so the UI can show what's flowing in.
+        # URDF-joint inputs read from the joint cache; topic inputs from
+        # the ROS source cache. Both surface in the same `inputs` bucket
+        # since the UI only cares about the InputNode id.
         for inp in sheet.inputs:
-            v = self._sources.get((inp.topic, inp.field))
+            if inp.kind == "urdf_joint":
+                v = self._urdf_joint_values.get(inp.joint)
+            else:
+                v = self._sources.get((inp.topic, inp.field))
             if v is not None:
                 sheet_input_vals[inp.id] = v
         for ws in sheet.ws_inputs:
@@ -405,6 +479,8 @@ class RoutingEvaluator:
             inp = sheet.find_input(source.parts[0])
             if inp is None:
                 return None
+            if inp.kind == "urdf_joint":
+                return self._urdf_joint_values.get(inp.joint)
             return self._sources.get((inp.topic, inp.field))
         if source.kind == "ws_input":
             if not source.parts:
@@ -553,14 +629,15 @@ def _apply_operator(node: OperatorNode, inputs: Dict[str, float]) -> float:
         in_hi = float(inputs.get("in_max", 1.0))
         out_lo = float(inputs.get("out_min", 0.0))
         out_hi = float(inputs.get("out_max", 1.0))
+        # Accept both the current param name ("clamp") and the legacy
+        # name ("clamp_output") so older saved sheets keep working.
+        clamp = node.params.get("clamp", node.params.get("clamp_output", True))
+        if clamp:
+            in_min_a, in_max_a = (in_lo, in_hi) if in_lo <= in_hi else (in_hi, in_lo)
+            v = max(in_min_a, min(in_max_a, v))
         if in_hi == in_lo:
-            mapped = out_lo
-        else:
-            mapped = out_lo + (v - in_lo) * (out_hi - out_lo) / (in_hi - in_lo)
-        if node.params.get("clamp_output", True):
-            mapped_lo, mapped_hi = (out_lo, out_hi) if out_lo <= out_hi else (out_hi, out_lo)
-            mapped = max(mapped_lo, min(mapped_hi, mapped))
-        return mapped
+            return out_lo
+        return out_lo + (v - in_lo) * (out_hi - out_lo) / (in_hi - in_lo)
     if op == "lerp":
         t = float(inputs.get("t", 0.5))
         return a + (b - a) * t
@@ -575,6 +652,18 @@ def _apply_operator(node: OperatorNode, inputs: Dict[str, float]) -> float:
         exp = float(inputs.get("exponent", 1.0))
         sign = -1.0 if v < 0 else 1.0
         return sign * math.pow(abs(v), exp)
+    if op == "select":
+        a = float(inputs.get("a", 0.0))
+        b = float(inputs.get("b", 0.0))
+        prefer_a = bool(node.params.get("prefer_a", False))
+        # The preferred input wins whenever it has a meaningful (non-
+        # zero) value. Treats values below 1e-6 as "no signal" so a
+        # joystick parked at its idle position lets the other source
+        # — e.g. an animation — drive through.
+        eps = 1e-6
+        if prefer_a:
+            return a if abs(a) > eps else b
+        return b if abs(b) > eps else a
     return 0.0
 
 

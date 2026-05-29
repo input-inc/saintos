@@ -62,9 +62,18 @@ typedef struct __attribute__((packed)) {
 
 #define FLASH_MAESTRO_MAX_CHANNELS 24
 
+/* transport_mode values: 0 = USB host (zero-default for backward
+ * compat with older Teensy saves), 1 = UART. serial_port is only
+ * meaningful in UART mode and indexes the platform's UART instance
+ * (0-1 on RP2040, 1-8 on Teensy hardware Serial). */
+#define FLASH_MAESTRO_TRANSPORT_USB_HOST 0
+#define FLASH_MAESTRO_TRANSPORT_UART     1
+
 typedef struct __attribute__((packed)) {
     uint8_t channel_count;
-    uint8_t reserved_m[3];
+    uint8_t transport_mode;     /* FLASH_MAESTRO_TRANSPORT_*           */
+    uint8_t serial_port;        /* UART instance index (UART mode)     */
+    uint8_t reserved_m;
     struct __attribute__((packed)) {
         uint16_t min_pulse_us;
         uint16_t max_pulse_us;
@@ -157,7 +166,9 @@ typedef struct __attribute__((packed)) {
     uint8_t roboclaw_rx_pin;
     uint8_t pathfinder_bms_tx_pin;
     uint8_t pathfinder_bms_rx_pin;
-    uint8_t reserved_u[8];
+    uint8_t maestro_tx_pin;
+    uint8_t maestro_rx_pin;
+    uint8_t reserved_u[6];
 } flash_uart_pins_t;
 
 // =============================================================================

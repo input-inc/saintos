@@ -20,7 +20,7 @@ const badgeText = computed(() => {
 const badgeClass = computed(() => {
   if (receiver.value.connected) return 'bg-emerald-500/20 text-emerald-400'
   if (receiver.value.running)   return 'bg-amber-500/20 text-amber-400'
-  return 'bg-slate-500/20 text-slate-400'
+  return 'bg-slate-500/20 text-fg-muted'
 })
 const statusText = computed(() => {
   if (receiver.value.connected) return 'Receiving data'
@@ -33,12 +33,12 @@ function viewDetails () { router.push('/livelink') }
 
 <template>
   <section>
-    <h2 class="text-2xl font-bold text-white mb-6">Inputs</h2>
+    <h2 class="text-2xl font-bold text-fg-strong mb-6">Inputs</h2>
 
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
       <div class="card">
         <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-white">LiveLink Face</h3>
+          <h3 class="text-lg font-semibold text-fg-strong">LiveLink Face</h3>
           <span :class="['px-2 py-1 text-xs font-medium rounded-full', badgeClass]">
             {{ badgeText }}
           </span>
@@ -57,7 +57,7 @@ function viewDetails () { router.push('/livelink') }
             <span class="stat-value text-sm">{{ (receiver.packet_count ?? 0).toLocaleString() }}</span>
           </div>
         </div>
-        <div class="mt-4 pt-4 border-t border-slate-700">
+        <div class="mt-4 pt-4 border-t border-line">
           <button class="btn-secondary w-full justify-center" @click="viewDetails">
             <span class="material-icons icon-sm">visibility</span>
             View Details
@@ -66,25 +66,25 @@ function viewDetails () { router.push('/livelink') }
       </div>
 
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-3 flex items-center gap-2">
           <span class="material-icons text-cyan-400 icon-md">cable</span>
           WebSocket clients
         </h3>
-        <div v-if="!clientList.length" class="text-sm text-slate-400">No clients connected.</div>
+        <div v-if="!clientList.length" class="text-sm text-fg-muted">No clients connected.</div>
         <ul v-else class="space-y-1 text-sm max-h-48 overflow-y-auto">
           <li v-for="c in clientList" :key="c.client_id" class="flex items-center justify-between font-mono text-xs">
-            <span class="text-slate-300 truncate">{{ c.address || c.client_id }}</span>
-            <span class="text-slate-500">{{ c.connected_at ? 'live' : '' }}</span>
+            <span class="text-fg truncate">{{ c.address || c.client_id }}</span>
+            <span class="text-fg-faint">{{ c.connected_at ? 'live' : '' }}</span>
           </li>
         </ul>
       </div>
 
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+        <h3 class="text-lg font-semibold text-fg-strong mb-3 flex items-center gap-2">
           <span class="material-icons text-cyan-400 icon-md">settings_remote</span>
           RC Receiver
         </h3>
-        <p class="text-sm text-slate-400">Disabled. Configure on a node's Peripherals tab.</p>
+        <p class="text-sm text-fg-muted">Disabled. Configure on a node's Peripherals tab.</p>
       </div>
     </div>
   </section>

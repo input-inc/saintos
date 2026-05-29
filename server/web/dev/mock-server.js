@@ -18,12 +18,13 @@ import * as st from './mock-state.js'
 import {
   managementHandlers, handleCommand, handleRouter, handleControl, handleGeneric,
 } from './mock-handlers.js'
+import { handleHttp } from './mock-http.js'
 
 const PORT = parseInt(process.env.MOCK_PORT || '8081', 10)
 
 // ── HTTP server (landing page + WebSocket upgrade) ───────────────────
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   if (req.url === '/' || req.url === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
     res.end(LANDING_HTML)
@@ -34,8 +35,22 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, server: 'SAINT.OS mock', port: PORT }))
     return
   }
+  // Animation builder HTTP surface — URDF upload/serve, Maestro import.
+  // Lives in mock-http.js so the URDF/zip/multipart plumbing stays out
+  // of this file's WebSocket flow.
+  try {
+    const handled = await handleHttp(req, res)
+    if (handled) return
+  } catch (e) {
+    console.error('[mock] HTTP handler crashed:', e)
+    if (!res.writableEnded) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: e.message || 'Internal error' }))
+    }
+    return
+  }
   res.writeHead(404, { 'Content-Type': 'text/plain' })
-  res.end('Mock server: only / and /api/ws are exposed.\n')
+  res.end('Mock server: route not found.\n')
 })
 
 // WS endpoint matches the real server: /api/ws
@@ -316,6 +331,15 @@ function tickRoutingValues () {
         }
       }
     }
+    // URDF-joint input values: each input with kind="urdf_joint"
+    // pulls its current setpoint from the joint cache (populated by
+    // active animation players).
+    for (const inp of (sheet.inputs || [])) {
+      if (inp.kind === 'urdf_joint') {
+        const v = st.getUrdfJointValue(inp.joint)
+        if (v != null) inputs[inp.id] = round(v, 3)
+      }
+    }
     // Widget input values: follow wires whose sink is "widget".
     for (const w of sheet.wires) {
       if (w.sink.kind !== 'widget') continue
@@ -332,6 +356,50 @@ function tickRoutingValues () {
     sheetsOut[sheetId] = { inputs, ws_inputs, outputs, operators, widgets, peripherals }
   }
   broadcast('routing_values', { sheets: sheetsOut })
+}
+
+// Animation playback ticker. Runs at 30 Hz, advances `t` for each
+// active player by the actual elapsed wall time (so pausing the
+// scheduler doesn't drop frames), samples value tracks into
+// st.live_animation_values, and stops the player when it crosses
+// `duration` (or loops if anim.loop is set).
+const ANIM_TICK_HZ = 30
+let _animLastTick = Date.now()
+function tickAnimations () {
+  const now = Date.now()
+  const dt = Math.max(0, (now - _animLastTick) / 1000.0)
+  _animLastTick = now
+  for (const player of [...st.animationPlayers.values()]) {
+    if (player.paused || !player.running) continue
+    const anim = st.animations.get(player.id)
+    if (!anim) {
+      st.animationPlayers.delete(player.id)
+      continue
+    }
+    player.last_t = player.t
+    player.t += dt
+    if (anim.duration > 0 && player.t >= anim.duration) {
+      if (anim.loop) {
+        player.t = 0
+        player.last_t = 0
+      } else {
+        // Land the final frame at duration then stop.
+        for (const track of anim.value_tracks || []) {
+          st.setUrdfJointValue(anim.id, track.id,
+                               st.sampleCurve(track.curve, anim.duration))
+        }
+        st.animationPlayers.delete(player.id)
+        continue
+      }
+    }
+    for (const track of anim.value_tracks || []) {
+      // Track id is the URDF joint name: any input with
+      // kind="urdf_joint" and matching `joint` field reads this value
+      // out of the cache.
+      st.setUrdfJointValue(anim.id, track.id,
+                           st.sampleCurve(track.curve, player.t))
+    }
+  }
 }
 
 // Resolve a wire endpoint to a live scalar — used for widget value pills.
@@ -371,6 +439,7 @@ server.listen(PORT, () => {
   schedule(tickSystemStatus,  2000, 'system_status')
   schedule(tickHostPinState,  1000, 'pin_state/host_controller')
   schedule(tickNodePinStates,  250, 'pin_state/<node>')
+  schedule(tickAnimations,  1000 / ANIM_TICK_HZ, 'animation_playback')
   schedule(tickRoutingValues,  500, 'routing_values')
   // Activity is irregular — jitter between 5 and 15 s.
   ;(function activityLoop () {

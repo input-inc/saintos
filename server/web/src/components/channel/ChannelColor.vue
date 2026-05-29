@@ -8,7 +8,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue', 'commit'])
 
-const hex = ref('#1e293b')
+const hex = ref('var(--color-panel)')
 watch(() => props.modelValue, (v) => {
   if (typeof v !== 'number') return
   hex.value = '#' + (v >>> 0).toString(16).padStart(6, '0').slice(-6)
@@ -25,11 +25,11 @@ function onChange (e) {
 <template>
   <div>
     <div class="flex items-center justify-between">
-      <span class="text-sm font-medium text-white">{{ label }}</span>
+      <span class="text-sm font-medium text-fg-strong">{{ label }}</span>
       <input
         type="color"
         :value="hex"
-        class="h-8 w-16 cursor-pointer rounded border border-slate-700 bg-slate-900"
+        class="h-8 w-16 cursor-pointer rounded border border-line bg-canvas"
         @change="onChange"
       />
     </div>

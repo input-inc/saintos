@@ -1,44 +1,24 @@
-"""
-SAINT.OS Unreal Engine Data Reader
+"""Animation primitives shared with the Animation Builder.
 
-Provides parsing capabilities for Unreal Engine asset files (.uasset),
-with focus on animation sequences and data assets for robot motion playback.
-
-Supported:
-- .uasset file structure parsing
-- Animation sequence extraction (curves, keyframes)
-- Bone transform data
-- Blueprint Data Assets (DA_* files) for UE5
-
-Limitations:
-- Tested primarily with UE 4.27 and UE 5.x formats
-- Some compressed formats may not be fully supported
-- Blueprint logic is not interpreted
-
-For real-time animation streaming, consider using the WebSocket bridge
-to stream data directly from Unreal at runtime instead.
+Originally hosted Unreal Engine data-asset parsers (`uasset_reader`,
+`data_asset_reader`) — those were removed when the Animation Builder
+replaced the Moods view. The keyframe-curve types here are now consumed
+by `saint_server.animation.models`; the package name is preserved to
+keep the import paths stable.
 """
 
-from saint_server.unreal.uasset_reader import UAssetReader
 from saint_server.unreal.animation import (
     AnimationSequence,
     AnimationCurve,
     CurveKey,
+    CurveInterpolation,
     BoneTrack,
-)
-from saint_server.unreal.data_asset_reader import (
-    DataAssetReader,
-    DataAsset,
-    read_data_asset,
 )
 
 __all__ = [
-    'UAssetReader',
     'AnimationSequence',
     'AnimationCurve',
     'CurveKey',
+    'CurveInterpolation',
     'BoneTrack',
-    'DataAssetReader',
-    'DataAsset',
-    'read_data_asset',
 ]

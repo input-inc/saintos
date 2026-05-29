@@ -36,6 +36,7 @@ CFLAGS=(
 TEST_BINARIES=(
     "test_fas100_parser"
     "test_roboclaw_driver"
+    "test_maestro_driver"
 )
 
 overall_rc=0

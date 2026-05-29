@@ -62,7 +62,7 @@ function sourceLabel (route) {
 <template>
   <section>
     <div v-if="!embedded" class="flex items-center justify-between mb-6">
-      <h2 class="text-2xl font-bold text-white">Widgets</h2>
+      <h2 class="text-2xl font-bold text-fg-strong">Widgets</h2>
       <RouterLink to="/routes" class="btn-secondary">
         <span class="material-icons icon-sm">bolt</span>
         Manage routes
@@ -70,9 +70,9 @@ function sourceLabel (route) {
     </div>
 
     <div v-if="!widgets.length" class="card text-center py-10">
-      <span class="material-icons icon-lg text-slate-600">dashboard</span>
-      <p class="text-slate-400 text-sm mt-3">No widgets configured yet.</p>
-      <p class="text-slate-500 text-xs mt-1">Add widgets and connect them to peripherals from the Routes page.</p>
+      <span class="material-icons icon-lg text-fg-faint">dashboard</span>
+      <p class="text-fg-muted text-sm mt-3">No widgets configured yet.</p>
+      <p class="text-fg-faint text-xs mt-1">Add widgets and connect them to peripherals from the Routes page.</p>
     </div>
 
     <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -89,26 +89,26 @@ function sourceLabel (route) {
         <div v-else class="card">
           <header class="flex items-center justify-between mb-3">
             <div>
-              <h4 class="text-base font-semibold text-white">{{ w.label || w.id }}</h4>
-              <p class="text-xs text-slate-500">{{ widgetType(w.type)?.label || w.type }}</p>
+              <h4 class="text-base font-semibold text-fg-strong">{{ w.label || w.id }}</h4>
+              <p class="text-xs text-fg-faint">{{ widgetType(w.type)?.label || w.type }}</p>
             </div>
-            <span class="material-icons text-slate-500">{{ widgetType(w.type)?.icon || 'widgets' }}</span>
+            <span class="material-icons text-fg-faint">{{ widgetType(w.type)?.icon || 'widgets' }}</span>
           </header>
 
-          <div v-if="!(widgetType(w.type)?.inputs?.length)" class="text-xs text-slate-500 italic">
+          <div v-if="!(widgetType(w.type)?.inputs?.length)" class="text-xs text-fg-faint italic">
             No declared inputs.
           </div>
           <div v-else class="space-y-1">
             <div
               v-for="inp in widgetType(w.type).inputs"
               :key="inp.id"
-              class="flex items-center justify-between text-sm border-b border-slate-700/40 py-1 font-mono"
+              class="flex items-center justify-between text-sm border-b border-line/40 py-1 font-mono"
             >
-              <span class="text-slate-400">{{ inp.display || inp.id }}</span>
+              <span class="text-fg-muted">{{ inp.display || inp.id }}</span>
               <span v-if="routesIntoWidget(w.id, inp.id).length" class="text-cyan-300 text-xs">
                 ← {{ sourceLabel(routesIntoWidget(w.id, inp.id)[0]) }}
               </span>
-              <span v-else class="text-slate-500 text-xs">unconnected</span>
+              <span v-else class="text-fg-faint text-xs">unconnected</span>
             </div>
           </div>
         </div>

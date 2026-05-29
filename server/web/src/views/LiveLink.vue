@@ -18,7 +18,7 @@ const shapes   = computed(() => paused.value ? null : (blendShapes.value || {}))
 const connState = computed(() => {
   if (receiver.value.connected) return { label: 'Connected',    dot: 'bg-emerald-500',         text: 'text-emerald-400' }
   if (receiver.value.running)   return { label: 'Listening',    dot: 'bg-amber-500 animate-pulse', text: 'text-amber-400' }
-  return                              { label: 'Disconnected', dot: 'bg-slate-500',           text: 'text-slate-400' }
+  return                              { label: 'Disconnected', dot: 'bg-slate-500',           text: 'text-fg-muted' }
 })
 
 const lastUpdateText = computed(() => {
@@ -101,12 +101,12 @@ function valueColor (name, value) {
   const abs = Math.abs(value)
   if (name.includes('Head')) {
     if (abs > 0.5) return 'text-rose-400'
-    if (abs > 0.2) return 'text-slate-300'
-    return 'text-slate-500'
+    if (abs > 0.2) return 'text-fg'
+    return 'text-fg-faint'
   }
   if (value > 0.7) return 'text-cyan-400'
-  if (value > 0.3) return 'text-slate-300'
-  return 'text-slate-500'
+  if (value > 0.3) return 'text-fg'
+  return 'text-fg-faint'
 }
 
 function barColor (name) {
@@ -145,9 +145,9 @@ function back () { router.push('/inputs') }
         Back
       </button>
       <div class="flex-1">
-        <h2 class="text-2xl font-bold text-white">LiveLink Face</h2>
+        <h2 class="text-2xl font-bold text-fg-strong">LiveLink Face</h2>
       </div>
-      <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+      <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-panel border border-line">
         <span :class="['w-2 h-2 rounded-full', connState.dot]" />
         <span :class="['text-sm', connState.text]">{{ connState.label }}</span>
       </div>
@@ -157,7 +157,7 @@ function back () { router.push('/inputs') }
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
       <!-- Connection Stats -->
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4">Connection Stats</h3>
+        <h3 class="text-lg font-semibold text-fg-strong mb-4">Connection Stats</h3>
         <div class="space-y-3">
           <div class="stat-item">
             <span class="stat-label">Receiver Port</span>
@@ -180,13 +180,13 @@ function back () { router.push('/inputs') }
 
       <!-- Head Pose -->
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4">Head Pose</h3>
+        <h3 class="text-lg font-semibold text-fg-strong mb-4">Head Pose</h3>
         <div class="flex flex-col items-center">
           <div class="relative w-32 h-32 mb-4">
             <div class="absolute inset-0 flex items-center justify-center">
-              <div class="absolute w-full h-full rounded-full border-2 border-slate-600"></div>
+              <div class="absolute w-full h-full rounded-full border-2 border-line-strong"></div>
               <div
-                class="relative w-20 h-24 bg-slate-700 rounded-full border-2 border-cyan-500/50 transition-transform duration-75"
+                class="relative w-20 h-24 bg-surface rounded-full border-2 border-cyan-500/50 transition-transform duration-75"
                 :style="headStyle"
               >
                 <div class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1 w-3 h-3 bg-cyan-500 rounded-full"></div>
@@ -197,15 +197,15 @@ function back () { router.push('/inputs') }
           </div>
           <div class="w-full space-y-2">
             <div class="flex items-center justify-between text-sm">
-              <span class="text-slate-400">Yaw (L/R)</span>
+              <span class="text-fg-muted">Yaw (L/R)</span>
               <span class="font-mono text-cyan-400">{{ yaw.toFixed(2) }}</span>
             </div>
             <div class="flex items-center justify-between text-sm">
-              <span class="text-slate-400">Pitch (U/D)</span>
+              <span class="text-fg-muted">Pitch (U/D)</span>
               <span class="font-mono text-violet-400">{{ pitch.toFixed(2) }}</span>
             </div>
             <div class="flex items-center justify-between text-sm">
-              <span class="text-slate-400">Roll (Tilt)</span>
+              <span class="text-fg-muted">Roll (Tilt)</span>
               <span class="font-mono text-amber-400">{{ roll.toFixed(2) }}</span>
             </div>
           </div>
@@ -214,23 +214,23 @@ function back () { router.push('/inputs') }
 
       <!-- Eye Tracking -->
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4">Eye Tracking</h3>
+        <h3 class="text-lg font-semibold text-fg-strong mb-4">Eye Tracking</h3>
         <div class="flex items-center justify-around">
           <div class="text-center">
-            <p class="text-sm text-slate-400 mb-2">Left Eye</p>
-            <div class="relative w-24 h-24 bg-slate-900 rounded-full border-2 border-slate-600">
+            <p class="text-sm text-fg-muted mb-2">Left Eye</p>
+            <div class="relative w-24 h-24 bg-canvas rounded-full border-2 border-line-strong">
               <div class="absolute w-8 h-8 bg-cyan-500 rounded-full transition-all duration-75" :style="leftEyeStyle"></div>
               <div class="absolute w-3 h-3 bg-white rounded-full transform -translate-x-1/2 -translate-y-1/2 pointer-events-none" style="left: 55%; top: 40%;"></div>
             </div>
-            <p class="text-xs text-slate-400 mt-2">Blink: {{ leftBlinkPct }}%</p>
+            <p class="text-xs text-fg-muted mt-2">Blink: {{ leftBlinkPct }}%</p>
           </div>
           <div class="text-center">
-            <p class="text-sm text-slate-400 mb-2">Right Eye</p>
-            <div class="relative w-24 h-24 bg-slate-900 rounded-full border-2 border-slate-600">
+            <p class="text-sm text-fg-muted mb-2">Right Eye</p>
+            <div class="relative w-24 h-24 bg-canvas rounded-full border-2 border-line-strong">
               <div class="absolute w-8 h-8 bg-cyan-500 rounded-full transition-all duration-75" :style="rightEyeStyle"></div>
               <div class="absolute w-3 h-3 bg-white rounded-full transform -translate-x-1/2 -translate-y-1/2 pointer-events-none" style="left: 55%; top: 40%;"></div>
             </div>
-            <p class="text-xs text-slate-400 mt-2">Blink: {{ rightBlinkPct }}%</p>
+            <p class="text-xs text-fg-muted mt-2">Blink: {{ rightBlinkPct }}%</p>
           </div>
         </div>
       </div>
@@ -239,7 +239,7 @@ function back () { router.push('/inputs') }
     <!-- Row 2: Blend Shapes Preview -->
     <div class="card mt-6">
       <div class="flex items-center justify-between mb-4">
-        <h3 class="text-lg font-semibold text-white">Blend Shapes Preview</h3>
+        <h3 class="text-lg font-semibold text-fg-strong">Blend Shapes Preview</h3>
         <button class="btn-secondary text-sm" @click="togglePause">
           <span class="material-icons icon-sm">{{ paused ? 'play_circle' : 'pause_circle' }}</span>
           {{ paused ? 'Resume' : 'Pause' }}
@@ -249,13 +249,13 @@ function back () { router.push('/inputs') }
         <div
           v-for="row in shapeRows"
           :key="row.name"
-          class="p-2 bg-slate-900/50 rounded-lg border border-slate-700/50"
+          class="p-2 bg-canvas/50 rounded-lg border border-line/50"
         >
           <div class="flex items-center justify-between mb-1">
-            <span class="text-xs text-slate-400 truncate" :title="row.name">{{ row.label }}</span>
+            <span class="text-xs text-fg-muted truncate" :title="row.name">{{ row.label }}</span>
             <span :class="['text-xs font-mono', row.valueCls]">{{ row.value.toFixed(2) }}</span>
           </div>
-          <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+          <div class="h-1.5 bg-surface rounded-full overflow-hidden">
             <div :class="['h-full', row.barCls]" :style="{ width: `${row.percent}%`, transition: 'width 0.1s ease-out' }"></div>
           </div>
         </div>

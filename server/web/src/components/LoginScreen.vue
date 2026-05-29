@@ -45,32 +45,32 @@ async function submit () {
     <div class="w-full max-w-md">
       <div class="text-center mb-8">
         <div class="w-20 h-20 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center mx-auto mb-4">
-          <span class="material-icons text-white text-4xl">computer</span>
+          <span class="material-icons text-fg-strong text-4xl">computer</span>
         </div>
-        <h1 class="text-3xl font-bold text-white">SAINT.OS</h1>
-        <p class="text-slate-400 mt-1">Administration Console</p>
+        <h1 class="text-3xl font-bold text-fg-strong">SAINT.OS</h1>
+        <p class="text-fg-muted mt-1">Administration Console</p>
       </div>
 
       <div class="card">
-        <h2 class="text-lg font-semibold text-white mb-4">Connect to server</h2>
+        <h2 class="text-lg font-semibold text-fg-strong mb-4">Connect to server</h2>
 
         <div v-if="error" class="mb-4 p-3 bg-red-500/20 border border-red-500/40 rounded-lg text-red-300 text-sm">{{ error }}</div>
 
         <form class="space-y-4" @submit.prevent="submit">
           <div>
-            <label class="block text-sm font-medium text-slate-300 mb-1">Server address</label>
+            <label class="block text-sm font-medium text-fg mb-1">Server address</label>
             <input v-model="host" type="text" class="input-field w-full" placeholder="opensaint.local" />
-            <p class="text-xs text-slate-500 mt-1">Leave empty to use this page's host.</p>
+            <p class="text-xs text-fg-faint mt-1">Leave empty to use this page's host.</p>
           </div>
           <div>
-            <label class="block text-sm font-medium text-slate-300 mb-1">Password</label>
+            <label class="block text-sm font-medium text-fg mb-1">Password</label>
             <input v-model="password" type="password" class="input-field w-full" placeholder="Enter password" />
-            <p class="text-xs text-slate-500 mt-1">Leave empty if the server has no password.</p>
+            <p class="text-xs text-fg-faint mt-1">Leave empty if the server has no password.</p>
           </div>
           <button
             type="submit"
             :disabled="connecting"
-            class="w-full py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-medium rounded-lg hover:from-cyan-600 hover:to-blue-700 transition-all"
+            class="w-full py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 text-fg-strong font-medium rounded-lg hover:from-cyan-600 hover:to-blue-700 transition-all"
           >
             {{ connecting ? 'Connecting…' : 'Connect' }}
           </button>

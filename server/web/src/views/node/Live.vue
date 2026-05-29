@@ -17,6 +17,20 @@ const peripherals = ref([])
 const pinState = useWsTopic(() => `pin_state/${props.nodeId}`)
 const history = useChannelHistory()
 
+// Channels actually exposed by a peripheral instance — applies the
+// Maestro channel-count clip (single catalog entry with 24 channels,
+// instance config picks 6 / 12 / 18 / 24). Other types pass through
+// the full type channel list.
+function visibleChannels (p) {
+  const t = catalog.byType(p.type)
+  const all = t?.channels || []
+  if (p.type === 'maestro') {
+    const n = Number(p.params?.channel_count) || 6
+    return all.slice(0, n)
+  }
+  return all
+}
+
 async function loadPeripherals () {
   try {
     const r = await ws.management('get_node_peripherals', { node_id: props.nodeId })
@@ -27,8 +41,7 @@ async function loadPeripherals () {
     // the "not logging" hint instead.
     for (const p of peripherals.value) {
       if (!p.log_enabled) continue
-      const t = catalog.byType(p.type)
-      for (const ch of (t?.channels || [])) {
+      for (const ch of visibleChannels(p)) {
         if (ch.dir !== 'in') continue
         history.fetchHistory(props.nodeId, p.id, ch.id)
       }
@@ -97,13 +110,13 @@ function sparkSamples (nodeId, peripheralId, channelId) {
 <template>
   <div>
     <div class="flex items-center justify-between mb-3">
-      <h3 class="text-lg font-semibold text-white">Live readings</h3>
+      <h3 class="text-lg font-semibold text-fg-strong">Live readings</h3>
       <span v-if="lastFeedback" :class="['text-xs', stale ? 'text-amber-400' : 'text-emerald-400']">
         {{ stale ? 'Stale feed' : 'Live feed' }}
       </span>
-      <span v-else class="text-xs text-slate-500">No feedback yet</span>
+      <span v-else class="text-xs text-fg-faint">No feedback yet</span>
     </div>
-    <p class="text-xs text-slate-400 mb-4">
+    <p class="text-xs text-fg-muted mb-4">
       Raw per-channel values streaming from the firmware via the
       routing system. If a peripheral's card shows <span class="font-mono">—</span>,
       either the firmware isn't sampling that channel yet or the
@@ -111,37 +124,37 @@ function sparkSamples (nodeId, peripheralId, channelId) {
     </p>
 
     <div v-if="!peripherals.length" class="card text-center py-10">
-      <span class="material-icons icon-lg text-slate-600">sensors</span>
-      <p class="text-slate-400 text-sm mt-3">No peripherals on this node yet.</p>
+      <span class="material-icons icon-lg text-fg-faint">sensors</span>
+      <p class="text-fg-muted text-sm mt-3">No peripherals on this node yet.</p>
     </div>
 
     <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
       <div v-for="p in peripherals" :key="p.id" class="card">
         <header class="flex items-center justify-between mb-3">
           <div>
-            <h4 class="text-base font-semibold text-white flex items-center gap-2 flex-wrap">
+            <h4 class="text-base font-semibold text-fg-strong flex items-center gap-2 flex-wrap">
               {{ p.label || p.id }}
-              <span v-if="p.builtin" class="px-2 py-0.5 text-xs rounded-full bg-slate-700 text-slate-300">Built-in</span>
+              <span v-if="p.builtin" class="px-2 py-0.5 text-xs rounded-full bg-surface text-fg">Built-in</span>
               <span
                 v-if="p.log_enabled"
                 class="px-2 py-0.5 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
                 title="Recording 30s in-RAM history"
               >Logging</span>
             </h4>
-            <p class="text-xs text-slate-500">{{ catalog.byType(p.type)?.label || p.type }} · <span class="font-mono">{{ p.id }}</span></p>
+            <p class="text-xs text-fg-faint">{{ catalog.byType(p.type)?.label || p.type }} · <span class="font-mono">{{ p.id }}</span></p>
           </div>
         </header>
 
-        <div v-if="!(catalog.byType(p.type)?.channels?.length)" class="text-xs text-slate-500 italic">
+        <div v-if="!visibleChannels(p).length" class="text-xs text-fg-faint italic">
           No declared channels.
         </div>
         <div v-else class="space-y-1">
           <div
-            v-for="ch in catalog.byType(p.type).channels"
+            v-for="ch in visibleChannels(p)"
             :key="ch.id"
-            class="flex items-center justify-between text-sm font-mono py-1 border-b border-slate-700/50 last:border-b-0"
+            class="flex items-center justify-between text-sm font-mono py-1 border-b border-line/50 last:border-b-0"
           >
-            <span class="text-slate-400">{{ ch.display || ch.id }}</span>
+            <span class="text-fg-muted">{{ ch.display || ch.id }}</span>
             <div class="flex items-center gap-3">
               <Sparkline
                 v-if="ch.dir === 'in' && p.log_enabled"
@@ -149,15 +162,15 @@ function sparkSamples (nodeId, peripheralId, channelId) {
               />
               <span
                 v-else-if="ch.dir === 'in'"
-                class="text-[10px] italic text-slate-600"
+                class="text-[10px] italic text-fg-faint"
                 title="Enable logging on this peripheral to see history"
               >not logging</span>
               <span
                 v-if="values[p.id]?.[ch.id] && values[p.id][ch.id].value !== null && values[p.id][ch.id].value !== undefined"
                 :class="ch.dir === 'in' ? 'text-cyan-300' : 'text-amber-300'"
               >{{ fmtValue(values[p.id][ch.id].value) }}</span>
-              <span v-else class="text-slate-500">—</span>
-              <span class="text-xs text-slate-600 w-20 text-right">{{ ageStr(values[p.id]?.[ch.id]?.last_updated) }}</span>
+              <span v-else class="text-fg-faint">—</span>
+              <span class="text-xs text-fg-faint w-20 text-right">{{ ageStr(values[p.id]?.[ch.id]?.last_updated) }}</span>
             </div>
           </div>
         </div>

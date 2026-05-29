@@ -73,22 +73,22 @@ const syncBadge = computed(() => ({
   synced:       { label: 'Synced',       cls: 'bg-emerald-500/20 text-emerald-400' },
   pending:      { label: 'Pending',      cls: 'bg-amber-500/20 text-amber-300' },
   error:        { label: 'Error',        cls: 'bg-red-500/20 text-red-400' },
-  unknown:      { label: 'Unknown',      cls: 'bg-slate-700 text-slate-400' },
-  unconfigured: { label: 'Unconfigured', cls: 'bg-slate-700 text-slate-400' },
-}[syncStatus.value] || { label: 'Unknown', cls: 'bg-slate-700 text-slate-400' }))
+  unknown:      { label: 'Unknown',      cls: 'bg-surface text-fg-muted' },
+  unconfigured: { label: 'Unconfigured', cls: 'bg-surface text-fg-muted' },
+}[syncStatus.value] || { label: 'Unknown', cls: 'bg-surface text-fg-muted' }))
 </script>
 
 <template>
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
     <div class="lg:col-span-2 space-y-4">
       <div class="flex items-center justify-between">
-        <h3 class="text-lg font-semibold text-white">Peripheral Controls</h3>
+        <h3 class="text-lg font-semibold text-fg-strong">Peripheral Controls</h3>
         <span :class="['px-2 py-1 text-xs font-medium rounded-full', syncBadge.cls]">{{ syncBadge.label }}</span>
       </div>
 
       <div v-if="!peripherals.length" class="card text-center py-10">
-        <span class="material-icons icon-lg text-slate-600">tune</span>
-        <p class="text-slate-400 text-sm mt-3">No peripherals configured on this node yet.</p>
+        <span class="material-icons icon-lg text-fg-faint">tune</span>
+        <p class="text-fg-muted text-sm mt-3">No peripherals configured on this node yet.</p>
       </div>
 
       <PeripheralCard
@@ -103,7 +103,7 @@ const syncBadge = computed(() => ({
 
     <div class="space-y-4">
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4">State Summary</h3>
+        <h3 class="text-lg font-semibold text-fg-strong mb-4">State Summary</h3>
         <div class="space-y-3">
           <div class="stat-item">
             <span class="stat-label">Node Status</span>
@@ -121,7 +121,7 @@ const syncBadge = computed(() => ({
       </div>
 
       <div class="card">
-        <h3 class="text-lg font-semibold text-white mb-4">Quick Actions</h3>
+        <h3 class="text-lg font-semibold text-fg-strong mb-4">Quick Actions</h3>
         <button class="btn-secondary w-full justify-center text-sm" @click="resetAll">
           <span class="material-icons icon-sm">center_focus_strong</span>
           Reset all outputs
