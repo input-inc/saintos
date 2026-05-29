@@ -57,6 +57,7 @@
 #include "picowota/reboot.h"
 #include "http_client.h"
 #include "http_transport_w5500.h"
+#include "crc32.h"
 
 /* ============================================================
  * Image header — placed in its own flash sector at the app slot
@@ -82,23 +83,8 @@ extern struct image_header app_image_header;  /* placed by linker */
 #define FLASH_ADDR_MAX       (XIP_BASE + PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 /* (the trailing FLASH_SECTOR_SIZE is reserved for persistent storage) */
 
-/* ============================================================
- * CRC32 — same polynomial/init/xorout as zlib/crc32; the gen_imghdr.py
- * helper and the server-side firmware-info compute the matching value.
- * Computed incrementally as the body streams in.
- * ============================================================ */
-
-static uint32_t crc32_update(uint32_t crc, const uint8_t* buf, size_t len)
-{
-	crc ^= 0xFFFFFFFFu;
-	while (len--) {
-		crc ^= *buf++;
-		for (int i = 0; i < 8; i++) {
-			crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(crc & 1));
-		}
-	}
-	return crc ^ 0xFFFFFFFFu;
-}
+/* CRC32 implementation lives in shared/src/crc32.c — same polynomial as
+ * gen_imghdr.py and the server-side firmware-info computation. */
 
 /* ============================================================
  * Image header read / write
@@ -111,7 +97,7 @@ static bool image_header_ok(const struct image_header* hdr)
 	if (hdr->vtor < XIP_BASE || hdr->vtor >= FLASH_ADDR_MAX) return false;
 	if (hdr->size == 0 || hdr->size > FLASH_ADDR_MAX - hdr->vtor) return false;
 
-	uint32_t crc = crc32_update(0, (const uint8_t*)hdr->vtor, hdr->size);
+	uint32_t crc = saint_crc32_update(0, (const uint8_t*)hdr->vtor, hdr->size);
 	if (crc != hdr->crc) return false;
 
 	const uint32_t* vtor = (const uint32_t*)hdr->vtor;
@@ -227,7 +213,7 @@ static int stage_body_cb(void* user, const uint8_t* data, size_t len)
 	stage_ctx_t* st = (stage_ctx_t*)user;
 	if (st->error) return -1;
 
-	st->crc32_running = crc32_update(st->crc32_running, data, len);
+	st->crc32_running = saint_crc32_update(st->crc32_running, data, len);
 
 	while (len > 0) {
 		size_t free_in_page = FLASH_PAGE_SIZE - st->page_buf_len;
@@ -433,7 +419,7 @@ static uint8_t perform_ota(uint32_t expected_size, uint32_t expected_crc,
 
 	/* Image body is in flash. Verify by recomputing CRC over the
 	 * flash itself (catches any silent program failure). */
-	uint32_t fcrc = crc32_update(0, (const uint8_t*)expected_vtor, expected_size);
+	uint32_t fcrc = saint_crc32_update(0, (const uint8_t*)expected_vtor, expected_size);
 	if (fcrc != expected_crc) {
 		printf("OTA: post-write flash CRC mismatch (0x%08x)\n", (unsigned)fcrc);
 		return OTA_FAIL_FLASH_CRC;

@@ -40,10 +40,10 @@ const fmt = (v) => props.spec.format ? props.spec.format(v) : Number(v).toFixed(
 <template>
   <div>
     <div class="flex items-center justify-between mb-2">
-      <span class="text-sm font-medium text-white">{{ label }}</span>
+      <span class="text-sm font-medium text-fg-strong">{{ label }}</span>
       <div class="flex items-center gap-2">
         <span class="text-sm text-cyan-400 font-mono w-20 text-right">{{ fmt(local) }}</span>
-        <button class="text-xs text-slate-400 hover:text-slate-200 transition-colors" @click="reset">
+        <button class="text-xs text-fg-muted hover:text-fg-strong transition-colors" @click="reset">
           <span class="material-icons icon-sm align-middle">restart_alt</span>
         </button>
       </div>
@@ -55,12 +55,12 @@ const fmt = (v) => props.spec.format ? props.spec.format(v) : Number(v).toFixed(
       @input="onInput"
       @change="onChange"
     />
-    <div class="flex justify-between mt-1 text-xs text-slate-500">
+    <div class="flex justify-between mt-1 text-xs text-fg-faint">
       <span>{{ fmt(spec.min) }}</span>
       <span>{{ fmt(spec.neutral) }}</span>
       <span>{{ fmt(spec.max) }}</span>
     </div>
-    <div v-if="spec.hint" class="text-xs text-slate-500 mt-1">{{ spec.hint }}</div>
+    <div v-if="spec.hint" class="text-xs text-fg-faint mt-1">{{ spec.hint }}</div>
     <div v-if="spec.unsupported" class="text-xs text-amber-400/80 mt-1 flex items-center gap-1">
       <span class="material-icons icon-sm">construction</span>{{ spec.note || 'Not yet supported.' }}
     </div>

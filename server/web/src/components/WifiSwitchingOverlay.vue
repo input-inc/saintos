@@ -37,11 +37,11 @@ onUnmounted(() => {
 
 <template>
   <div v-if="visible" class="fixed inset-0 z-50 bg-black/80 flex items-center justify-center">
-    <div class="text-center text-white">
+    <div class="text-center text-fg-strong">
       <div class="material-icons text-6xl text-cyan-400 mb-4 animate-spin">refresh</div>
       <h3 class="text-xl font-semibold mb-2">Restarting WiFi AP…</h3>
-      <p class="text-slate-400 mb-2">The dashboard will reconnect when the AP returns.</p>
-      <p class="text-xs text-slate-500">
+      <p class="text-fg-muted mb-2">The dashboard will reconnect when the AP returns.</p>
+      <p class="text-xs text-fg-faint">
         {{ detail || 'If you changed the SSID or password, you may need to reconnect your laptop/phone to the new network manually.' }}
       </p>
     </div>

@@ -110,12 +110,12 @@ async function submit () {
 
     <div class="space-y-4">
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-2">Node ID</label>
-        <div class="input-field w-full bg-slate-900/50 text-slate-400 font-mono">{{ node.node_id }}</div>
+        <label class="block text-sm font-medium text-fg mb-2">Node ID</label>
+        <div class="input-field w-full bg-canvas/50 text-fg-muted font-mono">{{ node.node_id }}</div>
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-2">Chip</label>
+        <label class="block text-sm font-medium text-fg mb-2">Chip</label>
         <select v-model="chipFamily" class="input-field w-full">
           <option value="">-- Select Chip --</option>
           <option v-for="c in chips" :key="c.chip_family" :value="c.chip_family">
@@ -125,32 +125,32 @@ async function submit () {
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-2">Board</label>
+        <label class="block text-sm font-medium text-fg mb-2">Board</label>
         <select v-model="boardId" class="input-field w-full">
           <option value="">-- Select Board --</option>
           <option v-for="b in boards" :key="b.board_id" :value="b.board_id">
             {{ b.display_name }}{{ b.builtin ? '' : '  (custom)' }}
           </option>
         </select>
-        <p class="text-xs text-slate-500 mt-1">
+        <p class="text-xs text-fg-faint mt-1">
           Changing the board re-derives pin layout and re-seeds built-in peripherals.
         </p>
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-2">Role</label>
+        <label class="block text-sm font-medium text-fg mb-2">Role</label>
         <select v-model="role" class="input-field w-full">
           <option value="">-- Select Role --</option>
           <option v-for="r in roles" :key="r.role" :value="r.role">
             {{ r.display_name || r.role }}
           </option>
         </select>
-        <p v-if="roleDescription" class="text-xs text-slate-500 mt-1">{{ roleDescription }}</p>
+        <p v-if="roleDescription" class="text-xs text-fg-faint mt-1">{{ roleDescription }}</p>
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-2">
-          Display Name <span class="text-slate-500">(optional)</span>
+        <label class="block text-sm font-medium text-fg mb-2">
+          Display Name <span class="text-fg-faint">(optional)</span>
         </label>
         <input v-model="displayName" type="text" class="input-field w-full" placeholder="e.g., Left Arm Controller" />
       </div>

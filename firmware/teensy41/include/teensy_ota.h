@@ -33,6 +33,7 @@ typedef enum {
     SAINT_OTA_ERR_SIZE       = -4,   /* bytes_received != expected_size */
     SAINT_OTA_ERR_CRC        = -5,   /* CRC32 mismatch                  */
     SAINT_OTA_ERR_FLASH      = -6,   /* flash_write_block failed        */
+    SAINT_OTA_ERR_TARGET     = -7,   /* FLASH_ID not found — wrong MCU  */
 } saint_ota_result_t;
 
 /** Perform a complete OTA cycle. Returns SAINT_OTA_OK on success and

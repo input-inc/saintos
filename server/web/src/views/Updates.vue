@@ -66,7 +66,7 @@ const releaseNotes    = computed(() => state.value.release_notes || '')
 <template>
   <section>
     <div v-if="!embedded" class="flex items-center justify-between mb-6">
-      <h2 class="text-2xl font-bold text-white">Software updates</h2>
+      <h2 class="text-2xl font-bold text-fg-strong">Software updates</h2>
       <div class="flex items-center gap-2">
         <button class="btn-secondary text-sm" @click="checkNow"><span class="material-icons icon-sm">refresh</span>Check now</button>
         <button class="btn-secondary text-sm" @click="scanUsb"><span class="material-icons icon-sm">usb</span>Scan USB</button>
@@ -91,9 +91,9 @@ const releaseNotes    = computed(() => state.value.release_notes || '')
         </div>
 
         <div class="flex flex-col items-stretch justify-center gap-3">
-          <div v-if="downloading" class="text-sm text-slate-300 space-y-2">
+          <div v-if="downloading" class="text-sm text-fg space-y-2">
             <div>Downloading {{ latestVersion }}…</div>
-            <div class="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+            <div class="w-full h-2 bg-surface rounded-full overflow-hidden">
               <div class="h-full bg-cyan-500" :style="{ width: `${Math.round((progress || 0) * 100)}%` }" />
             </div>
           </div>
@@ -105,20 +105,20 @@ const releaseNotes    = computed(() => state.value.release_notes || '')
             <span class="material-icons icon-sm">system_update_alt</span>
             Install
           </button>
-          <p v-else class="text-sm text-slate-400 text-center">No updates available.</p>
+          <p v-else class="text-sm text-fg-muted text-center">No updates available.</p>
         </div>
       </div>
     </div>
 
     <div v-if="usbAvailable.length" class="card mt-4">
-      <h3 class="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+      <h3 class="text-lg font-semibold text-fg-strong mb-3 flex items-center gap-2">
         <span class="material-icons text-amber-400">usb</span>
         Install from USB
       </h3>
-      <ul class="divide-y divide-slate-700/50 text-sm">
+      <ul class="divide-y divide-line/50 text-sm">
         <li v-for="u in usbAvailable" :key="u.version" class="flex items-center gap-3 py-2">
           <span class="font-mono">{{ u.version }}</span>
-          <span class="text-slate-500 text-xs">{{ u.path || '' }}</span>
+          <span class="text-fg-faint text-xs">{{ u.path || '' }}</span>
           <span class="flex-1" />
           <button class="btn-secondary text-sm" @click="stageUsb(u.version)">Stage</button>
         </li>
@@ -126,18 +126,18 @@ const releaseNotes    = computed(() => state.value.release_notes || '')
     </div>
 
     <AppModal v-if="installModalOpen" title="Confirm install" @close="installModalOpen = false">
-      <p class="text-sm text-slate-300 mb-3">Installing will restart the server. Active connections will reconnect automatically.</p>
-      <pre v-if="releaseNotes" class="text-xs font-mono text-slate-300 bg-slate-900 rounded p-3 overflow-x-auto max-h-64">{{ releaseNotes }}</pre>
+      <p class="text-sm text-fg mb-3">Installing will restart the server. Active connections will reconnect automatically.</p>
+      <pre v-if="releaseNotes" class="text-xs font-mono text-fg bg-canvas rounded p-3 overflow-x-auto max-h-64">{{ releaseNotes }}</pre>
       <template #actions>
         <button class="btn-secondary" @click="installModalOpen = false">Cancel</button>
         <button class="btn-danger" @click="confirmInstall">Install now</button>
       </template>
     </AppModal>
 
-    <div v-if="installing" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm">
+    <div v-if="installing" class="fixed inset-0 z-50 flex items-center justify-center bg-canvas/80 backdrop-blur-sm">
       <div class="text-center">
         <span class="material-icons text-cyan-400 animate-spin" style="font-size: 64px;">refresh</span>
-        <p class="mt-4 text-slate-200">Installing update… the server will restart.</p>
+        <p class="mt-4 text-fg-strong">Installing update… the server will restart.</p>
       </div>
     </div>
   </section>

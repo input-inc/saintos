@@ -137,6 +137,53 @@ export const peripheralCatalog = [
   ptype('led', 'LED', 'A digital output on a GPIO pin.', 'gpio',
     [chan('on', 'On', 'out', 'digital_out')],
     [{ id: 'active_low', label: 'Active low', type: 'bool', default: false }]),
+  ptype('servo', 'Servo (PWM)', 'Hobby servo on a PWM-capable pin.', 'pwm',
+    [chan('angle', 'Angle', 'out', 'analog')],
+    [{ id: 'min_pulse_us', label: 'Min pulse (µs)', type: 'int', default:  500, min: 100, max: 3000 },
+     { id: 'max_pulse_us', label: 'Max pulse (µs)', type: 'int', default: 2500, min: 100, max: 3000 }]),
+  ptype('pwm', 'PWM Output',
+    'Generic PWM output on a PWM-capable pin. Independent frequency and duty cycle.',
+    'pwm',
+    [chan('duty', 'Duty cycle (0–1)', 'out', 'analog')],
+    [{ id: 'frequency_hz', label: 'Frequency (Hz)',    type: 'int',   default: 1000, min: 1,   max: 200000 },
+     { id: 'initial_duty', label: 'Initial duty (0–1)', type: 'float', default: 0.0,  min: 0.0, max: 1.0 },
+     { id: 'invert',       label: 'Invert output',     type: 'bool',  default: false }]),
+  // Pololu Maestro — one entry with channel_count as a constrained
+  // enum param. Catalog exposes 24 channels statically; UI clips to
+  // the operator's chosen count. See server/docs/MAESTRO_PROTOCOL.md.
+  ptype('maestro', 'Pololu Maestro',
+    'Pololu Maestro USB / TTL servo controller. Pick channel count to match your SKU.',
+    'uart',
+    Array.from({ length: 24 }, (_, i) => chan(`ch${i}`, `Channel ${i}`, 'out', 'analog')),
+    [{ id: 'channel_count',  label: 'Channel count', type: 'int', default: 6, choices: [
+        { value:  6, label: 'Micro Maestro · 6 ch' },
+        { value: 12, label: 'Mini Maestro · 12 ch' },
+        { value: 18, label: 'Mini Maestro · 18 ch' },
+        { value: 24, label: 'Mini Maestro · 24 ch' },
+     ] },
+     { id: 'device_number',  label: 'Device number (0–127)',  type: 'int',   default: 12,   min: 0,   max: 127 },
+     { id: 'baud_rate',      label: 'Baud rate',              type: 'int',   default: 9600,
+       choices: [
+         { value:   1200, label:   '1200 bps' },
+         { value:   2400, label:   '2400 bps' },
+         { value:   4800, label:   '4800 bps' },
+         { value:   9600, label:   '9600 bps (Maestro default)' },
+         { value:  19200, label:  '19200 bps' },
+         { value:  38400, label:  '38400 bps' },
+         { value:  57600, label:  '57600 bps' },
+         { value: 115200, label: '115200 bps (auto-detect max)' },
+         { value: 200000, label: '200000 bps (fixed-baud max)' },
+       ],
+       help: "Must match the rate configured in the Maestro Control Center. The Maestro's auto-detect mode locks onto the first 0xAA byte and supports up to 115200; fixed-baud mode goes up to 200000.",
+     },
+     { id: 'min_pulse_us',   label: 'Min pulse (µs)',         type: 'int',   default: 1000, min: 64,  max: 3200 },
+     { id: 'max_pulse_us',   label: 'Max pulse (µs)',         type: 'int',   default: 2000, min: 64,  max: 3200 },
+     { id: 'idle_value',     label: 'Idle value (0–1)',       type: 'float', default: 0.5,  min: 0.0, max: 1.0 },
+     { id: 'speed_limit',    label: 'Speed limit (0 = off)',  type: 'int',   default: 0,    min: 0,   max: 65535 },
+     { id: 'accel_limit',    label: 'Accel limit (0 = off)',  type: 'int',   default: 0,    min: 0,   max: 255 },
+     { id: 'poll_positions', label: 'Poll live positions',    type: 'bool',  default: false,
+       help: "When on, the driver issues a Get Position query for each channel every tick so the UI can show what the Maestro is actually doing (servos honoring speed / accel limits land here gradually, not instantly). Off by default: at 9600 baud each query costs ≈3 ms, so polling 24 channels is too expensive for a 100 Hz control loop. Leave it off unless you're debugging.",
+     }]),
   ptype('analog_in', 'Analog Input', 'Voltage reading on an ADC pin.', 'adc',
     [chan('voltage', 'Voltage', 'in', 'analog')],
     [{ id: 'divider_ratio', label: 'Voltage divider ratio', type: 'float', default: 1.0 }]),
@@ -214,9 +261,25 @@ export const operatorCatalog = [
     [oin('a', 'A', 1.0), oin('b', 'B', 1.0)]),
   otype('clamp', 'Clamp', 'Clamp value into [min, max].',
     [oin('value', 'Value'), oin('min', 'Min', -1), oin('max', 'Max', 1)]),
+  otype('map_range', 'Map Range',
+    'Linearly remap value from [in_min, in_max] to [out_min, out_max]. ' +
+    "When 'Clamp input' is checked, values outside the input range are " +
+    'pinned to the nearest endpoint so the output never leaves the output range.',
+    [oin('value', 'Value'),
+     oin('in_min', 'In Min', -1.0), oin('in_max', 'In Max', 1.0),
+     oin('out_min', 'Out Min', 0.0), oin('out_max', 'Out Max', 1.0)],
+    [{ id: 'clamp', label: 'Clamp input to range', type: 'bool', default: true }]),
   otype('deadband', 'Deadband', 'Pass through if |value| > threshold.',
     [oin('value', 'Value'), oin('threshold', 'Threshold', 0.05)]),
   otype('invert', 'Invert', 'out = −value', [oin('value', 'Value')]),
+  otype('select', 'Select Input',
+    'Pick one of two sources. The preferred input wins whenever it has ' +
+    'a non-zero value; otherwise the other input passes through. Common ' +
+    'use: wire a joystick to the preferred pin and an animation to the ' +
+    'other so manual control overrides playback only while the operator ' +
+    'is actively pushing the stick.',
+    [oin('a', 'A'), oin('b', 'B')],
+    [{ id: 'prefer_a', label: 'Prefer A', type: 'bool', default: false }]),
 ]
 
 function ptype (id, label, description, pin_kind, channels, params, builtin_only = false) {
@@ -400,6 +463,216 @@ function logEntry (level, message) {
 // ── Subscription bookkeeping (per-client topic sets) ─────────────────
 
 export const clients = new Map()   // client_id -> { ws, subscriptions: Set, ... }
+
+// ── Animation builder fixtures (mock-only) ──────────────────────────
+//
+// Mirrors the real server's animation/pose stores. Persistence is
+// memory-only — restart the mock and you lose everything.
+
+export const animations = new Map()   // id → Animation JSON
+export const poses      = new Map()   // id → Pose JSON
+
+// Active playback state. Per id: { t, last_t, running, paused, loop, started_at }.
+// The mock-server tick loop advances `t` and samples value tracks into
+// live.animationValues so the routing canvas lights up.
+export const animationPlayers = new Map()
+
+// URDF model — single slot, replaced on every upload.
+//
+// Shape: { metadata: {…}, urdfBytes: Buffer, meshes: Map<string, Buffer> }
+// `metadata` matches what the real server's URDFStore writes to
+// metadata.json — original_filename, urdf_filename, sha256, uploaded_at,
+// mesh_files (filenames only), link_count, joint_count.
+export let urdfModel = null
+export function setUrdfModel (model) { urdfModel = model }
+export function getUrdfModel ()      { return urdfModel }
+
+// URDF-joint cache — animation players write here per tick and every
+// URDF-joint input on every sheet reads from here. Keyed by joint
+// name so any animation whose value-track id matches the joint drives
+// it (matches the real server's evaluator._urdf_joint_values).
+//
+// `live_animation_track_origins` tracks which animation owns which
+// joint write so clearAnimationValues can zero out only that
+// animation's contributions when a player stops.
+export const live_urdf_joint_values = new Map()      // joint → value
+const live_animation_track_origins   = new Map()      // animation_id → Set(joint)
+export function setUrdfJointValue (animation_id, joint, value) {
+  live_urdf_joint_values.set(joint, value)
+  let owned = live_animation_track_origins.get(animation_id)
+  if (!owned) {
+    owned = new Set()
+    live_animation_track_origins.set(animation_id, owned)
+  }
+  owned.add(joint)
+}
+export function getUrdfJointValue (joint) {
+  return live_urdf_joint_values.get(joint)
+}
+export function clearAnimationValues (animation_id) {
+  const owned = live_animation_track_origins.get(animation_id)
+  if (!owned) return
+  for (const joint of owned) live_urdf_joint_values.delete(joint)
+  live_animation_track_origins.delete(animation_id)
+}
+
+// ── Curve sampling (mirrors saint_server/unreal/animation.py) ───────
+//
+// Interp encoding matches the Vue catalog in
+// src/composables/easings.js:
+//   0 CONSTANT   1 LINEAR   2 CUBIC (Hermite)
+//   3-6   CSS basics (ease, ease-in, ease-out, ease-in-out)
+//   10-39 easings.net palette (Sine / Quad / Cubic / Quart / Quint /
+//         Expo / Circ / Back / Elastic / Bounce, each in/out/inOut)
+//
+// Keep this in sync with src/composables/easings.js — any divergence
+// shows up as a preview-vs-playback mismatch.
+
+const MOCK_EASING_BEZIERS = {
+  1: [0,    0,   1,    1],
+  3: [0.25, 0.1, 0.25, 1],
+  4: [0.42, 0,   1,    1],
+  5: [0,    0,   0.58, 1],
+  6: [0.42, 0,   0.58, 1],
+}
+
+const _C1 = 1.70158, _C2 = _C1 * 1.525, _C3 = _C1 + 1
+const _C4 = (2 * Math.PI) / 3, _C5 = (2 * Math.PI) / 4.5
+const _N1 = 7.5625, _D1 = 2.75
+function _bounceOut (x) {
+  if (x < 1 / _D1)   return _N1 * x * x
+  if (x < 2 / _D1)   return _N1 * (x -= 1.5 / _D1)   * x + 0.75
+  if (x < 2.5 / _D1) return _N1 * (x -= 2.25 / _D1)  * x + 0.9375
+  return                    _N1 * (x -= 2.625 / _D1) * x + 0.984375
+}
+function _easingsNet (code, t) {
+  if (t <= 0) return 0
+  if (t >= 1) return 1
+  switch (code) {
+    case 10: return 1 - Math.cos((t * Math.PI) / 2)
+    case 11: return Math.sin((t * Math.PI) / 2)
+    case 12: return -(Math.cos(Math.PI * t) - 1) / 2
+    case 13: return t * t
+    case 14: return 1 - (1 - t) * (1 - t)
+    case 15: return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2
+    case 16: return t * t * t
+    case 17: return 1 - Math.pow(1 - t, 3)
+    case 18: return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+    case 19: return t * t * t * t
+    case 20: return 1 - Math.pow(1 - t, 4)
+    case 21: return t < 0.5 ? 8 * t ** 4 : 1 - Math.pow(-2 * t + 2, 4) / 2
+    case 22: return t ** 5
+    case 23: return 1 - Math.pow(1 - t, 5)
+    case 24: return t < 0.5 ? 16 * t ** 5 : 1 - Math.pow(-2 * t + 2, 5) / 2
+    case 25: return t === 0 ? 0 : Math.pow(2, 10 * t - 10)
+    case 26: return t === 1 ? 1 : 1 - Math.pow(2, -10 * t)
+    case 27: {
+      if (t === 0) return 0
+      if (t === 1) return 1
+      return t < 0.5 ? Math.pow(2, 20 * t - 10) / 2
+                     : (2 - Math.pow(2, -20 * t + 10)) / 2
+    }
+    case 28: return 1 - Math.sqrt(1 - t * t)
+    case 29: return Math.sqrt(1 - (t - 1) ** 2)
+    case 30: return t < 0.5
+      ? (1 - Math.sqrt(1 - (2 * t) ** 2)) / 2
+      : (Math.sqrt(1 - (-2 * t + 2) ** 2) + 1) / 2
+    case 31: return _C3 * t ** 3 - _C1 * t * t
+    case 32: return 1 + _C3 * Math.pow(t - 1, 3) + _C1 * Math.pow(t - 1, 2)
+    case 33: return t < 0.5
+      ? (Math.pow(2 * t, 2) * ((_C2 + 1) * 2 * t - _C2)) / 2
+      : (Math.pow(2 * t - 2, 2) * ((_C2 + 1) * (t * 2 - 2) + _C2) + 2) / 2
+    case 34: {
+      if (t === 0) return 0
+      if (t === 1) return 1
+      return -Math.pow(2, 10 * t - 10) * Math.sin((t * 10 - 10.75) * _C4)
+    }
+    case 35: {
+      if (t === 0) return 0
+      if (t === 1) return 1
+      return Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * _C4) + 1
+    }
+    case 36: {
+      if (t === 0) return 0
+      if (t === 1) return 1
+      return t < 0.5
+        ? -(Math.pow(2, 20 * t - 10) * Math.sin((20 * t - 11.125) * _C5)) / 2
+        : (Math.pow(2, -20 * t + 10) * Math.sin((20 * t - 11.125) * _C5)) / 2 + 1
+    }
+    case 37: return 1 - _bounceOut(1 - t)
+    case 38: return _bounceOut(t)
+    case 39: return t < 0.5
+      ? (1 - _bounceOut(1 - 2 * t)) / 2
+      : (1 + _bounceOut(2 * t - 1)) / 2
+    default: return t
+  }
+}
+function cubicBezierAtTime (t, c1x, c1y, c2x, c2y) {
+  if (t <= 0) return 0
+  if (t >= 1) return 1
+  let s = t
+  for (let i = 0; i < 8; i++) {
+    const one_s = 1 - s
+    const x = 3 * one_s * one_s * s * c1x
+            + 3 * one_s * s * s * c2x
+            + s * s * s
+    const dx = 3 * one_s * one_s * c1x
+             + 6 * one_s * s * (c2x - c1x)
+             + 3 * s * s * (1 - c2x)
+    if (Math.abs(x - t) < 1e-5 || Math.abs(dx) < 1e-6) break
+    s -= (x - t) / dx
+    if (s < 0) s = 0
+    if (s > 1) s = 1
+  }
+  const one_s = 1 - s
+  return 3 * one_s * one_s * s * c1y
+       + 3 * one_s * s * s * c2y
+       + s * s * s
+}
+export function sampleCurve (curve, time) {
+  const keys = curve?.keys || []
+  if (!keys.length) return 0
+  if (time <= keys[0].time) return keys[0].value
+  if (time >= keys[keys.length - 1].time) return keys[keys.length - 1].value
+  for (let i = 0; i < keys.length - 1; i++) {
+    const k0 = keys[i], k1 = keys[i + 1]
+    if (k0.time <= time && time <= k1.time) {
+      const dt = k1.time - k0.time
+      const t = dt === 0 ? 0 : (time - k0.time) / dt
+      const interp = k0.interp ?? 1
+      if (interp === 0) return k0.value
+      if (interp === 2) {
+        const t2 = t * t, t3 = t2 * t
+        const h1 = 2 * t3 - 3 * t2 + 1
+        const h2 = -2 * t3 + 3 * t2
+        const h3 = t3 - 2 * t2 + t
+        const h4 = t3 - t2
+        return (h1 * k0.value + h2 * k1.value +
+                h3 * (k0.leave_tangent || 0) * dt +
+                h4 * (k1.arrive_tangent || 0) * dt)
+      }
+      const cp = MOCK_EASING_BEZIERS[interp]
+      if (cp) {
+        const y = cubicBezierAtTime(t, cp[0], cp[1], cp[2], cp[3])
+        return k0.value + y * (k1.value - k0.value)
+      }
+      if (interp >= 10 && interp <= 39) {
+        const y = _easingsNet(interp, t)
+        return k0.value + y * (k1.value - k0.value)
+      }
+      return k0.value + t * (k1.value - k0.value)
+    }
+  }
+  return keys[keys.length - 1].value
+}
+
+export function slugify (name) {
+  return String(name || '').toLowerCase()
+    .replace(/[^a-z0-9_-\s]+/g, '').trim()
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 64) || 'untitled'
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

@@ -61,7 +61,7 @@ function classFor (level) {
 <template>
   <div class="card">
     <div class="flex items-center justify-between mb-4">
-      <h3 class="text-lg font-semibold text-white">Logs</h3>
+      <h3 class="text-lg font-semibold text-fg-strong">Logs</h3>
       <button class="btn-secondary text-sm" @click="clear">
         <span class="material-icons icon-sm">clear</span>
         Clear
@@ -70,7 +70,7 @@ function classFor (level) {
 
     <div
       v-if="!entries.length"
-      class="text-slate-500 italic text-sm py-6 text-center"
+      class="text-fg-faint italic text-sm py-6 text-center"
     >No logs yet.</div>
 
     <div
@@ -83,7 +83,7 @@ function classFor (level) {
         :key="i"
         :class="['log-entry', classFor(e.level)]"
       >
-        <span class="text-slate-500 mr-2">{{ fmtTime(e.time) }}</span>
+        <span class="text-fg-faint mr-2">{{ fmtTime(e.time) }}</span>
         {{ e.text || '' }}
       </div>
     </div>

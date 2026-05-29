@@ -120,6 +120,23 @@ export const managementHandlers = {
     widget_types: st.widgetCatalog,
     operator_types: st.operatorCatalog,
   }),
+  // Flat enumeration of WS inputs across every sheet — powers the
+  // trigger-keyframe target picker in the animation builder.
+  list_ws_inputs: () => {
+    const out = []
+    for (const [sheetId, sheet] of Object.entries(st.systemRouting.sheets)) {
+      for (const wsi of (sheet.ws_inputs || [])) {
+        out.push({
+          sheet_id: sheetId,
+          sheet_label: sheetId,
+          input_id: wsi.id,
+          label: wsi.label || wsi.id,
+          kind: wsi.kind || 'command',
+        })
+      }
+    }
+    return ok({ ws_inputs: out })
+  },
   get_node_peripherals: ({ node_id }) => {
     const pc = st.nodePeripherals[node_id]
     if (!pc) return err(`Node ${node_id} not found`)
@@ -128,6 +145,10 @@ export const managementHandlers = {
   save_node_peripheral: ({ node_id, peripheral }, ctx) => {
     const pc = st.nodePeripherals[node_id]
     if (!pc) return err(`Node ${node_id} not found`)
+    if (!peripheral || typeof peripheral !== 'object') {
+      return err('Missing peripheral payload (expected { peripheral: { type, label, pins, params } })')
+    }
+    if (!peripheral.type) return err('Peripheral type is required')
     const pid = peripheral.id ||
       `${peripheral.type}-${pc.peripherals.filter(p => p.type === peripheral.type).length + 1}`
     const idx = pc.peripherals.findIndex(p => p.id === pid)
@@ -176,10 +197,19 @@ export const managementHandlers = {
 
   // Routing (system_routing graph) ─────────────────────────────────
   get_system_routing:  () => ok(st.systemRouting),
-  add_routing_input:   ({ node_id, topic, field = '', label = '', position = [40, 40] }, ctx) => {
+  add_routing_input:   ({ node_id, topic = '', field = '', joint = '',
+                          kind = 'topic', label = '',
+                          position = [40, 40] }, ctx) => {
     const sheet = ensureSheet(node_id)
     const id = nextId(sheet.inputs, 'in')
-    sheet.inputs.push({ id, topic, field, label: label || `${topic}.${field}`, position })
+    // Default label: joint name for urdf_joint, else topic.field.
+    const fallback = kind === 'urdf_joint'
+      ? (joint || 'joint')
+      : `${topic}${field ? '.' + field : ''}`
+    sheet.inputs.push({
+      id, topic, field, joint, kind,
+      label: label || fallback, position,
+    })
     bumpRouting(ctx)
     return ok({ id })
   },
@@ -228,7 +258,7 @@ export const managementHandlers = {
     if (!sheet) return err('Sheet not found')
     const target = findSheetNode(sheet, sheet_node_id)
     if (!target) return err('Sheet node not found')
-    for (const k of ['label', 'params', 'defaults', 'position', 'topic', 'field']) {
+    for (const k of ['label', 'params', 'defaults', 'position', 'topic', 'field', 'kind', 'joint']) {
       if (changes[k] !== undefined) target[k] = changes[k]
     }
     bumpRouting(ctx)
@@ -238,6 +268,7 @@ export const managementHandlers = {
     const sheet = st.systemRouting.sheets[node_id]
     if (!sheet) return err('Sheet not found')
     for (const list of ['inputs', 'ws_inputs', 'outputs', 'operators', 'widgets']) {
+      if (!Array.isArray(sheet[list])) continue
       const idx = sheet[list].findIndex(x => x.id === sheet_node_id)
       if (idx >= 0) {
         sheet[list].splice(idx, 1)
@@ -334,6 +365,128 @@ export const managementHandlers = {
     available: null, installed_version: '0.5.0', server_version: '0.5.0',
   }),
   'update.check_now':  () => ok({ checking: true }),
+
+  // Animations ────────────────────────────────────────────────────
+  list_animations: () => ok({
+    animations: [...st.animations.values()].map(a => ({
+      id: a.id, name: a.name, duration: a.duration, fps: a.fps, loop: !!a.loop,
+      icon: a.icon || '', group: a.group || '',
+      value_tracks: a.value_tracks?.length || 0,
+      trigger_tracks: a.trigger_tracks?.length || 0,
+      modified: a.modified || '',
+    })),
+  }),
+  get_animation: ({ id }) => {
+    const a = st.animations.get(id)
+    return a ? ok({ animation: a }) : err('Not found')
+  },
+  save_animation: ({ animation }, ctx) => {
+    if (!animation || typeof animation !== 'object') return err('Invalid animation payload')
+    const id = st.slugify(animation.id || animation.name || 'untitled')
+    const now = new Date().toISOString()
+    const saved = {
+      ...animation, id,
+      created: animation.created || now,
+      modified: now,
+    }
+    st.animations.set(id, saved)
+    return ok({ success: true, animation: saved })
+  },
+  delete_animation: ({ id }, ctx) => {
+    st.animations.delete(id)
+    // Stop any active player. Animations now drive routing through
+    // URDF-joint inputs keyed by joint name, so deleting an animation
+    // doesn't invalidate sheet topology — the joint inputs just stop
+    // receiving values until another animation drives the same joint.
+    if (st.animationPlayers.has(id)) st.animationPlayers.delete(id)
+    st.clearAnimationValues(id)
+    st.systemRouting.version++
+    ctx.broadcast('system_routing', st.systemRouting)
+    return ok({ success: true })
+  },
+  start_animation: ({ id, loop }) => {
+    const a = st.animations.get(id)
+    if (!a) return err('Animation not found')
+    if (loop != null) a.loop = !!loop
+    st.animationPlayers.set(id, {
+      id, t: 0, last_t: 0, running: true, paused: false,
+      loop: !!a.loop, started_at: Date.now(),
+    })
+    return ok({ success: true })
+  },
+  stop_animation: ({ id }) => {
+    if (!st.animationPlayers.delete(id)) return err('Animation not running')
+    st.clearAnimationValues(id)
+    return ok({ success: true })
+  },
+  pause_animation: ({ id }) => {
+    const p = st.animationPlayers.get(id)
+    if (!p) return err('Animation not running')
+    p.paused = true
+    return ok({ success: true })
+  },
+  resume_animation: ({ id }) => {
+    const p = st.animationPlayers.get(id)
+    if (!p) return err('Animation not running')
+    p.paused = false
+    return ok({ success: true })
+  },
+  seek_animation: ({ id, t }) => {
+    const p = st.animationPlayers.get(id)
+    if (!p) return err('Animation not running')
+    p.t = Math.max(0, Number(t) || 0)
+    return ok({ success: true })
+  },
+  animation_state: () => ok({
+    players: [...st.animationPlayers.values()].map(p => {
+      const a = st.animations.get(p.id)
+      return {
+        id: p.id, name: a?.name || p.id, duration: a?.duration || 0,
+        t: p.t, running: p.running, paused: p.paused, loop: p.loop,
+      }
+    }),
+  }),
+
+  // Poses ──────────────────────────────────────────────────────────
+  list_poses: () => ok({
+    poses: [...st.poses.values()].map(p => ({
+      id: p.id, name: p.name,
+      icon: p.icon || '', group: p.group || '',
+      description: p.description || '',
+      setpoint_count: p.setpoints?.length || 0,
+      modified: p.modified || '',
+    })),
+  }),
+  get_pose: ({ id }) => {
+    const p = st.poses.get(id)
+    return p ? ok({ pose: p }) : err('Not found')
+  },
+  save_pose: ({ pose }) => {
+    if (!pose || typeof pose !== 'object') return err('Invalid pose payload')
+    const id = st.slugify(pose.id || pose.name || 'untitled')
+    const now = new Date().toISOString()
+    const saved = {
+      ...pose, id,
+      created: pose.created || now,
+      modified: now,
+    }
+    st.poses.set(id, saved)
+    return ok({ success: true, pose: saved })
+  },
+  delete_pose: ({ id }) => {
+    return st.poses.delete(id) ? ok({ success: true }) : err('Pose not found')
+  },
+  apply_pose: ({ id }, ctx) => {
+    const p = st.poses.get(id)
+    if (!p) return err('Pose not found')
+    // Mock can't actually write into the routing evaluator's ws_input
+    // cache, but reporting success lines up with what the UI shows
+    // when the real server applies a pose.
+    const applied = (p.setpoints || []).length
+    ctx.activity?.(`Applied pose ${p.name || id} (${applied} setpoint${applied === 1 ? '' : 's'})`, 'info')
+    return ok({ success: true, applied, skipped: [] })
+  },
+
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -413,11 +566,19 @@ export function handleCommand (action, params, ctx) {
 
 export function handleRouter (action, params, ctx) {
   if (action === 'list_websocket_inputs') {
-    // Flatten ws_inputs across every sheet.
+    // Flatten ws_inputs across every sheet. Includes sheet_label so the
+    // animation/pose target pickers can render readable names rather
+    // than raw node IDs.
     const ws_inputs = []
     for (const [sid, sheet] of Object.entries(st.systemRouting.sheets)) {
+      const node = st.findAdopted(sid)
+      const sheet_label = node?.display_name || sid
       for (const wi of sheet.ws_inputs) {
-        ws_inputs.push({ sheet_id: sid, input_id: wi.id, label: wi.label, kind: wi.kind })
+        ws_inputs.push({
+          sheet_id: sid, sheet_label,
+          input_id: wi.id, label: wi.label,
+          kind: wi.kind || 'command',
+        })
       }
     }
     return ok({ ws_inputs })

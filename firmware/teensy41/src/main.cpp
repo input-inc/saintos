@@ -19,6 +19,9 @@ extern "C" {
 #include "fas100_driver.h"
 #include "roboclaw_driver.h"
 #include "pathfinder_bms_driver.h"
+extern "C" {
+#include "saint_log.h"
+}
 }
 
 #include <rcl/rcl.h>
@@ -77,6 +80,7 @@ static rclc_executor_t executor;
 // Publishers
 static rcl_publisher_t announcement_pub;
 static rcl_publisher_t state_pub;
+static rcl_publisher_t log_pub;            // Node log lines (best-effort)
 
 // Subscribers
 static rcl_subscription_t config_sub;
@@ -102,6 +106,14 @@ static char command_buffer[512];
 
 static std_msgs__msg__String state_msg;
 static char state_buffer[2048];
+
+static std_msgs__msg__String log_msg;
+static char log_buffer[256];               // One log line at a time
+
+// Announces published since boot — used to gate saint_log boot-queue
+// drain (the server creates per-node /log subscriptions lazily, on
+// first /announce).
+static unsigned g_announce_count = 0;
 
 #define STATE_PUBLISH_INTERVAL_MS 100
 
@@ -420,6 +432,13 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     rcl_ret_t ret = rcl_publish(&announcement_pub, &announcement_msg, NULL);
     if (ret == RCL_RET_OK) {
         mark_agent_communication();
+        // The server creates the per-node /log subscription lazily on
+        // first announce, so wait for ≥2 announces before flushing the
+        // boot-log buffer — that gives the subscriber time to come up.
+        if (g_announce_count < 1000) g_announce_count++;
+        if (g_announce_count >= 2) {
+            saint_log_drain_boot_queue();
+        }
     }
 }
 
@@ -493,6 +512,15 @@ static bool init_micro_ros(void)
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic);
     if (ret != RCL_RET_OK) return false;
 
+    // Log publisher — per-node /log topic. Best-effort; shared/src/saint_log.c
+    // owns the publish path, this main just provides the rcl handle.
+    snprintf(topic, sizeof(topic), "/saint/nodes/%s/log", g_node.node_id);
+    for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
+    ret = rclc_publisher_init_default(&log_pub, &ros_node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic);
+    if (ret != RCL_RET_OK) return false;
+    saint_log_set_ros_ready(true);
+
     // Timers
     ret = rclc_timer_init_default(&announce_timer, &support,
         RCL_MS_TO_NS(ANNOUNCE_INTERVAL_MS), announce_timer_callback);
@@ -524,6 +552,8 @@ static void cleanup_micro_ros(void)
     rcl_subscription_fini(&command_sub, &ros_node);
     rcl_subscription_fini(&control_sub, &ros_node);
     rcl_subscription_fini(&config_sub, &ros_node);
+    saint_log_set_ros_ready(false);
+    rcl_publisher_fini(&log_pub, &ros_node);
     rcl_publisher_fini(&state_pub, &ros_node);
     rcl_publisher_fini(&announcement_pub, &ros_node);
     rcl_timer_fini(&state_timer);
@@ -531,6 +561,30 @@ static void cleanup_micro_ros(void)
     rclc_executor_fini(&executor);
     rcl_node_fini(&ros_node);
     rclc_support_fini(&support);
+}
+
+// ============================================================================
+// saint_log per-platform hooks (shared/src/saint_log.c calls these)
+// ============================================================================
+
+extern "C" void saint_log_emit_local(const char* level, const char* text)
+{
+    Serial.printf("[%s] %s\n", level, text);
+}
+
+extern "C" bool saint_log_emit_ros(const char* json, size_t len)
+{
+    if (len >= sizeof(log_buffer)) return false;
+    memcpy(log_buffer, json, len);
+    log_msg.data.data     = log_buffer;
+    log_msg.data.size     = len;
+    log_msg.data.capacity = sizeof(log_buffer);
+    return rcl_publish(&log_pub, &log_msg, NULL) == RCL_RET_OK;
+}
+
+extern "C" uint32_t saint_log_uptime_ms(void)
+{
+    return (uint32_t)millis();
 }
 
 // ============================================================================
@@ -624,20 +678,29 @@ void setup()
     // Initialize pin configuration
     pin_config_init();
 
-    // Load saved pin configuration
-    if (pin_config_load()) {
-        Serial.printf("Loaded pin configuration from flash\n");
-    }
-
     // Initialize pin control
     pin_control_init();
 
-    // Register and initialize peripheral drivers
+    // Register peripheral drivers BEFORE loading config from flash.
+    // pin_config_load() walks the registered-drivers list and calls
+    // each driver's load_config(&storage) so it can read its stored
+    // pins/enabled flag. If we load first and register after, that
+    // loop runs over zero drivers and the per-driver flash data is
+    // silently discarded — leaving drivers in their default state
+    // even after a reboot of a previously-configured node. Matches
+    // the order used in firmware/rp2040/src/main.c.
     peripheral_register(maestro_get_peripheral_driver());
     peripheral_register(syren_get_peripheral_driver());
     peripheral_register(fas100_get_peripheral_driver());
     peripheral_register(roboclaw_get_peripheral_driver());
     peripheral_register(pathfinder_bms_get_peripheral_driver());
+
+    // Load saved pin configuration (also fans out to each driver's
+    // load_config callback).
+    if (pin_config_load()) {
+        Serial.printf("Loaded pin configuration from flash\n");
+    }
+
     peripheral_init_all();
 
     // Initialize hardware

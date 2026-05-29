@@ -24,7 +24,7 @@ async function open () {
       cursorBlink: true, fontSize: 13,
       fontFamily: '"JetBrains Mono", "Menlo", "Consolas", monospace',
       scrollback: 5000,
-      theme: { background: '#000000', foreground: '#e2e8f0', cursor: '#22d3ee', selectionBackground: '#334155' },
+      theme: { background: '#000000', foreground: 'var(--color-fg)', cursor: '#22d3ee', selectionBackground: 'var(--color-surface)' },
       convertEol: false,
     })
     fit = new FitAddon()
@@ -99,15 +99,15 @@ onUnmounted(close)
 <template>
   <section class="flex flex-col" style="height: calc(100vh - 12rem);">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="text-2xl font-bold text-white">Terminal</h2>
+      <h2 class="text-2xl font-bold text-fg-strong">Terminal</h2>
       <div class="flex items-center gap-3">
-        <span class="text-xs text-slate-400 font-mono">{{ status }}</span>
+        <span class="text-xs text-fg-muted font-mono">{{ status }}</span>
         <button class="btn-secondary text-sm" @click="restart">
           <span class="material-icons icon-sm">restart_alt</span>
           Restart
         </button>
       </div>
     </div>
-    <div ref="mount" class="flex-1 bg-black border border-slate-700 rounded-lg overflow-hidden" />
+    <div ref="mount" class="flex-1 bg-black border border-line rounded-lg overflow-hidden" />
   </section>
 </template>

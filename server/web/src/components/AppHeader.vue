@@ -17,26 +17,26 @@ function estop () {
 </script>
 
 <template>
-  <header class="sticky top-0 z-50 bg-slate-900/80 backdrop-blur-lg border-b border-slate-700/50">
+  <header class="sticky top-0 z-50 bg-canvas/80 backdrop-blur-lg border-b border-line/50">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
       <div class="flex items-center justify-between h-16">
         <!-- Logo -->
         <div class="flex items-center gap-3">
           <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
-            <span class="material-icons text-white icon-md">computer</span>
+            <span class="material-icons text-fg-strong icon-md">computer</span>
           </div>
           <div>
-            <h1 class="text-xl font-bold text-white leading-tight">SAINT.OS</h1>
-            <p class="text-xs text-slate-400">Administration Console</p>
+            <h1 class="text-xl font-bold text-fg-strong leading-tight">SAINT.OS</h1>
+            <p class="text-xs text-fg-muted">Administration Console</p>
           </div>
         </div>
 
         <!-- Connection pill -->
-        <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+        <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-panel border border-line">
           <span :class="['status-dot w-2 h-2 rounded-full', status.dot]" />
-          <span class="text-sm text-slate-300">{{ status.text }}</span>
-          <button class="ml-1 p-0.5 rounded hover:bg-slate-700 transition-colors" title="Disconnect" @click="disconnect">
-            <span class="material-icons text-slate-400 text-base">logout</span>
+          <span class="text-sm text-fg">{{ status.text }}</span>
+          <button class="ml-1 p-0.5 rounded hover:bg-surface transition-colors" title="Disconnect" @click="disconnect">
+            <span class="material-icons text-fg-muted text-base">logout</span>
           </button>
         </div>
 

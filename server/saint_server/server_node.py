@@ -1324,6 +1324,10 @@ class SaintServerNode(Node):
                     self.ros_bridge = ROSBridge(self, logger=self.get_logger())
                     self.ros_bridge.initialize()
                     self.web_server.ws_handler.set_ros_bridge(self.ros_bridge)
+                    # Animation trigger tracks need the bridge to
+                    # publish on `topic`-kind dispatches; the registry
+                    # spins up once both bridge + evaluator are present.
+                    self.state_manager.set_ros_bridge(self.ros_bridge)
                     # Override the callback to use thread-safe async broadcast
                     self.ros_bridge.set_message_callback(self._broadcast_ros_message)
                     self.get_logger().info('ROS Bridge initialized and connected to WebSocket handler')

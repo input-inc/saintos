@@ -129,6 +129,15 @@ const graphNodes = computed(() => {
 function meta (g) {
   if (g.kind === 'input') {
     const inp = g.data
+    if (inp.kind === 'urdf_joint') {
+      return {
+        title: inp.label || inp.joint || 'URDF joint',
+        subtitle: `URDF · joint ${inp.joint || '?'}`,
+        builtin: false, removable: true,
+        inputs: [],
+        outputs: [{ id: 'out', label: 'value' }],
+      }
+    }
     const topicMeta = props.topicCatalog.find(t => t.topic === inp.topic)
     return {
       title: inp.label || `${inp.topic}${inp.field ? '.' + inp.field : ''}`,
@@ -173,12 +182,24 @@ function meta (g) {
       builtin: false, removable: true,
       inputs: ins,
       outputs: [{ id: 'out', label: 'out' }],
+      // Static config knobs (bool / int / float) declared by the
+      // operator's catalog entry. Rendered below the pin list on the
+      // node card.
+      params: (type?.params || []).map(spec => ({
+        id: spec.id, label: spec.label, type: spec.type, default: spec.default,
+      })),
     }
   }
   if (g.kind === 'peripheral') {
     const p = g.peripheral
     const type = peripheralType(p.type)
-    const channels = type?.channels || []
+    let channels = type?.channels || []
+    // Maestro: one catalog entry, 24 channels declared, instance
+    // picks how many to expose via params.channel_count.
+    if (p.type === 'maestro') {
+      const n = Number(p.params?.channel_count) || 6
+      channels = channels.slice(0, n)
+    }
     return {
       title: p.label || p.id,
       subtitle: `${type?.label || p.type} on ${g.nodeLabel}`,
@@ -427,6 +448,27 @@ async function setOperatorDefault (opId, pinId, valStr) {
   } catch (e) { console.warn('update_sheet_node failed:', e) }
 }
 
+function operatorParam (op, param) {
+  if (op.params && op.params[param.id] !== undefined) return op.params[param.id]
+  return param.default
+}
+async function setOperatorParam (opId, param, value) {
+  const op = (props.sheet?.operators || []).find(o => o.id === opId)
+  if (!op) return
+  // Coerce by declared type so we don't accidentally save a bool as
+  // the string "false" or an int as a float.
+  let coerced = value
+  if (param.type === 'bool') coerced = !!value
+  else if (param.type === 'int') coerced = Math.trunc(Number(value))
+  else if (param.type === 'float') coerced = Number(value)
+  const params = { ...(op.params || {}), [param.id]: coerced }
+  try {
+    await ws.management('update_sheet_node', {
+      node_id: props.sheetId, sheet_node_id: opId, params,
+    })
+  } catch (e) { console.warn('update_sheet_node failed:', e) }
+}
+
 // ── Auto-layout (this sheet only) ────────────────────────────────────
 function autoLayout () {
   const prefix = `${props.sheetId}:`
@@ -503,7 +545,7 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
           </div>
           <button
             v-if="meta(g)?.removable"
-            class="text-slate-200 hover:text-rose-400 text-base leading-none ml-1"
+            class="text-fg-strong hover:text-rose-400 text-base leading-none ml-1"
             title="Remove from sheet"
             @click.stop="removeSheetNode(g.id)"
           >✕</button>
@@ -547,6 +589,42 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
               @mouseup.stop="pinMouseUp($event, g, p.id, 'out')"
             />
           </div>
+          <!-- Operator static-config knobs. Sits below the pin list
+               so they read as "settings on the node" rather than pins.
+               Booleans → checkbox; int/float → number input. -->
+          <div
+            v-if="g.kind === 'operator' && (meta(g)?.params || []).length"
+            class="routing-node-params"
+          >
+            <label
+              v-for="param in meta(g).params"
+              :key="'pr-' + param.id"
+              class="routing-param-row"
+              @mousedown.stop
+            >
+              <template v-if="param.type === 'bool'">
+                <input
+                  type="checkbox"
+                  :checked="!!operatorParam(g.data, param)"
+                  @click.stop
+                  @change="setOperatorParam(g.sheetNodeId, param, $event.target.checked)"
+                />
+                <span class="routing-param-label">{{ param.label }}</span>
+              </template>
+              <template v-else>
+                <span class="routing-param-label">{{ param.label }}</span>
+                <input
+                  type="number"
+                  :step="param.type === 'int' ? 1 : 0.01"
+                  class="routing-param-input"
+                  :value="operatorParam(g.data, param)"
+                  @click.stop
+                  @mousedown.stop
+                  @change="setOperatorParam(g.sheetNodeId, param, $event.target.value)"
+                />
+              </template>
+            </label>
+          </div>
         </div>
       </div>
     </template>
@@ -558,9 +636,9 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
   position: relative;
   height: 640px;
   background:
-    radial-gradient(circle at 1px 1px, #334155 1px, transparent 1px) 0 0 / 24px 24px,
-    #0b1220;
-  border: 1px solid #334155;
+    radial-gradient(circle at 1px 1px, var(--color-surface) 1px, transparent 1px) 0 0 / 24px 24px,
+    var(--color-canvas);
+  border: 1px solid var(--color-surface);
   border-radius: 0.5rem;
   overflow: auto;
   user-select: none;
@@ -575,19 +653,19 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
 
 .routing-node {
   position: absolute; min-width: 180px;
-  background: #1e293b; border: 1px solid #475569; border-radius: 0.5rem;
-  z-index: 2; box-shadow: 0 4px 12px rgba(0,0,0,0.4); color: #e2e8f0;
+  background: var(--color-panel); border: 1px solid var(--color-surface-2); border-radius: 0.5rem;
+  z-index: 2; box-shadow: 0 4px 12px rgba(0,0,0,0.4); color: var(--color-fg);
 }
 .routing-node.dragging { z-index: 10; opacity: 0.9; }
 .routing-node-header {
   height: 48px; box-sizing: border-box;
   padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #334155;
+  border-bottom: 1px solid var(--color-surface);
   font-size: 0.75rem; font-weight: 600;
   cursor: move; display: flex; align-items: center;
   justify-content: space-between; gap: 0.25rem;
 }
-.routing-node-kind { font-size: 0.65rem; color: #94a3b8; font-weight: 400; }
+.routing-node-kind { font-size: 0.65rem; color: var(--color-fg-muted); font-weight: 400; }
 .routing-node-body { padding: 0; }
 .routing-pin-row {
   display: flex; align-items: center; padding: 0 0.5rem;
@@ -598,7 +676,7 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
 .routing-pin-row.output { justify-content: flex-end; }
 .routing-pin {
   width: 12px; height: 12px; border-radius: 50%;
-  background: #475569; border: 2px solid #1e293b;
+  background: var(--color-surface-2); border: 2px solid var(--color-panel);
   cursor: pointer; position: absolute;
   top: 50%; transform: translateY(-50%);
 }
@@ -608,8 +686,8 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
 .routing-pin.dir-out { background: #f59e0b; }
 .routing-pin:hover    { transform: translateY(-50%) scale(1.3); }
 .routing-pin.connecting { background: #34d399; box-shadow: 0 0 8px #34d399; }
-.routing-pin-label-in  { margin-left: 0.75rem; color: #cbd5e1; }
-.routing-pin-label-out { margin-right: 0.75rem; color: #cbd5e1; }
+.routing-pin-label-in  { margin-left: 0.75rem; color: var(--color-fg); }
+.routing-pin-label-out { margin-right: 0.75rem; color: var(--color-fg); }
 .routing-pin-value {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.65rem; color: #fbbf24; margin: 0 0.25rem;
@@ -620,18 +698,15 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
   margin-left: 0.5rem;
   padding: 0 0.25rem;
   font-size: 0.65rem;
-  background: #0f172a;
-  border: 1px solid #334155;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-surface);
   border-radius: 3px;
-  color: #e2e8f0;
+  color: var(--color-fg);
 }
 .routing-pin-default:focus { outline: 1px solid #06b6d4; }
 
-.routing-node[data-kind="peripheral"] .routing-node-header { background: #0f4c5c; }
-.routing-node[data-kind="input"]      .routing-node-header { background: #1e3a4a; }
-.routing-node[data-kind="ws_input"]   .routing-node-header { background: #1e3a5c; }
-.routing-node[data-kind="operator"]   .routing-node-header { background: #3a3f5c; }
-.routing-node[data-kind="output"]     .routing-node-header { background: #4a3b5c; }
-.routing-node[data-kind="widget"]     .routing-node-header { background: #5c4a0f; }
-.routing-node[data-builtin="true"]    .routing-node-header { background: #1e3a4a; }
+/* Node header tints — defined in src/style.css with theme-aware
+ * color-mix tints so they read on both light and dark backgrounds.
+ * (Previously duplicated here with hardcoded dark hexes; removed
+ * so the global rules win the cascade.) */
 </style>

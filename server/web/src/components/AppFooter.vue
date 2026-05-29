@@ -10,12 +10,12 @@ const versionHash = computed(() => ws.serverName ? ws.serverName : '')
 </script>
 
 <template>
-  <footer class="border-t border-slate-800 bg-slate-900/50">
+  <footer class="border-t border-line-subtle bg-canvas/50">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-      <div class="flex items-center justify-between text-sm text-slate-500">
+      <div class="flex items-center justify-between text-sm text-fg-faint">
         <span>
           SAINT.OS v{{ version }}
-          <span v-if="versionHash" class="ml-2 font-mono text-xs text-slate-600">{{ versionHash }}</span>
+          <span v-if="versionHash" class="ml-2 font-mono text-xs text-fg-faint">{{ versionHash }}</span>
         </span>
         <span>System for Articulated Intelligence and Navigation Tasks</span>
       </div>

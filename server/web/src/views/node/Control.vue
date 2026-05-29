@@ -80,7 +80,7 @@ async function unadoptNode () {
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
     <!-- Node Commands card -->
     <div class="card">
-      <h3 class="text-lg font-semibold text-white mb-4">Node Commands</h3>
+      <h3 class="text-lg font-semibold text-fg-strong mb-4">Node Commands</h3>
       <div class="space-y-3">
         <button
           v-if="fwUpdateAvailable"
@@ -108,7 +108,7 @@ async function unadoptNode () {
 
     <!-- Danger Zone card -->
     <div class="card">
-      <h3 class="text-lg font-semibold text-white mb-4">Danger Zone</h3>
+      <h3 class="text-lg font-semibold text-fg-strong mb-4">Danger Zone</h3>
       <div class="space-y-3">
         <button
           class="btn-secondary w-full justify-center text-cyan-400 border-cyan-500/50 hover:bg-cyan-500/20"
@@ -134,7 +134,7 @@ async function unadoptNode () {
       </div>
     </div>
 
-    <p v-if="message" class="lg:col-span-2 text-xs text-slate-400">{{ message }}</p>
+    <p v-if="message" class="lg:col-span-2 text-xs text-fg-muted">{{ message }}</p>
 
     <FirmwareUpdateModal
       v-if="firmwareModalOpen"

@@ -31,18 +31,18 @@ function commit (channelId, value) { emit('commit', { channelId, value }) }
   <div class="card">
     <header class="flex items-start justify-between mb-4">
       <div>
-        <h4 class="text-base font-semibold text-white flex items-center gap-2 flex-wrap">
+        <h4 class="text-base font-semibold text-fg-strong flex items-center gap-2 flex-wrap">
           {{ peripheral.label || peripheral.id }}
-          <span v-if="peripheral.builtin" class="px-2 py-0.5 text-xs rounded-full bg-slate-700 text-slate-300">Built-in</span>
+          <span v-if="peripheral.builtin" class="px-2 py-0.5 text-xs rounded-full bg-surface text-fg">Built-in</span>
           <span v-if="statusBadge" :class="['px-2 py-0.5 text-xs font-medium rounded-full', statusBadge.cls]">{{ statusBadge.label }}</span>
         </h4>
-        <p class="text-xs text-slate-500 mt-0.5">
+        <p class="text-xs text-fg-faint mt-0.5">
           {{ type?.label || peripheral.type }} · <span class="font-mono">{{ peripheral.id }}</span>
         </p>
       </div>
     </header>
 
-    <div v-if="!writable.length" class="text-xs text-slate-500 italic">
+    <div v-if="!writable.length" class="text-xs text-fg-faint italic">
       No writable channels — this peripheral only emits readings.
     </div>
 
@@ -58,7 +58,7 @@ function commit (channelId, value) { emit('commit', { channelId, value }) }
       </template>
     </div>
 
-    <footer v-if="readable.length" class="mt-4 pt-4 border-t border-slate-700/50 text-xs text-slate-500">
+    <footer v-if="readable.length" class="mt-4 pt-4 border-t border-line/50 text-xs text-fg-faint">
       <span class="font-medium uppercase tracking-wide">Readings</span>
       <span class="ml-2">{{ readable.map(c => c.display || c.id).join(', ') }}</span>
     </footer>

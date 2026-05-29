@@ -52,7 +52,7 @@ const serverName = computed(() => systemStatus.value?.server_name || '--')
 // 80 °C where the Pi enters soft-throttle).
 const tempClass = computed(() => {
   const t = tempC.value
-  if (t == null) return 'stat-value text-slate-500'
+  if (t == null) return 'stat-value text-fg-faint'
   if (t >= 80) return 'stat-value text-red-400'
   if (t >= 65) return 'stat-value text-amber-400'
   return 'stat-value text-emerald-400'
@@ -71,7 +71,7 @@ const throttleText = computed(() => {
 })
 const throttleClass = computed(() => {
   const t = throttle.value
-  if (!t) return 'stat-value text-sm text-slate-500'
+  if (!t) return 'stat-value text-sm text-fg-faint'
   if (t.status === 'ok') return 'stat-value text-sm text-emerald-400'
   if (t.status === 'warning') return 'stat-value text-sm text-amber-400'
   return 'stat-value text-sm text-red-400'
@@ -141,7 +141,7 @@ function fmtUptime (sec) {
 <template>
   <section class="space-y-6">
     <div class="flex items-center justify-between">
-      <h2 class="text-2xl font-bold text-white">Dashboard</h2>
+      <h2 class="text-2xl font-bold text-fg-strong">Dashboard</h2>
       <button class="btn-secondary" @click="nodes.scan()">
         <span class="material-icons icon-sm">search</span>
         Scan Nodes
@@ -151,7 +151,7 @@ function fmtUptime (sec) {
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div class="card">
         <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-white">System Status</h3>
+          <h3 class="text-lg font-semibold text-fg-strong">System Status</h3>
           <span class="px-2 py-1 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400">Online</span>
         </div>
         <div class="grid grid-cols-2 gap-4">
@@ -166,7 +166,7 @@ function fmtUptime (sec) {
           <div class="stat-item">
             <span class="stat-label">CPU Usage</span>
             <div class="flex items-center gap-2">
-              <div class="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+              <div class="flex-1 h-2 bg-surface rounded-full overflow-hidden">
                 <div class="h-full bg-cyan-500 transition-all duration-300" :style="{ width: `${cpu ?? 0}%` }" />
               </div>
               <span class="stat-value text-sm w-12 text-right">{{ cpu != null ? `${cpu.toFixed(0)}%` : '--' }}</span>
@@ -175,7 +175,7 @@ function fmtUptime (sec) {
           <div class="stat-item">
             <span class="stat-label">Memory Usage</span>
             <div class="flex items-center gap-2">
-              <div class="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+              <div class="flex-1 h-2 bg-surface rounded-full overflow-hidden">
                 <div class="h-full bg-violet-500 transition-all duration-300" :style="{ width: `${mem ?? 0}%` }" />
               </div>
               <span class="stat-value text-sm w-12 text-right">{{ mem != null ? `${mem.toFixed(0)}%` : '--' }}</span>
@@ -199,7 +199,7 @@ function fmtUptime (sec) {
            pin_state/host_controller's system_monitor.wifi_* channels. -->
       <div class="card">
         <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-white">WiFi Status</h3>
+          <h3 class="text-lg font-semibold text-fg-strong">WiFi Status</h3>
           <RouterLink to="/settings" class="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">Manage →</RouterLink>
         </div>
         <div class="grid grid-cols-2 gap-4">
@@ -232,7 +232,7 @@ function fmtUptime (sec) {
             <span class="stat-value text-sm">{{ wifiUpdatedText }}</span>
           </div>
         </div>
-        <div class="mt-4 pt-4 border-t border-slate-700 flex items-center justify-end">
+        <div class="mt-4 pt-4 border-t border-line flex items-center justify-end">
           <button class="btn-secondary text-sm flex items-center gap-2" @click="wifiModalOpen = true">
             <span class="material-icons icon-sm">wifi_find</span>
             Find better channel
@@ -243,7 +243,7 @@ function fmtUptime (sec) {
 
     <div>
       <div class="flex items-center justify-between mb-4">
-        <h3 class="text-lg font-semibold text-slate-400">Widgets</h3>
+        <h3 class="text-lg font-semibold text-fg-muted">Widgets</h3>
         <RouterLink to="/routes" class="btn-secondary text-sm">
           <span class="material-icons icon-sm">add</span>
           Configure on Routes page

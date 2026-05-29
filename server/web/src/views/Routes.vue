@@ -155,10 +155,14 @@ function selectSheet (id) {
 // into the label field, picking a different topic/channel rewrites the
 // label to "topic.channel". Once they edit by hand we stop clobbering.
 const inputModal = ref({
-  open: false, kind: 'ws_input', topic: '', field: '',
+  open: false, kind: 'ws_input', topic: '', field: '', joint: '',
   label: '', labelEdited: false, error: '',
+  urdfJoints: [],
 })
 function inputDerivedLabel () {
+  if (inputModal.value.kind === 'urdf_joint') {
+    return inputModal.value.joint || ''
+  }
   const t = inputModal.value.topic || ''
   const f = inputModal.value.field || ''
   return t ? (f ? `${t}.${f}` : t) : ''
@@ -170,46 +174,67 @@ function openAddInput () {
   const field = first?.channels?.[0]?.field || ''
   inputModal.value = {
     open: true, kind: 'ws_input',
-    topic, field,
+    topic, field, joint: '',
     label: topic ? (field ? `${topic}.${field}` : topic) : '',
     labelEdited: false,
     error: '',
+    urdfJoints: [],
   }
+  // Fire-and-forget: load the joint list so the URDF Model option has
+  // something to pick from when the operator switches to it.
+  fetch('/api/robot/joints')
+    .then(r => r.ok ? r.json() : { joints: [] })
+    .then(d => { inputModal.value.urdfJoints = d.joints || [] })
+    .catch(() => { inputModal.value.urdfJoints = [] })
 }
 const inputTopicChannels = computed(() =>
   topicCatalog.value.find(t => t.topic === inputModal.value.topic)?.channels || [],
 )
 const inputIsWs = computed(() => inputModal.value.kind === 'ws_input')
+const inputIsUrdf = computed(() => inputModal.value.kind === 'urdf_joint')
 const inputTopicFieldLabel = computed(() =>
   inputIsWs.value ? 'Pick a topic to copy its name (optional)' : 'ROS topic',
 )
-const inputLabelPlaceholder = computed(() =>
-  inputIsWs.value
+const inputLabelPlaceholder = computed(() => {
+  if (inputIsUrdf.value) return 'Defaults to joint name — or type a custom name'
+  return inputIsWs.value
     ? 'Defaults to topic.channel — or type a custom name'
-    : 'Defaults to topic.channel',
-)
-// Auto-derive label on topic/field changes — but only until the user
-// types something into the label box.
-watch(() => [inputModal.value.topic, inputModal.value.field], () => {
-  if (inputModal.value.open && !inputModal.value.labelEdited) {
-    inputModal.value.label = inputDerivedLabel()
-  }
+    : 'Defaults to topic.channel'
 })
+// Auto-derive label on topic/field/joint changes — but only until the
+// user types something into the label box.
+watch(
+  () => [inputModal.value.topic, inputModal.value.field, inputModal.value.joint, inputModal.value.kind],
+  () => {
+    if (inputModal.value.open && !inputModal.value.labelEdited) {
+      inputModal.value.label = inputDerivedLabel()
+    }
+  },
+)
 function onInputLabelInput (evt) {
   inputModal.value.label = evt.target.value
   inputModal.value.labelEdited = !!evt.target.value.trim()
 }
 async function saveAddInput () {
-  const { kind, topic, field, label } = inputModal.value
+  const { kind, topic, field, joint, label } = inputModal.value
   let derivedLabel = label.trim()
   // Belt-and-suspenders: if the operator cleared the label after
-  // picking a topic/channel, fall back to the derived name.
-  if (!derivedLabel && topic) derivedLabel = field ? `${topic}.${field}` : topic
+  // picking a topic/channel/joint, fall back to the derived name.
+  if (!derivedLabel) {
+    if (kind === 'urdf_joint') derivedLabel = joint || ''
+    else if (topic) derivedLabel = field ? `${topic}.${field}` : topic
+  }
   inputModal.value.error = ''
   try {
     let r
     if (kind === 'ws_input') {
       r = await ws.management('add_routing_ws_input', { node_id: activeSheetId.value, label: derivedLabel })
+    } else if (kind === 'urdf_joint') {
+      if (!joint) { inputModal.value.error = 'Pick a URDF joint'; return }
+      r = await ws.management('add_routing_input', {
+        node_id: activeSheetId.value,
+        kind: 'urdf_joint', joint, label: derivedLabel,
+      })
     } else {
       if (!topic) { inputModal.value.error = 'Pick a ROS topic'; return }
       r = await ws.management('add_routing_input', {
@@ -340,7 +365,7 @@ const sheetCounts = computed(() => {
       <!-- Left rail: one entry per controller node sheet -->
       <aside class="routing-sidebar">
         <div class="routing-sidebar-header">
-          <span class="text-xs uppercase tracking-wide text-slate-400">Sheets</span>
+          <span class="text-xs uppercase tracking-wide text-fg-muted">Sheets</span>
         </div>
         <div class="routing-sheet-list">
           <div
@@ -356,7 +381,7 @@ const sheetCounts = computed(() => {
               {{ sheets[e.id].wires.length }}
             </span>
           </div>
-          <div v-if="!sheetEntries.length" class="text-xs text-slate-500 p-2">
+          <div v-if="!sheetEntries.length" class="text-xs text-fg-faint p-2">
             No controller nodes adopted yet.
           </div>
         </div>
@@ -366,8 +391,8 @@ const sheetCounts = computed(() => {
       <div class="routing-main">
         <div class="routing-toolbar">
           <div class="min-w-0">
-            <h2 class="text-lg font-semibold text-white truncate">{{ activeEntry?.label || 'Routing' }}</h2>
-            <p class="text-xs text-slate-400 truncate">
+            <h2 class="text-lg font-semibold text-fg-strong truncate">{{ activeEntry?.label || 'Routing' }}</h2>
+            <p class="text-xs text-fg-muted truncate">
               <template v-if="activeEntry">
                 {{ sheetCounts.peripherals }} peripheral{{ sheetCounts.peripherals === 1 ? '' : 's' }} ·
                 {{ sheetCounts.inputs }} in ·
@@ -419,7 +444,7 @@ const sheetCounts = computed(() => {
         />
         <div v-else class="routing-canvas">
           <div class="routing-empty">
-            <p class="text-slate-400">No sheets yet. Adopt a controller node to start.</p>
+            <p class="text-fg-muted">No sheets yet. Adopt a controller node to start.</p>
           </div>
         </div>
       </div>
@@ -429,29 +454,48 @@ const sheetCounts = computed(() => {
     <AppModal v-if="inputModal.open" title="Add input node" @close="inputModal.open = false">
       <div class="space-y-3">
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Kind</label>
+          <label class="block text-sm font-medium text-fg mb-1">Kind</label>
           <select v-model="inputModal.kind" class="input-field w-full">
             <option value="ws_input">WebSocket Input (controller-driven)</option>
             <option value="topic">ROS Topic (subscribe to state)</option>
+            <option value="urdf_joint">URDF Model (animation joint)</option>
           </select>
         </div>
+        <template v-if="inputIsUrdf">
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">Joint</label>
+            <select v-model="inputModal.joint" class="input-field w-full">
+              <option v-for="j in inputModal.urdfJoints" :key="j.name" :value="j.name">
+                {{ j.name }} <span class="text-fg-faint">({{ j.type }})</span>
+              </option>
+              <option v-if="!inputModal.urdfJoints.length" value="" disabled>
+                (no URDF installed — upload one in Settings → Robot Model)
+              </option>
+            </select>
+            <p class="text-xs text-fg-faint mt-1">
+              When an animation with a value track named for this joint plays, its sampled value flows through this input.
+            </p>
+          </div>
+        </template>
+        <template v-else>
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">{{ inputTopicFieldLabel }}</label>
+            <select v-model="inputModal.topic" class="input-field w-full">
+              <option v-for="t in topicCatalog" :key="t.topic" :value="t.topic">{{ t.topic }}</option>
+              <option v-if="!topicCatalog.length" value="">(no ROS topics discovered)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">Channel</label>
+            <select v-model="inputModal.field" class="input-field w-full">
+              <option v-for="c in inputTopicChannels" :key="c.field" :value="c.field">
+                {{ c.label }} ({{ c.type || 'num' }})
+              </option>
+            </select>
+          </div>
+        </template>
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">{{ inputTopicFieldLabel }}</label>
-          <select v-model="inputModal.topic" class="input-field w-full">
-            <option v-for="t in topicCatalog" :key="t.topic" :value="t.topic">{{ t.topic }}</option>
-            <option v-if="!topicCatalog.length" value="">(no ROS topics discovered)</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
-          <select v-model="inputModal.field" class="input-field w-full">
-            <option v-for="c in inputTopicChannels" :key="c.field" :value="c.field">
-              {{ c.label }} ({{ c.type || 'num' }})
-            </option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+          <label class="block text-sm font-medium text-fg mb-1">Label (optional)</label>
           <input
             :value="inputModal.label"
             type="text"
@@ -472,14 +516,14 @@ const sheetCounts = computed(() => {
     <AppModal v-if="outputModal.open" title="Add output" @close="outputModal.open = false">
       <div class="space-y-3">
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">ROS topic</label>
+          <label class="block text-sm font-medium text-fg mb-1">ROS topic</label>
           <select v-model="outputModal.topic" class="input-field w-full">
             <option v-for="t in topicCatalog" :key="t.topic" :value="t.topic">{{ t.topic }}</option>
             <option v-if="!topicCatalog.length" value="">(no ROS topics discovered)</option>
           </select>
         </div>
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Channel</label>
+          <label class="block text-sm font-medium text-fg mb-1">Channel</label>
           <select v-model="outputModal.field" class="input-field w-full">
             <option v-for="c in outputTopicChannels" :key="c.field" :value="c.field">
               {{ c.label }} ({{ c.type || 'num' }})
@@ -487,7 +531,7 @@ const sheetCounts = computed(() => {
           </select>
         </div>
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+          <label class="block text-sm font-medium text-fg mb-1">Label (optional)</label>
           <input
             v-model="outputModal.label"
             type="text"
@@ -507,14 +551,14 @@ const sheetCounts = computed(() => {
     <AppModal v-if="operatorModal.open" title="Add operator" @close="operatorModal.open = false">
       <div class="space-y-3">
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Operator</label>
+          <label class="block text-sm font-medium text-fg mb-1">Operator</label>
           <select v-model="operatorModal.op" class="input-field w-full">
             <option v-for="t in operatorTypes" :key="t.id" :value="t.id">{{ t.label }}</option>
           </select>
-          <p v-if="operatorDesc" class="text-xs text-slate-500 mt-1">{{ operatorDesc }}</p>
+          <p v-if="operatorDesc" class="text-xs text-fg-faint mt-1">{{ operatorDesc }}</p>
         </div>
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Label (optional)</label>
+          <label class="block text-sm font-medium text-fg mb-1">Label (optional)</label>
           <input v-model="operatorModal.label" type="text" class="input-field w-full" placeholder="Defaults to operator name" />
         </div>
         <p v-if="operatorModal.error" class="text-sm text-red-300">{{ operatorModal.error }}</p>
@@ -529,14 +573,14 @@ const sheetCounts = computed(() => {
     <AppModal v-if="widgetModal.open" title="Add widget" @close="widgetModal.open = false">
       <div class="space-y-3">
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Widget type</label>
+          <label class="block text-sm font-medium text-fg mb-1">Widget type</label>
           <select v-model="widgetModal.type" class="input-field w-full">
             <option v-for="t in catalog.widgetTypes" :key="t.id" :value="t.id">{{ t.label }}</option>
           </select>
-          <p v-if="widgetDesc" class="text-xs text-slate-500 mt-1">{{ widgetDesc }}</p>
+          <p v-if="widgetDesc" class="text-xs text-fg-faint mt-1">{{ widgetDesc }}</p>
         </div>
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-1">Label</label>
+          <label class="block text-sm font-medium text-fg mb-1">Label</label>
           <input v-model="widgetModal.label" type="text" class="input-field w-full" placeholder="Auto-generated if blank" />
         </div>
         <p v-if="widgetModal.error" class="text-sm text-red-300">{{ widgetModal.error }}</p>
@@ -546,6 +590,7 @@ const sheetCounts = computed(() => {
         <button class="btn-primary" @click="saveAddWidget">Add</button>
       </template>
     </AppModal>
+
   </section>
 </template>
 
@@ -555,7 +600,7 @@ const sheetCounts = computed(() => {
   align-items: center;
   gap: 0.25rem;
   overflow-x: auto;
-  border-bottom: 1px solid #334155;
+  border-bottom: 1px solid var(--color-surface);
   margin-bottom: 0.75rem;
   padding-bottom: 0.25rem;
 }
@@ -565,7 +610,7 @@ const sheetCounts = computed(() => {
   gap: 0.4rem;
   padding: 0.45rem 0.75rem;
   font-size: 0.8rem;
-  color: #cbd5e1;
+  color: var(--color-fg);
   background: transparent;
   border: 1px solid transparent;
   border-bottom: none;
@@ -575,14 +620,21 @@ const sheetCounts = computed(() => {
   transition: background 120ms ease;
 }
 .routing-tab:hover {
-  background: #1e293b;
+  background: var(--color-panel);
 }
 .routing-tab.active {
-  background: #1e293b;
-  border-color: #334155;
-  border-bottom: 1px solid #1e293b;
-  color: #ffffff;
+  background: var(--color-panel);
+  border-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-panel);
+  color: var(--color-fg-strong);
   margin-bottom: -1px;
+  /* 2-px cyan accent strip along the top edge. The "merging tab"
+     pattern (active tab's bottom border = its background = the
+     content card behind) needs *something* to mark the active state
+     when canvas and panel are close in lightness (light theme). The
+     accent is the brand cyan that stays the same across themes, so
+     active is always unambiguous. */
+  box-shadow: inset 0 2px 0 0 var(--color-cyan-500);
 }
 .routing-tab.orphan {
   color: #fb923c;
@@ -590,9 +642,9 @@ const sheetCounts = computed(() => {
 .routing-tab-count {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.65rem;
-  background: #334155;
+  background: var(--color-surface);
   border-radius: 999px;
   padding: 0 0.4rem;
-  color: #e2e8f0;
+  color: var(--color-fg);
 }
 </style>

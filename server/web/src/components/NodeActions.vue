@@ -54,7 +54,7 @@ async function remove () {
 
 <template>
   <div class="card">
-    <h3 class="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+    <h3 class="text-lg font-semibold text-fg-strong mb-3 flex items-center gap-2">
       <span class="material-icons text-cyan-400">build</span>
       Actions
     </h3>
@@ -71,7 +71,7 @@ async function remove () {
       <button class="btn-primary justify-start" @click="firmwareModalOpen = true">
         <span class="material-icons icon-sm">system_update</span> Update firmware
       </button>
-      <hr class="border-slate-700/50 my-1" />
+      <hr class="border-line/50 my-1" />
       <button class="btn-secondary justify-start" @click="factoryReset">
         <span class="material-icons icon-sm">settings_backup_restore</span> Factory reset
       </button>
@@ -82,7 +82,7 @@ async function remove () {
         <span class="material-icons icon-sm">delete</span> Remove
       </button>
     </div>
-    <p v-if="message" class="mt-3 text-xs text-slate-400">{{ message }}</p>
+    <p v-if="message" class="mt-3 text-xs text-fg-muted">{{ message }}</p>
 
     <FirmwareUpdateModal
       v-if="firmwareModalOpen"

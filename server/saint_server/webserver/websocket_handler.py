@@ -1104,15 +1104,24 @@ class WebSocketHandler:
 
         elif action == 'add_routing_input':
             node_id = params.get('node_id')
-            topic = params.get('topic')
-            if not node_id or not topic:
-                return {"status": "error", "message": "Missing node_id or topic"}
+            kind = params.get('kind', 'topic')
+            topic = params.get('topic', '')
+            joint = params.get('joint', '')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            if kind == 'urdf_joint':
+                if not joint:
+                    return {"status": "error", "message": "Missing joint name"}
+            elif not topic:
+                return {"status": "error", "message": "Missing topic"}
             result = self.state_manager.add_routing_input(
                 node_id=node_id,
                 topic=topic,
                 field=params.get('field', ''),
                 label=params.get('label', ''),
                 position=params.get('position'),
+                kind=kind,
+                joint=joint,
             )
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
@@ -1199,6 +1208,112 @@ class WebSocketHandler:
             )
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
+
+        # ── animations ────────────────────────────────────────────────
+        elif action == 'list_animations':
+            return {"status": "ok",
+                    "data": {"animations": self.state_manager.list_animations()}}
+
+        elif action == 'get_animation':
+            anim_id = params.get('id')
+            if not anim_id:
+                return {"status": "error", "message": "Missing id"}
+            anim = self.state_manager.get_animation(anim_id)
+            if anim is None:
+                return {"status": "error", "message": "Not found"}
+            return {"status": "ok", "data": {"animation": anim}}
+
+        elif action == 'save_animation':
+            payload = params.get('animation')
+            if not isinstance(payload, dict):
+                return {"status": "error", "message": "Missing animation payload"}
+            return {"status": "ok",
+                    "data": self.state_manager.save_animation(payload)}
+
+        elif action == 'delete_animation':
+            anim_id = params.get('id')
+            if not anim_id:
+                return {"status": "error", "message": "Missing id"}
+            result = self.state_manager.delete_animation(anim_id)
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
+        elif action == 'start_animation':
+            anim_id = params.get('id')
+            if not anim_id:
+                return {"status": "error", "message": "Missing id"}
+            result = await self.state_manager.start_animation(
+                anim_id, loop=params.get('loop')
+            )
+            return {"status": "ok", "data": result}
+
+        elif action == 'stop_animation':
+            anim_id = params.get('id')
+            if not anim_id:
+                return {"status": "error", "message": "Missing id"}
+            result = await self.state_manager.stop_animation(anim_id)
+            return {"status": "ok", "data": result}
+
+        elif action == 'pause_animation':
+            anim_id = params.get('id')
+            if not anim_id:
+                return {"status": "error", "message": "Missing id"}
+            return {"status": "ok",
+                    "data": self.state_manager.pause_animation(anim_id)}
+
+        elif action == 'resume_animation':
+            anim_id = params.get('id')
+            if not anim_id:
+                return {"status": "error", "message": "Missing id"}
+            return {"status": "ok",
+                    "data": self.state_manager.resume_animation(anim_id)}
+
+        elif action == 'seek_animation':
+            anim_id = params.get('id')
+            t = params.get('t')
+            if not anim_id or t is None:
+                return {"status": "error", "message": "Missing id or t"}
+            return {"status": "ok",
+                    "data": self.state_manager.seek_animation(anim_id, float(t))}
+
+        elif action == 'animation_state':
+            return {"status": "ok",
+                    "data": {"players": self.state_manager.animation_state()}}
+
+        # ── poses ─────────────────────────────────────────────────────
+        elif action == 'list_poses':
+            return {"status": "ok",
+                    "data": {"poses": self.state_manager.list_poses()}}
+
+        elif action == 'get_pose':
+            pose_id = params.get('id')
+            if not pose_id:
+                return {"status": "error", "message": "Missing id"}
+            pose = self.state_manager.get_pose(pose_id)
+            if pose is None:
+                return {"status": "error", "message": "Not found"}
+            return {"status": "ok", "data": {"pose": pose}}
+
+        elif action == 'save_pose':
+            payload = params.get('pose')
+            if not isinstance(payload, dict):
+                return {"status": "error", "message": "Missing pose payload"}
+            return {"status": "ok",
+                    "data": self.state_manager.save_pose(payload)}
+
+        elif action == 'delete_pose':
+            pose_id = params.get('id')
+            if not pose_id:
+                return {"status": "error", "message": "Missing id"}
+            return {"status": "ok",
+                    "data": self.state_manager.delete_pose(pose_id)}
+
+        elif action == 'apply_pose':
+            pose_id = params.get('id')
+            if not pose_id:
+                return {"status": "error", "message": "Missing id"}
+            return {"status": "ok",
+                    "data": self.state_manager.apply_pose(pose_id)}
 
         elif action == 'add_widget':
             node_id = params.get('node_id')
@@ -1957,8 +2072,6 @@ class WebSocketHandler:
             return await self._handle_file_download(client, params)
         elif action == 'delete':
             return await self._handle_file_delete(client, params)
-        elif action == 'parse':
-            return await self._handle_file_parse(client, params)
         else:
             return {"status": "error", "message": f"Unknown file action: {action}"}
 
@@ -2124,79 +2237,6 @@ class WebSocketHandler:
             return {"status": "ok", "data": {"deleted": relative_path}}
         except OSError as e:
             return {"status": "error", "message": f"Failed to delete file: {e}"}
-
-    async def _handle_file_parse(self, client: WebSocketClient, params: dict) -> dict:
-        """
-        Upload and parse a data asset file.
-
-        This combines upload with parsing, returning both the file path
-        and the parsed asset data.
-        """
-        filename = params.get('filename')
-        content_b64 = params.get('content')
-        category = params.get('category', 'moods')  # Default to moods
-
-        if not filename:
-            return {"status": "error", "message": "Missing filename"}
-        if not content_b64:
-            return {"status": "error", "message": "Missing content"}
-
-        # Validate filename
-        if not self._validate_filename(filename):
-            return {"status": "error", "message": "Invalid filename"}
-
-        # Decode content
-        try:
-            content = base64.b64decode(content_b64)
-        except Exception as e:
-            return {"status": "error", "message": f"Invalid base64 content: {e}"}
-
-        # Try to parse as data asset
-        parsed_data = None
-        if filename.endswith('.uasset'):
-            try:
-                from saint_server.unreal.data_asset_reader import DataAssetReader
-                reader = DataAssetReader()
-                asset = reader.load_bytes(content, filename)
-                parsed_data = asset.to_motion_dict()
-            except Exception as e:
-                self.log('warn', f'Failed to parse asset {filename}: {e}')
-                # Continue with upload even if parsing fails
-
-        # Get safe path
-        file_path = self._get_safe_path(filename, category)
-        if not file_path:
-            return {"status": "error", "message": "Invalid file path"}
-
-        # Create directory if needed
-        try:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            return {"status": "error", "message": f"Failed to create directory: {e}"}
-
-        # Write file
-        try:
-            with open(file_path, 'wb') as f:
-                f.write(content)
-        except OSError as e:
-            return {"status": "error", "message": f"Failed to write file: {e}"}
-
-        # Calculate relative path
-        resources_dir = self._get_resources_dir().resolve()
-        relative_path = str(file_path.relative_to(resources_dir))
-
-        self.log('info', f'Client {client.id} uploaded asset: {relative_path} ({len(content)} bytes)')
-        await self.broadcast_activity(f'Asset uploaded: {relative_path}', 'info')
-
-        return {
-            "status": "ok",
-            "data": {
-                "path": relative_path,
-                "size": len(content),
-                "filename": filename,
-                "parsed": parsed_data,
-            }
-        }
 
     async def broadcast_ros_state(self, topic: str, data: dict):
         """Broadcast ROS state update to subscribed WebSocket clients."""

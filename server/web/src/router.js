@@ -24,7 +24,17 @@ export const router = createRouter({
     { path: '/inputs',          name: 'inputs',      component: () => import('@/views/Inputs.vue') },
     { path: '/livelink',        name: 'livelink',    component: () => import('@/views/LiveLink.vue') },
     { path: '/control',         name: 'control',     component: () => import('@/views/Control.vue') },
-    { path: '/moods',           name: 'moods',       component: () => import('@/views/Moods.vue') },
+    // Landing / management table.
+    { path: '/animations',      name: 'animations',
+      component: () => import('@/views/Animations.vue') },
+    // Full-screen editor for a single animation, addressable by id so
+    // bookmarks + browser back/forward work.
+    { path: '/animations/:id',  name: 'animation-editor',
+      component: () => import('@/views/AnimationEditorView.vue'),
+      props: true },
+    // Legacy shortcut from the old vanilla-UI nav. Drops directly into
+    // the animation manager which subsumed the old mood/.uasset flow.
+    { path: '/moods',                                redirect: '/animations' },
     { path: '/logs',            name: 'logs',        component: () => import('@/views/Logs.vue') },
     { path: '/terminal',        name: 'terminal',    component: () => import('@/views/Terminal.vue') },
     { path: '/updates',         name: 'updates',     component: () => import('@/views/Updates.vue') },

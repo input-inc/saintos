@@ -67,7 +67,7 @@ function bandLabel (band) {
 // 0 clear / 1-2 light / 3-5 busy / 6+ avoid.
 function apClass (n) {
   if (n === 0) return 'text-emerald-400 font-semibold'
-  if (n <= 2) return 'text-slate-300'
+  if (n <= 2) return 'text-fg'
   if (n <= 5) return 'text-amber-300'
   return 'text-red-300 font-semibold'
 }
@@ -75,7 +75,7 @@ function apClass (n) {
 function rowClass (c) {
   if (best.value && c === best.value) return 'bg-emerald-500/10 hover:bg-emerald-500/20'
   if (c.is_current)                   return 'bg-cyan-500/5 hover:bg-cyan-500/10'
-  return 'hover:bg-slate-700/30'
+  return 'hover:bg-surface/30'
 }
 
 function selectRow (c) {
@@ -126,7 +126,7 @@ const DFS_TOOLTIP =
 <template>
   <AppModal title="WiFi Channel Survey" width="max-w-3xl" @close="emit('close')">
     <!-- Loading state — survey runs ~10 s on the server. -->
-    <div v-if="loading" class="text-sm text-slate-400 py-8 text-center">
+    <div v-if="loading" class="text-sm text-fg-muted py-8 text-center">
       <span class="material-icons animate-spin align-middle">refresh</span>
       Scanning…
     </div>
@@ -163,7 +163,7 @@ const DFS_TOOLTIP =
       </div>
 
       <!-- Legend. -->
-      <div class="text-xs text-slate-400 mb-2 flex flex-wrap gap-x-4 gap-y-1">
+      <div class="text-xs text-fg-muted mb-2 flex flex-wrap gap-x-4 gap-y-1">
         <span><span class="inline-block w-2 h-2 rounded-full bg-emerald-400 mr-1" />0 APs — clear</span>
         <span><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1" />1-2 — light</span>
         <span><span class="inline-block w-2 h-2 rounded-full bg-amber-400 mr-1" />3-5 — busy</span>
@@ -171,13 +171,13 @@ const DFS_TOOLTIP =
         <span class="ml-auto">DFS = radar-detection silence on activation</span>
       </div>
 
-      <div v-if="!channels.length" class="text-sm text-slate-500 italic p-4 text-center border border-slate-700 rounded">
+      <div v-if="!channels.length" class="text-sm text-fg-faint italic p-4 text-center border border-line rounded">
         No channels available.
       </div>
-      <div v-else class="overflow-y-auto border border-slate-700 rounded max-h-[55vh]">
+      <div v-else class="overflow-y-auto border border-line rounded max-h-[55vh]">
         <table class="w-full text-sm">
-          <thead class="bg-slate-800 sticky top-0">
-            <tr class="text-left text-xs uppercase text-slate-400">
+          <thead class="bg-panel sticky top-0">
+            <tr class="text-left text-xs uppercase text-fg-muted">
               <th class="p-2">Band</th>
               <th class="p-2">Channel</th>
               <th class="p-2">Freq</th>
@@ -191,7 +191,7 @@ const DFS_TOOLTIP =
               v-for="(c, i) in channels"
               :key="i"
               :class="[
-                'border-t border-slate-700 cursor-pointer',
+                'border-t border-line cursor-pointer',
                 rowClass(c),
                 selected && selected.channel === c.channel
                   && ((selected.band === 'a') === (c.band === '5'))
@@ -199,11 +199,11 @@ const DFS_TOOLTIP =
               ]"
               @click="selectRow(c)"
             >
-              <td class="p-2 text-slate-300">{{ bandLabel(c.band) }}</td>
+              <td class="p-2 text-fg">{{ bandLabel(c.band) }}</td>
               <td class="p-2 font-mono">{{ c.channel }}</td>
-              <td class="p-2 text-slate-500 text-xs">{{ c.freq_mhz }} MHz</td>
+              <td class="p-2 text-fg-faint text-xs">{{ c.freq_mhz }} MHz</td>
               <td :class="['p-2', apClass(c.ap_count)]">{{ c.ap_count }}</td>
-              <td class="p-2 text-slate-400">
+              <td class="p-2 text-fg-muted">
                 {{ c.strongest_signal_dbm != null ? `${Math.round(c.strongest_signal_dbm)} dBm` : '—' }}
               </td>
               <td class="p-2">

@@ -316,7 +316,7 @@ function detailJson (entry) { return JSON.stringify(entry, null, 2) }
       <!-- Left rail -->
       <aside class="logs-sidebar">
         <div class="logs-sidebar-header">
-          <span class="text-xs uppercase tracking-wide text-slate-400">Sources</span>
+          <span class="text-xs uppercase tracking-wide text-fg-muted">Sources</span>
         </div>
         <div class="logs-source-list">
           <div
@@ -336,11 +336,11 @@ function detailJson (entry) { return JSON.stringify(entry, null, 2) }
       <div class="logs-main">
         <div class="logs-toolbar">
           <div class="min-w-0 flex-1">
-            <h2 class="text-lg font-semibold text-white truncate">{{ sourceTitle }}</h2>
-            <p class="text-xs text-slate-400 truncate">{{ sourceSubtitle }}</p>
+            <h2 class="text-lg font-semibold text-fg-strong truncate">{{ sourceTitle }}</h2>
+            <p class="text-xs text-fg-muted truncate">{{ sourceSubtitle }}</p>
           </div>
           <div class="flex gap-2 items-center flex-wrap">
-            <label class="text-xs text-slate-400">Level</label>
+            <label class="text-xs text-fg-muted">Level</label>
             <select
               v-model="serverLogLevel"
               class="input-field text-sm py-1"

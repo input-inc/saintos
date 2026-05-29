@@ -84,25 +84,25 @@ async function submit () {
 
     <div class="space-y-4">
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-1">Node ID</label>
-        <div class="input-field w-full bg-slate-900/50 text-slate-400 font-mono">{{ nodeId }}</div>
+        <label class="block text-sm font-medium text-fg mb-1">Node ID</label>
+        <div class="input-field w-full bg-canvas/50 text-fg-muted font-mono">{{ nodeId }}</div>
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-1">Chip family</label>
+        <label class="block text-sm font-medium text-fg mb-1">Chip family</label>
         <select v-model="chipFamily" class="input-field w-full">
           <option value="">-- Select Chip --</option>
           <option v-for="c in chips" :key="c.chip_family" :value="c.chip_family">
             {{ c.display_name }} ({{ c.chip_family }})
           </option>
         </select>
-        <p :class="['text-xs mt-1', props.announcedChip && !chips.find(c => c.chip_family === props.announcedChip) ? 'text-amber-400' : 'text-slate-500']">
+        <p :class="['text-xs mt-1', props.announcedChip && !chips.find(c => c.chip_family === props.announcedChip) ? 'text-amber-400' : 'text-fg-faint']">
           {{ chipHint }}
         </p>
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-1">Board</label>
+        <label class="block text-sm font-medium text-fg mb-1">Board</label>
         <select v-model="boardId" class="input-field w-full" :disabled="!chipFamily">
           <option value="">-- Select Board --</option>
           <option v-for="b in boards" :key="b.board_id" :value="b.board_id">
@@ -112,18 +112,18 @@ async function submit () {
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-1">Role</label>
+        <label class="block text-sm font-medium text-fg mb-1">Role</label>
         <select v-model="role" class="input-field w-full">
           <option value="">-- Select Role --</option>
           <option v-for="r in roles" :key="r.role" :value="r.role">
             {{ r.display_name || r.role }}
           </option>
         </select>
-        <p v-if="roleDescription" class="text-xs text-slate-500 mt-1">{{ roleDescription }}</p>
+        <p v-if="roleDescription" class="text-xs text-fg-faint mt-1">{{ roleDescription }}</p>
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-slate-300 mb-1">Display name (optional)</label>
+        <label class="block text-sm font-medium text-fg mb-1">Display name (optional)</label>
         <input v-model="displayName" type="text" class="input-field w-full" placeholder="e.g., Left Arm Controller" />
       </div>
     </div>

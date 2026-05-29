@@ -70,14 +70,27 @@ class PeripheralTypeParam:
     default: Any
     min: Optional[float] = None
     max: Optional[float] = None
+    # When set, the modal renders this param as a dropdown instead of
+    # a freeform input. Each entry is either a scalar (used as both
+    # value and label) or a {value, label} dict. Works for any base
+    # `type` — the value gets coerced through the type's normal path.
+    choices: Optional[List[Any]] = None
+    # Inline help text rendered under the input in the Add/Edit
+    # Peripheral modal. Keep it to 1–2 sentences — anything longer
+    # belongs in a docs page.
+    help: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
-        # Drop unset min/max so the JSON is compact.
+        # Drop unset optional fields so the JSON stays compact.
         if d["min"] is None:
             d.pop("min")
         if d["max"] is None:
             d.pop("max")
+        if d["choices"] is None:
+            d.pop("choices")
+        if d["help"] is None:
+            d.pop("help")
         return d
 
 
@@ -105,6 +118,35 @@ class PeripheralType:
             "params": [p.to_dict() for p in self.params],
             "builtin_only": self.builtin_only,
         }
+
+
+# ── Pololu Maestro ───────────────────────────────────────────────────
+#
+# One catalog entry, one driver. The `channel_count` param picks
+# which of the four Pololu SKUs the operator wired up (6 / 12 / 18 /
+# 24). The catalog exposes all 24 channels statically — UI surfaces
+# (Peripherals modal, Routing canvas, Live view) filter the list down
+# to `params.channel_count` at render time. See visible_channels()
+# below — driver-side code should iterate it instead of the raw type
+# channel list.
+#
+# See server/docs/MAESTRO_PROTOCOL.md for wire-format details. The
+# protocol is identical across SKUs; only Mini Maestro 12/18/24
+# support Set Multiple Targets (0x9F) for bulk updates.
+
+_MAESTRO_MAX_CHANNELS = 24
+
+
+def visible_maestro_channels(peripheral) -> int:
+    """How many of the type's static 24 channels are 'live' on this
+    Maestro instance. Drivers / UI consumers iterate the first N
+    entries of ``type.channels``. Falls back to 6 for forward-compat
+    if the param is unset.
+    """
+    n = int(peripheral.params.get("channel_count", 6) or 6)
+    if n not in (6, 12, 18, 24):
+        n = 6
+    return n
 
 
 # Default catalog. Mirrors the firmware's runtime drivers + adds generic
@@ -151,6 +193,27 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralTypeParam("max_pulse_us", "Max pulse (µs)", "int", 2500, min=100, max=3000),
         ],
     ),
+    "pwm": PeripheralType(
+        id="pwm", label="PWM Output",
+        description=(
+            "Generic PWM output on a PWM-capable pin. Independent "
+            "frequency and duty cycle — handy for driving LED dimmers, "
+            "ESCs, fan controllers, or any device that takes a raw PWM "
+            "signal. The `duty` channel accepts 0.0–1.0; map a routing "
+            "source into it via a Map Range operator if your source's "
+            "natural range is different."
+        ),
+        pin_kind="pwm",
+        channels=[PeripheralChannel("duty", "Duty cycle (0–1)", "out", "analog")],
+        params=[
+            PeripheralTypeParam("frequency_hz", "Frequency (Hz)",  "int",  1000, min=1,  max=200_000),
+            PeripheralTypeParam("initial_duty", "Initial duty (0–1)", "float", 0.0, min=0.0, max=1.0),
+            # Invert is rare for PWM but matches the Servo + RoboClaw
+            # ergonomics in this catalog — useful for active-low PWM
+            # consumers (some MOSFET drivers).
+            PeripheralTypeParam("invert",       "Invert output",     "bool", False),
+        ],
+    ),
     "neopixel": PeripheralType(
         id="neopixel", label="NeoPixel (RGB)",
         description="WS2812 RGB LED, typically hardwired on the board.",
@@ -186,6 +249,91 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
         params=[
             PeripheralTypeParam("address",  "Address",  "int", 128, min=128, max=135),
             PeripheralTypeParam("deadband", "Deadband", "int",   3, min=0,   max=127),
+        ],
+    ),
+    # Pololu Maestro servo controller. One peripheral type; the
+    # ``channel_count`` param picks Micro / Mini Maestro size (6 /
+    # 12 / 18 / 24). UI consumers and the firmware driver clip the
+    # static 24-channel list to the operator-selected count via
+    # ``visible_maestro_channels(p)`` above. Wire protocol is in
+    # server/docs/MAESTRO_PROTOCOL.md.
+    "maestro": PeripheralType(
+        id="maestro", label="Pololu Maestro",
+        description=(
+            "Pololu Maestro USB / TTL servo controller. Pick the channel "
+            "count to match your hardware: 6 (Micro), 12 / 18 / 24 (Mini)."
+        ),
+        pin_kind="uart",
+        channels=[
+            PeripheralChannel(f"ch{i}", f"Channel {i}", "out", "analog")
+            for i in range(_MAESTRO_MAX_CHANNELS)
+        ],
+        params=[
+            PeripheralTypeParam(
+                "channel_count", "Channel count", "int", 6,
+                choices=[
+                    {"value":  6, "label": "Micro Maestro · 6 ch"},
+                    {"value": 12, "label": "Mini Maestro · 12 ch"},
+                    {"value": 18, "label": "Mini Maestro · 18 ch"},
+                    {"value": 24, "label": "Mini Maestro · 24 ch"},
+                ],
+            ),
+            # Pololu protocol device number — used when more than one
+            # Maestro shares the same UART bus. 0 = Compact protocol.
+            PeripheralTypeParam("device_number", "Device number (0–127)",
+                                "int", 12, min=0, max=127),
+            PeripheralTypeParam(
+                "baud_rate", "Baud rate", "int", 9600,
+                choices=[
+                    {"value":   1200, "label":   "1200 bps"},
+                    {"value":   2400, "label":   "2400 bps"},
+                    {"value":   4800, "label":   "4800 bps"},
+                    {"value":   9600, "label":   "9600 bps (Maestro default)"},
+                    {"value":  19200, "label":  "19200 bps"},
+                    {"value":  38400, "label":  "38400 bps"},
+                    {"value":  57600, "label":  "57600 bps"},
+                    {"value": 115200, "label": "115200 bps (auto-detect max)"},
+                    {"value": 200000, "label": "200000 bps (fixed-baud max)"},
+                ],
+                help=(
+                    "Must match the rate configured in the Maestro Control "
+                    "Center. The Maestro's auto-detect mode locks onto the "
+                    "first 0xAA byte and supports up to 115200; fixed-baud "
+                    "mode goes up to 200000."
+                ),
+            ),
+            # Pulse-range maps. Operator-facing channel values are
+            # 0.0–1.0; firmware maps into [min_pulse_us, max_pulse_us]
+            # and sends to the Maestro × 4 (quarter-microsecond units).
+            PeripheralTypeParam("min_pulse_us",  "Min pulse (µs)",
+                                "int", 1000, min=64, max=3200),
+            PeripheralTypeParam("max_pulse_us",  "Max pulse (µs)",
+                                "int", 2000, min=64, max=3200),
+            # 0.0 → min_pulse_us, 1.0 → max_pulse_us. Commanded on each
+            # channel at init so unwired channels don't go limp.
+            PeripheralTypeParam("idle_value",    "Idle value (0–1)",
+                                "float", 0.5, min=0.0, max=1.0),
+            # 0.25-µs / 10-ms units (Maestro's native). 0 = unlimited.
+            PeripheralTypeParam("speed_limit",   "Speed limit (0 = off)",
+                                "int", 0, min=0, max=65_535),
+            # 0.25-µs / 10-ms / 80-ms units. 0 = unlimited.
+            PeripheralTypeParam("accel_limit",   "Accel limit (0 = off)",
+                                "int", 0, min=0, max=255),
+            # Poll Get Position each tick to surface live setpoints
+            # in the UI. Off by default — extra UART traffic the
+            # operator rarely needs.
+            PeripheralTypeParam(
+                "poll_positions", "Poll live positions", "bool", False,
+                help=(
+                    "When on, the driver issues a Get Position query for "
+                    "each channel every tick so the UI can show what the "
+                    "Maestro is actually doing (servos honoring speed / "
+                    "accel limits land here gradually, not instantly). "
+                    "Off by default: at 9600 baud each query costs ≈3 ms, "
+                    "so polling 24 channels is too expensive for a 100 Hz "
+                    "control loop. Leave it off unless you're debugging."
+                ),
+            ),
         ],
     ),
     "roboclaw": PeripheralType(
@@ -440,18 +588,27 @@ class RouteEndpoint:
 
 @dataclass
 class InputNode:
-    """A ROS topic source on a sheet.
+    """A source node on a sheet — currently either a ROS topic or a
+    URDF joint driven by the animation player.
 
-    `topic` is the canonical endpoint path (e.g. "/joy", "/cmd_vel"),
-    `field` is a flattened scalar path into the message (e.g. "axes[0]",
-    "linear.x", "value"). The evaluator subscribes once per (topic, field)
-    pair across all sheets that reference it.
+    Discriminated by `kind`:
+      - ``"topic"`` (default): ``topic`` is the canonical endpoint path
+        (e.g. ``"/joy"``, ``"/cmd_vel"``), ``field`` is a flattened scalar
+        path into the message (e.g. ``"axes[0]"``, ``"linear.x"``). The
+        evaluator subscribes once per ``(topic, field)`` pair across all
+        sheets that reference it.
+      - ``"urdf_joint"``: ``joint`` names a URDF joint. Whenever an
+        animation plays and one of its value tracks matches this joint
+        name, the sampled value flows through this input as the joint's
+        live setpoint.
     """
     id: str
     topic: str
     field: str
     label: str = ""
     position: Tuple[int, int] = (0, 0)
+    kind: str = "topic"
+    joint: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -460,6 +617,8 @@ class InputNode:
             "field": self.field,
             "label": self.label,
             "position": list(self.position),
+            "kind": self.kind,
+            "joint": self.joint,
         }
 
     @classmethod
@@ -467,11 +626,13 @@ class InputNode:
         pos = d.get("position") or [0, 0]
         return cls(
             id=d["id"],
-            topic=d["topic"],
+            topic=d.get("topic", ""),
             field=d.get("field", "value"),
             label=d.get("label", ""),
             position=(int(pos[0]) if len(pos) > 0 else 0,
                       int(pos[1]) if len(pos) > 1 else 0),
+            kind=d.get("kind", "topic"),
+            joint=d.get("joint", ""),
         )
 
 
@@ -669,6 +830,9 @@ class NodeSheet:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "NodeSheet":
         # Forward reference: WidgetInstance is declared below.
+        # Legacy "animations" list (AnimationInputNode entries) — silently
+        # dropped on load; animations now drive routing through URDF-joint
+        # InputNodes, so any persisted animation nodes are obsolete.
         return cls(
             node_id=d["node_id"],
             inputs=[InputNode.from_dict(x) for x in d.get("inputs", [])],
@@ -686,13 +850,20 @@ class NodeSheet:
         return f"{prefix}{n}"
 
     def add_input(self, topic: str, field: str, label: str = "",
-                  position: Tuple[int, int] = (0, 0)) -> InputNode:
+                  position: Tuple[int, int] = (0, 0),
+                  kind: str = "topic", joint: str = "") -> InputNode:
         existing = {n.id for n in self.inputs}
+        if kind == "urdf_joint":
+            default_label = joint or "joint"
+        else:
+            default_label = f"{topic}{('.' + field) if field else ''}"
         node = InputNode(
             id=self._next_id("in", existing),
             topic=topic, field=field,
-            label=label or f"{topic}{('.' + field) if field else ''}",
+            label=label or default_label,
             position=position,
+            kind=kind,
+            joint=joint,
         )
         self.inputs.append(node)
         return node
@@ -922,7 +1093,12 @@ OPERATOR_CATALOG: Dict[str, OperatorType] = {
     ),
     "map_range": OperatorType(
         "map_range", "Map Range",
-        "Linearly remap value from [in_min, in_max] to [out_min, out_max].",
+        "Linearly remap value from [in_min, in_max] to [out_min, out_max]. "
+        "When 'Clamp input' is checked, values outside the input range are "
+        "first pinned to the nearest endpoint, so the output is guaranteed "
+        "to stay inside [out_min, out_max]. With it off the mapping extends "
+        "linearly past either end (useful when you want to amplify beyond "
+        "the nominal range).",
         inputs=[
             OperatorInputSpec("value",   "Value"),
             OperatorInputSpec("in_min",  "In Min", -1.0),
@@ -930,7 +1106,7 @@ OPERATOR_CATALOG: Dict[str, OperatorType] = {
             OperatorInputSpec("out_min", "Out Min", 0.0),
             OperatorInputSpec("out_max", "Out Max", 1.0),
         ],
-        params=[OperatorParamSpec("clamp_output", "Clamp output to range", "bool", True)],
+        params=[OperatorParamSpec("clamp", "Clamp input to range", "bool", True)],
     ),
     "lerp": OperatorType(
         "lerp", "Lerp", "out = a + (b − a) × t",
@@ -963,6 +1139,19 @@ OPERATOR_CATALOG: Dict[str, OperatorType] = {
             OperatorInputSpec("value",    "Value"),
             OperatorInputSpec("exponent", "Exponent", 2.0),
         ],
+    ),
+    "select": OperatorType(
+        "select", "Select Input",
+        "Pick one of two sources. The preferred input wins whenever it has "
+        "a non-zero value; otherwise the other input passes through. Common "
+        "use: wire a joystick to the preferred pin and an animation to the "
+        "other so manual control overrides playback only while the operator "
+        "is actively pushing the stick.",
+        inputs=[
+            OperatorInputSpec("a", "A"),
+            OperatorInputSpec("b", "B"),
+        ],
+        params=[OperatorParamSpec("prefer_a", "Prefer A", "bool", False)],
     ),
 }
 

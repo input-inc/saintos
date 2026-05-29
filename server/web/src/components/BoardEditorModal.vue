@@ -53,7 +53,7 @@ async function save () {
 
 <template>
   <AppModal :title="boardId ? `Board: ${boardId}` : 'New board'" width="max-w-3xl" @close="emit('close')">
-    <p class="text-xs text-slate-500 mb-2">
+    <p class="text-xs text-fg-faint mb-2">
       Edit the YAML directly. Required keys: <code class="text-cyan-300">board_id</code>,
       <code class="text-cyan-300">display_name</code>, <code class="text-cyan-300">chip_family</code>.
       Lists: <code class="text-cyan-300">available_pins</code>, <code class="text-cyan-300">reserved_pins</code>,

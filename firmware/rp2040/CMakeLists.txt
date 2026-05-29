@@ -140,6 +140,9 @@ set(SAINT_NODE_SOURCES
     ../shared/src/flash_helpers.c
     ../shared/src/peripheral_manager.cpp
     ../shared/src/uart_pin_pairs_parse.c
+    ../shared/src/saint_log.c
+    ../shared/src/maestro_driver.c
+    ../shared/src/ota_streamer.c
     src/hardware.c
     src/led_status.c
     src/pico_clock.c
@@ -151,6 +154,7 @@ set(SAINT_NODE_SOURCES
     src/fas100_driver.c
     src/roboclaw_driver.c
     src/pathfinder_bms_driver.c
+    src/maestro_driver.c
     src/pio_uart.c
 )
 
