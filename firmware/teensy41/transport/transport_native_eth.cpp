@@ -209,7 +209,14 @@ size_t transport_native_eth_read(
             *err = 0;
             return read_bytes;
         }
-        delay(1);
+        /* Was delay(1), which on Teensy 4 is a yield-busy-loop at full
+         * 600 MHz. __WFI halts the core until the next interrupt — the
+         * SysTick fires every 1 ms and the ENET interrupt fires when a
+         * packet actually arrives, so this is functionally equivalent
+         * to delay(1) but the chip stops drawing 600 MHz current
+         * during the wait. Same fix applied at the loop tail in
+         * src/main.cpp. */
+        asm volatile ("wfi");
     }
 
     *err = 0;

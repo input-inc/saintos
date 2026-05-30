@@ -931,9 +931,14 @@ class SaintServerNode(Node):
             self.get_logger().error('No Teensy 4.1 firmware available for update')
             return
 
+        # Prefer the full version string ("1.0.0-<githash>-<unix_ts>") so
+        # the node can extract the build timestamp out of it. Without the
+        # trailing unix_ts the node's up-to-date check sees server_ts=0
+        # and silently bails before starting the download. Matches the
+        # RP2040 flow in _send_rp2040_firmware_update.
         control_data = {
             "action": "firmware_update",
-            "version": fw_info.get("version") or "0.0.0",
+            "version": fw_info.get("version_full") or fw_info.get("version") or "0.0.0",
             "build_date": fw_info.get("build_date"),
             "force": force,
         }
@@ -948,7 +953,8 @@ class SaintServerNode(Node):
         pub.publish(msg)
         self.get_logger().info(
             f'Sent Teensy 4.1 firmware update command to {node_id} '
-            f'(size: {fw_info.get("bin_size")}, crc32: {control_data.get("crc32")}, '
+            f'(version: {control_data["version"]}, '
+            f'size: {fw_info.get("bin_size")}, crc32: {control_data.get("crc32")}, '
             f'force: {force})'
         )
 

@@ -3237,6 +3237,14 @@ class StateManager:
                 result["build_date"]  = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
 
             # Try to read version from generated version.h if staged.
+            # We extract BOTH the short string ("1.0.0") and the full one
+            # ("1.0.0-<githash>-<unix_ts>"). The Teensy's OTA up-to-date
+            # check parses the trailing unix timestamp out of the server-
+            # supplied version string; if we send only the short form it
+            # gets timestamp=0, sees "server <= current", and silently
+            # short-circuits — never starting the actual download. The
+            # RP2040 path (see _send_rp2040_firmware_update) prefers
+            # version_full for the same reason.
             version_h_path = os.path.join(fw_dir, 'generated', 'version.h')
             if os.path.isfile(version_h_path):
                 try:
@@ -3245,6 +3253,9 @@ class StateManager:
                     m = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
                     if m:
                         result["version"] = m.group(1)
+                    m_full = re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
+                    if m_full:
+                        result["version_full"] = m_full.group(1)
                 except Exception:
                     pass
             return result
