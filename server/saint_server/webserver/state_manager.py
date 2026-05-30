@@ -3104,6 +3104,22 @@ class StateManager:
                 "message": "Node not found",
             }
 
+        # Suppress update-status computation for offline nodes. The node's
+        # firmware_version stays at its last-known value (often the empty
+        # "0.0.0" default when the node has never announced its build),
+        # which would otherwise compare strictly-less-than the server's
+        # real version and falsely flag "update available" — misleading
+        # for nodes that are simply powered off. Surface it explicitly
+        # so the UI can render the offline state instead of a stale
+        # update prompt.
+        if not node.online:
+            return {
+                "available": False,
+                "current_version": node.firmware_version or None,
+                "server_version": None,
+                "message": "Node offline — update status unavailable",
+            }
+
         server_fw = self.get_server_firmware_info()
         node_version = node.firmware_version or "0.0.0"
         server_version = server_fw.get("version", "0.0.0")

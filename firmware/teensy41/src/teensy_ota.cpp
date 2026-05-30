@@ -89,11 +89,20 @@ extern "C" saint_ota_result_t saint_ota_perform(uint32_t expected_size,
                   (unsigned long)expected_size,
                   (unsigned long)expected_crc32);
 
-    /* 1. Allocate staging buffer in flash. */
+    /* 1. Allocate staging buffer in flash.
+     *
+     * firmware_buffer_init returns a BUFFER TYPE, not a success/error
+     * code: NO_BUFFER_TYPE (0) on failure, FLASH_BUFFER_TYPE (1) or
+     * RAM_BUFFER_TYPE (2) on success. So the failure check is
+     * "br == 0" (no buffer allocated), NOT "br != 0" — that earlier
+     * bug rejected every successful allocation and ate every OTA
+     * attempt with a "size 7.5MB < expected 477KB" log line that
+     * was nonsense on its face (the buffer is huge — the issue was
+     * the rc check, not the size). */
     uint32_t buffer_addr = 0, buffer_size = 0;
     int br = firmware_buffer_init(&buffer_addr, &buffer_size);
-    if (br != 0 || buffer_size < expected_size) {
-        Serial.printf("OTA: firmware_buffer_init rc=%d, size=%lu < expected=%lu\n",
+    if (br == NO_BUFFER_TYPE || buffer_size < expected_size) {
+        Serial.printf("OTA: firmware_buffer_init rc=%d, size=%lu, expected=%lu\n",
                       br, (unsigned long)buffer_size,
                       (unsigned long)expected_size);
         if (buffer_addr) firmware_buffer_free(buffer_addr, buffer_size);
