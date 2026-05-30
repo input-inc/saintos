@@ -94,5 +94,16 @@ def _stage_bin(source, target, env):
     if os.path.exists(version_src):
         shutil.copy2(version_src, os.path.join(gen_dir, "version.h"))
 
+    # Stage the hand-maintained info.json (board metadata: name, features,
+    # architecture, etc.) from its source-of-truth location in
+    # firmware/teensy41/. This file used to live at the staging path and
+    # was tracked there, which mixed source with artifacts. Now the
+    # staging path is purely build output (gitignored), and the source
+    # file is copied here on every build so the dist tarball always has
+    # the latest metadata bundled with the .bin / .hex / version.h.
+    info_src = os.path.join(PROJECT_DIR, "info.json")
+    if os.path.exists(info_src):
+        shutil.copy2(info_src, os.path.join(RESOURCES, "info.json"))
+
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.hex", _stage_bin)
