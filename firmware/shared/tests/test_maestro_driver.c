@@ -434,6 +434,39 @@ static void case_load_unsupported_transport(void)
            "channel data still loaded");
 }
 
+/* Erased / never-saved flash slot — drv_load must NOT bind a
+ * transport and must NOT log an error. Regression for the post-OTA
+ * "Maestro: no transport for mode=255" log on nodes with no Maestro
+ * configured: the maestro_config bytes are 0xFF (erased) or zero
+ * (never written), and the driver was applying them as if they were
+ * a real saved record. */
+static void case_load_no_record(void)
+{
+    printf("case_load_no_record\n");
+
+    /* Erased-flash slot (0xFF everywhere). */
+    reset_all();
+    usb_available  = true;
+    uart_available = true;
+    flash_storage_data_t storage;
+    memset(&storage, 0xFF, sizeof(storage));
+    EXPECT(maestro_peripheral.load_config(&storage),
+           "erased slot: load_config returns true");
+    EXPECT(g_transport == NULL,
+           "erased slot: no transport bound");
+
+    /* Zero-initialized slot (struct was written but Maestro region
+     * untouched — channel_count==0 sentinel). */
+    reset_all();
+    usb_available  = true;
+    uart_available = true;
+    memset(&storage, 0, sizeof(storage));
+    EXPECT(maestro_peripheral.load_config(&storage),
+           "zero slot: load_config returns true");
+    EXPECT(g_transport == NULL,
+           "zero slot: no transport bound");
+}
+
 int main(void)
 {
     case_compact_protocol_bytes();
@@ -443,6 +476,7 @@ int main(void)
     case_parse_json_transport();
     case_default_transport_pick();
     case_load_unsupported_transport();
+    case_load_no_record();
 
     if (fail_count) {
         printf("\ntest_maestro_driver: %d failure(s)\n", fail_count);

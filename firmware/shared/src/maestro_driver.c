@@ -387,6 +387,22 @@ static bool drv_load(const void* storage)
      * loaded with defaults. */
     ensure_state_init();
 
+    /* Detect "no Maestro ever saved on this node." drv_save always
+     * writes channel_count = MAESTRO_MAX_CHANNELS and transport_mode in
+     * [0, 1]; a saved record never has channel_count == 0 or 0xFF and
+     * never has transport_mode > FLASH_MAESTRO_TRANSPORT_UART. Reading
+     * any of those means the maestro_config bytes are either zero-
+     * initialized (never written) or erased flash (0xFF) — typical when
+     * the operator has no Maestro hardware on this node. Bail before
+     * we try to bind a transport, which would otherwise log a spurious
+     * "no transport for mode=255" error on every boot. */
+    const uint8_t saved_cc = s->maestro_config.channel_count;
+    const uint8_t saved_tm = s->maestro_config.transport_mode;
+    if (saved_cc == 0 || saved_cc == 0xFF
+        || saved_tm > FLASH_MAESTRO_TRANSPORT_UART) {
+        return true;
+    }
+
     /* Restore channel configs. */
     if (s->maestro_config.channel_count > 0) {
         uint8_t count_m = s->maestro_config.channel_count;
