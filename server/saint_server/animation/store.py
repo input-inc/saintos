@@ -97,7 +97,11 @@ class _JSONStore:
 
     def _log(self, level: str, msg: str) -> None:
         if self.logger:
-            getattr(self.logger, level)(msg)
+            # rcutils tracks log calls by file/line; getattr-dispatch
+            # funnels every severity through one line and trips rclpy's
+            # severity-change check. See saint_server.log_level.log_at.
+            from saint_server.log_level import log_at
+            log_at(self.logger, level, msg)
 
 
 class AnimationStore:
@@ -154,7 +158,11 @@ class AnimationStore:
 
     def _log(self, level: str, msg: str) -> None:
         if self.logger:
-            getattr(self.logger, level)(msg)
+            # rcutils tracks log calls by file/line; getattr-dispatch
+            # funnels every severity through one line and trips rclpy's
+            # severity-change check. See saint_server.log_level.log_at.
+            from saint_server.log_level import log_at
+            log_at(self.logger, level, msg)
 
 
 class PoseStore:
@@ -206,4 +214,8 @@ class PoseStore:
 
     def _log(self, level: str, msg: str) -> None:
         if self.logger:
-            getattr(self.logger, level)(msg)
+            # rcutils tracks log calls by file/line; getattr-dispatch
+            # funnels every severity through one line and trips rclpy's
+            # severity-change check. See saint_server.log_level.log_at.
+            from saint_server.log_level import log_at
+            log_at(self.logger, level, msg)

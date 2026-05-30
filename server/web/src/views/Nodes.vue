@@ -16,12 +16,24 @@ async function remove (id) {
   catch (e) { console.warn('remove_node failed:', e) }
 }
 
-// Bulk firmware update — issue update_firmware to every adopted node that
-// has the `update_available` flag from the server's announcement.
+// A node is "updatable" when the server has flagged a newer firmware
+// available AND it knows the server-side version to flash.
+function isUpdatable (n) {
+  return n.firmware_update_available === true && !!n.server_firmware_version
+}
+
+// Bulk firmware update — issue update_firmware to every adopted node
+// that the server flagged as having a newer build available.
 async function updateAll () {
-  const targets = nodes.all.filter(n => n.update_available)
+  const targets = nodes.all.filter(isUpdatable)
   if (!targets.length) return
-  if (!confirm(`Update firmware on ${targets.length} node(s)?`)) return
+  const lines = targets.map(n =>
+    `  • ${n.display_name || n.node_id}: ${n.firmware_version || '--'} → ${n.server_firmware_version}`
+  ).join('\n')
+  if (!confirm(
+    `Update firmware on ${targets.length} node${targets.length === 1 ? '' : 's'}?\n\n` +
+    `${lines}\n\nEach node will restart during the update.`
+  )) return
   for (const n of targets) {
     try { await ws.management('update_firmware', { node_id: n.node_id }) }
     catch (e) { console.warn(`update_firmware ${n.node_id} failed:`, e) }
@@ -29,7 +41,7 @@ async function updateAll () {
   await nodes.fetchAll()
 }
 
-const updatable = computed(() => nodes.all.filter(n => n.update_available).length)
+const updatable = computed(() => nodes.all.filter(isUpdatable).length)
 </script>
 
 <template>
@@ -109,7 +121,14 @@ const updatable = computed(() => nodes.all.filter(n => n.update_available).lengt
         <div class="text-xs text-fg-muted space-y-0.5 font-mono">
           <div>{{ n.hardware_model || '—' }}</div>
           <div>{{ n.ip_address || '—' }}</div>
-          <div>FW {{ n.firmware_version || '—' }}</div>
+          <div class="flex items-center gap-1.5">
+            <span>FW {{ n.firmware_version || '—' }}</span>
+            <span
+              v-if="isUpdatable(n)"
+              class="px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+              :title="`Update available: ${n.server_firmware_version}`"
+            >↑ {{ n.server_firmware_version }}</span>
+          </div>
         </div>
       </RouterLink>
     </div>

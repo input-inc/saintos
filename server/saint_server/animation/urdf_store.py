@@ -279,7 +279,8 @@ class URDFStore:
 
     def _log(self, level: str, msg: str) -> None:
         if self.logger:
-            getattr(self.logger, level)(msg)
+            from saint_server.log_level import log_at
+            log_at(self.logger, level, msg)
 
 
 def _validate_urdf(urdf_bytes: bytes) -> tuple[int, int]:

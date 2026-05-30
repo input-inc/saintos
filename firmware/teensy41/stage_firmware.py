@@ -1,15 +1,28 @@
 """
-PlatformIO post-build script: produce + stage saint_node.bin
+PlatformIO post-build script: produce + stage Teensy 4.1 firmware artifacts.
 
-After the hardware ELF is linked, objcopy it to a raw .bin (what the
-in-app OTA path streams over HTTP) and copy it — plus the auto-generated
-version.h — into server/resources/firmware/teensy41/ where the server's
-state_manager picks them up.
+After the hardware ELF is linked, this script writes three things into
+server/resources/firmware/teensy41/ atomically on every build, so the
+staging area can never drift out of sync with the running build:
 
-Mirrors what the RP2040 build pipeline does for parity: server
-get_firmware_info_for_type('teensy41') expects saint_node.bin to exist
-in order to populate the OTA control message's `size` + `crc32` fields.
-Without it the node sees no metadata and falls back to a no-op reboot.
+  - saint_node.bin       — raw flash image, streamed by the in-app OTA
+                           path; the server uses this to compute the
+                           OTA control message's `size` + `crc32`.
+  - firmware.hex         — Intel HEX, what Teensy Loader / the manual
+                           flashing tool consumes via HalfKay USB.
+                           Copied directly from the build output —
+                           overwrites whatever was staged previously,
+                           which is the only thing keeping
+                           resources/firmware/teensy41/ from accruing
+                           stale HEX files from old builds.
+  - generated/version.h  — sidecar so the server can read out
+                           FIRMWARE_VERSION_FULL for the OTA up-to-date
+                           comparison.
+
+Mirrors what the RP2040 build pipeline stages for parity. Without
+saint_node.bin the OTA falls back to a no-op reboot; without an up-to-
+date firmware.hex, anyone doing a manual flash via Teensy Loader gets
+old code.
 """
 
 import os
@@ -27,8 +40,15 @@ RESOURCES    = os.path.join(SOURCE_DIR, "server", "resources", "firmware", "teen
 
 
 def _stage_bin(source, target, env):
-    elf = str(target[0])
-    bin_path = elf[:-4] + ".bin" if elf.endswith(".elf") else elf + ".bin"
+    # Hooked on $BUILD_DIR/${PROGNAME}.hex — target[0] is the freshly
+    # built HEX. The matching ELF lives next to it; objcopy reads the
+    # ELF to produce the OTA .bin. Hooking on .hex (not .elf) is what
+    # guarantees the HEX exists at the moment we try to copy it to
+    # resources — the .elf post-action fires too early in PlatformIO's
+    # build chain.
+    hex_src = str(target[0])
+    elf = hex_src[:-4] + ".elf" if hex_src.endswith(".hex") else hex_src + ".elf"
+    bin_path = hex_src[:-4] + ".bin" if hex_src.endswith(".hex") else hex_src + ".bin"
 
     # ELF -> raw flash image. The Teensy 4.1 in-app OTA streams this
     # verbatim into FlashTxx's staging buffer, then flash_move() copies
@@ -55,8 +75,19 @@ def _stage_bin(source, target, env):
     shutil.copy2(bin_path, dst)
     print(f"** stage_firmware: staged -> {dst}")
 
+    # Refresh firmware.hex too. shutil.copy2 overwrites, so the staged
+    # copy can never drift behind the build output — solves the stale-
+    # .hex problem where a HEX from a previous build would sit in
+    # resources/firmware/teensy41/ untouched (because stage_firmware
+    # used to ignore .hex entirely).
+    if os.path.exists(hex_src):
+        hex_dst = os.path.join(RESOURCES, "firmware.hex")
+        shutil.copy2(hex_src, hex_dst)
+        print(f"** stage_firmware: staged -> {hex_dst}")
+
     # Also stage the generated version.h so the server can parse the
-    # FIRMWARE_VERSION_STRING out of it for the update message.
+    # FIRMWARE_VERSION_STRING / FIRMWARE_VERSION_FULL out of it for the
+    # OTA control message.
     gen_dir = os.path.join(RESOURCES, "generated")
     os.makedirs(gen_dir, exist_ok=True)
     version_src = os.path.join(PROJECT_DIR, "include", "version.h")
@@ -64,4 +95,4 @@ def _stage_bin(source, target, env):
         shutil.copy2(version_src, os.path.join(gen_dir, "version.h"))
 
 
-env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", _stage_bin)
+env.AddPostAction("$BUILD_DIR/${PROGNAME}.hex", _stage_bin)

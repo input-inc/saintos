@@ -578,10 +578,8 @@ class RoutingEvaluator:
 
     def _log(self, level: str, message: str) -> None:
         if self._logger:
-            try:
-                getattr(self._logger, level)(message)
-            except Exception:
-                pass
+            from saint_server.log_level import log_at
+            log_at(self._logger, level, message)
 
     def _hot_log(self, message: str) -> None:
         """Sampled INFO log for per-tick lines. Logs 1-of-N during steady

@@ -115,15 +115,14 @@ class RoleManager:
     def _log(self, level: str, message: str):
         """Log a message if logger is available.
 
-        Wrapped in try/except because rclpy's logger occasionally raises
-        "Logger severity cannot be changed between calls" when severity
-        flips across calls. A logger quirk shouldn't sink role loading.
+        Used to wrap getattr() in try/except as a workaround for rclpy's
+        "Logger severity cannot be changed between calls" — the real fix
+        is dispatching from a stable per-severity source line. See
+        saint_server.log_level.log_at.
         """
         if self.logger:
-            try:
-                getattr(self.logger, level, self.logger.info)(message)
-            except Exception:
-                pass
+            from saint_server.log_level import log_at
+            log_at(self.logger, level, message)
 
     def _load_roles(self):
         """Load all role definitions from YAML files."""
