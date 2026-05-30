@@ -789,6 +789,20 @@ class WebSocketHandler:
                 await self.broadcast_activity(
                     f'Node {node_id} adopted as {role}{board_note}', 'info'
                 )
+                # Push an initial configure to the node so it transitions
+                # out of UNADOPTED into ACTIVE. Without this, adopt_node
+                # only updates server-side state (adopted_nodes dict +
+                # YAML) and the node never finds out — it keeps
+                # announcing state="UNADOPTED" forever, and the dashboard
+                # shows the contradiction (node in adopted bucket but
+                # self-reported state UNADOPTED). The firmware treats
+                # receipt of any configure message on its per-node /config
+                # topic as the adoption signal, so even an "empty
+                # peripherals" configure is enough.
+                if self._sync_config_callback:
+                    config_json = self.state_manager.get_firmware_config_json(node_id)
+                    if config_json:
+                        self._sync_config_callback(node_id, config_json)
             return {"status": "ok" if result['success'] else "error", "data": result}
 
         elif action == 'update_node':

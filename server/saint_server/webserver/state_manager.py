@@ -2800,6 +2800,155 @@ class StateManager:
 
         return None
 
+    def _firmware_staging_dir(self, fw_type: str) -> Optional[str]:
+        """Resolve the on-disk staging directory for a firmware target.
+
+        Returns the first existing path from the candidate list below, or
+        None if none of them exist. Same resolution rules for every
+        platform — used by get_firmware_info_for_type and friends so the
+        per-platform code paths don't drift apart on path handling. The
+        previous design had each platform branch hand-roll its own
+        candidate list, which is how the Teensy ended up unable to find
+        the staged version.h on the deployed Pi (its candidates missed
+        the install-tree symlink that the RP2040 branch happened to hit).
+
+        Candidate order (first match wins):
+          1. /opt/saint-os/resources/firmware/<fw_type> via _INSTALL_PREFIX
+          2. <here>/../../resources/firmware/<fw_type> — this is the
+             install-tree symlink path that the dist creates at
+             install/lib/python3.11/site-packages/resources/firmware ->
+             /opt/saint-os/firmware
+          3. ament_index_python share dir for the saint_os package
+          4. Repo-relative dev path for local server runs
+        """
+        here = os.path.dirname(__file__)
+        candidates = [
+            str(_INSTALL_PREFIX / 'resources' / 'firmware' / fw_type),
+            os.path.abspath(os.path.join(here, '..', '..', 'resources', 'firmware', fw_type)),
+        ]
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            package_dir = get_package_share_directory('saint_os')
+            candidates.append(os.path.join(package_dir, 'resources', 'firmware', fw_type))
+        except Exception:
+            pass
+        # Repo-relative dev fallback for running the server out of source.
+        candidates.append(
+            os.path.abspath(os.path.join(here, '..', '..', '..', '..',
+                                          'server', 'resources', 'firmware', fw_type))
+        )
+        for path in candidates:
+            if os.path.isdir(path):
+                return path
+        return None
+
+    def _read_version_h(self, staging_dir: str, result: Dict[str, Any]) -> None:
+        """Populate `result` with version fields parsed from
+        <staging_dir>/generated/version.h.
+
+        Mutates `result` in place. Silently no-ops if the file is missing
+        or the regexes don't match — caller's defaults stay. Fields
+        populated when present:
+          - version       (from FIRMWARE_VERSION_STRING)
+          - version_full  (from FIRMWARE_VERSION_FULL — what the OTA
+                           up-to-date check on the node parses for a
+                           build timestamp)
+          - git_hash      (from FIRMWARE_GIT_HASH)
+          - build_date    (from FIRMWARE_BUILD_TIMESTAMP — preferred
+                           over file mtime)
+
+        Single implementation shared across get_server_firmware_info,
+        get_firmware_build_info, and get_firmware_info_for_type so the
+        regex/scope quirks that broke the Teensy's separate copy can't
+        recur. Re-import re defensively in case the caller has shadowed
+        the module-level binding.
+        """
+        version_h_path = os.path.join(staging_dir, 'generated', 'version.h')
+        if not os.path.isfile(version_h_path):
+            return
+        try:
+            with open(version_h_path, 'r') as f:
+                content = f.read()
+        except Exception:
+            return
+        import re as _re  # defensive against caller-side shadowing
+        m = _re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
+        if m:
+            result["version"] = m.group(1)
+        m_full = _re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
+        if m_full:
+            result["version_full"] = m_full.group(1)
+        m_hash = _re.search(r'FIRMWARE_GIT_HASH\s+"([^"]+)"', content)
+        if m_hash:
+            result["git_hash"] = m_hash.group(1)
+        m_ts = _re.search(r'FIRMWARE_BUILD_TIMESTAMP\s+"([^"]+)"', content)
+        if m_ts:
+            result["build_date"] = m_ts.group(1)
+
+    def _populate_node_firmware_info(self, result: Dict[str, Any], fw_type: str,
+                                      bin_filename: str) -> None:
+        """Shared body for node-firmware (rp2040, teensy41) info reads.
+
+        Fills `result` with: available, bin_path/size/crc32, build_date
+        (from bin mtime, then overridden by version.h timestamp), plus
+        version / version_full / git_hash via _read_version_h. Per-
+        platform differences are just `fw_type` (staging dir name) and
+        `bin_filename` (saint_node.bin / firmware.hex / saint_node.uf2).
+        """
+        staging = self._firmware_staging_dir(fw_type)
+        if not staging:
+            return
+        bin_path = os.path.join(staging, bin_filename)
+        if os.path.isfile(bin_path):
+            result["available"]  = True
+            result["bin_path"]   = bin_path
+            result["bin_size"]   = os.path.getsize(bin_path)
+            result["bin_crc32"]  = self._calculate_file_crc32(bin_path)
+            result["build_date"] = time.strftime(
+                '%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(bin_path)))
+        self._read_version_h(staging, result)
+
+    def _populate_package_firmware_info(self, result: Dict[str, Any], fw_type: str,
+                                         file_glob_suffix: str,
+                                         filename_contains: Optional[str] = None
+                                         ) -> None:
+        """Shared body for package-firmware (rpi5, controller) info reads.
+
+        These don't ship a flash image — they ship a versioned archive
+        (zip / AppImage) plus an info.json manifest. info.json carries the
+        canonical version + checksum; the filename-scan fallback only
+        runs when the manifest is missing (e.g. an older build).
+        """
+        staging = self._firmware_staging_dir(fw_type)
+        if not staging:
+            return
+        info_file = os.path.join(staging, 'info.json')
+        if os.path.isfile(info_file):
+            try:
+                with open(info_file, 'r') as f:
+                    info = json.load(f)
+                result["available"]   = True
+                result["version"]     = info.get("latest_version", "0.0.0")
+                result["filename"]    = info.get("latest_package")
+                result["checksum"]    = info.get("latest_checksum")
+                result["build_date"]  = info.get("updated")
+                return
+            except Exception:
+                pass
+        # info.json missing or unreadable — scan directory for matching files.
+        import re as _re
+        for f in os.listdir(staging):
+            if not f.endswith(file_glob_suffix):
+                continue
+            if filename_contains and filename_contains not in f:
+                continue
+            result["available"] = True
+            result["filename"]  = f
+            m = _re.search(r'(\d+\.\d+\.\d+)', f)
+            if m:
+                result["version"] = m.group(1)
+            break
+
     def _firmware_artifact_dirs(self) -> List[Tuple[str, str]]:
         """Candidate directories holding RP2040 .elf/.uf2 artifacts.
 
@@ -2957,30 +3106,10 @@ class StateManager:
                 result["bin_size"]  = os.path.getsize(bin_path)
                 result["bin_crc32"] = self._calculate_file_crc32(bin_path)
 
-            # Try to read version info from generated version.h
-            version_h_path = os.path.join(build_dir, 'generated', 'version.h')
-            if os.path.isfile(version_h_path):
-                try:
-                    with open(version_h_path, 'r') as f:
-                        content = f.read()
-                    # Extract version string
-                    version_match = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
-                    if version_match:
-                        result["version"] = version_match.group(1)
-                    # Extract full version with git hash
-                    full_match = re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
-                    if full_match:
-                        result["version_full"] = full_match.group(1)
-                    # Extract git hash
-                    hash_match = re.search(r'FIRMWARE_GIT_HASH\s+"([^"]+)"', content)
-                    if hash_match:
-                        result["git_hash"] = hash_match.group(1)
-                    # Extract build timestamp from version.h (more accurate than file mtime)
-                    build_match = re.search(r'FIRMWARE_BUILD_TIMESTAMP\s+"([^"]+)"', content)
-                    if build_match:
-                        result["build_date"] = build_match.group(1)
-                except Exception:
-                    pass
+            # Version metadata from generated version.h — same helper
+            # the Teensy / per-platform info read uses, so a regex fix
+            # in one place propagates everywhere.
+            self._read_version_h(build_dir, result)
 
             # Fallback: Try to read version from CMakeLists.txt. Only
             # applies in dev where the firmware source tree is present;
@@ -3049,26 +3178,8 @@ class StateManager:
                     mtime = os.path.getmtime(uf2_path)
                     result["build_date"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
 
-            # Read version from generated version.h (only present in build dirs)
-            version_h_path = os.path.join(build_dir, 'generated', 'version.h')
-            if os.path.isfile(version_h_path):
-                try:
-                    with open(version_h_path, 'r') as f:
-                        content = f.read()
-                    version_match = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
-                    if version_match:
-                        result["version"] = version_match.group(1)
-                    full_match = re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
-                    if full_match:
-                        result["version_full"] = full_match.group(1)
-                    hash_match = re.search(r'FIRMWARE_GIT_HASH\s+"([^"]+)"', content)
-                    if hash_match:
-                        result["git_hash"] = hash_match.group(1)
-                    build_match = re.search(r'FIRMWARE_BUILD_TIMESTAMP\s+"([^"]+)"', content)
-                    if build_match:
-                        result["build_date"] = build_match.group(1)
-                except Exception:
-                    pass
+            # Version metadata from generated version.h — shared helper.
+            self._read_version_h(build_dir, result)
 
             if result["available"]:
                 break
@@ -3120,7 +3231,22 @@ class StateManager:
                 "message": "Node offline — update status unavailable",
             }
 
-        server_fw = self.get_server_firmware_info()
+        # Dispatch by the node's chip family so a Teensy compares
+        # against the Teensy's staged build (and an RP2040 against the
+        # RP2040's). The earlier code always fetched RP2040 info, so
+        # the "Update available: 1.2.0..." banner on a Teensy node
+        # actually compared its 1.0.0 firmware against the RP2040's
+        # 1.2.0 build — a category error that produced misleading UX
+        # AND would have OTA'd the wrong .bin if the operator clicked
+        # update without force. Fall back to the legacy
+        # get_server_firmware_info path for nodes whose chip family
+        # isn't reported yet (older firmware) — there the RP2040
+        # build is the only thing we can compare against.
+        chip = (node.chip_family or '').lower() or None
+        if chip and chip in ('rp2040', 'teensy41'):
+            server_fw = self.get_firmware_info_for_type(chip)
+        else:
+            server_fw = self.get_server_firmware_info()
         node_version = node.firmware_version or "0.0.0"
         server_version = server_fw.get("version", "0.0.0")
         # Use full version (with unix timestamp) for display if available
@@ -3213,142 +3339,47 @@ class StateManager:
         }
 
         if fw_type == 'rp2040':
-            # Use existing method for RP2040 — includes bin size + crc32
-            # so the OTA update message has what it needs.
+            # RP2040 has historically gone through get_server_firmware_info
+            # which walks both the install staging dir AND dev-build
+            # locations (firmware/rp2040/build/). Keep that path for ELF /
+            # UF2 / dev fallbacks, but propagate version_full too — it
+            # was previously missing here, which broke the up-to-date
+            # check on the RP2040 branch of is_firmware_update_available
+            # the same way it broke the Teensy.
             rp2040_info = self.get_server_firmware_info()
-            result["available"]   = rp2040_info.get("available", False)
-            result["version"]     = rp2040_info.get("version", "0.0.0")
-            result["build_date"]  = rp2040_info.get("build_date")
-            result["elf_path"]    = rp2040_info.get("elf_path")
-            result["uf2_path"]    = rp2040_info.get("uf2_path")
-            result["bin_path"]    = rp2040_info.get("bin_path")
-            result["bin_size"]    = rp2040_info.get("bin_size")
-            result["bin_crc32"]   = rp2040_info.get("bin_crc32")
+            result["available"]    = rp2040_info.get("available", False)
+            result["version"]      = rp2040_info.get("version", "0.0.0")
+            result["version_full"] = rp2040_info.get("version_full")
+            result["build_date"]   = rp2040_info.get("build_date")
+            result["elf_path"]     = rp2040_info.get("elf_path")
+            result["uf2_path"]     = rp2040_info.get("uf2_path")
+            result["bin_path"]     = rp2040_info.get("bin_path")
+            result["bin_size"]     = rp2040_info.get("bin_size")
+            result["bin_crc32"]    = rp2040_info.get("bin_crc32")
             return result
 
         elif fw_type == 'teensy41':
-            # Teensy artifacts staged into resources/firmware/teensy41/.
-            # We look for saint_node.bin (raw flash image — what the
-            # in-app OTA downloads) and a version.h sidecar.
-            here = os.path.dirname(__file__)
-            candidates = [
-                str(_INSTALL_PREFIX / 'resources' / 'firmware' / 'teensy41'),
-                os.path.abspath(os.path.join(here, '..', '..', 'resources', 'firmware', 'teensy41')),
-            ]
-            fw_dir = None
-            for path in candidates:
-                if os.path.isdir(path):
-                    fw_dir = path
-                    break
-            if not fw_dir:
-                return result
-
-            bin_path = os.path.join(fw_dir, 'saint_node.bin')
-            if os.path.isfile(bin_path):
-                result["available"]   = True
-                result["bin_path"]    = bin_path
-                result["bin_size"]    = os.path.getsize(bin_path)
-                result["bin_crc32"]   = self._calculate_file_crc32(bin_path)
-                mtime = os.path.getmtime(bin_path)
-                result["build_date"]  = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
-
-            # Try to read version from generated version.h if staged.
-            # We extract BOTH the short string ("1.0.0") and the full one
-            # ("1.0.0-<githash>-<unix_ts>"). The Teensy's OTA up-to-date
-            # check parses the trailing unix timestamp out of the server-
-            # supplied version string; if we send only the short form it
-            # gets timestamp=0, sees "server <= current", and silently
-            # short-circuits — never starting the actual download. The
-            # RP2040 path (see _send_rp2040_firmware_update) prefers
-            # version_full for the same reason.
-            version_h_path = os.path.join(fw_dir, 'generated', 'version.h')
-            if os.path.isfile(version_h_path):
-                try:
-                    with open(version_h_path, 'r') as f:
-                        content = f.read()
-                    m = re.search(r'FIRMWARE_VERSION_STRING\s+"([^"]+)"', content)
-                    if m:
-                        result["version"] = m.group(1)
-                    m_full = re.search(r'FIRMWARE_VERSION_FULL\s+"([^"]+)"', content)
-                    if m_full:
-                        result["version_full"] = m_full.group(1)
-                except Exception:
-                    pass
+            # Teensy artifact = raw saint_node.bin streamed by the in-app
+            # OTA. Path resolution + version.h read both come from the
+            # shared helpers, so the regex bug that used to silently
+            # produce version="0.0.0" can't recur from a copied-and-
+            # drifted code path.
+            self._populate_node_firmware_info(result, 'teensy41', 'saint_node.bin')
             return result
 
         elif fw_type == 'rpi5':
-            # Look for Pi 5 firmware in resources/firmware/rpi5
-            current_dir = os.path.dirname(__file__)
-            firmware_dir = os.path.abspath(
-                os.path.join(current_dir, '..', '..', 'resources', 'firmware', 'rpi5')
-            )
-
-            if not os.path.isdir(firmware_dir):
-                return result
-
-            # Check for info.json
-            info_file = os.path.join(firmware_dir, 'info.json')
-            if os.path.isfile(info_file):
-                try:
-                    with open(info_file, 'r') as f:
-                        info = json.load(f)
-                        result["available"] = True
-                        result["version"] = info.get("latest_version", "0.0.0")
-                        result["filename"] = info.get("latest_package")
-                        result["checksum"] = info.get("latest_checksum")
-                        result["build_date"] = info.get("updated")
-                        return result
-                except Exception:
-                    pass
-
-            # Fallback: scan for zip files
-            for f in os.listdir(firmware_dir):
-                if f.endswith('.zip') and 'rpi5' in f:
-                    result["available"] = True
-                    result["filename"] = f
-                    # Try to extract version from filename
-                    import re
-                    version_match = re.search(r'(\d+\.\d+\.\d+)', f)
-                    if version_match:
-                        result["version"] = version_match.group(1)
-                    break
+            # Pi 5 firmware is a zip package, not a flash image. info.json
+            # is produced by the Pi 5 build script and carries the version
+            # / checksum / package name. Fallback parses the filename if
+            # info.json is missing.
+            self._populate_package_firmware_info(
+                result, 'rpi5', file_glob_suffix='.zip', filename_contains='rpi5')
+            return result
 
         elif fw_type == 'controller':
-            # Steam Deck controller .AppImage in resources/firmware/controller.
-            # Same info.json shape as the node firmware types; produced by
-            # controller/appimage/build-bundle.sh on local builds and by the
-            # appimage-controller CI job.
-            current_dir = os.path.dirname(__file__)
-            firmware_dir = os.path.abspath(
-                os.path.join(current_dir, '..', '..', 'resources', 'firmware', 'controller')
-            )
-
-            if not os.path.isdir(firmware_dir):
-                return result
-
-            info_file = os.path.join(firmware_dir, 'info.json')
-            if os.path.isfile(info_file):
-                try:
-                    with open(info_file, 'r') as f:
-                        info = json.load(f)
-                        result["available"] = True
-                        result["version"] = info.get("latest_version", "0.0.0")
-                        result["filename"] = info.get("latest_package")
-                        result["checksum"] = info.get("latest_checksum")
-                        result["build_date"] = info.get("updated")
-                        return result
-                except Exception:
-                    pass
-
-            # Fallback: scan for AppImage files.
-            for f in os.listdir(firmware_dir):
-                if f.endswith('.AppImage'):
-                    result["available"] = True
-                    result["filename"] = f
-                    import re
-                    version_match = re.search(r'(\d+\.\d+\.\d+)', f)
-                    if version_match:
-                        result["version"] = version_match.group(1)
-                    break
+            # Steam Deck controller .AppImage. Same info.json shape as
+            # rpi5 (controller/appimage/build-bundle.sh emits it).
+            self._populate_package_firmware_info(
+                result, 'controller', file_glob_suffix='.AppImage')
 
         return result
