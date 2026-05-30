@@ -57,8 +57,14 @@ build_date = time.strftime("%b %d %Y")
 build_time = time.strftime("%H:%M:%S")
 build_timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-# Full version string: version-githash-unixtime
-version_full = f"{version_string}-{git_hash}-{build_unix}"
+# Full version string: <semver>-<unix_ts>. Format mirrors
+# firmware/rp2040/cmake/GenerateVersion.cmake — NO git hash in between.
+# The node-side extract_version_timestamp parses digits after the first
+# dash; if a git hash sits in that slot it reads a partial integer and
+# every up-to-date / OTA-comparison check produces wrong answers
+# (server_ts of 276 vs current_ts of 1780175695 etc). Git hash stays
+# available as the separate FIRMWARE_GIT_HASH define for diagnostics.
+version_full = f"{version_string}-{build_unix}"
 
 # Generate header
 header_content = f"""/**
