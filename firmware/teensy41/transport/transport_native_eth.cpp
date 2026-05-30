@@ -74,27 +74,31 @@ static void wait_with_led(uint32_t total_ms)
 
 bool transport_native_eth_connect(void)
 {
-    // Wait indefinitely for an Ethernet link. The server (Pi) and the node
-    // power up together; giving up after a few seconds would strand the
-    // node on a useless fallback. Matches RP2040 (transport_w5500.c).
-    Serial.printf("Transport: waiting for Ethernet link...\n");
-    uint32_t link_wait_ms = 0;
-    while (Ethernet.linkStatus() != LinkON) {
-        wait_with_led(100);
-        link_wait_ms += 100;
-        if (link_wait_ms % 5000 == 0) {
-            Serial.printf("Still waiting for ethernet link (%lus)...\n",
-                          (unsigned long)(link_wait_ms / 1000));
-        }
-    }
-    Serial.printf("Ethernet link detected after %lums\n",
-                  (unsigned long)link_wait_ms);
-
-    // Retry DHCP forever. We never fall back to a static IP because the
-    // compile-time fallback is on a different subnet than the server: a
-    // "successful" fallback would IP-conflict with every other node doing
-    // the same thing. The RP2040 OTA path makes the same call for the
-    // same reason — see firmware/rp2040/transport/transport_w5500.c:286.
+    // Don't wait on linkStatus() before the first Ethernet.begin().
+    // NativeEthernet's link_status is only updated by FNET's callback,
+    // which is registered INSIDE Ethernet.begin() — see
+    // .platformio/packages/framework-arduinoteensy/libraries/
+    //   NativeEthernet/src/NativeEthernet.cpp:406. Before begin() the
+    // value is its 0 default, which maps to LinkOFF, so any wait-for-
+    // LinkON loop hangs forever even with the cable plugged in. The
+    // W5500 on the RP2040 doesn't have this property because the chip
+    // self-initializes, which is what made the previous copy-from-
+    // RP2040 link-wait pattern look right.
+    //
+    // Strategy: retry Ethernet.begin(mac, timeout) in a loop. Each
+    // begin() initialises the PHY, FNET, and DHCP in one shot and
+    // returns 1 on a successful lease / 0 otherwise. Failure modes
+    // (no link, no DHCP server, DHCP refused) all just return 0, so
+    // we treat them uniformly with backoff. After the first call
+    // linkStatus() is meaningful, so we log it for diagnostics — that
+    // turns "no cable" into an obvious one-liner in the serial log.
+    //
+    // We never fall back to a static IP — the compile-time fallback
+    // is on a different subnet than the server, so a "successful"
+    // fallback would IP-conflict with every other node doing the
+    // same thing. Matches firmware/rp2040/transport/transport_w5500.c
+    // for the same reason.
+    Serial.printf("Transport: bringing up Ethernet (DHCP)...\n");
     uint32_t attempt = 0;
     while (true) {
         attempt++;
@@ -103,11 +107,17 @@ bool transport_native_eth_connect(void)
         if (Ethernet.begin(mac_addr, DHCP_ATTEMPT_TIMEOUT_MS) != 0) {
             break;
         }
+        EthernetLinkStatus link = Ethernet.linkStatus();
+        const char* link_str = (link == LinkON)  ? "up"
+                             : (link == LinkOFF) ? "down (check cable)"
+                                                 : "unknown";
         uint32_t backoff_ms = (attempt < DHCP_FAST_ATTEMPTS)
                               ? DHCP_BACKOFF_FAST_MS
                               : DHCP_BACKOFF_SLOW_MS;
-        Serial.printf("Transport: DHCP attempt %lu failed; retrying in %lums\n",
-                      (unsigned long)attempt, (unsigned long)backoff_ms);
+        Serial.printf("Transport: DHCP attempt %lu failed (link=%s); "
+                      "retrying in %lums\n",
+                      (unsigned long)attempt, link_str,
+                      (unsigned long)backoff_ms);
         wait_with_led(backoff_ms);
     }
 

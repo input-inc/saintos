@@ -103,9 +103,16 @@ class ROSBridge:
         self._hot_log_last_ms = 0.0
 
     def log(self, level: str, message: str):
-        """Log a message if logger is available."""
+        """Log a message if logger is available.
+
+        Dispatches via saint_server.log_level.log_at so each severity
+        emits from its own stable source line — works around rclpy's
+        "Logger severity cannot be changed between calls" trip on
+        single-line getattr wrappers.
+        """
         if self._logger:
-            getattr(self._logger, level)(message)
+            from saint_server.log_level import log_at
+            log_at(self._logger, level, message)
 
     def _hot_log(self, message: str):
         """Sampled INFO log for per-tick lines. Logs 1-of-N during steady

@@ -31,7 +31,7 @@ build_sim() {
 build_hw() {
     echo -e "${YELLOW}Building HARDWARE firmware (Teensy 4.1)...${NC}"
     pio run -e hardware
-    echo -e "${GREEN}Hardware build complete: .pio/build/hardware/firmware.hex${NC}"
+    echo -e "${GREEN}Hardware build complete: build/hardware/firmware.hex${NC}"
     echo -e "${GREEN}OTA artifact staged: server/resources/firmware/teensy41/saint_node.bin${NC}"
 }
 
@@ -58,8 +58,8 @@ case "${1:-all}" in
         echo ""
         echo -e "${GREEN}========================================${NC}"
         echo -e "${GREEN}Both builds complete!${NC}"
-        echo -e "${GREEN}  Simulation: .pio/build/simulation/${NC}"
-        echo -e "${GREEN}  Hardware:   .pio/build/hardware/firmware.hex${NC}"
+        echo -e "${GREEN}  Simulation: build/simulation/${NC}"
+        echo -e "${GREEN}  Hardware:   build/hardware/firmware.hex${NC}"
         echo -e "${GREEN}  OTA stage:  server/resources/firmware/teensy41/saint_node.bin${NC}"
         echo -e "${GREEN}========================================${NC}"
         ;;

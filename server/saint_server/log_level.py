@@ -92,3 +92,39 @@ def apply_log_level(level: str, ros_node: Optional[object] = None) -> str:
         pass
 
     return canonical
+
+
+def log_at(logger, level: str, message: str) -> None:
+    """Dispatch `message` to `logger.<level>()` from a stable per-severity line.
+
+    rclpy's rcutils logger identifies each log call by source file + line.
+    If the same source line emits at more than one severity over its
+    lifetime, the second severity trips a
+    ``ValueError: Logger severity cannot be changed between calls.``
+    Wrappers that did ``getattr(logger, level)(message)`` looked clean
+    but funnelled every severity through ONE line, so they tripped this
+    check the moment a dashboard log-level change started actually
+    invoking the previously-filtered debug paths.
+
+    This helper sidesteps that by having each severity emit from its
+    own dedicated line below. rclpy treats each elif branch as a
+    distinct call site, so a single severity is forever pinned to a
+    single line — no matter how many callers funnel through here.
+    """
+    if logger is None:
+        return
+    if level == 'debug':
+        logger.debug(message)
+    elif level == 'info':
+        logger.info(message)
+    elif level == 'warn' or level == 'warning':
+        logger.warning(message)
+    elif level == 'error':
+        logger.error(message)
+    elif level == 'fatal' or level == 'critical':
+        try:
+            logger.fatal(message)
+        except AttributeError:
+            logger.critical(message)
+    else:
+        logger.info(message)

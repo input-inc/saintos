@@ -1,3 +1,20 @@
+# PlatformIO library cache (downloaded micro-ROS / NativeEthernet / etc).
+# Stays hidden — it's package-manager state, not a build artifact.
 .pio/
+
+# Build artifacts. Surfaced via [platformio] build_dir = build in
+# platformio.ini, mirroring firmware/rp2040/build/. Same exclusions as
+# firmware/rp2040/.gitignore so neither platform risks committing a
+# firmware.hex / .elf / .bin.
+build/
+*.elf
+*.hex
+*.bin
+*.map
+
 .vscode/
+
+# Generated each build by generate_version.py from the git hash + the
+# wall-clock build timestamp. Must not be checked in or every commit
+# would dirty the working tree on the next build.
 include/version.h

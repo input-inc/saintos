@@ -43,9 +43,15 @@ class DiscoveryService:
         self._running = False
 
     def log(self, level: str, message: str):
-        """Log a message."""
+        """Log a message via the shared rcutils-safe dispatcher.
+
+        See saint_server.log_level.log_at — getattr(logger, level)(...)
+        funnels every severity through one source line and trips
+        rclpy's "Logger severity cannot be changed between calls."
+        """
         if self.logger:
-            getattr(self.logger, level)(message)
+            from saint_server.log_level import log_at
+            log_at(self.logger, level, message)
         else:
             print(f"[Discovery] {message}")
 

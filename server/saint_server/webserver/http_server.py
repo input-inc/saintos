@@ -124,9 +124,16 @@ class WebServer:
         self.site: Optional[web.TCPSite] = None
 
     def log(self, level: str, message: str):
-        """Log a message if logger is available."""
+        """Log a message if logger is available.
+
+        Dispatches via saint_server.log_level.log_at so each severity
+        emits from its own stable source line — works around rclpy's
+        "Logger severity cannot be changed between calls" trip on
+        single-line getattr wrappers.
+        """
         if self.logger:
-            getattr(self.logger, level)(message)
+            from saint_server.log_level import log_at
+            log_at(self.logger, level, message)
 
     async def start(self):
         """Start the HTTP server."""
