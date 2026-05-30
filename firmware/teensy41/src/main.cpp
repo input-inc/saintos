@@ -156,15 +156,31 @@ static void config_subscription_callback(const void* msgin)
 
     if (strstr(msg->data.data, "\"action\":\"configure\"") ||
         strstr(msg->data.data, "\"action\": \"configure\"")) {
-        if (pin_config_apply_json(msg->data.data, msg->data.size)) {
+        bool applied = pin_config_apply_json(msg->data.data, msg->data.size);
+        if (applied) {
             Serial.printf("Pin configuration applied successfully\n");
             if (pin_config_save()) {
                 Serial.printf("Pin configuration saved to flash\n");
             }
-            if (g_node.state != NODE_STATE_ACTIVE) {
-                node_set_state(NODE_STATE_ACTIVE);
-                led_set_state(NODE_STATE_ACTIVE);
-            }
+        } else {
+            // No pins / peripherals to apply (or apply failed cleanly).
+            // That's still a valid "you are adopted" signal — the
+            // server only publishes a configure on this node's
+            // per-node /config topic when it considers us adopted,
+            // and the operator may have adopted without configuring
+            // any peripherals yet. Honor the adoption either way.
+            Serial.printf("Configure received with no pins to apply (empty/no-op)\n");
+        }
+        if (g_node.state != NODE_STATE_ACTIVE) {
+            // Transition regardless of apply outcome — receipt of the
+            // configure is itself the server's "you're adopted" signal.
+            // Without this, an adopt-without-peripherals leaves the
+            // node permanently in UNADOPTED even though the server
+            // has it in its adopted list, and the dashboard's two
+            // views of adoption state stay forever out of sync.
+            node_set_state(NODE_STATE_ACTIVE);
+            led_set_state(NODE_STATE_ACTIVE);
+            Serial.printf("State: -> ACTIVE (adopted)\n");
         }
     }
 }
@@ -438,6 +454,21 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         if (g_announce_count < 1000) g_announce_count++;
         if (g_announce_count >= 2) {
             saint_log_drain_boot_queue();
+        }
+    } else {
+        // Surface publish failures instead of swallowing them. Without
+        // this, an XRCE-DDS session that's lost its publisher (e.g.
+        // because the agent's bookkeeping got out of sync after a
+        // disconnect/reconnect cycle) looks identical to a healthy
+        // node from the serial console — same boot banner, same
+        // periodic status line, just no announces on the wire.
+        // Rate-limit to one log line per second-ish so a sustained
+        // failure doesn't drown the serial.
+        static uint32_t last_fail_log_ms = 0;
+        uint32_t now_ms = millis();
+        if (now_ms - last_fail_log_ms >= 1000) {
+            Serial.printf("Announce publish failed: rcl_ret=%d\n", (int)ret);
+            last_fail_log_ms = now_ms;
         }
     }
 }
