@@ -25,8 +25,8 @@ file from one of two places:
 1. **Built locally**, via `controller/appimage/build-docker.sh` on a Mac
    or Linux dev machine, then `scp`'d to the Deck.
 2. **OTA-fetched**, from a SAINT.OS server: the controller's Settings tab
-   polls `/api/firmware/controller` for newer versions and downloads the
-   replacement straight into `~/.local/share/saint-controller/`.
+   polls `/api/firmware/controller` for newer versions and atomically
+   replaces the running AppImage in place (wherever the operator put it).
 
 Either way, the operator-side install is the same atomic-file-replace
 flow: write the file, `chmod +x`, drop a `.desktop` entry. No portal
@@ -39,20 +39,21 @@ calls, no package manager, no sandbox shell game.
 From your dev machine (or wherever you have the built artifact):
 
 ```bash
+ssh deck@steamdeck.local mkdir -p ~/Applications
 scp server/resources/firmware/controller/saint_firmware_controller_*.AppImage \
-    deck@steamdeck.local:~/.local/share/saint-controller/SAINT-Controller.AppImage
+    deck@steamdeck.local:~/Applications/SAINT-Controller.AppImage
 ```
 
-If `~/.local/share/saint-controller/` doesn't exist yet on the Deck, `scp`
-will refuse — create it first with
-`ssh deck@steamdeck.local mkdir -p ~/.local/share/saint-controller`.
+`~/Applications/` is the conventional AppImage location on Linux and is
+visible in Dolphin's home view, which makes manual swaps easy. SteamOS
+doesn't create it by default — hence the `mkdir -p` above.
 
 ### 2. Mark it executable and try a launch
 
 ```bash
 ssh deck@steamdeck.local
-chmod +x ~/.local/share/saint-controller/SAINT-Controller.AppImage
-~/.local/share/saint-controller/SAINT-Controller.AppImage
+chmod +x ~/Applications/SAINT-Controller.AppImage
+~/Applications/SAINT-Controller.AppImage
 ```
 
 The controller window should come up. (GTK module warnings about
@@ -66,7 +67,7 @@ In Desktop Mode, **Steam → Games → Add a Non-Steam Game to My Library →
 BROWSE…** and pick:
 
 ```
-/home/deck/.local/share/saint-controller/SAINT-Controller.AppImage
+/home/deck/Applications/SAINT-Controller.AppImage
 ```
 
 Rename the entry to **SAINT Controller** in the library so the
@@ -78,7 +79,7 @@ artwork-setup script in the next step finds it.
 the bundled hero + capsule PNGs into Steam's grid dir.
 
 ```bash
-~/.local/share/saint-controller/SAINT-Controller.AppImage \
+~/Applications/SAINT-Controller.AppImage \
     --appimage-extract-and-run saint-controller-artwork-setup
 ```
 
@@ -103,9 +104,9 @@ The controller's **Settings** tab polls `/api/firmware/controller` on the
 configured SAINT.OS server. When the server has a newer
 `saint_firmware_controller_*.AppImage` than what's running, a banner
 appears: **Update available — Install**. The flow downloads, verifies
-SHA-256, then atomically replaces
-`~/.local/share/saint-controller/SAINT-Controller.AppImage`. The Steam
-shortcut keeps working — the file path doesn't change.
+SHA-256, then atomically replaces the running AppImage at its current
+location (typically `~/Applications/SAINT-Controller.AppImage`). The
+Steam shortcut keeps working — the file path doesn't change.
 
 Operator-visible UX: click Install, wait for "Update installed. Please
 manually relaunch the SAINT Controller", relaunch from the Steam tile.
@@ -189,9 +190,6 @@ is the supported path. The native-dev recipe is preserved in
 
 ## Documentation
 
-- [docs/APPIMAGE_MIGRATION.md](docs/APPIMAGE_MIGRATION.md) — why the
-  build moved from flatpak to AppImage, what the path-shim does, and
-  the full migration plan
 - [docs/BINDINGS_SYSTEM.md](docs/BINDINGS_SYSTEM.md) — input → action
   data model (binding profiles, preset panels, action types)
 - [docs/SHEETS_BINDINGS.md](docs/SHEETS_BINDINGS.md) — how to bind a
@@ -210,11 +208,11 @@ likely running an old Docker image; pass `--rebuild-image`.
 
 ### AppImage launches but the webview is blank
 
-Check `~/.local/share/saint-controller/` exists and the file there is
-the actual current build (compare with the server's `info.json`
-checksum). Tauri's release binary embeds the production frontend, so a
-blank window usually means the binary is stale relative to what the
-controller's UI expects from the server.
+Check `~/Applications/SAINT-Controller.AppImage` is the actual current
+build (compare with the server's `info.json` checksum). Tauri's release
+binary embeds the production frontend, so a blank window usually means
+the binary is stale relative to what the controller's UI expects from
+the server.
 
 ### `npm ci` fails inside the AppImage build
 
