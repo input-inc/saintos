@@ -149,6 +149,8 @@ static const char* ota_fail_reason_str(uint8_t reason)
 #include "roboclaw_driver.h"
 #include "pathfinder_bms_driver.h"
 #include "maestro_driver.h"
+#include "tic_driver.h"
+#include "tmc2208_driver.h"
 #include "saint_log.h"
 
 #ifdef SAINT_OS_OTA_BOOTLOADER
@@ -1430,6 +1432,8 @@ int main(void)
     peripheral_register(fas100_get_peripheral_driver());
     peripheral_register(roboclaw_get_peripheral_driver());
     peripheral_register(pathfinder_bms_get_peripheral_driver());
+    peripheral_register(tic_get_peripheral_driver());
+    peripheral_register(tmc2208_get_peripheral_driver());
 
     // Load saved pin configuration (also fans out to each driver's
     // load_config callback).

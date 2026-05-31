@@ -224,6 +224,27 @@ _FIRMWARE_CHANNEL_MAP: Dict[str, Tuple[int, Dict[int, str]]] = {
     "pathfinder_bms_sensor": (276, {
         0: "pack_voltage", 1: "current", 2: "soc", 4: "temp_1", 5: "temp_2",
     }),
+    # TIC_VIRTUAL_GPIO_BASE = 300, 6 channels per unit * 8 units.
+    # Same multi-unit pattern as RoboClaw; the peripheral_id from
+    # pin_config_t.logical_name disambiguates which unit.
+    "tic_stepper": (300, {
+        (unit * 6 + sub): name
+        for unit in range(8)
+        for sub, name in enumerate((
+            "target_position", "target_velocity",
+            "current_position", "current_velocity",
+            "vin_voltage", "error_status",
+        ))
+    }),
+    # TMC2208_VIRTUAL_GPIO_BASE = 348, 4 channels per axis * 4 axes.
+    "tmc2208_stepper": (348, {
+        (axis * 4 + sub): name
+        for axis in range(4)
+        for sub, name in enumerate((
+            "target_position", "target_velocity",
+            "current_position", "error_flags",
+        ))
+    }),
 }
 
 
@@ -272,6 +293,8 @@ class PinCapability:
             'fas100_sensor': 'fas100_sensor',
             'roboclaw_motor': 'roboclaw_motor',
             'pathfinder_bms_sensor': 'pathfinder_bms_sensor',
+            'tic_stepper': 'tic_stepper',
+            'tmc2208_stepper': 'tmc2208_stepper',
         }
         required_cap = mode_map.get(mode, mode)
         return required_cap in self.capabilities

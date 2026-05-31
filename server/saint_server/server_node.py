@@ -72,7 +72,8 @@ from saint_server.discovery import DiscoveryService
 # subsystems don't get mis-tagged. List is intentionally small — we'd
 # rather under-tag than mis-tag.
 _PERIPHERAL_LOG_PREFIXES = (
-    "roboclaw", "fas100", "jbd", "neopixel", "maestro", "syren",
+    "roboclaw", "fas100", "jbd", "neopixel", "maestro", "syren", "tic",
+    "tmc2208",
 )
 
 

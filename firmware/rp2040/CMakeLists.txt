@@ -158,6 +158,10 @@ set(SAINT_NODE_SOURCES
     ../shared/src/roboclaw_driver.c
     src/pathfinder_bms_transport.c
     ../shared/src/pathfinder_bms_driver.c
+    src/tic_transport.c
+    ../shared/src/tic_driver.c
+    src/tmc2208_transport.c
+    ../shared/src/tmc2208_driver.c
     src/maestro_driver.c
     src/pio_uart.c
 )

@@ -37,6 +37,8 @@ TEST_BINARIES=(
     "test_fas100_parser"
     "test_roboclaw_driver"
     "test_maestro_driver"
+    "test_tic_driver"
+    "test_tmc2208_driver"
 )
 
 overall_rc=0

@@ -86,6 +86,37 @@ bool flash_storage_load(flash_storage_data_t* data)
         if (mutable_data->version <= 7) {
             memset(&mutable_data->uart_pins, 0, sizeof(mutable_data->uart_pins));
         }
+        // v8 -> v9: flash_roboclaw_config_t units grew by 2 bytes each
+        // (estop_pin + uart_swap). Same fix as RP2040: zero everything
+        // after roboclaw_config so misaligned bytes don't get
+        // interpreted as live config. Operators re-sync once.
+        if (mutable_data->version <= 8) {
+            memset(&mutable_data->roboclaw_config, 0,
+                   sizeof(mutable_data->roboclaw_config));
+            memset(&mutable_data->pathfinder_bms_config, 0,
+                   sizeof(mutable_data->pathfinder_bms_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+            mutable_data->fas100_config.enabled = 0;
+        }
+        // v9 -> v10: inserted flash_tic_config_t between
+        // pathfinder_bms_config and uart_pins. Zero tic_config +
+        // uart_pins (only Tic gets fresh defaults; earlier peripherals
+        // sit before the inserted block and keep their offsets).
+        if (mutable_data->version <= 9) {
+            memset(&mutable_data->tic_config, 0,
+                   sizeof(mutable_data->tic_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+        }
+        // v10 -> v11: inserted flash_tmc2208_config_t between tic_config
+        // and uart_pins. Same fix pattern.
+        if (mutable_data->version <= 10) {
+            memset(&mutable_data->tmc2208_config, 0,
+                   sizeof(mutable_data->tmc2208_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+        }
         mutable_data->version = FLASH_STORAGE_VERSION;
     }
 
@@ -183,6 +214,21 @@ bool flash_storage_load(flash_storage_data_t* data)
             memset(&data->syren_config, 0, sizeof(data->syren_config));
         }
         if (data->version <= 7) {
+            memset(&data->uart_pins, 0, sizeof(data->uart_pins));
+        }
+        if (data->version <= 8) {
+            memset(&data->roboclaw_config, 0, sizeof(data->roboclaw_config));
+            memset(&data->pathfinder_bms_config, 0,
+                   sizeof(data->pathfinder_bms_config));
+            memset(&data->uart_pins, 0, sizeof(data->uart_pins));
+            data->fas100_config.enabled = 0;
+        }
+        if (data->version <= 9) {
+            memset(&data->tic_config, 0, sizeof(data->tic_config));
+            memset(&data->uart_pins, 0, sizeof(data->uart_pins));
+        }
+        if (data->version <= 10) {
+            memset(&data->tmc2208_config, 0, sizeof(data->tmc2208_config));
             memset(&data->uart_pins, 0, sizeof(data->uart_pins));
         }
         data->version = FLASH_STORAGE_VERSION;

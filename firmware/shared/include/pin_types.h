@@ -30,6 +30,8 @@
 #define PIN_CAP_FAS100_SENSOR   0x800
 #define PIN_CAP_ROBOCLAW_MOTOR  0x1000
 #define PIN_CAP_PATHFINDER_BMS  0x2000
+#define PIN_CAP_TIC_STEPPER     0x4000
+#define PIN_CAP_TMC2208_STEPPER 0x8000
 
 // Convenience combinations
 #define PIN_CAP_GPIO            (PIN_CAP_DIGITAL_IN | PIN_CAP_DIGITAL_OUT)
@@ -56,7 +58,9 @@ typedef enum {
     PIN_MODE_SYREN_MOTOR,
     PIN_MODE_FAS100_SENSOR,
     PIN_MODE_ROBOCLAW_MOTOR,
-    PIN_MODE_PATHFINDER_BMS
+    PIN_MODE_PATHFINDER_BMS,
+    PIN_MODE_TIC_STEPPER,
+    PIN_MODE_TMC2208_STEPPER
 } pin_mode_t;
 
 // =============================================================================
@@ -171,6 +175,43 @@ typedef struct {
         struct {
             uint16_t poll_interval_ms;
         } pathfinder_bms;
+        struct {
+            /* Pololu device ID, 1..127 (factory default 14). All
+             * units on one node share the same UART pair; address
+             * disambiguates which Tic the command targets. */
+            uint8_t address;
+            /* Operator-facing scaling. set_value gets a [-1.0, 1.0]
+             * float from the dashboard; the driver maps that to
+             * ±max_position (target_position channel) or
+             * ±max_speed_pps (target_velocity channel) before it
+             * goes on the wire. Both are operator config, not
+             * Tic-side settings — the Tic's max_speed/max_accel
+             * etc. are set via Pololu Control Center USB. */
+            int32_t  max_position;     /* default 10000 steps */
+            uint16_t max_speed_pps;    /* default 1000 pulses/sec */
+        } tic;
+        struct {
+            /* TMC2208 slave address — set on the PCB via MS1/MS2 pin
+             * strapping. The MCU needs to know which value the board
+             * hardwired so UART frames carry the right addr. */
+            uint8_t  address;
+            /* STEP and DIR output GPIOs. Per-axis because each TMC2208
+             * is a single-axis chip; the MCU pulses STEP at the
+             * desired step rate and toggles DIR before reversing. */
+            uint8_t  step_pin;
+            uint8_t  dir_pin;
+            /* PCB-specific sense resistor in milliohms. Common: 110
+             * (0.11Ω) or 75 (0.075Ω). Operator-configurable per axis
+             * because mixed-vendor builds aren't rare. */
+            uint16_t rsense_milliohm;
+            uint16_t microsteps;       /* 1/2/4/8/16/32/64/128/256 */
+            uint16_t run_current_ma;
+            uint16_t hold_current_ma;
+            uint8_t  stealth_chop;     /* 0 = SpreadCycle, 1 = StealthChop */
+            uint8_t  reserved_tmc;
+            int32_t  max_position;     /* default 10000 steps */
+            uint16_t max_speed_pps;    /* default 1000 pulses/sec */
+        } tmc2208;
     } params;
 } pin_config_t;
 

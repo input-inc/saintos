@@ -119,6 +119,31 @@ bool flash_storage_load(flash_storage_data_t* data)
                    sizeof(mutable_data->uart_pins));
             mutable_data->fas100_config.enabled = 0;
         }
+        // Version 9 -> 10: inserted flash_tic_config_t between
+        // pathfinder_bms_config and uart_pins. The shift means a v9
+        // blob loaded into v10 layout has the old uart_pins bytes
+        // misread as tic_config. Same fix as v8→v9: zero tic_config
+        // AND uart_pins (so the FAS100/SyRen/RoboClaw/Pathfinder
+        // pin assignments need a one-time re-sync). Pre-v10 peripheral
+        // configs that sit BEFORE tic_config (maestro, syren, fas100,
+        // roboclaw, pathfinder_bms) keep their offsets, so those
+        // peripherals' addresses/baud/etc survive untouched.
+        if (mutable_data->version <= 9) {
+            memset(&mutable_data->tic_config, 0,
+                   sizeof(mutable_data->tic_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+        }
+        // Version 10 -> 11: inserted flash_tmc2208_config_t between
+        // tic_config and uart_pins. Same shape as v9->v10 — zero the
+        // new block + uart_pins so misaligned bytes don't get read as
+        // live config. Tic and earlier peripherals keep their offsets.
+        if (mutable_data->version <= 10) {
+            memset(&mutable_data->tmc2208_config, 0,
+                   sizeof(mutable_data->tmc2208_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+        }
 
         mutable_data->version = FLASH_STORAGE_VERSION;
     }

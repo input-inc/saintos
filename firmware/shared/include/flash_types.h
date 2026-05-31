@@ -20,7 +20,7 @@ extern "C" {
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   9
+#define FLASH_STORAGE_VERSION   11
 // Bump history:
 //   v8: added uart_pins block.
 //   v9: added estop_pin + uart_swap to flash_roboclaw_config_t units.
@@ -33,6 +33,23 @@ extern "C" {
 //       The v8→v9 migration zeros roboclaw_config, pathfinder_bms_
 //       config, and uart_pins; operators re-sync from the dashboard
 //       once, then everything persists correctly.
+//   v10: added flash_tic_config_t for the Pololu Tic stepper driver,
+//        AND added tic_tx_pin/tic_rx_pin to flash_uart_pins_t (stolen
+//        from reserved_u). The Tic block lives AFTER pathfinder_bms_
+//        config in flash_storage_data_t so existing fields keep their
+//        offsets. uart_pins shifts by 0 bytes (the new pins replace
+//        reserved bytes), but the FLASH_UART_PINS layout is part of
+//        flash_storage_data_t and an unmigrated v9 load would still
+//        zero-fill the new tic-specific bytes. The v9→v10 migration
+//        zeros tic_config + the new uart_pins fields; pre-existing
+//        peripheral configs survive untouched.
+//   v11: added flash_tmc2208_config_t for the TMC2208 stepper driver,
+//        AND added tmc2208_tx_pin/tmc2208_rx_pin to flash_uart_pins_t
+//        (more reserved_u bytes). The TMC2208 block lives AFTER
+//        tic_config so blocks BEFORE it (maestro/syren/fas100/roboclaw/
+//        pathfinder/tic) keep their offsets. The v10→v11 migration
+//        zeros tmc2208_config + uart_pins; non-Tic peripheral configs
+//        survive untouched but operators must re-sync UART pin pairs.
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
@@ -149,6 +166,50 @@ typedef struct __attribute__((packed)) {
 } flash_pathfinder_bms_config_t;
 
 // =============================================================================
+// Pololu Tic Stepper Controller Configuration
+// =============================================================================
+
+#define FLASH_TIC_MAX_UNITS 8
+
+typedef struct __attribute__((packed)) {
+    uint8_t unit_count;
+    uint8_t serial_port;    // Which UART (0-1 RP2040, 1-8 Teensy)
+    uint16_t baud_rate;     // Default 9600
+    struct __attribute__((packed)) {
+        uint8_t address;          // Tic device ID, 1..127
+        uint8_t reserved_t;
+        uint16_t max_speed_pps;   // operator scaling for target_velocity
+        int32_t  max_position;    // operator scaling for target_position
+    } units[FLASH_TIC_MAX_UNITS];
+} flash_tic_config_t;
+
+// =============================================================================
+// TMC2208 Stepper Driver Configuration
+// =============================================================================
+
+#define FLASH_TMC2208_MAX_AXES 4
+
+typedef struct __attribute__((packed)) {
+    uint8_t axis_count;
+    uint8_t serial_port;     // Which UART
+    uint16_t reserved_t208;  // padding to keep baud_rate aligned
+    uint32_t baud_rate;      // Default 115200; full 32 bits because the
+                             // common TMC2208 rate 115200 exceeds uint16.
+    struct __attribute__((packed)) {
+        uint8_t address;          // 0..3 slave addr (PCB MS1/MS2 strap)
+        uint8_t step_pin;
+        uint8_t dir_pin;
+        uint8_t stealth_chop;     // 0/1
+        uint16_t microsteps;
+        uint16_t run_current_ma;
+        uint16_t hold_current_ma;
+        uint16_t rsense_milliohm;
+        uint16_t max_speed_pps;
+        int32_t  max_position;
+    } axes[FLASH_TMC2208_MAX_AXES];
+} flash_tmc2208_config_t;
+
+// =============================================================================
 // UART Pin Assignments (added v8)
 // =============================================================================
 //
@@ -168,7 +229,11 @@ typedef struct __attribute__((packed)) {
     uint8_t pathfinder_bms_rx_pin;
     uint8_t maestro_tx_pin;
     uint8_t maestro_rx_pin;
-    uint8_t reserved_u[6];
+    uint8_t tic_tx_pin;
+    uint8_t tic_rx_pin;
+    uint8_t tmc2208_tx_pin;
+    uint8_t tmc2208_rx_pin;
+    uint8_t reserved_u[2];
 } flash_uart_pins_t;
 
 // =============================================================================
@@ -202,6 +267,10 @@ typedef struct __attribute__((packed)) {
     flash_roboclaw_config_t roboclaw_config;
 
     flash_pathfinder_bms_config_t pathfinder_bms_config;
+
+    flash_tic_config_t tic_config;
+
+    flash_tmc2208_config_t tmc2208_config;
 
     flash_uart_pins_t uart_pins;
 

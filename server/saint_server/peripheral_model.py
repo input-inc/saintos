@@ -381,6 +381,69 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralTypeParam("invert_direction", "Invert motor direction", "bool", False),
         ],
     ),
+    "tic": PeripheralType(
+        id="tic", label="Tic Stepper",
+        description=(
+            "Pololu Tic stepper motor controller (T834/T825/T249/36v4) "
+            "over TTL serial with per-unit device ID. Up to 8 units share "
+            "one UART. Step mode and current limit must be pre-configured "
+            "via Pololu Tic Control Center over USB."
+        ),
+        pin_kind="uart",
+        channels=[
+            PeripheralChannel("target_position",  "Target position",  "out", "analog"),
+            PeripheralChannel("target_velocity",  "Target velocity",  "out", "analog"),
+            PeripheralChannel("current_position", "Current position", "in",  "analog"),
+            PeripheralChannel("current_velocity", "Current velocity", "in",  "analog"),
+            PeripheralChannel("vin_voltage",      "VIN voltage",      "in",  "analog"),
+            PeripheralChannel("error_status",     "Error status",     "in",  "analog"),
+        ],
+        params=[
+            # Pololu device number. Factory default 14; operators
+            # change it via Tic Control Center to allow multi-drop.
+            PeripheralTypeParam("address",        "Device ID",            "int", 14,    min=1, max=127),
+            # Operator-facing scaling. The dashboard slider sends
+            # [-1.0, 1.0]; firmware multiplies by these to get the
+            # wire value sent to the Tic.
+            PeripheralTypeParam("max_position",   "Max position (steps)", "int", 10000, min=1, max=2000000000),
+            PeripheralTypeParam("max_speed_pps",  "Max speed (pulses/s)", "int", 1000,  min=1, max=50000),
+        ],
+    ),
+    "tmc2208": PeripheralType(
+        id="tmc2208", label="TMC2208 Stepper",
+        description=(
+            "Trinamic TMC2208 stepper amplifier with UART configuration "
+            "and MCU-generated STEP/DIR pulses. Up to 4 axes per node, "
+            "each with its own slave address (PCB MS1/MS2 strapping), "
+            "STEP and DIR GPIOs, and Rsense. Motion is constant-velocity "
+            "between target_position commands — no acceleration ramp."
+        ),
+        pin_kind="uart",
+        channels=[
+            PeripheralChannel("target_position",  "Target position",  "out", "analog"),
+            PeripheralChannel("target_velocity",  "Target velocity",  "out", "analog"),
+            PeripheralChannel("current_position", "Current position", "in",  "analog"),
+            PeripheralChannel("error_flags",      "Error flags",      "in",  "analog"),
+        ],
+        params=[
+            # PCB-side slave address strap (MS1/MS2). 0-3 supported.
+            PeripheralTypeParam("address",         "Slave address",        "int", 0,     min=0, max=3),
+            # GPIOs the MCU wires to the chip's STEP and DIR inputs.
+            PeripheralTypeParam("step_pin",        "STEP pin",             "gpio", 0),
+            PeripheralTypeParam("dir_pin",         "DIR pin",              "gpio", 0),
+            # PCB-specific sense resistor. 110 = 0.11Ω (most boards),
+            # 75 = 0.075Ω (high-current variants).
+            PeripheralTypeParam("rsense_milliohm", "Rsense (mΩ)",          "int", 110,   min=20, max=500),
+            # Chip-side motion characteristics.
+            PeripheralTypeParam("microsteps",      "Microsteps",           "int", 16,    min=1, max=256),
+            PeripheralTypeParam("run_current_ma",  "Run current (mA)",     "int", 500,   min=0, max=2000),
+            PeripheralTypeParam("hold_current_ma", "Hold current (mA)",    "int", 200,   min=0, max=2000),
+            PeripheralTypeParam("stealth_chop",    "StealthChop",          "bool", True),
+            # Operator-facing scaling for set_value [-1,1].
+            PeripheralTypeParam("max_position",    "Max position (steps)", "int", 10000, min=1, max=2000000000),
+            PeripheralTypeParam("max_speed_pps",   "Max speed (pulses/s)", "int", 1000,  min=1, max=12500),
+        ],
+    ),
     "pathfinder_bms": PeripheralType(
         id="pathfinder_bms", label="Pathfinder BMS",
         description="JBD-compatible battery management system.",

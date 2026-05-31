@@ -19,6 +19,8 @@ extern "C" {
 #include "fas100_driver.h"
 #include "roboclaw_driver.h"
 #include "pathfinder_bms_driver.h"
+#include "tic_driver.h"
+#include "tmc2208_driver.h"
 extern "C" {
 #include "saint_log.h"
 }
@@ -725,6 +727,8 @@ void setup()
     peripheral_register(fas100_get_peripheral_driver());
     peripheral_register(roboclaw_get_peripheral_driver());
     peripheral_register(pathfinder_bms_get_peripheral_driver());
+    peripheral_register(tic_get_peripheral_driver());
+    peripheral_register(tmc2208_get_peripheral_driver());
 
     // Load saved pin configuration (also fans out to each driver's
     // load_config callback).
