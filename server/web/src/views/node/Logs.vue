@@ -1,7 +1,6 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
-import { useWsTopic } from '@/composables/useWsTopic'
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -9,32 +8,80 @@ const props = defineProps({
 })
 
 const ws = useWsStore()
-const history = ref([])           // entries fetched on mount
-const live = useWsTopic(() => `node_log/${props.nodeId}`)
+const history = ref([])           // accumulating buffer (initial fetch + live)
 const listEl = ref(null)
 const MAX_ROWS = 500
+// Monotonic seq for stable v-for keys. Using the array index would
+// cause Vue to re-use DOM nodes with new content whenever the buffer
+// shifts (every push past MAX_ROWS), producing visible flicker.
+let nextSeq = 0
+function withSeq (entry) {
+  return { ...entry, _seq: ++nextSeq }
+}
 
-const entries = computed(() => {
-  const out = [...history.value]
-  // node_log broadcasts arrive as single entries via the topic feed.
-  if (live.value && typeof live.value === 'object' && !Array.isArray(live.value)) {
-    out.push(live.value)
-  }
-  return out.slice(-MAX_ROWS)
-})
+const entries = computed(() => history.value)
 
 async function loadHistory () {
   history.value = []
   try {
     const r = await ws.management('get_node_logs', { node_id: props.nodeId })
-    history.value = (r && r.entries) || []
+    history.value = ((r && r.entries) || []).map(withSeq)
   } catch (e) {
     console.warn('Failed to load logs:', e)
   }
 }
 
-onMounted(loadHistory)
-watch(() => props.nodeId, loadHistory)
+// Subscribe directly to the topic + catch live entries off the 'state'
+// frame so each one APPENDS instead of clobbering the previous value.
+// Same pattern as views/Logs.vue — see the comment there for why
+// useWsTopic isn't sufficient (it only stores the latest payload, so
+// every new log line replaces the previous one and the dashboard
+// either shows just the newest line or briefly overlaps during the
+// reactive re-render).
+let liveTopic = null
+async function attachLive (nodeId) {
+  if (liveTopic) {
+    try { await ws.unsubscribe([liveTopic]) } catch (_) {}
+    liveTopic = null
+  }
+  if (!nodeId) return
+  liveTopic = `node_log/${nodeId}`
+  try {
+    await ws.subscribe([liveTopic])
+  } catch (e) {
+    console.warn(`node_log subscribe failed: ${e}`)
+  }
+}
+
+function onStateFrame (msg) {
+  if (typeof msg?.node !== 'string') return
+  if (msg.node !== liveTopic) return
+  const entry = msg.data
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return
+  history.value.push(withSeq(entry))
+  if (history.value.length > MAX_ROWS) {
+    history.value.splice(0, history.value.length - MAX_ROWS)
+  }
+}
+
+onMounted(async () => {
+  ws.on('state', onStateFrame)
+  await loadHistory()
+  await attachLive(props.nodeId)
+})
+
+watch(() => props.nodeId, async (newId) => {
+  await loadHistory()
+  await attachLive(newId)
+})
+
+onUnmounted(async () => {
+  ws.off('state', onStateFrame)
+  if (liveTopic) {
+    try { await ws.unsubscribe([liveTopic]) } catch (_) {}
+    liveTopic = null
+  }
+})
 
 // Stick to bottom as new lines arrive.
 watch(entries, async () => {
@@ -79,8 +126,8 @@ function classFor (level) {
       class="space-y-1 font-mono text-xs max-h-[60vh] overflow-y-auto"
     >
       <div
-        v-for="(e, i) in entries"
-        :key="i"
+        v-for="e in entries"
+        :key="e._seq"
         :class="['log-entry', classFor(e.level)]"
       >
         <span class="text-fg-faint mr-2">{{ fmtTime(e.time) }}</span>

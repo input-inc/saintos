@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useChannelHistory } from '@/composables/useChannelHistory'
@@ -40,8 +40,52 @@ async function loadAll () {
   } catch (e) { console.warn('get_node_capabilities failed:', e) }
 }
 
-onMounted(() => { catalog.ensureLoaded(); loadAll() })
-watch(() => props.nodeId, loadAll)
+// Live sync-status feed. The server broadcasts on
+// `sync_status/<node_id>` after _maybe_handle_sync_ack flips the
+// node's peripheral_config.sync_status (success → "synced", or
+// "error" if the firmware logged "Config apply failed" /
+// "Flash save failed"). Without this subscription the Sync badge
+// would only refresh on a full loadAll() — which never re-runs after
+// the initial click, so the pill would stay on "Pending" forever
+// even after a successful sync.
+let syncTopic = null
+function onStateFrame (msg) {
+  if (typeof msg?.node !== 'string') return
+  if (msg.node !== syncTopic) return
+  const data = msg.data
+  if (!data || typeof data !== 'object') return
+  if (typeof data.sync_status === 'string') {
+    syncStatus.value = data.sync_status
+  }
+}
+
+async function attachSyncFeed (nodeId) {
+  if (syncTopic) {
+    try { await ws.unsubscribe([syncTopic]) } catch (_) {}
+  }
+  syncTopic = `sync_status/${nodeId}`
+  try { await ws.subscribe([syncTopic], 5) } catch (_) {}
+}
+
+onMounted(async () => {
+  catalog.ensureLoaded()
+  await loadAll()
+  ws.on('state', onStateFrame)
+  await attachSyncFeed(props.nodeId)
+})
+
+watch(() => props.nodeId, async (id) => {
+  await loadAll()
+  await attachSyncFeed(id)
+})
+
+onUnmounted(async () => {
+  ws.off('state', onStateFrame)
+  if (syncTopic) {
+    try { await ws.unsubscribe([syncTopic]) } catch (_) {}
+    syncTopic = null
+  }
+})
 
 const typesById = computed(() => {
   const out = {}

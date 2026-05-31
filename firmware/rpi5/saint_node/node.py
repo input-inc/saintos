@@ -21,6 +21,13 @@ from std_msgs.msg import String
 from .gpio_control import GPIOController
 from .config import ConfigManager
 from .updater import FirmwareUpdater
+from .peripheral_manager import PeripheralManager
+from .peripherals.syren import SyRenDriver
+from .peripherals.maestro import MaestroDriver
+from .peripherals.roboclaw import RoboClawDriver
+from .peripherals.tic import TicDriver
+from .peripherals.pathfinder_bms import PathfinderBMSDriver
+from .peripherals.fas100 import FAS100Driver
 
 
 class NodeState(Enum):
@@ -69,6 +76,19 @@ class SaintNode(Node):
 
         # GPIO controller
         self._gpio = GPIOController(self.get_logger())
+
+        # Peripheral manager: owns one instance of each peripheral
+        # driver (SyRen, Maestro, RoboClaw, Tic, Pathfinder BMS). Each
+        # driver claims a virtual GPIO range (200+); set_pin messages
+        # that target a virtual GPIO get dispatched here instead of
+        # going to gpio_control.
+        self._peripherals = PeripheralManager(self.get_logger())
+        self._peripherals.register(SyRenDriver)
+        self._peripherals.register(MaestroDriver)
+        self._peripherals.register(RoboClawDriver)
+        self._peripherals.register(TicDriver)
+        self._peripherals.register(PathfinderBMSDriver)
+        self._peripherals.register(FAS100Driver)
 
         # Firmware updater
         self._updater = FirmwareUpdater(self.get_logger())
@@ -210,6 +230,12 @@ class SaintNode(Node):
         """Main processing loop (10 Hz)."""
         now = time.time()
 
+        # Tick every peripheral driver (keepalives, telemetry polls,
+        # etc.). Cheap when no peripherals are configured; required
+        # for things like RoboClaw duty keepalive even when the
+        # operator isn't sliding a control.
+        self._peripherals.update()
+
         # Publish announcements (1 Hz)
         if now - self._last_announce >= 1.0:
             self._publish_announcement()
@@ -243,8 +269,15 @@ class SaintNode(Node):
         self._pub_announce.publish(msg)
 
     def _publish_capabilities(self):
-        """Publish node capabilities."""
+        """Publish node capabilities — physical GPIO pins from
+        gpio_control plus the peripheral types this node has registered
+        drivers for. The server uses peripheral_types to decide which
+        catalog entries are syncable to this node."""
         capabilities = self._gpio.get_capabilities()
+
+        peripheral_types = [
+            driver.TYPE_ID for driver in self._peripherals.all_drivers()
+        ]
 
         msg_data = {
             'node_id': self._node_id,
@@ -252,16 +285,21 @@ class SaintNode(Node):
             'reserved_pins': capabilities['reserved_pins'],
             'total_pins': len(capabilities['available_pins']),
             'features': capabilities.get('features', []),
+            'peripheral_types': peripheral_types,
         }
 
         msg = String()
         msg.data = json.dumps(msg_data)
         self._pub_capabilities.publish(msg)
-        self.get_logger().info('Published capabilities')
+        self.get_logger().info(
+            f'Published capabilities ({len(peripheral_types)} peripheral types)')
 
     def _publish_state(self):
-        """Publish current pin state."""
+        """Publish current pin state — physical GPIOs + peripheral
+        virtual channels in the same `pins` array. The server filters
+        by channel range to surface what the dashboard cares about."""
         pin_states = self._gpio.get_all_states()
+        pin_states += self._peripherals.collect_states()
 
         msg_data = {
             'node_id': self._node_id,
@@ -285,7 +323,17 @@ class SaintNode(Node):
                 self._publish_capabilities()
 
             elif action == 'configure':
-                self._handle_configure(data)
+                # Peripheral-first format takes precedence over the
+                # legacy "pins" format. Server emits one or the other,
+                # not both.
+                if 'peripherals' in data:
+                    self._peripherals.apply_peripherals(
+                        data.get('peripherals', []))
+                    self._state = NodeState.ACTIVE
+                    self.get_logger().info(
+                        'Configuration applied (peripherals), now ACTIVE')
+                else:
+                    self._handle_configure(data)
 
             elif action == 'adopt':
                 self._handle_adopt(data)
@@ -353,10 +401,23 @@ class SaintNode(Node):
                 gpio = data.get('gpio')
                 value = data.get('value')
 
-                if gpio is not None and value is not None:
-                    self._gpio.set_value(int(gpio), float(value))
-                else:
+                if gpio is None or value is None:
                     self.get_logger().warn('set_pin missing gpio or value')
+                else:
+                    gpio_i = int(gpio)
+                    # Peripheral virtual GPIOs (≥200) go through the
+                    # peripheral manager; everything else goes to the
+                    # physical GPIO controller.
+                    if self._peripherals.is_peripheral_vgpio(gpio_i):
+                        self._peripherals.set_value(gpio_i, float(value))
+                    else:
+                        self._gpio.set_value(gpio_i, float(value))
+
+            elif action == 'estop':
+                self._handle_estop()
+
+            elif action == 'clear_estop':
+                self._handle_clear_estop()
 
             elif action == 'factory_reset':
                 self._handle_factory_reset()
@@ -385,6 +446,10 @@ class SaintNode(Node):
         # Reset all GPIO to default
         self._gpio.reset_all()
 
+        # Wipe every peripheral driver's state too (closes serial
+        # ports, drops instance config).
+        self._peripherals.reset()
+
         # Clear configuration
         self._config.factory_reset()
 
@@ -392,6 +457,21 @@ class SaintNode(Node):
         self._state = NodeState.UNADOPTED
 
         self.get_logger().info('Factory reset complete')
+
+    def _handle_estop(self):
+        """Operator-triggered emergency stop: fan out to every
+        peripheral driver so write-side motion is halted as fast as
+        possible. Doesn't affect physical GPIO state — operator can
+        re-arm by sending fresh values."""
+        self.get_logger().warn('ESTOP requested')
+        self._peripherals.estop()
+
+    def _handle_clear_estop(self):
+        """Release latched estop state on every driver that supports
+        it (e.g. RoboClaw's S3 estop_pin). Motor commands stay where
+        they are — operator must send a fresh value to start moving."""
+        self.get_logger().info('Clear ESTOP requested')
+        self._peripherals.clear_estop()
 
     def _handle_reboot(self):
         """Handle reboot request."""
@@ -482,6 +562,7 @@ class SaintNode(Node):
     def cleanup(self):
         """Clean up resources on shutdown."""
         self.get_logger().info('Cleaning up...')
+        self._peripherals.reset()
         self._gpio.cleanup()
 
 

@@ -282,15 +282,41 @@ static bool drv_load(const void* storage_ptr)
      * otherwise see (would confuse the dashboard's channel picker). */
     syren_init();
 
-    /* Restore pin overrides from flash. The transport will resolve
-     * them to its internal UART instance when we call syren_open. */
-    if (storage->uart_pins.syren_tx_pin != 0 ||
-        storage->uart_pins.syren_rx_pin != 0) {
-        g_tx_pin = storage->uart_pins.syren_tx_pin;
-        g_rx_pin = storage->uart_pins.syren_rx_pin;
+    /* Validate pin overrides from flash against the platform's known
+     * UART pin pairs before honoring them. 0xFF/0xFF (or any other
+     * combo the platform doesn't actually wire to a UART) means the
+     * flash slot was never properly written — typically a pre-refactor
+     * flash layout being reinterpreted by post-refactor code. Treat
+     * the record as unconfigured rather than opening the UART with
+     * bogus pin numbers. Mirrors roboclaw_drv_load. */
+    uint8_t stored_tx = storage->uart_pins.syren_tx_pin;
+    uint8_t stored_rx = storage->uart_pins.syren_rx_pin;
+    bool pins_valid = false;
+    if (stored_tx != 0 || stored_rx != 0) {
+        uint8_t inst;
+        if (uart_pin_pair_lookup(stored_tx, stored_rx, &inst)) {
+            g_tx_pin = stored_tx;
+            g_rx_pin = stored_rx;
+            pins_valid = true;
+        } else {
+            saint_log_publish("warn",
+                "SyRen: stored pin pair TX=%u RX=%u isn't a valid UART pair "
+                "— driver dormant. Re-sync a SyRen config from the dashboard.",
+                (unsigned)stored_tx, (unsigned)stored_rx);
+        }
     }
 
-    if (storage->syren_config.channel_count == 0) return true;
+    if (storage->syren_config.channel_count == 0) {
+        saint_log_publish("info",
+            "SyRen: no saved peripheral in flash — driver dormant. "
+            "Sync a SyRen config from the dashboard to bind the UART.");
+        return true;
+    }
+
+    /* channel_count says configured but the pin pair is invalid — the
+     * flash record is inconsistent. Don't open the UART on garbage;
+     * wait for a fresh sync. */
+    if (!pins_valid) return true;
 
     uint8_t count = storage->syren_config.channel_count;
     if (count > SYREN_MAX_CHANNELS) count = SYREN_MAX_CHANNELS;

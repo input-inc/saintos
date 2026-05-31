@@ -314,22 +314,24 @@ class SaintServerNode(Node):
         try:
             # Log announcement for debugging
             self.get_logger().debug(f'Received announcement ({len(raw)} bytes): {raw[:100]}...')
-            is_new = self.state_manager.update_node_from_announcement(raw)
-            # Parse node_id once; used for both the log line below and
-            # to register the per-node log subscriber lazily on first
-            # contact (so firmware boot lines from a fresh node get
-            # captured even before adoption).
+
+            # Parse once; reused for state-mismatch reconcile below.
             announced_node_id = None
+            announced_state = ''
             try:
                 import json
-                announced_node_id = json.loads(raw).get('node_id')
+                parsed = json.loads(raw)
+                announced_node_id = parsed.get('node_id')
+                announced_state = parsed.get('state', '')
             except Exception:
                 pass
+
+            is_new = self.state_manager.update_node_from_announcement(raw)
             if is_new:
                 self.get_logger().info(f'New node discovered via announcement')
-            else:
-                if announced_node_id:
-                    self.get_logger().debug(f'Updated node {announced_node_id}')
+            elif announced_node_id:
+                self.get_logger().debug(f'Updated node {announced_node_id}')
+
             if announced_node_id:
                 # Subscribe to everything the firmware publishes for
                 # this node, so data flows whether or not the operator
@@ -340,6 +342,34 @@ class SaintServerNode(Node):
                 self._ensure_node_log_subscriber(announced_node_id)
                 self._ensure_node_state_subscriber(announced_node_id)
                 self._ensure_node_capabilities_subscriber(announced_node_id)
+
+                # Pre-create per-node publishers at first contact so DDS
+                # discovery completes during the quiet stretch between
+                # boot and the operator's first Sync / control / command
+                # action. Without this, the publishers were created
+                # lazily inside send_config_to_node / send_control_command
+                # / send_node_command — and the very first publish on
+                # that brand-new publisher races with DDS matching: the
+                # firmware's subscription has existed since boot, but
+                # DDS still needs ~1-5 s to match the just-created
+                # publisher, and VOLATILE durability drops any messages
+                # published before the match completes. Operators then
+                # see "Pushed peripheral config (Sync to Node)" on the
+                # server log with no corresponding "Config received" on
+                # the firmware side, and the sync silently fails.
+                self._ensure_node_config_publisher(announced_node_id)
+                self._ensure_node_control_publisher(announced_node_id)
+                self._ensure_node_command_publisher(announced_node_id)
+
+                # Auto-reconcile firmware-server state mismatch. If we
+                # have this node in adopted_nodes but it announces
+                # UNADOPTED — typically an OTA wiped or invalidated its
+                # flash-saved peripheral config — re-push our config so
+                # the firmware can re-enter ACTIVE. Without this the
+                # operator has to notice the divergence and hit Sync to
+                # Node by hand.
+                self._maybe_reconcile_adopted_unadopted(
+                    announced_node_id, announced_state)
         except Exception as e:
             # Dump the full raw payload so operators can see exactly what
             # arrived — the bare error message ("unterminated string at
@@ -349,6 +379,53 @@ class SaintServerNode(Node):
                 f'Error processing announcement ({preview_len} bytes): {e}\n'
                 f'  RAW: {raw!r}'
             )
+
+    # 10 s between reconcile pushes for the same node. Firmware takes a
+    # few hundred ms to apply + flash-save and then needs to announce
+    # again with state=ACTIVE before we know the recovery worked. 10 s
+    # is comfortably longer than that worst case while still being
+    # short enough for an operator to see "it healed itself" on the
+    # Logs tab without waiting forever.
+    _RECONCILE_COOLDOWN_S = 10.0
+
+    def _maybe_reconcile_adopted_unadopted(self, node_id: str,
+                                            announced_state: str) -> None:
+        """Re-push peripheral config when an adopted node says UNADOPTED.
+
+        Rate-limited per node via NodeInfo.last_reconcile_push_at so a
+        firmware that keeps failing apply doesn't get hammered at 1 Hz
+        (the announcement cadence in UNADOPTED state). Once the
+        firmware successfully applies, its next announcement will say
+        ACTIVE and this guard short-circuits.
+        """
+        if announced_state != "UNADOPTED":
+            return
+        node = self.state_manager.state.adopted_nodes.get(node_id)
+        if not node:
+            return
+
+        import time
+        now = time.time()
+        if now - node.last_reconcile_push_at < self._RECONCILE_COOLDOWN_S:
+            return
+
+        config_json = self.state_manager.get_firmware_config_json(node_id)
+        if not config_json:
+            # Adopted but no non-builtin peripherals yet. Send an empty
+            # peripherals array — RP2040's pin_config_apply_json accepts
+            # `{"peripherals":[]}` (apply_peripherals_json walks an empty
+            # array without error and returns true → ACTIVE transition).
+            # Teensy main.cpp:176-186 treats any configure as adoption,
+            # so the same payload works there too.
+            config_json = '{"action":"configure","version":0,"peripherals":[]}'
+
+        node.last_reconcile_push_at = now
+        self.send_config_to_node(node_id, config_json)
+        self.state_manager.log_node_event(
+            node_id,
+            "Adopted node announced UNADOPTED — re-pushing peripheral config",
+            "warn",
+        )
 
     def _periodic_update(self):
         """Periodic update - check timeouts, publish status."""

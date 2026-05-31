@@ -16,6 +16,14 @@ const catalog = usePeripheralCatalog()
 const peripherals = ref([])
 const syncStatus  = ref('unknown')
 const pinState = useWsTopic(() => `pin_state/${props.nodeId}`)
+// Live sync-status feed — same source the Peripherals tab uses.
+// Without this the badge would freeze at whatever loadPeripherals
+// last fetched and never reflect a successful sync until the next
+// tab switch.
+const syncFeed = useWsTopic(() => `sync_status/${props.nodeId}`, 5)
+watch(syncFeed, (v) => {
+  if (v && typeof v.sync_status === 'string') syncStatus.value = v.sync_status
+})
 
 const values = computed(() => {
   const out = {}
