@@ -222,7 +222,16 @@ static rcl_timer_t state_timer;            // State publish timer (10Hz)
 
 // Message buffers
 static std_msgs__msg__String announcement_msg;
-static char announcement_buffer[512];
+// 1024 bytes (was 512). The announcement JSON grew past 512 when
+// commit a6ecb8c added the tic + tmc2208 drivers — base fields
+// (~347 B with realistic node_id / hw / fw strings) plus seven
+// "<driver>_connected":<bool> entries (~182 B) totals ~529 B,
+// 17 B over the old buffer. snprintf silently truncated the closing
+// "}}" → server's json.loads() raised → announcement dropped without
+// surfacing in the per-node Logs tab. Stays well under micro-ROS's
+// RMW_UXRCE_MAX_OUTPUT_BUFFER_SIZE = 2048 (= MTU 512 × HISTORY 4),
+// with headroom for future peripheral additions.
+static char announcement_buffer[1024];
 
 static std_msgs__msg__String config_msg;
 static char config_buffer[2048];        // Buffer for incoming config

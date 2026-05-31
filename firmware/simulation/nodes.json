@@ -10,7 +10,18 @@
       "status": "stopped",
       "udp_port": 9999,
       "started": "2026-01-31T20:47:26.227762"
+    },
+    "rp2040_synctest": {
+      "id": "rp2040_synctest",
+      "type": "rp2040",
+      "role": null,
+      "display_name": "rp2040_synctest",
+      "created": "2026-05-31T15:38:40.732232",
+      "pid": null,
+      "status": "stopped",
+      "udp_port": 9994,
+      "started": "2026-05-31T15:38:40.775539"
     }
   },
-  "next_udp_port": 9998
+  "next_udp_port": 9993
 }

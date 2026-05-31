@@ -95,7 +95,11 @@ static rcl_timer_t state_timer;
 
 // Message buffers
 static std_msgs__msg__String announcement_msg;
-static char announcement_buffer[512];
+// 1024 bytes (was 512). Matched to the RP2040 fix: the announcement
+// JSON grew past 512 when tic + tmc2208 drivers were added, snprintf
+// silently truncated the closing braces, server's json.loads dropped
+// it. See firmware/rp2040/src/main.c for the longer rationale.
+static char announcement_buffer[1024];
 
 static std_msgs__msg__String config_msg;
 static char config_buffer[2048];

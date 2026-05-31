@@ -1,0 +1,83 @@
+# SAINT.OS end-to-end test orchestration.
+#
+# Usage:
+#   # First time / after firmware changes, build the sim firmware on
+#   # the host so the container can mount the install dir:
+#   (cd firmware/rp2040 && ./build.sh sim && cd build_sim && make install_sim)
+#
+#   # Then run the e2e:
+#   docker compose -f firmware/simulation/docker/docker-compose.e2e.yml up \
+#       --build --abort-on-container-exit --exit-code-from e2e
+#
+#   # Smoke test only (sim node bring-up, no server):
+#   MODE=smoke docker compose -f ... up --build --abort-on-container-exit --exit-code-from e2e
+#
+#   # Drop into a debug shell with agent + server running:
+#   MODE=shell docker compose -f ... run --rm --service-ports e2e
+#
+# Single-service today by design — see the header of Dockerfile.e2e for
+# why agent + server + Renode share one network namespace. To split:
+# add discovery-server config + change network_mode for each service.
+
+services:
+  e2e:
+    # Pin to amd64. Renode only ships an x86_64 Linux "portable" tarball
+    # — no arm64 Linux build is published. On Apple Silicon Docker
+    # Desktop uses Rosetta 2 (fast); on Linux arm64 hosts qemu-user-static
+    # handles it (slow but functional). Without this an arm64 container
+    # gets the x86_64 Renode binary and crashes with
+    # "rosetta error: failed to open elf at /lib64/ld-linux-x86-64.so.2".
+    platform: linux/amd64
+    build:
+      context: ../../..
+      dockerfile: firmware/simulation/docker/Dockerfile.e2e
+      platforms:
+        - linux/amd64
+      args:
+        ROS_DISTRO: jazzy
+        # Pinned below 1.16 because the local Renode 1.16 was failing
+        # the RP2040 bootrom→XIP handoff. Bump when 1.16+ is shown to
+        # work with the renode_rp2040 board files in this repo.
+        RENODE_VERSION: 1.15.3
+
+    environment:
+      ROS_DISTRO: jazzy
+      MODE: ${MODE:-full}
+      WS_URL: ${WS_URL:-ws://localhost:80/api/ws}
+      PASSWORD: ${PASSWORD:-12345}
+      # Default DDS implementation matches the production server. Set
+      # RMW_IMPLEMENTATION=rmw_cyclonedds_cpp to switch if needed.
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+
+    volumes:
+      # Pre-built sim firmware lives here. The harness's resc loads
+      # it from /work/firmware/rp2040/install/simulation/.
+      - ../../rp2040/install/simulation:/work/firmware/rp2040/install/simulation:ro
+
+      # Persistent storage backing for sim nodes — analogous to
+      # firmware/simulation/rp2040_storage/ on the host. Kept in a
+      # docker volume so multiple runs can simulate "node had a
+      # previous boot's config".
+      - sim_storage:/work/firmware/simulation/rp2040_storage
+
+      # Test logs — make them available to the host for post-mortem.
+      - ../../simulation/logs:/work/firmware/simulation/logs
+
+    # Useful for debugging: expose the HTTP/WS and agent ports to the
+    # host so `wscat -c ws://localhost:8080/api/ws` from the host works
+    # while the container is running. The server listens on port 80
+    # inside the container (privileged port) — map to 8080 outside so
+    # we don't need root.
+    ports:
+      - "8080:80"     # SAINT.OS HTTP + WebSocket (/api/ws)
+      - "8888:8888/udp"  # micro-ROS agent
+
+    # Renode needs more memory than the default — RP2040 + dual-core +
+    # bootrom + flash model adds up. 2 GB is comfortable headroom.
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+volumes:
+  sim_storage:

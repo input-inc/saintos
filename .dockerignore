@@ -1,0 +1,52 @@
+# Trim the build context for the e2e Dockerfile. Docker uploads the
+# whole context to the daemon before evaluating COPY, so excluding
+# build artifacts + cached deps + IDE state shaves the context from
+# several GB down to tens of MB.
+
+# Build / cache artifacts
+**/build/
+**/build_sim/
+**/install/
+firmware/rp2040/install/simulation/saint_node.elf  # mounted, not copied
+firmware/teensy41/.pio/
+firmware/teensy41/build/
+firmware/simulation/logs/
+firmware/simulation/rp2040_storage/
+firmware/simulation/teensy41_storage/
+firmware/simulation/rp2040_scripts/
+firmware/simulation/teensy41_scripts/
+
+# JS / Vue dev artifacts
+**/node_modules/
+**/dist/
+controller/src-tauri/target/
+controller/build/
+controller/dist/
+server/web/dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+
+# Renode + Pico SDK trees — big and irrelevant to the runtime container
+# (the simulator runs inside the image; the SDK sources aren't needed).
+pico-sdk/
+firmware/rp2040/lib/
+
+# Test artifacts
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Locally-built dist tarballs
+dist/
+_fw/
+_debs/
+_ros2/
+_ros2_src/

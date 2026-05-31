@@ -1,0 +1,109 @@
+# SAINT.OS end-to-end test image.
+#
+# What's in here:
+#   - ROS2 jazzy (base layer)
+#   - micro-ROS agent (ros-jazzy-micro-ros-agent)
+#   - Renode (pinned version — see RENODE_VERSION arg)
+#   - Python 3 + websockets + the test harness
+#   - saint_server source, built via colcon at image-build time
+#
+# What's NOT in here:
+#   - The pre-built sim firmware. The host builds it (`cd
+#     firmware/rp2040 && ./build.sh sim && cd build_sim &&
+#     make install_sim`) and mounts the install dir at runtime.
+#     This avoids re-building the firmware on every image rebuild.
+#
+# Why single-container instead of multi-service compose:
+#   Cross-container DDS discovery in Docker requires either
+#   `network_mode: host` (Linux-only) or FastDDS/Cyclone DDS
+#   discovery-server setup. For an e2e test fixture, one network
+#   namespace is the simplest correct answer — agent + server share
+#   localhost, and Renode forwards firmware UDP to localhost:8888
+#   exactly the same way it does on a dev box. Future split into
+#   separate sim / runtime containers is unblocked by setting up a
+#   discovery-server profile; that's a tractable follow-up but out
+#   of scope here.
+
+ARG ROS_DISTRO=jazzy
+
+# Stage 1: pull the micro-ROS agent from the canonical Docker image.
+# micro-ROS publishes prebuilt images per distro; the install tree
+# under /uros_ws/install/ is colcon-shaped and source-able from the
+# main image. Doing this as a stage instead of installing in-place
+# avoids the "ros-jazzy-micro-ros-agent" apt package (which doesn't
+# exist — micro-ROS doesn't ship to the canonical ROS apt repo).
+FROM microros/micro-ros-agent:${ROS_DISTRO} AS uros_agent
+
+FROM ros:${ROS_DISTRO}-ros-base
+
+ARG RENODE_VERSION=1.15.3
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ROS_DISTRO
+
+# Copy the agent install tree from the multi-stage source above.
+# /uros_ws/install/setup.bash is sourceable on top of /opt/ros/<distro>.
+COPY --from=uros_agent /uros_ws/install /uros_ws/install
+
+# ── System packages ────────────────────────────────────────────────────
+# - python3-websockets: harness uses it to drive the server's WS API.
+# - mono-runtime / libnss3 / xauth: Renode dependencies even in headless.
+# - lsof: harness prereq probe.
+# - procps / curl / netcat-openbsd: entrypoint orchestration.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-pip python3-websockets python3-psutil \
+        mono-runtime mono-devel libnss3 xauth \
+        lsof procps curl netcat-openbsd ca-certificates \
+        build-essential cmake git \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Renode ─────────────────────────────────────────────────────────────
+# Antmicro publishes pre-built .tar.gz releases. Pin the version so
+# the simulator behavior doesn't shift under us — the bootrom/XIP
+# handoff was breaking on 1.16 locally, so we pin lower until the
+# sim infrastructure is shown to work on 1.16+.
+RUN cd /opt \
+    && curl -fsSL "https://github.com/renode/renode/releases/download/v${RENODE_VERSION}/renode-${RENODE_VERSION}.linux-portable.tar.gz" \
+        -o renode.tar.gz \
+    && tar -xzf renode.tar.gz \
+    && mv "renode_${RENODE_VERSION}_portable" renode \
+    && rm renode.tar.gz \
+    && ln -s /opt/renode/renode /usr/local/bin/renode
+
+# ── saint_server build ─────────────────────────────────────────────────
+# The repo is mounted at /work at runtime (compose) but we also need
+# the python package installed into the container's site-packages so
+# `python3 -m saint_server.server_node` works. Use a separate build
+# stage so layer caching kicks in when only firmware/test code changes.
+WORKDIR /work
+COPY server/ /work/server/
+COPY configs/ /work/configs/
+
+# colcon build the saint_os ROS2 package. Same flags package-server
+# uses in dist.yml — keeps test ABI aligned with production.
+SHELL ["/bin/bash", "-c"]
+RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
+    && cd /work \
+    && pip3 install --break-system-packages aiohttp pyyaml \
+    && colcon build \
+        --base-paths server \
+        --merge-install \
+        --packages-select saint_os \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+
+# ── Harness + sim orchestration ────────────────────────────────────────
+COPY firmware/simulation/ /work/firmware/simulation/
+COPY firmware/shared/ /work/firmware/shared/
+COPY firmware/rp2040/simulation/ /work/firmware/rp2040/simulation/
+
+# Renode binary discovery — the harness looks at $RENODE_PATH first.
+ENV RENODE_PATH=/usr/local/bin/renode
+# Default agent address inside the container is loopback; harness
+# overrides if --ws-url points elsewhere.
+ENV SAINT_LOG_DIR=/tmp/saint-os
+
+COPY firmware/simulation/docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8888/udp 9090/tcp 80/tcp
+
+ENTRYPOINT ["/entrypoint.sh"]
