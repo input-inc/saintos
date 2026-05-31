@@ -482,7 +482,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: saint-os_${{ needs.meta.outputs.version }}_${{ matrix.arch }}_${{ matrix.ros }}
-          path: dist/*.tar.gz
+          path: dist/*.tar.zst
           if-no-files-found: error
           retention-days: 30
 
@@ -503,6 +503,6 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: dist/*.tar.zst
           generate_release_notes: true
           fail_on_unmatched_files: true
