@@ -101,24 +101,35 @@ static bool uart_pin_pair_parse_json(const char* a, const char* b,
 }
 
 /* ============================================================================
- * PIO UART stubs — the driver #includes pio_uart.h which provides
- * SIMULATION-mode void*-based stubs. We compile pio_uart.c too so the
- * linker has definitions; under SIMULATION the .c file is a thin set
- * of no-op stubs that return false / 0.
- *
- * The point of including the real stubs (vs. defining our own) is to
- * keep the SIMULATION code path under test: if pio_uart.c later grows
- * SIMULATION behavior that the driver depends on, the test runner
- * automatically picks it up without manual sync.
+ * Transport stub. The shared driver routes all UART I/O through
+ * roboclaw_get_transport(); the tests don't exercise the wire layer
+ * (anything wire-touching is gated behind #ifndef SIMULATION in the
+ * shared driver), so NULL is fine.
  * ============================================================================ */
-#include "../src/pio_uart.c"
+#define SAINT_ROBOCLAW_TRANSPORT_H
+typedef struct roboclaw_transport_ops {
+    const char* name;
+    bool (*open)(uint8_t tx_pin, uint8_t rx_pin, uint32_t baud, bool pio_swap);
+    bool (*verify_binding)(void);
+    bool (*is_open)(void);
+    bool (*write)(const uint8_t* data, size_t len);
+    size_t (*read)(uint8_t* data, size_t max_len);
+    bool (*pio_swap_active)(void);
+    uint8_t (*resolved_instance)(void);
+} roboclaw_transport_ops_t;
+static const roboclaw_transport_ops_t* roboclaw_get_transport(void) { return NULL; }
+
+/* The shared driver expects the per-platform transport to provide
+ * GPIO-output helpers for the unit's E-stop wire. Tests link in
+ * no-ops via this flag. */
+#define SAINT_ROBOCLAW_NO_ESTOP_GPIO 1
 
 /* ============================================================================
- * Pull in the real driver. The hardware paths under #ifndef SIMULATION
+ * Pull in the shared driver. Hardware paths under #ifndef SIMULATION
  * drop out; everything else (state machine, config plumbing, JSON
  * parsing, save/load) compiles unchanged.
  * ============================================================================ */
-#include "../src/roboclaw_driver.c"
+#include "../../shared/src/roboclaw_driver.c"
 
 /* ============================================================================
  * Test helpers — same idioms as test_fas100_parser.c

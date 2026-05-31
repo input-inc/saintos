@@ -37,10 +37,15 @@ lib64/
 /_ros2/
 /_ros2_src/
 /_fw/
-# Host-runnable test binaries (built by firmware/rp2040/tests/run_tests.sh)
-/firmware/rp2040/tests/test_fas100_parser
-/firmware/rp2040/tests/test_roboclaw_driver
-/firmware/rp2040/tests/*.dSYM/
+# Host-runnable test binaries + macOS debug bundles. Built by each
+# subdir's run_tests.sh (rp2040/tests, shared/tests). Pattern matches
+# any test_<name> executable while keeping test_<name>.c sources
+# tracked. Previously this only listed the original RP2040 binaries
+# by name, so every new test_* binary across both test dirs ended up
+# committed by accident.
+firmware/*/tests/test_*
+!firmware/*/tests/test_*.c
+firmware/*/tests/*.dSYM/
 
 # Locally-built firmware artifacts staged into the dist tarball.
 # The entire tree is build output — .bin / .hex / .uf2 / .elf binaries

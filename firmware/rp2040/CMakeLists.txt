@@ -150,10 +150,14 @@ set(SAINT_NODE_SOURCES
     src/pin_config.c
     src/pin_control.c
     src/uart_pin_pairs.c
-    src/syren_driver.c
-    src/fas100_driver.c
-    src/roboclaw_driver.c
-    src/pathfinder_bms_driver.c
+    src/syren_transport.c
+    ../shared/src/syren_driver.c
+    src/fas100_transport.c
+    ../shared/src/fas100_driver.c
+    src/roboclaw_transport.c
+    ../shared/src/roboclaw_driver.c
+    src/pathfinder_bms_transport.c
+    ../shared/src/pathfinder_bms_driver.c
     src/maestro_driver.c
     src/pio_uart.c
 )

@@ -9,6 +9,7 @@
 
 #define PLATFORM_SLEEP_MS(ms)  delay(ms)
 #define PLATFORM_MILLIS()      ((uint32_t)millis())
+#define PLATFORM_MICROS()      ((uint32_t)micros())
 #define PLATFORM_PRINTF        Serial.printf
 
 #endif // PLATFORM_H

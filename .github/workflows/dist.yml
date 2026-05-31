@@ -127,7 +127,11 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: firmware-teensy41
-          path: firmware/teensy41/.pio/build/hardware/firmware.hex
+          path: |
+            firmware/teensy41/build/hardware/firmware.hex
+            firmware/teensy41/build/hardware/firmware.bin
+            firmware/teensy41/build/hardware/firmware.elf
+            firmware/teensy41/include/version.h
           if-no-files-found: error
           retention-days: 30
 
@@ -314,6 +318,20 @@ jobs:
           if [[ -d _fw/firmware-teensy41 ]]; then
             find _fw/firmware-teensy41 -type f -name '*.hex' \
               -exec cp -v {} server/resources/firmware/teensy41/ \;
+            # The runtime OTA path streams firmware.bin (renamed to
+            # saint_node.bin to match the in-repo staging name). Without
+            # this, the dist tarball ships whatever .bin happened to be
+            # committed last, which silently drifts behind the freshly
+            # built .hex.
+            teensy_bin=$(find _fw/firmware-teensy41 -type f -name 'firmware.bin' -print -quit)
+            if [[ -n "${teensy_bin}" ]]; then
+              cp -v "${teensy_bin}" server/resources/firmware/teensy41/saint_node.bin
+            fi
+            teensy_ver=$(find _fw/firmware-teensy41 -type f -name 'version.h' -print -quit)
+            if [[ -n "${teensy_ver}" ]]; then
+              mkdir -p server/resources/firmware/teensy41/generated
+              cp -v "${teensy_ver}" server/resources/firmware/teensy41/generated/version.h
+            fi
           fi
           if [[ -d _fw/firmware-rpi5 ]]; then
             cp -rv _fw/firmware-rpi5/. server/resources/firmware/rpi5/

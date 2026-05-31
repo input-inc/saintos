@@ -32,7 +32,9 @@
  * ============================================================================ */
 #define PLATFORM_H
 static uint32_t test_now_ms = 0;
+static uint32_t test_now_us = 0;
 #define PLATFORM_MILLIS()      (test_now_ms)
+#define PLATFORM_MICROS()      (test_now_us)
 #define PLATFORM_SLEEP_MS(ms)  ((void)(ms))
 #define PLATFORM_PRINTF(...)   ((void)0)
 
@@ -72,10 +74,30 @@ static bool uart_pin_pair_parse_json(const char* a, const char* b,
 }
 
 /* ============================================================================
- * Pull in the real driver. Hardware paths under #ifndef SIMULATION
- * are excluded, leaving the parser + state machine.
+ * Transport stub. The shared driver routes all UART I/O through
+ * fas100_get_transport(); the parser tests never exercise that path
+ * (they call sport_feed_byte / fbus_feed_byte directly), so NULL is
+ * fine — every transport-using function in the driver bails on a NULL
+ * transport.
  * ============================================================================ */
-#include "../src/fas100_driver.c"
+#define SAINT_FAS100_TRANSPORT_H
+typedef struct fas100_transport_ops {
+    const char* name;
+    bool (*open)(uint8_t tx_pin, uint8_t rx_pin, uint32_t baud, bool invert);
+    void (*set_baud)(uint32_t baud);
+    bool (*is_open)(void);
+    bool (*write)(const uint8_t* data, size_t len);
+    void (*flush)(void);
+    size_t (*read)(uint8_t* data, size_t max_len);
+    uint8_t (*resolved_instance)(void);
+} fas100_transport_ops_t;
+static const fas100_transport_ops_t* fas100_get_transport(void) { return NULL; }
+
+/* ============================================================================
+ * Pull in the shared driver. Routes UART I/O through fas100_get_transport
+ * which we stub to NULL above — pure parser tests don't care.
+ * ============================================================================ */
+#include "../../shared/src/fas100_driver.c"
 
 /* ============================================================================
  * Test helpers
