@@ -76,9 +76,6 @@ export const managementHandlers = {
     ctx.activity(`Node ${node_id} removed`, 'info')
     return ok({ success: true })
   },
-  reset_node:          ({ node_id }) => st.findAdopted(node_id)
-    ? ok({ success: true, message: 'Reset (mock)' }) : err('Node not found'),
-  factory_reset_node:  ({ node_id }) => ok({ success: true, message: `Factory reset ${node_id} (mock)` }),
   restart_node:        ({ node_id }) => ok({ message: `Restart sent to ${node_id} (mock)` }),
   identify_node:       ({ node_id }) => ok({ message: `Identifying ${node_id} (mock)` }),
 

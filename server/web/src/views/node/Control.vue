@@ -56,21 +56,15 @@ async function updateFirmware () {
 }
 
 async function factoryResetNode () {
-  if (!confirm('Factory reset this node? All configuration will be lost.')) return
+  if (!confirm(
+    'Factory reset this node?\n\n' +
+    'The node will erase its saved configuration and reboot, ' +
+    'and the server will drop all record of it. ' +
+    'It will reappear in the Unadopted list on its next announcement.'
+  )) return
   try {
-    // Mirrors vanilla app.js factoryResetNode(): calls the
-    // factory_reset_node management action (no-op in current server
-    // but kept for parity — vanilla behaviour is identical).
-    await ws.management('factory_reset_node', { node_id: props.nodeId })
+    await ws.management('remove_node', { node_id: props.nodeId })
     message.value = 'Factory reset issued'
-  } catch (e) { message.value = e.message || String(e) }
-}
-
-async function unadoptNode () {
-  if (!confirm('Unadopt this node? It will need to be re-adopted.')) return
-  try {
-    await ws.management('reset_node', { node_id: props.nodeId, factory_reset: false })
-    message.value = 'Unadopting…'
     router.push({ name: 'nodes' })
   } catch (e) { message.value = e.message || String(e) }
 }
@@ -123,13 +117,6 @@ async function unadoptNode () {
         >
           <span class="material-icons icon-sm">delete_forever</span>
           Factory Reset
-        </button>
-        <button
-          class="btn-secondary w-full justify-center text-red-400 border-red-500/50 hover:bg-red-500/20"
-          @click="unadoptNode"
-        >
-          <span class="material-icons icon-sm">person_remove</span>
-          Unadopt Node
         </button>
       </div>
     </div>

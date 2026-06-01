@@ -867,22 +867,6 @@ class WebSocketHandler:
             result = self.state_manager.delete_board(board_id)
             return {"status": "ok", "data": result}
 
-        elif action == 'reset_node':
-            node_id = params.get('node_id')
-            factory_reset = params.get('factory_reset', False)
-
-            if not node_id:
-                return {"status": "error", "message": "Missing node_id"}
-
-            # Send factory reset command to node first (if doing factory reset)
-            if factory_reset and self._factory_reset_callback:
-                self._factory_reset_callback(node_id)
-
-            result = self.state_manager.reset_node(node_id, factory_reset)
-            if result['success']:
-                await self.broadcast_activity(f'Node {node_id} reset', 'info')
-            return {"status": "ok" if result['success'] else "error", "data": result}
-
         elif action == 'remove_node':
             node_id = params.get('node_id')
 

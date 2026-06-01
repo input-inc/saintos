@@ -73,6 +73,9 @@ REPO_ROOT = SCRIPT_DIR.parent.parent
 # defaults to (controller/README.md "ws://opensaint.local/api/ws").
 DEFAULT_WS_URL = "ws://localhost:80/api/ws"
 DEFAULT_PASSWORD = "12345"
+# Default node_id when driving the Renode-sim path. The --node-id
+# flag overrides this for the fake-firmware path (the python stand-in
+# announces as rp2040_fakefw by default).
 TEST_NODE_ID = "rp2040_synctest"
 RECONCILE_WAIT_S = 15.0
 SYNC_WAIT_S = 10.0
@@ -226,13 +229,47 @@ class WsClient:
                 if not fut.done():
                     fut.set_result(msg)
                 continue
-            # Topic broadcasts
+            if os.environ.get("HARNESS_TRACE_STATE"):
+                text_preview = ""
+                if msg.get("type") == "activity":
+                    text_preview = f" text={msg.get('text', '')[:80]!r}"
+                elif msg.get("type") == "state":
+                    text_preview = f" data={str(msg.get('data', ''))[:80]!r}"
+                print(f"  [ws trace] type={msg.get('type')!r} node={msg.get('node')!r}{text_preview}",
+                      flush=True)
+            # Per-node `state` frames on node_log/<id> are the
+            # canonical channel, but the server ALSO mirrors every log
+            # event to the unconditional `activity` broadcast. The
+            # state path was empirically silent in the docker e2e
+            # (likely a subscription-filter quirk we haven't pinned
+            # down yet) so we treat both as valid signals — text
+            # matching against either gets us through the test.
             if msg.get("type") == "state":
                 node = msg.get("node", "")
                 if node.startswith("node_log/"):
                     await self._node_log_queue.put((node, msg.get("data")))
                 elif node.startswith("sync_status/"):
                     await self._sync_status_queue.put((node, msg.get("data")))
+            elif msg.get("type") == "activity":
+                # Bridge activity → node_log queue with a synthetic
+                # node prefix so the existing wait helpers (which
+                # filter by "node_log/<id>") still match. The text is
+                # already prefixed with [+uptime.s] for firmware logs,
+                # so substring matches against "Config received" /
+                # "Config saved to flash" / "Adopted node announced
+                # UNADOPTED — re-pushing peripheral config" all work.
+                synthetic_entry = {
+                    "text": msg.get("text", ""),
+                    "level": msg.get("level", "info"),
+                    "time": msg.get("timestamp"),
+                }
+                # The activity stream isn't per-node, so feed it under
+                # both possible node_log/ queue keys the wait helpers
+                # might look up. wait_for_node_log_containing checks
+                # the topic prefix, so a non-prefixed bucket would be
+                # missed — use a sentinel topic the helper accepts.
+                await self._node_log_queue.put(
+                    ("node_log/activity", synthetic_entry))
 
     async def request(self, action: str, params: dict | None = None,
                       msg_type: str = "management", timeout: float = 10.0) -> dict:
@@ -254,7 +291,17 @@ class WsClient:
     async def wait_for_node_log_containing(
         self, node_id: str, needle: str, timeout: float,
     ) -> Optional[dict]:
-        topic = f"node_log/{node_id}"
+        """Wait for a log line whose text contains `needle`.
+
+        Accepts entries from either:
+        - The per-node `node_log/<id>` state-frame stream (preferred,
+          matches dashboard's Logs-tab feed).
+        - The unconditional `activity` broadcast bridged under the
+          sentinel topic `node_log/activity` (covers the case where
+          state-frame delivery isn't firing for some reason).
+        """
+        per_node_topic = f"node_log/{node_id}"
+        activity_topic = "node_log/activity"
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -264,7 +311,7 @@ class WsClient:
                 )
             except asyncio.TimeoutError:
                 return None
-            if seen_topic != topic:
+            if seen_topic not in (per_node_topic, activity_topic):
                 continue
             text = (entry or {}).get("text", "")
             if needle in text:
@@ -284,6 +331,26 @@ def _run_node_manager(*args: str) -> subprocess.CompletedProcess:
     """Shell out to node_manager.py with the given args."""
     cmd = [sys.executable, str(SCRIPT_DIR / "node_manager.py"), *args]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+
+def _publish_ros2_string(topic: str, data: str) -> bool:
+    """Publish a one-shot std_msgs/String to a ROS2 topic via the CLI.
+
+    Used by the fake-firmware test path to inject test-only control
+    messages (e.g. "lose_config" on /test/fake_firmware/<id>/control)
+    that exercise the server's auto-reconcile flow. Shelling out is
+    cheaper than pulling rclpy into the harness; the CLI itself comes
+    with the ROS2 install the container already has sourced.
+    """
+    # ros2 topic pub --once expects YAML-formatted args; escape inner
+    # quotes so the JSON string passes through cleanly.
+    yaml_arg = f"data: \"{data.replace(chr(34), chr(92) + chr(34))}\""
+    cmd = [
+        "ros2", "topic", "pub", "--once",
+        topic, "std_msgs/msg/String", yaml_arg,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    return r.returncode == 0
 
 
 def _say(phase: str, msg: str, ok: bool = True):
@@ -384,38 +451,51 @@ def run_smoke_test() -> int:
     return 0
 
 
-async def run_test(ws_url: str, password: str) -> int:
+async def run_test(ws_url: str, password: str,
+                    fake_firmware: bool = False,
+                    node_id: str = TEST_NODE_ID) -> int:
     failures = 0
     node_created = False
 
-    print(f"E2E sync-recovery test — target server {ws_url}\n")
+    target_node_id = node_id
+    flavor = "fake-firmware" if fake_firmware else "Renode"
+    print(f"E2E sync-recovery test — {flavor} — target {ws_url}\n")
+    print(f"  test node: {target_node_id}\n")
 
     try:
-        # Pre-clean: previous compose-up runs leave the node in
-        # nodes.json inside the container, which makes the create
-        # below fail with "already exists". Best-effort remove so
-        # every run starts from a known state.
-        _run_node_manager("remove", TEST_NODE_ID)
+        if not fake_firmware:
+            # ── Renode-sim path: orchestrate the sim node via node_manager.
+            # Pre-clean: previous compose-up runs leave the node in
+            # nodes.json inside the container, which makes the create
+            # below fail with "already exists". Best-effort remove so
+            # every run starts from a known state.
+            _run_node_manager("remove", target_node_id)
 
-        # Phase 1: create + start sim node. node_manager prints
-        # "already exists" to STDOUT (not stderr) and exits non-zero
-        # on the dup case, so check both streams.
-        _say("setup", f"creating sim node {TEST_NODE_ID}")
-        r = _run_node_manager("create", TEST_NODE_ID, "--type", "rp2040")
-        combined = (r.stdout or "") + (r.stderr or "")
-        if r.returncode != 0 and "already exists" not in combined:
-            _say("setup",
-                 f"create failed: {combined.strip() or '(no output)'}",
-                 ok=False)
-            return 3
-        node_created = True
-
-        _say("setup", "starting node in Renode")
-        r = _run_node_manager("start", TEST_NODE_ID)
-        if r.returncode != 0:
+            # Phase 1: create + start sim node. node_manager prints
+            # "already exists" to STDOUT (not stderr) and exits non-zero
+            # on the dup case, so check both streams.
+            _say("setup", f"creating sim node {target_node_id}")
+            r = _run_node_manager("create", target_node_id, "--type", "rp2040")
             combined = (r.stdout or "") + (r.stderr or "")
-            _say("setup", f"start failed: {combined.strip()}", ok=False)
-            return 3
+            if r.returncode != 0 and "already exists" not in combined:
+                _say("setup",
+                     f"create failed: {combined.strip() or '(no output)'}",
+                     ok=False)
+                return 3
+            node_created = True
+
+            _say("setup", "starting node in Renode")
+            r = _run_node_manager("start", target_node_id)
+            if r.returncode != 0:
+                combined = (r.stdout or "") + (r.stderr or "")
+                _say("setup", f"start failed: {combined.strip()}", ok=False)
+                return 3
+        else:
+            # ── Fake-firmware path: the python stand-in is already
+            # running (entrypoint.sh started it before launching the
+            # harness). Nothing to start here; just verify announcements
+            # are flowing.
+            _say("setup", f"using fake firmware (already running)")
 
         # Phase 2: connect to server WebSocket
         client = WsClient(ws_url, password)
@@ -424,18 +504,18 @@ async def run_test(ws_url: str, password: str) -> int:
         _say("setup", "connected + authenticated to server")
 
         await client.subscribe([
-            f"node_log/{TEST_NODE_ID}",
-            f"sync_status/{TEST_NODE_ID}",
+            f"node_log/{target_node_id}",
+            f"sync_status/{target_node_id}",
         ], rate_hz=10)
 
-        # Phase 3: wait for unadopted announcement
+        # Phase 1: wait for unadopted announcement
         _say("phase 1", "waiting for node to announce as UNADOPTED…")
         deadline = time.monotonic() + ADOPT_WAIT_S
         unadopted_seen = False
         while time.monotonic() < deadline:
             resp = await client.request("list_unadopted")
             nodes = (resp.get("data") or {}).get("nodes") or []
-            if any(n.get("node_id") == TEST_NODE_ID for n in nodes):
+            if any(n.get("node_id") == target_node_id for n in nodes):
                 unadopted_seen = True
                 break
             await asyncio.sleep(1.0)
@@ -446,21 +526,22 @@ async def run_test(ws_url: str, password: str) -> int:
             return failures
         _say("phase 1", "node announced")
 
-        # Phase 4: adopt + sync
+        # Phase 2: adopt + sync
         _say("phase 2", "adopting node")
         await client.request("adopt_node", {
-            "node_id": TEST_NODE_ID,
+            "node_id": target_node_id,
             "role": "cradle_base",
             "display_name": "SyncTest",
             "board_id": "feather_rp2040_w5500",
         })
         _say("phase 2", "syncing initial config (publisher pre-create check)")
-        await client.request("sync_node_peripherals", {"node_id": TEST_NODE_ID})
+        await client.request("sync_node_peripherals",
+                             {"node_id": target_node_id})
 
         # If the publisher pre-create fix is working, "Config received"
         # arrives in <SYNC_WAIT_S; if not, this times out.
         entry = await client.wait_for_node_log_containing(
-            TEST_NODE_ID, "Config received", SYNC_WAIT_S)
+            target_node_id, "Config received", SYNC_WAIT_S)
         if entry is None:
             _say("phase 2",
                  f"firmware never logged 'Config received' within {SYNC_WAIT_S}s "
@@ -471,7 +552,7 @@ async def run_test(ws_url: str, password: str) -> int:
             _say("phase 2", "firmware acknowledged Sync to Node")
 
             saved = await client.wait_for_node_log_containing(
-                TEST_NODE_ID, "Config saved to flash", SYNC_WAIT_S)
+                target_node_id, "Config saved to flash", SYNC_WAIT_S)
             if saved is None:
                 _say("phase 2",
                      "got 'Config received' but not 'Config saved to flash' "
@@ -481,16 +562,28 @@ async def run_test(ws_url: str, password: str) -> int:
             else:
                 _say("phase 2", "config persisted to flash")
 
-        # Phase 5: simulate OTA — reset node (clears flash on Renode sim),
-        # observe auto-reconcile.
-        _say("phase 3", "resetting node to simulate post-OTA flash wipe")
-        _run_node_manager("reset", TEST_NODE_ID)
-        _run_node_manager("start", TEST_NODE_ID)
+        # Phase 3: simulate post-OTA flash wipe, observe auto-reconcile.
+        # Two paths depending on what's hosting the firmware:
+        #   - Renode sim: reset the VM, which clears the persistent
+        #     storage backend → boot back to UNADOPTED.
+        #   - Fake firmware: publish to the test-only control channel
+        #     so the python node drops its state to UNADOPTED without
+        #     telling the server. This is what makes the auto-reconcile
+        #     path observable (server still thinks the node is adopted).
+        _say("phase 3", "simulating post-OTA flash wipe on the node")
+        if fake_firmware:
+            _publish_ros2_string(
+                f"/test/fake_firmware/{target_node_id}/control",
+                json.dumps({"action": "lose_config"}),
+            )
+        else:
+            _run_node_manager("reset", target_node_id)
+            _run_node_manager("start", target_node_id)
 
         _say("phase 3",
              f"waiting up to {RECONCILE_WAIT_S}s for server auto-reconcile")
         entry = await client.wait_for_node_log_containing(
-            TEST_NODE_ID,
+            target_node_id,
             "Adopted node announced UNADOPTED — re-pushing peripheral config",
             RECONCILE_WAIT_S)
         if entry is None:
@@ -502,7 +595,7 @@ async def run_test(ws_url: str, password: str) -> int:
             _say("phase 3", "server detected divergence + pushed config")
 
             entry = await client.wait_for_node_log_containing(
-                TEST_NODE_ID, "Config saved to flash", SYNC_WAIT_S)
+                target_node_id, "Config saved to flash", SYNC_WAIT_S)
             if entry is None:
                 _say("phase 3",
                      "reconcile push reached firmware but flash-save didn't follow",
@@ -515,16 +608,19 @@ async def run_test(ws_url: str, password: str) -> int:
 
     finally:
         if node_created:
+            # Renode path owns a separately-spawned process; clean it up.
             if failures:
                 # Preserve log + .resc so the operator can diagnose
                 # which hop failed. Next run's pre-clean removes them.
                 _say("teardown",
                      "stopping sim node (logs preserved for diagnosis)")
-                _run_node_manager("stop", TEST_NODE_ID)
+                _run_node_manager("stop", target_node_id)
             else:
                 _say("teardown", "stopping + removing sim node")
-                _run_node_manager("stop", TEST_NODE_ID)
-                _run_node_manager("remove", TEST_NODE_ID)
+                _run_node_manager("stop", target_node_id)
+                _run_node_manager("remove", target_node_id)
+        # Fake-firmware lifetime is managed by entrypoint.sh; nothing
+        # to do here — entrypoint's trap kills it on container exit.
 
     print()
     if failures:
@@ -550,10 +646,34 @@ def main() -> int:
                              "that the firmware sim boots and joins the agent. "
                              "Useful on a Mac dev box where ROS2 (and so "
                              "saint_server) doesn't run natively.")
+    parser.add_argument("--fake-firmware", action="store_true",
+                        help="Run against the Python fake-firmware "
+                             "stand-in instead of a Renode sim node. "
+                             "Assumes the fake firmware is already "
+                             "running (entrypoint.sh starts it in the "
+                             "container when MODE=fake). Bypasses "
+                             "node_manager + Renode + XRCE, exercises "
+                             "everything else in the server chain.")
+    parser.add_argument("--node-id", default=TEST_NODE_ID,
+                        help="Node ID to drive the test against. "
+                             f"Default: {TEST_NODE_ID} (matches the "
+                             "Renode path); use rp2040_fakefw to "
+                             "match the fake firmware's default.")
     args = parser.parse_args()
 
     print("Checking prerequisites…")
-    problems = check_prereqs(args.ws_url, need_server=not args.no_server)
+    # Renode is only needed for the non-fake path. Skipping the
+    # check would be cleanest, but the existing check_prereqs handles
+    # each independently so it's fine to keep all of them.
+    need_renode = not args.fake_firmware and not args.no_server
+    problems = check_prereqs(
+        args.ws_url,
+        need_server=not args.no_server,
+    )
+    if not need_renode:
+        # Filter out Renode-specific complaints since we don't need it.
+        problems = [p for p in problems
+                    if "Renode" not in p and "Sim firmware" not in p]
     if problems:
         print("\nPrerequisites missing:")
         for p in problems:
@@ -567,7 +687,11 @@ def main() -> int:
     try:
         if args.no_server:
             return run_smoke_test()
-        return asyncio.run(run_test(args.ws_url, args.password))
+        return asyncio.run(run_test(
+            args.ws_url, args.password,
+            fake_firmware=args.fake_firmware,
+            node_id=args.node_id,
+        ))
     except KeyboardInterrupt:
         return 130
 

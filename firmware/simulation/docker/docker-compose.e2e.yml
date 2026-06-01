@@ -42,12 +42,17 @@ services:
 
     environment:
       ROS_DISTRO: jazzy
-      MODE: ${MODE:-full}
+      # Default to the Python fake-firmware path. MODE=full uses
+      # Renode-sim firmware (currently blocked on the bootrom/XIP
+      # modelling issue described in the entrypoint header).
+      MODE: ${MODE:-fake}
       WS_URL: ${WS_URL:-ws://localhost:80/api/ws}
       PASSWORD: ${PASSWORD:-12345}
-      # Default DDS implementation matches the production server. Set
-      # RMW_IMPLEMENTATION=rmw_cyclonedds_cpp to switch if needed.
-      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      # Use Cyclone DDS in the test container. Fast DDS's multicast
+      # discovery is unreliable inside a single docker container —
+      # pubs/subs work but ros2 node list / topic info can't see them.
+      # Production may still use Fast DDS; that's the operator's call.
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
 
     volumes:
       # Pre-built sim firmware lives here. The harness's resc loads

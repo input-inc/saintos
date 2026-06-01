@@ -318,13 +318,33 @@ class SaintServerNode(Node):
             # Parse once; reused for state-mismatch reconcile below.
             announced_node_id = None
             announced_state = ''
+            parse_error: Optional[str] = None
             try:
                 import json
                 parsed = json.loads(raw)
                 announced_node_id = parsed.get('node_id')
                 announced_state = parsed.get('state', '')
-            except Exception:
-                pass
+            except Exception as e:
+                parse_error = f'{type(e).__name__}: {e}'
+
+            # Truncated / malformed announcement: surface it to the
+            # operator. Without this branch, the failure only goes to
+            # journalctl (the rclpy logger) and the dashboard's Logs
+            # tab shows nothing — operators chase phantom symptoms like
+            # "Sync to Node has no response" because the upstream
+            # buffer overflow is invisible.
+            #
+            # We extract node_id with a regex even from a truncated
+            # payload (it's the second key in the announce schema, so
+            # it's almost always intact) and attribute the warning to
+            # that node's log. If even the node_id is unreachable, the
+            # warning lands in the global activity feed.
+            if parse_error is not None:
+                self._report_announcement_parse_error(raw, parse_error)
+                # Skip the rest of the pipeline — without a valid
+                # announcement we have no node_id to wire subscribers
+                # / publishers to.
+                return
 
             is_new = self.state_manager.update_node_from_announcement(raw)
             if is_new:
@@ -379,6 +399,81 @@ class SaintServerNode(Node):
                 f'Error processing announcement ({preview_len} bytes): {e}\n'
                 f'  RAW: {raw!r}'
             )
+
+    # 30 s minimum between "announcement parse error" log entries for
+    # the same node. A node with a truncated payload announces at 1 Hz,
+    # so without rate-limiting we'd flood the per-node log buffer with
+    # 3600 identical warnings per hour. 30 s gives the operator enough
+    # signal to notice + investigate without drowning out other logs.
+    _ANNOUNCE_ERROR_COOLDOWN_S = 30.0
+
+    def _report_announcement_parse_error(self, raw: str, parse_error: str) -> None:
+        """Surface a malformed announcement to the dashboard.
+
+        The original handler caught the json.JSONDecodeError, logged it
+        to rclpy (→ journalctl), and moved on. That made buffer
+        overflows on the firmware side functionally invisible: the
+        dashboard's Logs tab showed nothing, and the operator had no
+        way to attribute the missing-announcement symptom to its
+        actual cause. This routes the warning into the per-node log
+        when we can identify the source, and into the global activity
+        feed otherwise.
+
+        The "second key in the schema" heuristic for extracting
+        node_id from a truncated payload is robust because the
+        firmware's announcement_buffer fills front-to-back via
+        snprintf, and the node_id field is emitted right after the
+        opening brace. Truncation only ever cuts the tail.
+        """
+        import re
+        node_id: Optional[str] = None
+        m = re.search(r'"node_id"\s*:\s*"([^"]+)"', raw or '')
+        if m:
+            node_id = m.group(1)
+
+        # Cap the preview so a 1024-byte payload doesn't bloat the log
+        # rows in the dashboard table. 200 B is enough to see the
+        # opening of the JSON and the spot where truncation happened.
+        preview = (raw or '')[:200]
+        if raw and len(raw) > 200:
+            preview += '…'
+
+        msg = (
+            f'Malformed announcement ({len(raw) if raw else 0} bytes) — {parse_error}. '
+            f'Common cause: firmware announcement_buffer overflow (see '
+            f'firmware/rp2040/src/main.c:announcement_buffer). '
+            f'Preview: {preview!r}'
+        )
+
+        # Always emit to the structured log so journalctl history is
+        # intact. The per-node / activity-feed routing below is the
+        # operator-facing surface.
+        self.get_logger().warn(f'Announcement parse error from '
+                                f'{node_id or "<unknown>"}: {parse_error}')
+
+        import time
+        now = time.time()
+        if not hasattr(self, '_announce_error_last_reported'):
+            self._announce_error_last_reported = {}  # type: ignore[attr-defined]
+
+        key = node_id or '<global>'
+        last = self._announce_error_last_reported.get(key, 0.0)
+        if now - last < self._ANNOUNCE_ERROR_COOLDOWN_S:
+            return
+        self._announce_error_last_reported[key] = now
+
+        if node_id:
+            # Per-node Logs tab will pick this up via the existing
+            # log_node_event → broadcast_node_log fanout.
+            self.state_manager.log_node_event(node_id, msg, 'warn')
+        else:
+            # Couldn't recover a node_id (extreme truncation, or a
+            # totally different payload format). Fall back to the
+            # global activity feed.
+            try:
+                self.state_manager._log_activity(msg, 'warn')
+            except Exception:
+                pass
 
     # 10 s between reconcile pushes for the same node. Firmware takes a
     # few hundred ms to apply + flash-save and then needs to announce

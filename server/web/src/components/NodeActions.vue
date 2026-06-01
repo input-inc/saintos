@@ -30,22 +30,15 @@ async function estop () {
   catch (e) { message.value = e.message }
 }
 async function factoryReset () {
-  if (!confirm(`Factory reset ${nodeId.value}?\n\nThis wipes the node's saved configuration.`)) return
-  try { await ws.management('factory_reset_node', { node_id: nodeId.value }); message.value = 'Factory reset issued' }
-  catch (e) { message.value = e.message }
-}
-async function unadopt () {
-  if (!confirm(`Unadopt ${nodeId.value}?\n\nThe node returns to the unadopted pool.`)) return
-  try {
-    await ws.management('reset_node', { node_id: nodeId.value, factory_reset: false })
-    emit('changed')
-    router.push('/nodes')
-  } catch (e) { message.value = e.message }
-}
-async function remove () {
-  if (!confirm(`Remove ${nodeId.value} from the server?`)) return
+  if (!confirm(
+    `Factory reset ${nodeId.value}?\n\n` +
+    'The node will erase its saved configuration and reboot, ' +
+    'and the server will drop all record of it. ' +
+    'It will reappear in the Unadopted list on its next announcement.'
+  )) return
   try {
     await ws.management('remove_node', { node_id: nodeId.value })
+    message.value = 'Factory reset issued'
     emit('changed')
     router.push('/nodes')
   } catch (e) { message.value = e.message }
@@ -72,14 +65,8 @@ async function remove () {
         <span class="material-icons icon-sm">system_update</span> Update firmware
       </button>
       <hr class="border-line/50 my-1" />
-      <button class="btn-secondary justify-start" @click="factoryReset">
-        <span class="material-icons icon-sm">settings_backup_restore</span> Factory reset
-      </button>
-      <button class="btn-secondary justify-start" @click="unadopt">
-        <span class="material-icons icon-sm">logout</span> Unadopt
-      </button>
-      <button class="btn-danger justify-start" @click="remove">
-        <span class="material-icons icon-sm">delete</span> Remove
+      <button class="btn-danger justify-start" @click="factoryReset">
+        <span class="material-icons icon-sm">delete_forever</span> Factory reset
       </button>
     </div>
     <p v-if="message" class="mt-3 text-xs text-fg-muted">{{ message }}</p>

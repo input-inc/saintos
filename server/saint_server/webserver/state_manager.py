@@ -1397,44 +1397,6 @@ class StateManager:
             ))
             node.peripheral_config.version += 1
 
-    def reset_node(self, node_id: str, factory_reset: bool = False) -> Dict[str, Any]:
-        """Move an adopted node back to the unadopted pool.
-
-        Soft (factory_reset=False, the Unadopt button): server-side
-        bookkeeping only. The node keeps its on-disk peripheral config
-        so a re-adoption picks up where the operator left off. Firmware
-        is NOT told to wipe its flash — that's factory_reset=True's job.
-
-        Hard (factory_reset=True, the Factory reset button): clears
-        role/display_name and deletes the on-disk config yaml so a
-        re-adoption is a clean slate. The caller (websocket_handler)
-        additionally publishes a factory_reset command to the firmware
-        so its flash storage gets wiped.
-        """
-        if node_id not in self.state.adopted_nodes:
-            return {"success": False, "message": f"Node {node_id} not found"}
-
-        node = self.state.adopted_nodes.pop(node_id)
-
-        if factory_reset:
-            node.role = ""
-            node.display_name = ""
-            config_path = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
-            if os.path.exists(config_path):
-                try:
-                    os.remove(config_path)
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(
-                            f"Failed to remove config file for {node_id}: {e}")
-            message = "Node factory reset and unadopted"
-        else:
-            message = "Node unadopted (config retained for re-adoption)"
-
-        self.state.unadopted_nodes[node_id] = node
-        self._log_activity(message, "info", node_id=node_id)
-        return {"success": True, "message": message}
-
     def remove_node(self, node_id: str) -> Dict[str, Any]:
         """Remove a node completely from the server (both adopted and unadopted)."""
         if node_id == HOST_CONTROLLER_NODE_ID:

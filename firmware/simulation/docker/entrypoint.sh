@@ -16,10 +16,14 @@ PASSWORD="${PASSWORD:-12345}"
 
 # Mode controls what to run. Useful for debugging the container without
 # always running the full e2e flow.
-#   full   — agent + server + harness (default)
+#   fake   — agent + server + Python fake-firmware + harness (DEFAULT;
+#            recommended path until the Renode RP2040 bootrom/XIP
+#            modelling gap is fixed and the real sim firmware boots)
+#   full   — agent + server + Renode-sim firmware + harness
+#            (currently blocked on Renode 1.15.3 / 1.16 XIP issues)
 #   smoke  — agent + (no server) + harness --no-server (sim-only check)
 #   shell  — agent + server, then drop into bash (manual probing)
-MODE="${MODE:-full}"
+MODE="${MODE:-fake}"
 
 mkdir -p /tmp/saint-os
 
@@ -89,12 +93,46 @@ if [[ "${MODE}" != "smoke" ]]; then
     done
 fi
 
+# ── Optionally start the Python fake firmware ─────────────────────────
+# In `fake` mode the harness runs against a Python ROS2 node that
+# speaks the same protocol as the real firmware. Lives in the same
+# container as the agent + server so no cross-container DDS discovery
+# is needed. Lets us validate the server-side chain (Sync → DDS →
+# subscriber → log echo) without depending on the Renode sim.
+FAKE_FW_PID=""
+FAKE_FW_NODE_ID="${FAKE_FW_NODE_ID:-rp2040_fakefw}"
+if [[ "${MODE}" == "fake" ]]; then
+    echo "[entrypoint] starting Python fake firmware (node_id=${FAKE_FW_NODE_ID})"
+    python3 /work/firmware/simulation/docker/fake_firmware.py \
+        --node-id "${FAKE_FW_NODE_ID}" > /tmp/fake_firmware.log 2>&1 &
+    FAKE_FW_PID=$!
+    # Wait a moment for the publisher to come up and DDS to discover.
+    sleep 2
+    if ! kill -0 "${FAKE_FW_PID}" 2>/dev/null; then
+        echo "[entrypoint] fake firmware died during startup — log:" >&2
+        tail -40 /tmp/fake_firmware.log >&2
+        exit 3
+    fi
+    echo "[entrypoint] fake firmware ready"
+fi
+
 # ── Run the requested mode ─────────────────────────────────────────────
-trap '[[ -n "${SERVER_PID}" ]] && kill ${SERVER_PID} 2>/dev/null; kill ${AGENT_PID} 2>/dev/null; true' EXIT
+trap '
+    [[ -n "${FAKE_FW_PID}" ]] && kill ${FAKE_FW_PID} 2>/dev/null
+    [[ -n "${SERVER_PID}" ]] && kill ${SERVER_PID} 2>/dev/null
+    kill ${AGENT_PID} 2>/dev/null
+    true
+' EXIT
 
 case "${MODE}" in
+    fake)
+        echo "[entrypoint] running e2e harness vs fake firmware against ${WS_URL}"
+        exec python3 /work/firmware/simulation/test_sync_recovery.py \
+            --ws-url "${WS_URL}" --password "${PASSWORD}" \
+            --fake-firmware --node-id "${FAKE_FW_NODE_ID}"
+        ;;
     full)
-        echo "[entrypoint] running full e2e harness against ${WS_URL}"
+        echo "[entrypoint] running full Renode e2e harness against ${WS_URL}"
         exec python3 /work/firmware/simulation/test_sync_recovery.py \
             --ws-url "${WS_URL}" --password "${PASSWORD}"
         ;;
@@ -104,13 +142,14 @@ case "${MODE}" in
         ;;
     shell)
         echo "[entrypoint] agent + server up. Dropping into bash."
-        echo "  agent log:  tail -F /tmp/agent.log"
-        echo "  server log: tail -F /tmp/server.log"
-        echo "  harness:    python3 /work/firmware/simulation/test_sync_recovery.py"
+        echo "  agent log:        tail -F /tmp/agent.log"
+        echo "  server log:       tail -F /tmp/server.log"
+        echo "  fake firmware log:tail -F /tmp/fake_firmware.log"
+        echo "  harness:          python3 /work/firmware/simulation/test_sync_recovery.py --fake-firmware --node-id ${FAKE_FW_NODE_ID}"
         exec bash
         ;;
     *)
-        echo "[entrypoint] unknown MODE=${MODE}; expected full|smoke|shell" >&2
+        echo "[entrypoint] unknown MODE=${MODE}; expected fake|full|smoke|shell" >&2
         exit 2
         ;;
 esac

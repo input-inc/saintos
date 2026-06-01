@@ -579,16 +579,26 @@ static void dispatch_action_buffer(const char* data, size_t size)
         // Clear flash storage (pin configuration)
         flash_storage_erase();
 
-        // Clear in-memory pin configuration
-        pin_config_reset();
-
-        // Transition to UNADOPTED state
-        node_set_state(NODE_STATE_UNADOPTED);
-        led_set_state(NODE_STATE_UNADOPTED);
-
-        printf("Factory reset complete - node is now UNADOPTED\n");
+        // Reboot via the watchdog. The in-memory state we WOULDN'T clear
+        // here — per-driver module statics (port_initialized flags,
+        // configured_baud, units arrays, open UART/PIO claims, the
+        // executor's pending subscriptions, etc.) — survive any amount
+        // of pin_config_reset / state-transition cleanup. A cold boot is
+        // the only way to guarantee a re-adoption starts from a true
+        // blank slate, and the operator pressed Factory Reset to get
+        // exactly that. saint_log_publish goes out best-effort before
+        // the reboot lands.
+        saint_log_publish("warn",
+            "Factory reset: flash erased, rebooting for clean slate");
+        printf("Factory reset complete - rebooting in 500ms...\n");
         printf("====================================\n\n");
-        return;
+
+        sleep_ms(500);
+        watchdog_enable(1, 1);
+        while (1) {
+            tight_loop_contents();
+        }
+        // Never returns
     }
 
     // Check for restart command

@@ -301,11 +301,21 @@ static void dispatch_action_buffer(const char* data, size_t size)
     if (strstr(data, "\"action\":\"factory_reset\"") ||
         strstr(data, "\"action\": \"factory_reset\"")) {
         flash_storage_erase();
-        pin_config_reset();
-        node_set_state(NODE_STATE_UNADOPTED);
-        led_set_state(NODE_STATE_UNADOPTED);
-        Serial.printf("Factory reset complete\n");
-        return;
+        // Reboot for a clean slate — per-driver module statics
+        // (port_initialized, configured_baud, open Serial claims, etc.)
+        // survive flash_storage_erase + pin_config_reset, and the
+        // operator pressed Factory Reset to get a true reset. See
+        // firmware/rp2040/src/main.c for the RP2040 mirror.
+        saint_log_publish("warn",
+            "Factory reset: flash erased, rebooting for clean slate");
+        Serial.printf("Factory reset: rebooting in 500ms\n");
+        delay(500);
+#ifdef SIMULATION
+        while (1) { yield(); }
+#else
+        SCB_AIRCR = 0x05FA0004;
+        while (1) { }
+#endif
     }
 
     if (strstr(data, "\"action\":\"restart\"") ||

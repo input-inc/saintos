@@ -49,12 +49,21 @@ COPY --from=uros_agent /uros_ws/install /uros_ws/install
 # - mono-runtime / libnss3 / xauth: Renode dependencies even in headless.
 # - lsof: harness prereq probe.
 # - procps / curl / netcat-openbsd: entrypoint orchestration.
+# - rmw-cyclonedds-cpp: replaces the default Fast DDS. Fast DDS's
+#   multicast discovery flakes inside a single docker container —
+#   ros2 node list / topic info return inconsistent views even though
+#   pubs/subs are objectively wired up correctly. Cyclone uses
+#   unicast discovery + sees pubs/subs deterministically.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip python3-websockets python3-psutil \
+        ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
         mono-runtime mono-devel libnss3 xauth \
         lsof procps curl netcat-openbsd ca-certificates \
         build-essential cmake git \
     && rm -rf /var/lib/apt/lists/*
+
+# Force Cyclone everywhere in the container.
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 # ── Renode ─────────────────────────────────────────────────────────────
 # Antmicro publishes pre-built .tar.gz releases. Pin the version so
