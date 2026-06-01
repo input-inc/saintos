@@ -28,12 +28,72 @@
 
 #include "fas100_transport.h"
 #include "uart_pin_pairs.h"
+#include "saint_log.h"
 
 #include <string.h>
+#include <stddef.h>
 
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "pico/time.h"
+
+/* Force exclusive ownership of `target_inst` (UART0 or UART1) by
+ * detaching every OTHER pad on the platform that is currently muxed
+ * to that same UART block. RP2040's IO_BANK0 lets multiple pads claim
+ * GPIO_FUNC_UART for the same instance simultaneously — they all
+ * wire-OR into the block's RX input, and a stray pad with no driver
+ * pulls RX to a garbage state that swallows every real byte. This
+ * regression bit FAS100 after the driver consolidation: Maestro (or
+ * any other UART peripheral whose drv_load opens UART0 first) leaves
+ * its TX/RX pads in GPIO_FUNC_UART even after the FAS100 transport
+ * binds its own 28/29 pair. Symptom: polls_sent climbs, echo_bytes
+ * stays 0 — the firmware writes go out, but FAS100's loopback echo
+ * can't fight the floating ghost-pad on RX.
+ *
+ * We can't ask the SDK "which pads are currently routed to UART<N>?"
+ * directly. Instead we walk the platform's known UART pin pair table
+ * (uart_pin_pairs_table) and, for every (tx,rx,instance) entry that
+ * matches our target instance but isn't the pair we're about to
+ * keep, check the pad's current function. If it's still GPIO_FUNC_UART
+ * we kick it back to GPIO_FUNC_SIO + GPIO_IN so it stops driving the
+ * shared block. Pads we leave alone stay where the owning driver put
+ * them. */
+static void detach_other_pads_on_same_uart(uint8_t target_inst,
+                                           uint8_t keep_tx,
+                                           uint8_t keep_rx)
+{
+    size_t count = 0;
+    const uart_pin_pair_t* table = uart_pin_pairs_table(&count);
+    if (!table) return;
+
+    for (size_t i = 0; i < count; i++) {
+        const uart_pin_pair_t* p = &table[i];
+        if (p->uart_instance != target_inst) continue;
+        if (p->tx_pin == keep_tx && p->rx_pin == keep_rx) continue;
+
+        bool detached_any = false;
+        if (p->tx_pin != keep_tx && p->tx_pin != keep_rx
+            && gpio_get_function(p->tx_pin) == GPIO_FUNC_UART) {
+            gpio_set_function(p->tx_pin, GPIO_FUNC_SIO);
+            gpio_set_dir(p->tx_pin, GPIO_IN);
+            detached_any = true;
+        }
+        if (p->rx_pin != keep_tx && p->rx_pin != keep_rx
+            && gpio_get_function(p->rx_pin) == GPIO_FUNC_UART) {
+            gpio_set_function(p->rx_pin, GPIO_FUNC_SIO);
+            gpio_set_dir(p->rx_pin, GPIO_IN);
+            detached_any = true;
+        }
+        if (detached_any) {
+            saint_log_publish("warn",
+                "FAS100: detached stale UART%u pads (tx=%u rx=%u) "
+                "before binding %u/%u — another driver had left them claimed",
+                (unsigned)target_inst,
+                (unsigned)p->tx_pin, (unsigned)p->rx_pin,
+                (unsigned)keep_tx, (unsigned)keep_rx);
+        }
+    }
+}
 
 static uart_inst_t* s_uart = NULL;
 static uint8_t      s_tx_pin = 0xFF;
@@ -71,6 +131,13 @@ static bool fas100_rp2040_open(uint8_t tx_pin, uint8_t rx_pin, uint32_t baud, bo
     }
 
     s_uart = (inst == 0) ? uart0 : uart1;
+
+    /* Take exclusive ownership of this UART block — see
+     * detach_other_pads_on_same_uart for the regression this guards
+     * against. Must happen BEFORE uart_init so the block restarts on a
+     * clean RX input. */
+    detach_other_pads_on_same_uart(inst, tx_pin, rx_pin);
+
     uart_init(s_uart, baud);
 
     gpio_set_function(tx_pin, GPIO_FUNC_UART);

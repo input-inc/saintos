@@ -600,12 +600,29 @@ bool pin_config_load(void)
         }
     }
 
-    // Restore peripheral driver configs from flash
+    // Restore peripheral driver configs from flash.
+    //
+    // Design rule: a driver only grabs hardware (UART, SPI, GPIO,
+    // timer, etc.) when the operator has actually configured pins of
+    // its type on this node. Without this gate, a stale per-driver
+    // config block in flash (e.g. a Maestro config that the operator
+    // removed from the pin map but left enabled in the driver-local
+    // store) would silently re-open a UART at boot, leaving floating
+    // pads claimed across the board. That sometimes wire-OR-ed onto
+    // another peripheral's RX input — concretely, this is what was
+    // killing FAS100 readings after the driver consolidation (see
+    // docs/SYNC_CONFIG_REGRESSION.md). Skipping load_config for
+    // drivers whose pin_mode has no matching pin in pin_config keeps
+    // the hardware-ownership contract intact.
     for (uint8_t d = 0; d < peripheral_get_count(); d++) {
         const peripheral_driver_t* drv = peripheral_get(d);
-        if (drv && drv->load_config) {
-            drv->load_config(&storage);
+        if (!drv || !drv->load_config) continue;
+        if (!pin_config_has_mode((uint8_t)drv->pin_mode)) {
+            printf("Peripheral '%s' has no pins in pin_config — skipping load_config\n",
+                   drv->name ? drv->name : "?");
+            continue;
         }
+        drv->load_config(&storage);
     }
 
     // Apply hardware configuration
@@ -633,6 +650,16 @@ bool pin_config_has_configured_pins(void)
 {
     for (uint8_t i = 0; i < pin_config_count; i++) {
         if (pin_configs[i].mode != PIN_MODE_UNCONFIGURED) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool pin_config_has_mode(uint8_t mode)
+{
+    for (uint8_t i = 0; i < pin_config_count; i++) {
+        if ((uint8_t)pin_configs[i].mode == mode) {
             return true;
         }
     }

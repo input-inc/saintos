@@ -245,6 +245,13 @@ bool pin_config_save(void);
 bool pin_config_load(void);
 void pin_config_reset(void);
 bool pin_config_has_configured_pins(void);
+
+/* True if at least one configured pin in the current pin_config table
+ * uses `mode`. Drivers consult this in their load_config to honor the
+ * design rule "don't grab hardware unless the operator actually
+ * configured a pin of my type on this node". Avoids dormant drivers
+ * stealing UART blocks / claiming pins behind the operator's back. */
+bool pin_config_has_mode(uint8_t mode);
 bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name);
 bool pin_config_set_pwm_params(uint8_t gpio, uint32_t frequency, uint16_t duty_cycle);
 bool pin_config_set_digital_in_params(uint8_t gpio, bool pull_up, bool pull_down);
