@@ -675,6 +675,17 @@ cpu1 IsHalted true
 # (helps prevent memory exhaustion from frequent memory-mapped I/O)
 cpu0 MaximumBlockSize 1
 
+# Diagnostic: trace function entry so we can see where the bootrom /
+# boot2 / user code is when something hangs. Requires symbols, which
+# both b2.elf and saint_node.elf carry. Leave on for now; cheap.
+cpu0 LogFunctionNames true
+sysbus LoadSymbolsFrom @{self.renode_rp2040_path}/bootroms/rp2040/b2.elf
+sysbus LoadSymbolsFrom @{firmware_path}
+
+# Diagnostic: also log all xip_ssi register accesses to confirm the
+# CPU is actually hitting that address range.
+logLevel -1 sysbus.xip_ssi
+
 # Capture firmware UART output to a dedicated file. showAnalyzer alone
 # only opens an analyzer window — in --disable-xwt --console headless
 # mode that window doesn't exist, so previously the firmware's printf
@@ -689,6 +700,7 @@ showAnalyzer sysbus.uart0
 # diagnostics to the operational log too, separate from the firmware
 # stdout stream captured above.
 logLevel -1 sysbus.uart0
+
 
 echo "SAINT.OS RP2040 Node: {node_id}"
 echo "  UDP Port: {udp_port}"

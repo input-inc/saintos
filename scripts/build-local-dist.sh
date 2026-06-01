@@ -156,26 +156,45 @@ fi
       fi
   fi
 )
-ROS_HASH=$(cat _ros2_src/ros2.repos _ros2_src/micro_ros.txt | $SHA256 | cut -c1-12)
+# Mirror the hash computation from .github/workflows/ros2-build.yml so the
+# release tag we look up here matches what CI built. Includes the build
+# script content so a pin change in scripts/build-ros2-in-container.sh
+# (e.g. bumping Micro-XRCE-DDS-Agent past v2.4.3) produces a fresh
+# ROS_TAG and stale local caches don't mask the upstream rebuild.
+ROS_HASH=$(cat _ros2_src/ros2.repos _ros2_src/micro_ros.txt \
+    "${REPO_ROOT}/scripts/build-ros2-in-container.sh" | $SHA256 | cut -c1-12)
 ROS_TAG="ros2-${ROS_DISTRO}-${ARCH}-${ROS_HASH}"
 ROS_CACHE_TARBALL="${CACHE_ROOT}/${ROS_TAG}.tar.gz"
 
-if [[ ! -f "$ROS_CACHE_TARBALL" || $REFETCH_ROS2 -eq 1 ]]; then
-    log "Downloading ROS2 install tree: ${ROS_TAG}"
-    curl -fL --progress-bar \
-      "https://github.com/${REPO_SLUG}/releases/download/${ROS_TAG}/ros2-install.tar.gz" \
-      -o "$ROS_CACHE_TARBALL" \
-      || die "ROS2 release ${ROS_TAG} not found. Run the ros2-build workflow first."
-else
-    log "Using cached ROS2 tarball ($(du -h "$ROS_CACHE_TARBALL" | cut -f1))"
+# Local-iteration fast path: if we already have a working extracted
+# install tree at _ros2/, trust it and skip the download/extract dance.
+# This decouples local iteration from CI: the operator can edit
+# build-ros2-in-container.sh (which the hash includes) without first
+# having to push and re-run the ros2-build workflow to publish a tarball
+# under the new hash. Pass --refetch-ros2 to override.
+EXTRACTED_INSTALL="_ros2/opt/ros/${ROS_DISTRO}/install"
+if (( REFETCH_ROS2 )); then
+    log "Forcing ROS2 re-fetch (--refetch-ros2) — wiping ${EXTRACTED_INSTALL}"
+    rm -rf "$EXTRACTED_INSTALL"
 fi
 
-if [[ ! -d _ros2/opt/ros/${ROS_DISTRO}/install ]]; then
+if [[ -f "${EXTRACTED_INSTALL}/setup.bash" ]]; then
+    log "Using already-extracted ROS2 install tree at ${EXTRACTED_INSTALL} (skipping download)"
+else
+    if [[ ! -f "$ROS_CACHE_TARBALL" ]]; then
+        log "Downloading ROS2 install tree: ${ROS_TAG}"
+        curl -fL --progress-bar \
+          "https://github.com/${REPO_SLUG}/releases/download/${ROS_TAG}/ros2-install.tar.gz" \
+          -o "$ROS_CACHE_TARBALL" \
+          || die "ROS2 release ${ROS_TAG} not found. Run the ros2-build workflow first, or re-extract a prior tarball under _ros2/opt/ros/${ROS_DISTRO}/install/."
+    else
+        log "Using cached ROS2 tarball ($(du -h "$ROS_CACHE_TARBALL" | cut -f1))"
+    fi
     log "Extracting ROS2 install tree"
     mkdir -p "_ros2/opt/ros/${ROS_DISTRO}"
     tar -xzf "$ROS_CACHE_TARBALL" -C "_ros2/opt/ros/${ROS_DISTRO}"
 fi
-[[ -f "_ros2/opt/ros/${ROS_DISTRO}/install/setup.bash" ]] \
+[[ -f "${EXTRACTED_INSTALL}/setup.bash" ]] \
     || die "ROS2 setup.bash missing after extract"
 
 # --- firmware --------------------------------------------------------------

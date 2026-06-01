@@ -163,7 +163,10 @@ namespace Antmicro.Renode.Peripherals.SPI
         {
             switch (currentOperation.State)
             {
-                case DecodedOperation.OperationState.RecognizeOperation:
+                // SAINT patch: RecognizeOperation here means CS rose
+                // without any command byte being shifted in — normal
+                // protocol during init / between cycles, not a
+                // violation. Silent.
                 case DecodedOperation.OperationState.AccumulateCommandAddressBytes:
                 case DecodedOperation.OperationState.AccumulateNoDataCommandAddressBytes:
                     this.Log(LogLevel.Warning, "Transmission finished in unexpected state: {0}", currentOperation.State);
@@ -205,6 +208,22 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void RecognizeOperation(byte operation)
         {
+            // SAINT patch: RP2040 bootrom sends a stream of 0xFF
+            // (continuous-read-mode reset, per W25Q datasheet) followed
+            // by 0x00 dummy clocks during the flash wake-up sequence
+            // before issuing a real command. Treat both as NOP: keep
+            // the chip idle, do NOT advance into HandleCommand (which
+            // would log an Unhandled warning for every subsequent
+            // dummy byte). Carried locally on top of matgla upstream;
+            // not yet upstreamed.
+            if (operation == 0xFF || operation == 0x00)
+            {
+                continuousReadMode = null;
+                currentOperation.State = DecodedOperation.OperationState.RecognizeOperation;
+                currentOperation.Operation = DecodedOperation.OperationType.None;
+                return;
+            }
+
             currentOperation.Operation = DecodedOperation.OperationType.None;
             currentOperation.State = DecodedOperation.OperationState.HandleCommand;
             currentOperation.DummyBytesRemaining = GetDummyBytes((Command)operation);
@@ -383,7 +402,19 @@ namespace Antmicro.Renode.Peripherals.SPI
                     result = ReadFromMemory();
                     break;
                 case DecodedOperation.OperationType.ReadID:
-                    this.Log(LogLevel.Info, "TODO: implement READ ID");
+                    // SAINT patch: JEDEC ID (0x9F) returns 3 bytes —
+                    // manufacturer, memory type, capacity. The RP2040
+                    // bootrom uses these to detect the flash chip;
+                    // all-zero bytes are read as "no flash" and the
+                    // bootrom never jumps to user code at 0x10000000.
+                    // W25Q16JV: EF 40 15 (Winbond, 2 Mbit / 2 MB).
+                    switch (currentOperation.CommandBytesHandled)
+                    {
+                        case 0: result = manufacturerId; break;
+                        case 1: result = 0x40; break;
+                        case 2: result = 0x15; break;
+                        default: result = 0xFF; break;
+                    }
                     break;
                 case DecodedOperation.OperationType.ReadSerialFlashDiscoveryParameter:
                     this.Log(LogLevel.Info, "TODO: implement READ SFDP");

@@ -70,7 +70,13 @@ jobs:
           echo "micro_ros_setup_sha=${MICRO_SHA}" > micro_ros.txt
           echo "$MICRO_SHA" > micro_ros_setup.sha
 
-          HASH=$(cat ros2.repos micro_ros.txt | sha256sum | cut -c1-12)
+          # Hash the build script content too so changes to it (e.g. a
+          # different Micro-XRCE-DDS-Agent pin) produce a fresh tag —
+          # otherwise the cache-lookup below sees the old release and
+          # skips rebuilding even though the inputs that govern the
+          # binary output have changed.
+          BUILD_SCRIPT="${GITHUB_WORKSPACE}/scripts/build-ros2-in-container.sh"
+          HASH=$(cat ros2.repos micro_ros.txt "${BUILD_SCRIPT}" | sha256sum | cut -c1-12)
           TAG="ros2-${ROS_DISTRO}-${ARCH}-${HASH}"
 
           echo "hash=${HASH}" >> "$GITHUB_OUTPUT"

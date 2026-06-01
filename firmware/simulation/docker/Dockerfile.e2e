@@ -25,6 +25,12 @@
 #   of scope here.
 
 ARG ROS_DISTRO=jazzy
+# TARGETARCH is auto-populated by buildkit ("amd64" or "arm64"). We use
+# it below to pick the right Renode tarball — Renode 1.16+ ships native
+# arm64 + amd64 .NET builds, so we don't need Rosetta on Apple Silicon
+# anymore. Earlier 1.15.x only shipped amd64-Mono, which crashed under
+# Rosetta with `Assertion at mini-amd64.c:217, amd64_is_imm32(disp)`.
+ARG TARGETARCH
 
 # Stage 1: pull the micro-ROS agent from the canonical Docker image.
 # micro-ROS publishes prebuilt images per distro; the install tree
@@ -36,9 +42,10 @@ FROM microros/micro-ros-agent:${ROS_DISTRO} AS uros_agent
 
 FROM ros:${ROS_DISTRO}-ros-base
 
-ARG RENODE_VERSION=1.15.3
+ARG RENODE_VERSION=1.16.1
 ARG DEBIAN_FRONTEND=noninteractive
 ARG ROS_DISTRO
+ARG TARGETARCH
 
 # Copy the agent install tree from the multi-stage source above.
 # /uros_ws/install/setup.bash is sourceable on top of /opt/ros/<distro>.
@@ -46,7 +53,7 @@ COPY --from=uros_agent /uros_ws/install /uros_ws/install
 
 # ── System packages ────────────────────────────────────────────────────
 # - python3-websockets: harness uses it to drive the server's WS API.
-# - mono-runtime / libnss3 / xauth: Renode dependencies even in headless.
+# - libnss3 / xauth: Renode dependencies even in headless.
 # - lsof: harness prereq probe.
 # - procps / curl / netcat-openbsd: entrypoint orchestration.
 # - rmw-cyclonedds-cpp: replaces the default Fast DDS. Fast DDS's
@@ -54,10 +61,12 @@ COPY --from=uros_agent /uros_ws/install /uros_ws/install
 #   ros2 node list / topic info return inconsistent views even though
 #   pubs/subs are objectively wired up correctly. Cyclone uses
 #   unicast discovery + sees pubs/subs deterministically.
+# Mono is no longer needed: we use Renode 1.16+'s .NET builds which
+# bundle their own runtime (and ship native arm64 + amd64).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip python3-websockets python3-psutil \
         ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
-        mono-runtime mono-devel libnss3 xauth \
+        libnss3 xauth \
         lsof procps curl netcat-openbsd ca-certificates \
         build-essential cmake git \
     && rm -rf /var/lib/apt/lists/*
@@ -66,17 +75,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 # ── Renode ─────────────────────────────────────────────────────────────
-# Antmicro publishes pre-built .tar.gz releases. Pin the version so
-# the simulator behavior doesn't shift under us — the bootrom/XIP
-# handoff was breaking on 1.16 locally, so we pin lower until the
-# sim infrastructure is shown to work on 1.16+.
-RUN cd /opt \
-    && curl -fsSL "https://github.com/renode/renode/releases/download/v${RENODE_VERSION}/renode-${RENODE_VERSION}.linux-portable.tar.gz" \
-        -o renode.tar.gz \
-    && tar -xzf renode.tar.gz \
-    && mv "renode_${RENODE_VERSION}_portable" renode \
-    && rm renode.tar.gz \
-    && ln -s /opt/renode/renode /usr/local/bin/renode
+# Antmicro publishes pre-built .tar.gz releases per architecture.
+# We pick the right one via TARGETARCH so Apple Silicon hosts get the
+# native arm64 build and don't fall back to Rosetta (which fails the
+# Mono JIT — see TARGETARCH comment at the top). Renode 1.16+ uses
+# .NET (not Mono) and ships native arm64 + amd64 builds. The portable
+# tarball drops into /opt/renode and ships its own .NET runtime, so
+# nothing else needs apt installation.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) RENODE_ARCH_SUFFIX=""        ;; \
+        arm64) RENODE_ARCH_SUFFIX="arm64-"  ;; \
+        *)     echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cd /opt; \
+    curl -fsSL "https://github.com/renode/renode/releases/download/v${RENODE_VERSION}/renode-${RENODE_VERSION}.linux-${RENODE_ARCH_SUFFIX}portable-dotnet.tar.gz" \
+        -o renode.tar.gz; \
+    tar -xzf renode.tar.gz; \
+    mv renode_${RENODE_VERSION}* renode; \
+    rm renode.tar.gz; \
+    ln -s /opt/renode/renode /usr/local/bin/renode
 
 # ── saint_server build ─────────────────────────────────────────────────
 # The repo is mounted at /work at runtime (compose) but we also need

@@ -218,6 +218,53 @@ done
 # the colcon build below will fail with a useful CMake-level error — much
 # clearer than rosdep's "no Debian mapping" cryptic failures.
 
+# --- Phase 3.5: pin Micro-XRCE-DDS-Agent to a Jazzy-compatible version -----
+#
+# micro-ROS-Agent's jazzy branch (SuperBuild.cmake) pins the underlying
+# eProsima Micro-XRCE-DDS-Agent to v2.4.3, which predates ROS2 Iron's
+# type-hash propagation (Feb 2023 release, Jazzy support landed in v3.0.0
+# Apr 2024). The v2.4.3 agent creates DDS-side bridge endpoints with
+# `Topic type hash: INVALID`, and Jazzy publishers won't deliver to them
+# — every Sync to Node / control / command silently fails at the server
+# → agent → firmware bridge while announcements (the reverse direction)
+# look fine.
+#
+# This sed bumps the pinned tag to v3.0.1 (latest 3.x with type-hash
+# support) before build_agent.sh fetches and builds it. Idempotent —
+# if the upstream micro-ROS-Agent jazzy branch ever updates its own
+# pin past 3.0.1, this rewrite becomes a no-op.
+PIN_TARGET_VERSION="v3.0.1"
+SUPERBUILD_CMAKE=$(find "${TARGETDIR}" -path '*micro-ROS-Agent*SuperBuild.cmake' -type f -print -quit)
+if [[ -z "${SUPERBUILD_CMAKE}" ]]; then
+    echo "WARNING: SuperBuild.cmake not found — couldn't bump Micro-XRCE-DDS-Agent pin." >&2
+    echo "  The agent will build against whatever the upstream pin is, which" >&2
+    echo "  may be v2.4.3 and break sync-to-firmware on Jazzy." >&2
+else
+    echo ">>> Bumping Micro-XRCE-DDS-Agent pin to ${PIN_TARGET_VERSION} in ${SUPERBUILD_CMAKE}"
+    # Only touch the `GIT_TAG v2.x.y` that follows the
+    # eProsima/Micro-XRCE-DDS-Agent.git URL — don't rewrite unrelated GIT_TAGs
+    # that may exist in the same file.
+    python3 - "${SUPERBUILD_CMAKE}" "${PIN_TARGET_VERSION}" <<'PY'
+import re, sys
+path, target = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    src = f.read()
+# The pattern: GIT_REPOSITORY ... Micro-XRCE-DDS-Agent.git followed by
+# GIT_TAG <version> (whitespace between is variable).
+pat = re.compile(
+    r'(GIT_REPOSITORY\s+https?://github\.com/eProsima/Micro-XRCE-DDS-Agent\.git\s+GIT_TAG\s+)v[\d.]+',
+    re.MULTILINE,
+)
+new, n = pat.subn(rf'\g<1>{target}', src)
+if n == 0:
+    print(f"WARNING: no GIT_TAG match in {path} — agent pin may already be patched or upstream changed", file=sys.stderr)
+else:
+    with open(path, 'w') as f:
+        f.write(new)
+    print(f"Patched {n} GIT_TAG occurrence(s) in {path} -> {target}")
+PY
+fi
+
 # Pass `--merge-install` through to colcon — Phase 1 used merged layout, so
 # this is required to keep using the same install/ tree (otherwise colcon
 # refuses to mix layouts). With `--packages-up-to micro_ros_agent` and a

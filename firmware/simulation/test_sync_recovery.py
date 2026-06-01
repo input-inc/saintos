@@ -453,17 +453,30 @@ def run_smoke_test() -> int:
 
 async def run_test(ws_url: str, password: str,
                     fake_firmware: bool = False,
+                    existing_node: bool = False,
                     node_id: str = TEST_NODE_ID) -> int:
     failures = 0
     node_created = False
 
     target_node_id = node_id
-    flavor = "fake-firmware" if fake_firmware else "Renode"
+    if existing_node:
+        flavor = "existing-node"
+    elif fake_firmware:
+        flavor = "fake-firmware"
+    else:
+        flavor = "Renode"
     print(f"E2E sync-recovery test — {flavor} — target {ws_url}\n")
     print(f"  test node: {target_node_id}\n")
 
     try:
-        if not fake_firmware:
+        if existing_node:
+            # ── Existing-hardware path: the node is already adopted on
+            # the target server. Skip the Renode bring-up + adoption
+            # dance; just connect, sync, and watch for the firmware's
+            # log lines. Used to reproduce real-hardware regressions
+            # that the Renode + fake-firmware paths can't surface.
+            _say("setup", f"targeting existing adopted node {target_node_id}")
+        elif not fake_firmware:
             # ── Renode-sim path: orchestrate the sim node via node_manager.
             # Pre-clean: previous compose-up runs leave the node in
             # nodes.json inside the container, which makes the create
@@ -508,32 +521,34 @@ async def run_test(ws_url: str, password: str,
             f"sync_status/{target_node_id}",
         ], rate_hz=10)
 
-        # Phase 1: wait for unadopted announcement
-        _say("phase 1", "waiting for node to announce as UNADOPTED…")
-        deadline = time.monotonic() + ADOPT_WAIT_S
-        unadopted_seen = False
-        while time.monotonic() < deadline:
-            resp = await client.request("list_unadopted")
-            nodes = (resp.get("data") or {}).get("nodes") or []
-            if any(n.get("node_id") == target_node_id for n in nodes):
-                unadopted_seen = True
-                break
-            await asyncio.sleep(1.0)
-        if not unadopted_seen:
-            _say("phase 1", "node never announced — agent or sim failure",
-                 ok=False)
-            failures += 1
-            return failures
-        _say("phase 1", "node announced")
+        if not existing_node:
+            # Phase 1: wait for unadopted announcement
+            _say("phase 1", "waiting for node to announce as UNADOPTED…")
+            deadline = time.monotonic() + ADOPT_WAIT_S
+            unadopted_seen = False
+            while time.monotonic() < deadline:
+                resp = await client.request("list_unadopted")
+                nodes = (resp.get("data") or {}).get("nodes") or []
+                if any(n.get("node_id") == target_node_id for n in nodes):
+                    unadopted_seen = True
+                    break
+                await asyncio.sleep(1.0)
+            if not unadopted_seen:
+                _say("phase 1", "node never announced — agent or sim failure",
+                     ok=False)
+                failures += 1
+                return failures
+            _say("phase 1", "node announced")
 
-        # Phase 2: adopt + sync
-        _say("phase 2", "adopting node")
-        await client.request("adopt_node", {
-            "node_id": target_node_id,
-            "role": "cradle_base",
-            "display_name": "SyncTest",
-            "board_id": "feather_rp2040_w5500",
-        })
+            # Phase 2: adopt + sync
+            _say("phase 2", "adopting node")
+            await client.request("adopt_node", {
+                "node_id": target_node_id,
+                "role": "cradle_base",
+                "display_name": "SyncTest",
+                "board_id": "feather_rp2040_w5500",
+            })
+
         _say("phase 2", "syncing initial config (publisher pre-create check)")
         await client.request("sync_node_peripherals",
                              {"node_id": target_node_id})
@@ -561,6 +576,19 @@ async def run_test(ws_url: str, password: str,
                 failures += 1
             else:
                 _say("phase 2", "config persisted to flash")
+
+        if existing_node:
+            # Skip Phase 3 on real hardware: factory-resetting a live
+            # node would erase the operator's actual config. Phase 2's
+            # sync result is what this mode is for.
+            _say("phase 3", "skipped (existing hardware — no reset)")
+            await client.close()
+            print()
+            if failures:
+                print(f"=== {failures} phase(s) failed ===")
+            else:
+                print("=== all phases passed ===")
+            return 1 if failures else 0
 
         # Phase 3: simulate post-OTA flash wipe, observe auto-reconcile.
         # Two paths depending on what's hosting the firmware:
@@ -654,6 +682,14 @@ def main() -> int:
                              "container when MODE=fake). Bypasses "
                              "node_manager + Renode + XRCE, exercises "
                              "everything else in the server chain.")
+    parser.add_argument("--existing-node", action="store_true",
+                        help="Target an already-adopted node on a "
+                             "running SAINT.OS server (real hardware). "
+                             "Skips Renode bring-up, adoption, and the "
+                             "Phase 3 factory-reset — only exercises "
+                             "the sync_node_peripherals → firmware "
+                             "log ack loop. Use --node-id to pick "
+                             "which adopted node to drive.")
     parser.add_argument("--node-id", default=TEST_NODE_ID,
                         help="Node ID to drive the test against. "
                              f"Default: {TEST_NODE_ID} (matches the "
@@ -662,10 +698,9 @@ def main() -> int:
     args = parser.parse_args()
 
     print("Checking prerequisites…")
-    # Renode is only needed for the non-fake path. Skipping the
-    # check would be cleanest, but the existing check_prereqs handles
-    # each independently so it's fine to keep all of them.
-    need_renode = not args.fake_firmware and not args.no_server
+    # Renode is only needed for the non-fake, non-existing path.
+    need_renode = not args.fake_firmware and not args.existing_node \
+                  and not args.no_server
     problems = check_prereqs(
         args.ws_url,
         need_server=not args.no_server,
@@ -674,6 +709,11 @@ def main() -> int:
         # Filter out Renode-specific complaints since we don't need it.
         problems = [p for p in problems
                     if "Renode" not in p and "Sim firmware" not in p]
+    if args.existing_node:
+        # Existing-hardware mode: agent + firmware live on the remote
+        # box we're connecting to via --ws-url. The harness only needs
+        # the websockets lib + server reachability locally.
+        problems = [p for p in problems if "micro-ROS agent" not in p]
     if problems:
         print("\nPrerequisites missing:")
         for p in problems:
@@ -690,6 +730,7 @@ def main() -> int:
         return asyncio.run(run_test(
             args.ws_url, args.password,
             fake_firmware=args.fake_firmware,
+            existing_node=args.existing_node,
             node_id=args.node_id,
         ))
     except KeyboardInterrupt:

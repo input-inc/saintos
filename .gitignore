@@ -246,3 +246,11 @@ target/
 # (and any other build host) has to re-resolve the dependency graph
 # from crates.io on every fresh checkout, which fails without network.
 **/*.rs.bk
+
+# =============================================================================
+# Simulation runtime artifacts
+# =============================================================================
+# Per-run UART/console captures from the Renode harness (node_manager.py
+# writes rp2040_synctest.uart.log.<n> into here). Host-local, regenerated
+# on every test run — never committed.
+firmware/simulation/logs/

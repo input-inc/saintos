@@ -273,7 +273,12 @@ jobs:
           MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git \
             "refs/heads/${MICRO_ROS_REF}" | awk '{print $1}')
           echo "micro_ros_setup_sha=${MICRO_SHA}" > micro_ros.txt
-          HASH=$(cat ros2.repos micro_ros.txt | sha256sum | cut -c1-12)
+          # Hash must match the algorithm in .github/workflows/ros2-build.yml
+          # and scripts/build-local-dist.sh — including the build script
+          # content so a pin bump (e.g. Micro-XRCE-DDS-Agent version)
+          # produces a new tag that points at a freshly-built release.
+          BUILD_SCRIPT="${GITHUB_WORKSPACE}/scripts/build-ros2-in-container.sh"
+          HASH=$(cat ros2.repos micro_ros.txt "${BUILD_SCRIPT}" | sha256sum | cut -c1-12)
           TAG="ros2-${ROS_DISTRO}-${ARCH}-${HASH}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Looking up release: ${TAG}"

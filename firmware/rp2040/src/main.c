@@ -1127,8 +1127,15 @@ static bool init_micro_ros(void)
     }
 
     // Initialize executor with 2 timers + 3 subscriptions (config,
-    // control, command).
-    ret = rclc_executor_init(&executor, &support.context, 5, &allocator);
+    // control, command) — actual handle count is 5. We provision 8
+    // instead to dodge a suspected rclc off-by-one when the handle
+    // count exactly equals RMW_UXRCE_MAX_SUBSCRIPTIONS (=5). After
+    // commit bc310cb added the /command sub the executor went 4→5,
+    // and the RELIABLE /config subscription stopped dispatching even
+    // though both endpoints match in the DDS graph — see
+    // docs/SYNC_CONFIG_REGRESSION.md (Experiment 2). 8 leaves headroom
+    // for the next sub/timer without bumping into the cap again.
+    ret = rclc_executor_init(&executor, &support.context, 8, &allocator);
     if (ret != RCL_RET_OK) {
         printf("Failed to create executor: %d\n", ret);
         return false;

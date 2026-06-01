@@ -52,15 +52,32 @@ async function confirmInstall () {
 
 onMounted(fetchStatus)
 
-const currentVersion = computed(() => state.value.current_version || '—')
-const latestVersion  = computed(() => state.value.latest_version || null)
-const updateAvailable = computed(() => state.value.update_available || false)
-const downloading     = computed(() => state.value.phase === 'downloading')
-const downloaded      = computed(() => state.value.phase === 'downloaded')
-const progress        = computed(() => state.value.progress ?? null)
-const usbStaged       = computed(() => state.value.usb_staged_version || null)
-const usbAvailable    = computed(() => state.value.usb_available || [])
-const releaseNotes    = computed(() => state.value.release_notes || '')
+// UpdateState field names (server/saint_server/update_manager.py UpdateState):
+//   installed_version, status, github_release {version, notes, ...},
+//   usb_releases [], download_received, download_total, staged_tarball.
+// status enum: unknown|checking|up_to_date|available|no_network|
+//              downloading|downloaded|installing|error.
+const currentVersion  = computed(() => state.value.installed_version || '—')
+const latestVersion   = computed(() => state.value.github_release?.version || null)
+const updateAvailable = computed(() => state.value.status === 'available')
+const downloading     = computed(() => state.value.status === 'downloading')
+const downloaded      = computed(() => state.value.status === 'downloaded')
+const progress        = computed(() => {
+  const total = state.value.download_total
+  const recv  = state.value.download_received
+  if (!total || total <= 0) return null
+  return Math.max(0, Math.min(1, recv / total))
+})
+const usbStaged       = computed(() => {
+  // staged_tarball is a filesystem path; surface its basename for the
+  // operator. The server doesn't carry a separate "staged version"
+  // field, so this is the best signal we have.
+  const p = state.value.staged_tarball
+  if (!p) return null
+  return String(p).split('/').pop()
+})
+const usbAvailable    = computed(() => state.value.usb_releases || [])
+const releaseNotes    = computed(() => state.value.github_release?.notes || '')
 </script>
 
 <template>

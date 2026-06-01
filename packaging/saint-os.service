@@ -10,6 +10,13 @@ User=@USER@
 Group=@USER@
 
 Environment=ROS_DOMAIN_ID=0
+# Force FastDDS to UDPv4 only. Shared-memory transport fails between the
+# `saint` service user and operator shells (e.g. `hackman`): the per-port
+# rendezvous files in /dev/shm/fastrtps_port* are 0644, which lets the
+# other user read but not write, and FastDDS 2.14 does not gracefully
+# fall back to UDP for matched endpoints when this happens. Symptom is
+# `ros2 topic info -v` showing both ends but `ros2 topic echo` silent.
+Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4
 Environment=PYTHONUNBUFFERED=1
 Environment=SAINT_CONFIG_DIR=@CONFIG_DIR@
 Environment=SAINT_STATE_DIR=@STATE_DIR@
@@ -40,7 +47,12 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 ProtectSystem=full
 ProtectHome=true
-PrivateTmp=true
+# PrivateTmp must stay false: FastDDS uses /tmp/fastrtps_interprocess/ for
+# shared-memory transport lockfiles. With PrivateTmp=true the service lives
+# in its own /tmp namespace, so DDS discovery still works (UDP multicast
+# crosses namespaces) but message delivery to operator shells on the same
+# host silently drops — `ros2 topic echo` sees endpoints but no data.
+PrivateTmp=false
 
 # NoNewPrivileges intentionally OFF: the server invokes a small set of
 # sudoers-restricted root wrappers (apply-update.sh, usb-helper.sh,

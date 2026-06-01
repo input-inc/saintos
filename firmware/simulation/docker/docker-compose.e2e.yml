@@ -21,24 +21,21 @@
 
 services:
   e2e:
-    # Pin to amd64. Renode only ships an x86_64 Linux "portable" tarball
-    # — no arm64 Linux build is published. On Apple Silicon Docker
-    # Desktop uses Rosetta 2 (fast); on Linux arm64 hosts qemu-user-static
-    # handles it (slow but functional). Without this an arm64 container
-    # gets the x86_64 Renode binary and crashes with
-    # "rosetta error: failed to open elf at /lib64/ld-linux-x86-64.so.2".
-    platform: linux/amd64
+    # No platform pin: Renode 1.16+ ships native arm64 + amd64 builds,
+    # and the Dockerfile picks the right one via TARGETARCH. On Apple
+    # Silicon you now get an arm64 container with native arm64 Renode
+    # (no Rosetta). On x86_64 hosts you get an amd64 container.
     build:
       context: ../../..
       dockerfile: firmware/simulation/docker/Dockerfile.e2e
-      platforms:
-        - linux/amd64
       args:
         ROS_DISTRO: jazzy
-        # Pinned below 1.16 because the local Renode 1.16 was failing
-        # the RP2040 bootrom→XIP handoff. Bump when 1.16+ is shown to
-        # work with the renode_rp2040 board files in this repo.
-        RENODE_VERSION: 1.15.3
+        # 1.16+ is needed for arm64 support; older Mono-based builds
+        # crashed under Rosetta on Apple Silicon. The bootrom/XIP
+        # concern that motivated the old 1.15.3 pin is re-evaluated
+        # with 1.16+ — if the simulator path regresses, log a fix in
+        # firmware/rp2040/simulation/ rather than downgrading here.
+        RENODE_VERSION: 1.16.1
 
     environment:
       ROS_DISTRO: jazzy

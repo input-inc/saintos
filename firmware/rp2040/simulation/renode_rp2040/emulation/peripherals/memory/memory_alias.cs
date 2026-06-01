@@ -1,12 +1,12 @@
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.CPU;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
 
 namespace Antmicro.Renode.Peripherals.Memory
 {
 
-    public class MemoryAlias : IDoubleWordPeripheral, IBytePeripheral, IWordPeripheral,
-                               IQuadWordPeripheral, IMultibyteWritePeripheral, IKnownSize, IMemory
+    public class MemoryAlias : IDoubleWordPeripheral, IKnownSize, IMemory, IBytePeripheral, IWordPeripheral, IQuadWordPeripheral, IMultibyteWritePeripheral
     {
         public long Size { get; }
 
@@ -16,6 +16,17 @@ namespace Antmicro.Renode.Peripherals.Memory
             this.machine = machine;
             Size = size;
             this.address = address;
+        }
+
+        public uint ReadDoubleWord(long offset)
+        {
+            uint data = machine.SystemBus.ReadDoubleWord(address + (ulong)offset);
+            return data;
+        }
+
+        public virtual void WriteDoubleWord(long offset, uint value)
+        {
+            machine.SystemBus.WriteDoubleWord(address + (ulong)offset, value);
         }
 
         public byte ReadByte(long offset)
@@ -38,17 +49,6 @@ namespace Antmicro.Renode.Peripherals.Memory
             machine.SystemBus.WriteWord(address + (ulong)offset, value);
         }
 
-        public uint ReadDoubleWord(long offset)
-        {
-            uint data = machine.SystemBus.ReadDoubleWord(address + (ulong)offset);
-            return data;
-        }
-
-        public virtual void WriteDoubleWord(long offset, uint value)
-        {
-            machine.SystemBus.WriteDoubleWord(address + (ulong)offset, value);
-        }
-
         public ulong ReadQuadWord(long offset)
         {
             return machine.SystemBus.ReadQuadWord(address + (ulong)offset);
@@ -64,9 +64,19 @@ namespace Antmicro.Renode.Peripherals.Memory
             return machine.SystemBus.ReadBytes(address + (ulong)offset, count);
         }
 
-        public void WriteBytes(long offset, byte[] array, int startingIndex, int count, IPeripheral context = null)
+        public void WriteBytes(long offset, byte[] data, int startingIndex, int count, IPeripheral context = null)
         {
-            machine.SystemBus.WriteBytes(array, address + (ulong)offset, startingIndex, count);
+            machine.SystemBus.WriteBytes(data, address + (ulong)offset, startingIndex, count);
+        }
+
+        public byte[] ReadBytes(long offset, int count, ICPU context)
+        {
+            return ReadBytes(offset, count, (IPeripheral)null);
+        }
+
+        public void WriteBytes(long offset, byte[] data, int startingIndex, int count, ICPU context)
+        {
+            WriteBytes(offset, data, startingIndex, count, (IPeripheral)null);
         }
 
         public virtual void Reset()
