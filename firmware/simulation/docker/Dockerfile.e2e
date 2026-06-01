@@ -25,6 +25,11 @@
 #   of scope here.
 
 ARG ROS_DISTRO=jazzy
+# NB: the firmware's micro-ROS client (lib/micro_ros_raspberrypi_pico_sdk)
+# must be checked out to the matching distro branch (`jazzy`). A mismatch
+# crashes the agent on the first XRCE-DDS packet with
+# `*** stack smashing detected ***` because the CREATE_SESSION_Payload
+# layout shifted between humble and jazzy. See docs/RENODE_RP2040_BRINGUP.md.
 # TARGETARCH is auto-populated by buildkit ("amd64" or "arm64"). We use
 # it below to pick the right Renode tarball — Renode 1.16+ ships native
 # arm64 + amd64 .NET builds, so we don't need Rosetta on Apple Silicon
@@ -36,8 +41,8 @@ ARG TARGETARCH
 # micro-ROS publishes prebuilt images per distro; the install tree
 # under /uros_ws/install/ is colcon-shaped and source-able from the
 # main image. Doing this as a stage instead of installing in-place
-# avoids the "ros-jazzy-micro-ros-agent" apt package (which doesn't
-# exist — micro-ROS doesn't ship to the canonical ROS apt repo).
+# avoids the "ros-${ROS_DISTRO}-micro-ros-agent" apt package (which
+# doesn't exist — micro-ROS doesn't ship to the canonical ROS apt repo).
 FROM microros/micro-ros-agent:${ROS_DISTRO} AS uros_agent
 
 FROM ros:${ROS_DISTRO}-ros-base
@@ -50,6 +55,31 @@ ARG TARGETARCH
 # Copy the agent install tree from the multi-stage source above.
 # /uros_ws/install/setup.bash is sourceable on top of /opt/ros/<distro>.
 COPY --from=uros_agent /uros_ws/install /uros_ws/install
+
+# Without this XML profile + the FASTRTPS_DEFAULT_PROFILES_FILE env, the
+# agent crashes with `*** stack smashing detected ***` on the first
+# packet it receives — Fast-DDS's default shared-memory transport
+# corrupts the agent's stack frame under our container setup. The
+# bare microros/micro-ros-agent image works because its entrypoint
+# (/micro-ros_entrypoint.sh) sets up exactly this profile when
+# MICROROS_DISABLE_SHM=1. We replicate that behavior here.
+COPY --from=uros_agent /tmp/disable_fastdds_shm.xml /opt/disable_fastdds_shm.xml
+
+# Stash the bare agent image's entire /opt/ros/jazzy/lib so the agent
+# can resolve every Fast-DDS / rmw_fastrtps lib against the exact
+# versions it was linked against. The apt-installed libs in our final
+# /opt/ros/jazzy/lib are 2.14.6 / 2.2.7, which:
+#   (a) subtly break the SHM transport's stack-frame layout → the agent
+#       aborts with `*** stack smashing detected ***` on the first
+#       received packet, and
+#   (b) drop a fastcdr symbol the agent's typesupport libs require
+#       → `undefined symbol: _ZN8eprosima7fastcdr3Cdr9serializeEj`
+#       once a session establishes.
+# Stashing instead of overwriting keeps the apt-installed libs in place
+# for the saint_os colcon build (it links against 2.14.6/2.2.7 headers
+# that the apt feed ships) and for the saint_server runtime. The agent
+# alone gets the matched set via LD_LIBRARY_PATH (see entrypoint.sh).
+COPY --from=uros_agent /opt/ros/jazzy/lib /opt/uros_libs
 
 # ── System packages ────────────────────────────────────────────────────
 # - python3-websockets: harness uses it to drive the server's WS API.
@@ -108,9 +138,13 @@ COPY configs/ /work/configs/
 # colcon build the saint_os ROS2 package. Same flags package-server
 # uses in dist.yml — keeps test ABI aligned with production.
 SHELL ["/bin/bash", "-c"]
+# --break-system-packages only exists on pip ≥ 23 (Ubuntu 24.04 / jazzy).
+# Humble's base (Ubuntu 22.04) ships an older pip that doesn't know
+# the flag and has no PEP 668 lockdown, so a plain install works.
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
     && cd /work \
-    && pip3 install --break-system-packages aiohttp pyyaml \
+    && (pip3 install aiohttp pyyaml \
+        || pip3 install --break-system-packages aiohttp pyyaml) \
     && colcon build \
         --base-paths server \
         --merge-install \

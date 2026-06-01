@@ -18,6 +18,7 @@
 #include "peripheral_driver.h"
 #include "saint_types.h"   // led_set_override_color / led_clear_override
 #include "saint_log.h"     // saint_log_publish (dashboard Logs tab)
+#include "fas100_driver.h" // fas100_get_diag (per-peripheral health in /state)
 
 // =============================================================================
 // Constants
@@ -777,8 +778,58 @@ int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node
         first = false;
     }
 
+    // Close pins array.
+    ret = snprintf(buffer + written, buffer_size - written, "]");
+    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+    written += ret;
+
+    // Per-peripheral health block. Diagnostic-only — surfaces the
+    // internal state of drivers whose pins are configured so the
+    // dashboard can show "polling but no response" vs "never polled"
+    // without operators having to break out a logic analyzer. Lives
+    // in /state (not /announce) because it's per-tick telemetry, not
+    // identity.
+    bool any_health = false;
+    for (uint8_t i = 0; i < count; i++) {
+        const pin_config_t* cfg = &configs[i];
+        if (cfg->mode != PIN_MODE_FAS100_SENSOR) continue;
+        if (any_health) continue; /* only one FAS100 instance per node */
+
+        fas100_diag_t d;
+        fas100_get_diag(&d);
+        const char* phase_str = (d.phase == 0) ? "probe_sport"
+                              : (d.phase == 1) ? "probe_fbus"
+                              : "locked";
+        const char* proto_str = (d.proto == 0) ? "sport" : "fbus";
+        ret = snprintf(buffer + written, buffer_size - written,
+            ",\"peripherals\":{\"fas100\":{"
+                "\"phase\":\"%s\","
+                "\"proto\":\"%s\","
+                "\"connected\":%s,"
+                "\"port_initialized\":%s,"
+                "\"polls_sent\":%lu,"
+                "\"echo_bytes\":%lu,"
+                "\"frames_ok\":%lu,"
+                "\"frames_crc_bad\":%lu,"
+                "\"last_byte_ms_ago\":%lu,"
+                "\"last_response_ms_ago\":%lu"
+            "}}",
+            phase_str, proto_str,
+            d.connected ? "true" : "false",
+            d.port_initialized ? "true" : "false",
+            (unsigned long)d.polls_sent,
+            (unsigned long)d.echo_bytes,
+            (unsigned long)d.frames_ok,
+            (unsigned long)d.frames_crc_bad,
+            (unsigned long)d.last_byte_ms_ago,
+            (unsigned long)d.last_response_ms_ago);
+        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+        written += ret;
+        any_health = true;
+    }
+
     // Close JSON
-    ret = snprintf(buffer + written, buffer_size - written, "]}");
+    ret = snprintf(buffer + written, buffer_size - written, "}");
     if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
     written += ret;
 

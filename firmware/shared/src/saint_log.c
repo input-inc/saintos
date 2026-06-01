@@ -30,6 +30,11 @@ typedef struct {
 
 static boot_log_entry_t g_boot_log[BOOT_LOG_MAX];
 static size_t           g_boot_log_count   = 0;
+/* Index of the next boot entry to publish. Boot drain emits one entry
+ * per saint_log_drain_boot_queue() call (caller is the 1Hz announce
+ * timer) — see the function's comment for the writer-stream-overflow
+ * reason this pacing exists. */
+static size_t           g_boot_log_drain_index = 0;
 static bool             g_boot_log_flushed = false;
 static bool             g_ros_ready        = false;
 
@@ -85,6 +90,9 @@ static void json_escape(const char* text, char* out, size_t cap)
     out[ei] = '\0';
 }
 
+static uint32_t g_emit_attempts = 0;
+static uint32_t g_emit_ok = 0;
+
 static void publish_one(const char* level, const char* text)
 {
     json_escape(text, g_escaped, sizeof(g_escaped));
@@ -92,8 +100,14 @@ static void publish_one(const char* level, const char* text)
         "{\"level\":\"%s\",\"text\":\"%s\",\"uptime_ms\":%lu}",
         level, g_escaped, (unsigned long)saint_log_uptime_ms());
     if (len < 0 || (size_t)len >= sizeof(g_envelope)) return;
-    (void)saint_log_emit_ros(g_envelope, (size_t)len);
+    g_emit_attempts++;
+    if (saint_log_emit_ros(g_envelope, (size_t)len)) {
+        g_emit_ok++;
+    }
 }
+
+uint32_t saint_log_emit_attempts(void) { return g_emit_attempts; }
+uint32_t saint_log_emit_ok(void)       { return g_emit_ok; }
 
 void saint_log_publish(const char* level, const char* fmt, ...)
 {
@@ -135,12 +149,40 @@ void saint_log_set_ros_ready(bool ready)
     g_ros_ready = ready;
 }
 
+/* Drain one buffered boot entry per call. Caller (announce_timer at 1Hz)
+ * loops us until g_boot_log_flushed is set.
+ *
+ * Why one-at-a-time: micro-XRCE-DDS sizes the client output stream at
+ * RMW_UXRCE_STREAM_HISTORY_OUTPUT = 4 unacked RELIABLE samples. The old
+ * implementation drained the whole queue (up to 24 entries) in a tight
+ * loop with no executor spin between publishes — by message 5 the
+ * stream was full and RELIABLE rcl_publish either blocked, timed out
+ * (RMW_UXRCE_PUBLISH_RELIABLE_TIMEOUT = 1000 ms × 19 leftover messages
+ * = potential 19 s stall inside a timer callback, well past our 8 s
+ * watchdog), or returned an error we discarded. After the drain
+ * finished, the writer's stream was stuck in a permanent
+ * waiting-for-ACK state and subsequent post-boot saint_log_publish
+ * calls silently no-op'd. Externally that looks like "/log went dead
+ * after the boot lines, sync ACK never reaches the server, UI pill
+ * stays pending forever" — see docs/SYNC_CONFIG_REGRESSION.md.
+ *
+ * 1 Hz pacing gives the executor plenty of cycles to spin the
+ * micro-XRCE-DDS session, deliver the message, and collect the ACK
+ * before the next drain. Worst-case boot-log visibility is delayed by
+ * BOOT_LOG_MAX (24) seconds, which is fine — these are diagnostic
+ * lines, not anything time-critical. */
 void saint_log_drain_boot_queue(void)
 {
     if (g_boot_log_flushed) return;
     if (!g_ros_ready)       return;
-    for (size_t i = 0; i < g_boot_log_count; i++) {
-        publish_one(g_boot_log[i].level, g_boot_log[i].text);
+
+    if (g_boot_log_drain_index < g_boot_log_count) {
+        boot_log_entry_t* e = &g_boot_log[g_boot_log_drain_index];
+        publish_one(e->level, e->text);
+        g_boot_log_drain_index++;
     }
-    g_boot_log_flushed = true;
+
+    if (g_boot_log_drain_index >= g_boot_log_count) {
+        g_boot_log_flushed = true;
+    }
 }

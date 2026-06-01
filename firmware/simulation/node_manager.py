@@ -671,21 +671,6 @@ sysbus.cpu1 VectorTableOffset 0x00000000
 # Keep cpu1 halted
 cpu1 IsHalted true
 
-# Reduce CPU translation block size to minimize dirty address accumulation
-# (helps prevent memory exhaustion from frequent memory-mapped I/O)
-cpu0 MaximumBlockSize 1
-
-# Diagnostic: trace function entry so we can see where the bootrom /
-# boot2 / user code is when something hangs. Requires symbols, which
-# both b2.elf and saint_node.elf carry. Leave on for now; cheap.
-cpu0 LogFunctionNames true
-sysbus LoadSymbolsFrom @{self.renode_rp2040_path}/bootroms/rp2040/b2.elf
-sysbus LoadSymbolsFrom @{firmware_path}
-
-# Diagnostic: also log all xip_ssi register accesses to confirm the
-# CPU is actually hitting that address range.
-logLevel -1 sysbus.xip_ssi
-
 # Capture firmware UART output to a dedicated file. showAnalyzer alone
 # only opens an analyzer window — in --disable-xwt --console headless
 # mode that window doesn't exist, so previously the firmware's printf
@@ -696,10 +681,10 @@ logLevel -1 sysbus.xip_ssi
 sysbus.uart0 CreateFileBackend @{uart_log_path} true
 showAnalyzer sysbus.uart0
 
-# Log UART transactions at info level — adds peripheral-level
-# diagnostics to the operational log too, separate from the firmware
-# stdout stream captured above.
-logLevel -1 sysbus.uart0
+# Diagnostic (temporary): trace UDP bridge socket activity while
+# investigating why micro-ROS session init can't establish with the
+# agent. Cheap — only fires on actual send/receive/control writes.
+logLevel -1 sysbus.udp_bridge
 
 
 echo "SAINT.OS RP2040 Node: {node_id}"
@@ -738,8 +723,11 @@ start
             return False
 
         log_file = self.logs_dir / f"{node_id}.log"
-        # Use --disable-xwt for headless operation (no GUI)
-        cmd = [self.renode_path, "--disable-xwt", "--console", str(script_path)]
+        # --disable-xwt: headless (no GUI window, HideMonitor implied).
+        # --console is added only for foreground runs where stdin is a real
+        # TTY; in background mode it pairs badly with stdin=DEVNULL because
+        # Renode's monitor reads EOF immediately and disposes the machine.
+        base_cmd = [self.renode_path, "--disable-xwt"]
 
         try:
             if foreground:
@@ -752,7 +740,7 @@ start
                 print(f"{'='*60}\n")
 
                 proc = subprocess.Popen(
-                    cmd,
+                    base_cmd + ["--console", str(script_path)],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
                     stdin=sys.stdin,
@@ -786,7 +774,7 @@ start
                     log.flush()
 
                     proc = subprocess.Popen(
-                        cmd,
+                        base_cmd + [str(script_path)],
                         stdout=log,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,

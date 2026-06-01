@@ -29,6 +29,11 @@ services:
       context: ../../..
       dockerfile: firmware/simulation/docker/Dockerfile.e2e
       args:
+        # Must match the micro-ROS client baked into the firmware.
+        # The Pico SDK lib (lib/micro_ros_raspberrypi_pico_sdk) has a
+        # branch per distro — keep it on `jazzy` to match. Mismatched
+        # versions crash the agent on the first XRCE packet — see
+        # Dockerfile.e2e comment on ROS_DISTRO for the gory details.
         ROS_DISTRO: jazzy
         # 1.16+ is needed for arm64 support; older Mono-based builds
         # crashed under Rosetta on Apple Silicon. The bootrom/XIP

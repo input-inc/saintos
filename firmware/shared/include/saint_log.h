@@ -58,6 +58,14 @@ void saint_log_set_ros_ready(bool ready);
  * /log subscriptions lazily on first /announce). */
 void saint_log_drain_boot_queue(void);
 
+/* Diagnostic counters — number of saint_log_publish calls that reached
+ * the post-boot publish path, and how many of those reported success
+ * from the platform's emit_ros hook. The boot-queue replay also
+ * increments these. Used to surface /log health in /announce when the
+ * /log channel itself is suspect. */
+uint32_t saint_log_emit_attempts(void);
+uint32_t saint_log_emit_ok(void);
+
 /* ── Per-platform hooks (implemented in <platform>/src/main.*) ─────── */
 
 /* Print one fully-formatted line locally (UART / Serial). The shared

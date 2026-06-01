@@ -40,6 +40,27 @@ float fas100_get_voltage(void);
 float fas100_get_temp1(void);
 float fas100_get_temp2(void);
 
+/* ── Diagnostic snapshot ────────────────────────────────────────────
+ *
+ * Surfaces enough internal state to debug a stuck probe from outside
+ * the firmware (the /state JSON puts these in the peripheral health
+ * block). All counters are monotonic from boot. last_byte_ms_ago is
+ * "ms since we last saw ANY UART byte" — 0 means a byte arrived this
+ * tick, UINT32_MAX means no byte has ever arrived since boot. */
+typedef struct {
+    uint8_t  phase;            /* 0=PROBE_SPORT 1=PROBE_FBUS 2=LOCKED */
+    uint8_t  proto;            /* 0=S.Port 1=FBUS */
+    bool     connected;
+    bool     port_initialized;
+    uint32_t polls_sent;
+    uint32_t echo_bytes;
+    uint32_t frames_ok;
+    uint32_t frames_crc_bad;
+    uint32_t last_byte_ms_ago;
+    uint32_t last_response_ms_ago;
+} fas100_diag_t;
+void fas100_get_diag(fas100_diag_t* out);
+
 struct peripheral_driver;
 const struct peripheral_driver* fas100_get_peripheral_driver(void);
 

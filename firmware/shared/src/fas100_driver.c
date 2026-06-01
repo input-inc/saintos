@@ -643,6 +643,22 @@ float fas100_get_voltage(void)  { return voltage_volts; }
 float fas100_get_temp1(void)    { return temp1_celsius; }
 float fas100_get_temp2(void)    { return temp2_celsius; }
 
+void fas100_get_diag(fas100_diag_t* out)
+{
+    if (!out) return;
+    out->phase            = (uint8_t)phase;
+    out->proto            = (uint8_t)active_proto;
+    out->connected        = fas100_is_connected();
+    out->port_initialized = port_initialized;
+    out->polls_sent       = stat_polls_sent;
+    out->echo_bytes       = stat_echo_bytes;
+    out->frames_ok        = stat_frames_ok;
+    out->frames_crc_bad   = stat_frames_crc_bad;
+    uint32_t now = PLATFORM_MILLIS();
+    out->last_byte_ms_ago     = (last_byte_ms == 0)     ? 0xFFFFFFFFu : (now - last_byte_ms);
+    out->last_response_ms_ago = (last_response_ms == 0) ? 0xFFFFFFFFu : (now - last_response_ms);
+}
+
 /* ── peripheral_driver_t glue ───────────────────────────────────── */
 
 static bool fas100_drv_init(void)

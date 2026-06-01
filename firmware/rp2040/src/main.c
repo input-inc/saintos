@@ -310,6 +310,29 @@ static void resolve_bootloader_version(void)
 // ≥2 announces go out. (See announce_timer_callback below.)
 static unsigned g_announce_count = 0;
 
+/* Diagnostic counters surfaced in /announce so we can verify post-boot
+ * subscription dispatch even when /log is dropping frames. Bumped
+ * inside each subscription callback. Reading the values back off
+ * /announce tells us whether the executor is delivering messages,
+ * which is independent of the /log writer's health. See
+ * docs/SYNC_CONFIG_REGRESSION.md. */
+static volatile uint32_t g_config_recv_count = 0;
+static volatile uint32_t g_control_recv_count = 0;
+static volatile uint32_t g_command_recv_count = 0;
+
+/* Sync-ACK signal published via /announce — uptime_ms of the last
+ * successful pin_config_save(). Server watches this field flip
+ * forward to flip the UI's "Sync to Node" pill green. Used to ride
+ * on /log ("Config saved to flash") but post-boot /log publishes
+ * are dropping on this platform (rcl_publish returns RCL_RET_ERROR;
+ * see docs/SYNC_CONFIG_REGRESSION.md); /announce is the only writer
+ * that demonstrably keeps working. Zero = no successful save since
+ * boot. */
+static volatile uint32_t g_last_config_save_ok_ms = 0;
+/* And a parallel signal for the failure case so the server can flip
+ * the pill red instead of leaving it spinning. */
+static volatile uint32_t g_last_config_save_fail_ms = 0;
+
 // =============================================================================
 // Remote logging — per-platform hooks
 // =============================================================================
@@ -325,16 +348,49 @@ void saint_log_emit_local(const char* level, const char* text)
     printf("[%s] %s\n", level, text);
 }
 
+/* Last rcl_publish return code for /log. Surfaced in /announce so we
+ * can debug when log_emit_ok stops tracking log_emit_attempts. */
+volatile int32_t g_log_last_publish_ret = 0;
+volatile uint32_t g_log_oversize_drops = 0;
+/* First 80 bytes of the most recent rcl_get_error_string() seen on a
+ * /log publish failure. JSON-escaped so the announce parser doesn't
+ * choke on quote/backslash. */
+static char g_log_last_err[80] = "";
+
+static void capture_log_err(void)
+{
+    rcl_error_string_t es = rcl_get_error_string();
+    /* Cheap escape: strip anything that would break JSON. We just want
+     * a fingerprint for diagnostics, not a faithful copy. */
+    size_t o = 0;
+    for (size_t i = 0; es.str[i] && o + 1 < sizeof(g_log_last_err); i++) {
+        char c = es.str[i];
+        if (c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t') c = ' ';
+        if ((unsigned char)c < 0x20) c = ' ';
+        g_log_last_err[o++] = c;
+    }
+    g_log_last_err[o] = '\0';
+    rcl_reset_error();
+}
+
 bool saint_log_emit_ros(const char* json, size_t len)
 {
-    if (len >= sizeof(log_buffer)) return false;
+    if (len >= sizeof(log_buffer)) {
+        g_log_oversize_drops++;
+        return false;
+    }
     memcpy(log_buffer, json, len);
     log_msg.data.data     = log_buffer;
     log_msg.data.size     = len;
     log_msg.data.capacity = sizeof(log_buffer);
     /* Log is best-effort — don't translate publish failure into a
      * caller-visible error. */
-    return rcl_publish(&log_pub, &log_msg, NULL) == RCL_RET_OK;
+    rcl_ret_t ret = rcl_publish(&log_pub, &log_msg, NULL);
+    g_log_last_publish_ret = (int32_t)ret;
+    if (ret != RCL_RET_OK) {
+        capture_log_err();
+    }
+    return ret == RCL_RET_OK;
 }
 
 uint32_t saint_log_uptime_ms(void)
@@ -353,6 +409,8 @@ uint32_t saint_log_uptime_ms(void)
 static void config_subscription_callback(const void* msgin)
 {
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
+
+    g_config_recv_count++;
 
     if (!msg || !msg->data.data) {
         return;
@@ -385,8 +443,12 @@ static void config_subscription_callback(const void* msgin)
             // Save to flash
             if (pin_config_save()) {
                 saint_log_publish("info", "Config saved to flash");
+                /* /announce-borne sync-ACK — see g_last_config_save_ok_ms
+                 * declaration for why /log can't be the carrier here. */
+                g_last_config_save_ok_ms = saint_log_uptime_ms();
             } else {
                 saint_log_publish("error", "Flash save failed");
+                g_last_config_save_fail_ms = saint_log_uptime_ms();
             }
 
             // Transition to ACTIVE state (node is now adopted)
@@ -397,6 +459,7 @@ static void config_subscription_callback(const void* msgin)
             }
         } else {
             saint_log_publish("error", "Config apply failed");
+            g_last_config_save_fail_ms = saint_log_uptime_ms();
         }
     }
 }
@@ -736,6 +799,7 @@ static void dispatch_action_buffer(const char* data, size_t size)
 static void control_subscription_callback(const void* msgin)
 {
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
+    g_control_recv_count++;
     if (!msg || !msg->data.data) return;
     if (msg->data.size >= sizeof(control_buffer)) {
         saint_log_publish("error",
@@ -754,6 +818,7 @@ static void control_subscription_callback(const void* msgin)
 static void command_subscription_callback(const void* msgin)
 {
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
+    g_command_recv_count++;
     if (!msg || !msg->data.data) return;
     if (msg->data.size >= sizeof(command_buffer)) {
         saint_log_publish("error",
@@ -866,6 +931,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
         "\"cpu_temp\":%.1f,"
+        "\"last_config_save_ok_ms\":%lu,"
+        "\"last_config_save_fail_ms\":%lu,"
         "\"peripherals\":{",
         g_node.node_id,
         chip_family,
@@ -881,7 +948,9 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         FIRMWARE_BUILD_TIMESTAMP,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
-        cpu_temp
+        cpu_temp,
+        (unsigned long)g_last_config_save_ok_ms,
+        (unsigned long)g_last_config_save_fail_ms
     );
 
     // Add peripheral connection status
@@ -1082,6 +1151,20 @@ static bool init_micro_ros(void)
 
     // Create log publisher (best-effort). The server subscribes per
     // adopted node and feeds each line into the per-node Logs tab.
+    //
+    // QoS = BEST_EFFORT — matches the original design comment, which
+    // had drifted from the code (rclc_publisher_init_default is
+    // RELIABLE). RELIABLE here was actively harmful: each saint_log
+    // burst (config-apply emits 4 lines in <1 ms) would saturate the
+    // micro-XRCE-DDS output stream (RMW_UXRCE_STREAM_HISTORY_OUTPUT=4)
+    // and leave the writer waiting indefinitely for ACKs that never
+    // arrived on the same callback dispatch, so post-boot /log frames
+    // silently stopped reaching the server. With BEST_EFFORT the
+    // stream-history pressure goes away. The sync-ack signal
+    // ("Config saved to flash" → server's _maybe_handle_sync_ack)
+    // still rides this topic, but a dropped sync-ack is recoverable
+    // (operator presses Sync again) whereas a wedged /log stream is
+    // not. See docs/SYNC_CONFIG_REGRESSION.md.
     char log_topic[64];
     snprintf(log_topic, sizeof(log_topic),
              "/saint/nodes/%s/log", g_node.node_id);
@@ -1089,7 +1172,7 @@ static bool init_micro_ros(void)
         if (*p == '-' || *p == ':') *p = '_';
     }
 
-    ret = rclc_publisher_init_default(
+    ret = rclc_publisher_init_best_effort(
         &log_pub,
         &ros_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),

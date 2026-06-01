@@ -47,6 +47,20 @@ COMMAND_QOS = QoSProfile(
     depth=8,
     durability=QoSDurabilityPolicy.VOLATILE,
 )
+# /saint/nodes/<id>/log
+#   BEST_EFFORT to match the firmware writer. RELIABLE here used to
+#   wedge the micro-XRCE-DDS output stream once a saint_log burst
+#   filled its 4-slot history (the writer waited indefinitely for
+#   ACKs that never came back during the same callback). Logs are
+#   diagnostic, depth=20 keeps the recent window for the per-node
+#   Logs tab. The sync-ack flow rides this topic — a dropped ack
+#   just means the operator re-clicks Sync.
+LOG_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=20,
+    durability=QoSDurabilityPolicy.VOLATILE,
+)
 
 # Use std_msgs/String for node announcements (matches firmware)
 from std_msgs.msg import String
@@ -256,6 +270,18 @@ class SaintServerNode(Node):
         self._node_state_subs: Dict[str, Any] = {}   # node_id -> state subscription
         self._node_log_subs: Dict[str, Any] = {}     # node_id -> log subscription
 
+        # Sync-ACK signal carried in /announce. Maps node_id to the most
+        # recent value of last_config_save_{ok,fail}_ms we've already
+        # acked on. When a fresh announce shows a larger value than
+        # what's here, we treat the increase as the firmware's "I just
+        # saved config" handshake and flip the UI's Sync pill. Used to
+        # be sourced from /log, but post-boot /log frames drop on
+        # RP2040 firmware (rcl_publish RCL_RET_ERROR) — /announce is
+        # the only writer that demonstrably keeps publishing, so the
+        # sync handshake rides it. See docs/SYNC_CONFIG_REGRESSION.md.
+        self._node_last_save_ok_ms: Dict[str, int] = {}
+        self._node_last_save_fail_ms: Dict[str, int] = {}
+
         # Initialize components
         self._init_publishers()
         self._init_subscribers()
@@ -390,6 +416,12 @@ class SaintServerNode(Node):
                 # Node by hand.
                 self._maybe_reconcile_adopted_unadopted(
                     announced_node_id, announced_state)
+
+                # /announce-borne sync ACK. The firmware bumps
+                # last_config_save_{ok,fail}_ms inside its config
+                # callback after pin_config_save() returns. Edge-trigger
+                # on either field increasing.
+                self._maybe_handle_announce_sync_ack(announced_node_id, parsed)
         except Exception as e:
             # Dump the full raw payload so operators can see exactly what
             # arrived — the bare error message ("unterminated string at
@@ -750,13 +782,15 @@ class SaintServerNode(Node):
         def callback(msg: String):
             self._on_node_log(node_id, msg)
 
-        # depth=20 since log bursts during config-apply can be a handful
-        # in quick succession; we'd rather buffer than drop.
+        # LOG_QOS = BEST_EFFORT depth=20. Must match the firmware's
+        # log publisher (also BEST_EFFORT). RELIABLE here used to leave
+        # the firmware's micro-XRCE-DDS writer wedged after a 4+ line
+        # burst; see the LOG_QOS docstring above.
         sub = self.create_subscription(
             String,
             topic,
             callback,
-            20,
+            LOG_QOS,
             callback_group=self.callback_group
         )
         self._node_log_subs[node_id] = sub
@@ -801,6 +835,50 @@ class SaintServerNode(Node):
         except Exception as e:
             self.state_manager.log_node_event(
                 node_id, f'(malformed log frame: {e}) {msg.data[:120]!r}', 'warn')
+
+    def _maybe_handle_announce_sync_ack(self, node_id: str, parsed: dict) -> None:
+        """Edge-trigger sync-ACK from the /announce JSON. The firmware
+        bumps last_config_save_ok_ms (uptime ms at the moment the save
+        returned true) inside config_subscription_callback. We remember
+        the last value we saw per node and flip the UI's pill the first
+        time it strictly increases. Same for the fail variant. A node
+        reboot resets uptime → the counter goes back to 0; the strict-
+        increase check needs to treat that as "no event" not "decreased
+        from 5000 → 0 = ack", so we early-out when the new value is
+        smaller than the cached one (and update the cache).
+        """
+        try:
+            ok = int(parsed.get('last_config_save_ok_ms') or 0)
+            fail = int(parsed.get('last_config_save_fail_ms') or 0)
+        except (TypeError, ValueError):
+            return
+
+        prev_ok = self._node_last_save_ok_ms.get(node_id, 0)
+        prev_fail = self._node_last_save_fail_ms.get(node_id, 0)
+
+        # Reboot: uptime restarted, drop cache and wait for the next
+        # tick to set a new baseline. Don't fire an ack.
+        if ok < prev_ok:
+            self._node_last_save_ok_ms[node_id] = ok
+            return
+        if fail < prev_fail:
+            self._node_last_save_fail_ms[node_id] = fail
+            return
+
+        if ok > prev_ok:
+            self._node_last_save_ok_ms[node_id] = ok
+            self.state_manager.mark_node_synced(node_id, success=True)
+            self._broadcast_sync_status(node_id)
+            self.state_manager.log_node_event(
+                node_id, f"Config saved to flash (sync ACK via /announce, uptime_ms={ok})",
+                "info")
+        if fail > prev_fail:
+            self._node_last_save_fail_ms[node_id] = fail
+            self.state_manager.mark_node_synced(node_id, success=False)
+            self._broadcast_sync_status(node_id)
+            self.state_manager.log_node_event(
+                node_id, f"Config apply/save failed (sync NACK via /announce, uptime_ms={fail})",
+                "error")
 
     def _maybe_handle_sync_ack(self, node_id: str, text: str) -> None:
         """If the firmware reported it finished applying + saving config,

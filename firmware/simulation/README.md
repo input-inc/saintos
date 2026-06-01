@@ -2,6 +2,14 @@
 
 Unified simulation manager for both RP2040 and Raspberry Pi 5 nodes.
 
+> **Want to run the firmware integration tests end-to-end?**
+> Use `docker/README.md` — `MODE=full docker compose -f
+> docker/docker-compose.e2e.yml up --build`. That path wraps everything
+> here (node_manager, Renode, agent, server, harness) into one
+> reproducible run and is the standard way to validate firmware
+> against the simulator. The README below documents the host-native
+> path for when you're driving individual nodes by hand.
+
 ## Quick Start
 
 ```bash
@@ -149,6 +157,22 @@ Pi 5 Node (Python)  <--DDS-->  SAINT.OS Server
 - Check Renode is installed: `ls ~/Applications/Renode.app` (macOS)
 - Set custom path: `export RENODE_PATH=/path/to/renode`
 - Check firmware exists: `ls firmware/rp2040/install/simulation/saint_node.elf`
+- The firmware's micro-ROS client (built into
+  `firmware/rp2040/lib/micro_ros_raspberrypi_pico_sdk`) must be on
+  the same distro branch as the agent you're running against. The
+  Pico SDK is a git submodule with one branch per ROS distro
+  (`humble`, `jazzy`, ...). Mismatched branches cause the agent to
+  silently drop the firmware's XRCE session-create attempts.
+
+### Renode boots but the firmware never prints
+- The most common silent-kill: `node_manager` was invoking Renode with
+  `--console` while `stdin=DEVNULL`. Renode's monitor reads EOF and
+  disposes the machine within ~100 ms. `node_manager.py` no longer
+  does this; if you're patching the resc generator and Renode dies
+  early, check that you haven't reintroduced this combo.
+- The other silent-kill: `cpu0 MaximumBlockSize 1 + LogFunctionNames
+  true` makes the CPU run 100×–1000× slower than normal. Bootrom
+  busy-waits then take seconds of wall time and look like hangs.
 
 ### Pi 5 node won't start
 - Source ROS2: `source /opt/ros/jazzy/setup.bash`
@@ -158,6 +182,13 @@ Pi 5 Node (Python)  <--DDS-->  SAINT.OS Server
 - For RP2040: Ensure micro-ROS agent is running
 - Check ROS_DOMAIN_ID matches between nodes and server
 - Verify network connectivity
+- If the agent is crashing with `*** stack smashing detected ***` or
+  `undefined symbol: _ZN8eprosima7fastcdr3Cdr9serializeEj`, the
+  shipped agent image's linked Fast-DDS lib versions don't match the
+  apt-installed `/opt/ros/<distro>/lib` versions. See
+  `docker/README.md` → "micro-ROS agent ABI pinning" for the fix —
+  short version: stash the bare agent image's `/opt/ros/<distro>/lib`
+  to a sidecar and `LD_LIBRARY_PATH`-prepend it for the agent process.
 
 ### View detailed logs
 ```bash

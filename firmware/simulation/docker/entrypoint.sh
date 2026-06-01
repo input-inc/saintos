@@ -44,9 +44,23 @@ source /work/install/setup.bash
 set -u
 
 # ── Start agent ────────────────────────────────────────────────────────
+# The agent was linked against libfastrtps.so.2.14.5 / libfastcdr.so.2.2.5
+# (versions baked into microros/micro-ros-agent:jazzy). ros:jazzy-ros-base's
+# apt feeds now ship .6 / .7, which subtly break the SHM transport's
+# stack-frame layout — the agent then aborts with `*** stack smashing
+# detected ***` on the first received packet. We stash the matched libs
+# under /opt/uros_libs and prepend that to LD_LIBRARY_PATH.
+#
+# Why we invoke the binary directly instead of via `ros2 run`: ros2 CLI
+# loads extra typesupport libs (librmw_dds_common__rosidl_typesupport_*)
+# from /opt/ros/jazzy/lib that were built against 2.2.7 and require a
+# fastcdr symbol that doesn't exist in 2.2.5 — leading to a symbol
+# lookup error on the first serialization. The agent itself doesn't
+# need those libs, so bypassing `ros2 run` keeps the lib scope tight.
 echo "[entrypoint] starting micro-ROS agent on UDP ${AGENT_PORT}"
-ros2 run micro_ros_agent micro_ros_agent udp4 --port "${AGENT_PORT}" \
-    > /tmp/agent.log 2>&1 &
+( export LD_LIBRARY_PATH="/opt/uros_libs:/uros_ws/install/micro_ros_agent/lib:/uros_ws/install/micro_ros_msgs/lib:/opt/ros/jazzy/lib"; \
+  exec /uros_ws/install/micro_ros_agent/lib/micro_ros_agent/micro_ros_agent \
+      udp4 --port "${AGENT_PORT}" > /tmp/agent.log 2>&1 ) &
 AGENT_PID=$!
 
 # Wait for the agent to bind its UDP socket. Capping at 30 s because
@@ -118,6 +132,14 @@ fi
 
 # ── Run the requested mode ─────────────────────────────────────────────
 trap '
+    # Preserve /tmp logs to the host-mounted logs dir so an operator can
+    # diagnose a failed run after the container has exited.
+    if [[ -d /work/firmware/simulation/logs ]]; then
+        for f in agent server fake_firmware; do
+            [[ -f "/tmp/${f}.log" ]] && cp "/tmp/${f}.log" \
+                "/work/firmware/simulation/logs/${f}.log" 2>/dev/null || true
+        done
+    fi
     [[ -n "${FAKE_FW_PID}" ]] && kill ${FAKE_FW_PID} 2>/dev/null
     [[ -n "${SERVER_PID}" ]] && kill ${SERVER_PID} 2>/dev/null
     kill ${AGENT_PID} 2>/dev/null
@@ -127,18 +149,18 @@ trap '
 case "${MODE}" in
     fake)
         echo "[entrypoint] running e2e harness vs fake firmware against ${WS_URL}"
-        exec python3 /work/firmware/simulation/test_sync_recovery.py \
+        python3 /work/firmware/simulation/test_sync_recovery.py \
             --ws-url "${WS_URL}" --password "${PASSWORD}" \
             --fake-firmware --node-id "${FAKE_FW_NODE_ID}"
         ;;
     full)
         echo "[entrypoint] running full Renode e2e harness against ${WS_URL}"
-        exec python3 /work/firmware/simulation/test_sync_recovery.py \
+        python3 /work/firmware/simulation/test_sync_recovery.py \
             --ws-url "${WS_URL}" --password "${PASSWORD}"
         ;;
     smoke)
         echo "[entrypoint] running --no-server smoke test"
-        exec python3 /work/firmware/simulation/test_sync_recovery.py --no-server
+        python3 /work/firmware/simulation/test_sync_recovery.py --no-server
         ;;
     shell)
         echo "[entrypoint] agent + server up. Dropping into bash."
