@@ -40,7 +40,26 @@ jobs:
     timeout-minutes: 180
     env:
       ROS_DISTRO: ${{ github.event.inputs.ros_distro || 'jazzy' }}
-      MICRO_ROS_REF: jazzy
+
+      # Upstream pins. Both used to track moving branches (`jazzy`),
+      # which meant the content hash drifted whenever upstream
+      # committed — silently invalidating the cached release while
+      # dist still tried to use it ("No ROS2 release …-<hash> found")
+      # and occasionally pulling in an upstream regression we hadn't
+      # screened. Pinning to release tags makes the hash a function
+      # of *this repo's* state only. Bump deliberately when a fix
+      # or feature you want lands upstream.
+      #
+      #   ROS2_REPOS_REF: ros2/ros2 release tag — date-stamped jazzy
+      #     releases live at refs/tags/release-jazzy-YYYYMMDD. See
+      #     https://github.com/ros2/ros2/tags?q=release-jazzy for the
+      #     full list.
+      #   MICRO_ROS_REF: micro-ROS/micro_ros_setup tag (or branch / SHA;
+      #     the git operations below accept all three). 5.0.2 is the
+      #     current jazzy-line head as a tagged release.
+      ROS2_REPOS_REF: release-jazzy-20260128
+      MICRO_ROS_REF: 5.0.2
+
       ARCH: arm64
       DEBIAN_RELEASE: bookworm
 
@@ -49,8 +68,9 @@ jobs:
 
       # ----------------------------------------------------------------------
       # Compute a content hash over the inputs that determine binary output.
-      # If upstream pins move (new ros2.repos commits) we rebuild; otherwise
-      # we re-use an existing release tarball.
+      # With ROS2_REPOS_REF + MICRO_ROS_REF both pinned in this file, the
+      # hash only changes when we bump those (or when build-ros2-in-container.sh
+      # changes). No more silent drift from upstream branch motion.
       - name: Resolve upstream refs and compute hash
         id: hash
         run: |
@@ -58,15 +78,23 @@ jobs:
           mkdir -p _ros2_src
           cd _ros2_src
 
-          # ros2.repos — the canonical pinned-SHA file maintained by the
-          # ROS2 team for the given distro.
+          # ros2.repos at the pinned release tag — the canonical
+          # pinned-SHA file maintained by the ROS2 team, frozen to a
+          # release-day snapshot rather than the moving jazzy branch.
           curl -fsSL \
-            "https://raw.githubusercontent.com/ros2/ros2/${ROS_DISTRO}/ros2.repos" \
+            "https://raw.githubusercontent.com/ros2/ros2/${ROS2_REPOS_REF}/ros2.repos" \
             -o ros2.repos
 
-          # micro_ros_setup is a single repo whose HEAD on the jazzy branch
-          # we need to capture. We hash the latest commit SHA on that branch.
-          MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git "refs/heads/${MICRO_ROS_REF}" | awk '{print $1}')
+          # micro_ros_setup at the pinned ref. We resolve to a concrete
+          # SHA up-front so the hash input is stable across runs even
+          # if a tag ever gets force-moved (rare but possible).
+          MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git \
+            "refs/tags/${MICRO_ROS_REF}" "refs/heads/${MICRO_ROS_REF}" "${MICRO_ROS_REF}" \
+            | head -n1 | awk '{print $1}')
+          if [[ -z "${MICRO_SHA}" ]]; then
+            echo "::error::Could not resolve MICRO_ROS_REF='${MICRO_ROS_REF}' to a SHA"
+            exit 1
+          fi
           echo "micro_ros_setup_sha=${MICRO_SHA}" > micro_ros.txt
           echo "$MICRO_SHA" > micro_ros_setup.sha
 
@@ -83,8 +111,9 @@ jobs:
           echo "tag=${TAG}"   >> "$GITHUB_OUTPUT"
           echo "micro_sha=${MICRO_SHA}" >> "$GITHUB_OUTPUT"
           echo "Resolved tag: ${TAG}"
-          echo "  upstream ros2.repos lines: $(wc -l < ros2.repos)"
-          echo "  micro_ros_setup HEAD:      ${MICRO_SHA}"
+          echo "  ros2/ros2 ref: ${ROS2_REPOS_REF}"
+          echo "  ros2.repos lines: $(wc -l < ros2.repos)"
+          echo "  micro_ros_setup ref: ${MICRO_ROS_REF} (${MICRO_SHA})"
 
       # ----------------------------------------------------------------------
       - name: Check whether release already exists

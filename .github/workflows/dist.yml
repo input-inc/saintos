@@ -245,11 +245,17 @@ jobs:
           - runs-on: ubuntu-22.04-arm
             arch: arm64
             ros: jazzy
-            micro_ros_ref: jazzy
+            # Upstream pins — keep in sync with the same-named env vars
+            # in .github/workflows/ros2-build.yml. Bumping either here
+            # without bumping there (or vice versa) produces a hash
+            # mismatch and "No ROS2 release …-<hash> found".
+            ros2_repos_ref: release-jazzy-20260128
+            micro_ros_ref: 5.0.2
             debian_release: bookworm
     runs-on: ${{ matrix.runs-on }}
     env:
       ROS_DISTRO: ${{ matrix.ros }}
+      ROS2_REPOS_REF: ${{ matrix.ros2_repos_ref }}
       MICRO_ROS_REF: ${{ matrix.micro_ros_ref }}
       ARCH: ${{ matrix.arch }}
       DEBIAN_RELEASE: ${{ matrix.debian_release }}
@@ -267,11 +273,20 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p _ros2_src && cd _ros2_src
+          # ros2.repos at the pinned release tag — must match the
+          # ROS2_REPOS_REF in ros2-build.yml or the computed hash drifts.
           curl -fsSL \
-            "https://raw.githubusercontent.com/ros2/ros2/${ROS_DISTRO}/ros2.repos" \
+            "https://raw.githubusercontent.com/ros2/ros2/${ROS2_REPOS_REF}/ros2.repos" \
             -o ros2.repos
+          # Resolve MICRO_ROS_REF (tag or branch or SHA) to a concrete
+          # SHA so the hash input is stable.
           MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git \
-            "refs/heads/${MICRO_ROS_REF}" | awk '{print $1}')
+            "refs/tags/${MICRO_ROS_REF}" "refs/heads/${MICRO_ROS_REF}" "${MICRO_ROS_REF}" \
+            | head -n1 | awk '{print $1}')
+          if [[ -z "${MICRO_SHA}" ]]; then
+            echo "::error::Could not resolve MICRO_ROS_REF='${MICRO_ROS_REF}' to a SHA"
+            exit 1
+          fi
           echo "micro_ros_setup_sha=${MICRO_SHA}" > micro_ros.txt
           # Hash must match the algorithm in .github/workflows/ros2-build.yml
           # and scripts/build-local-dist.sh — including the build script

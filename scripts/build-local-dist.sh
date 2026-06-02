@@ -50,7 +50,12 @@ cd "$REPO_ROOT"
 ROS_DISTRO="jazzy"
 ARCH="arm64"
 DEBIAN_RELEASE="bookworm"
-MICRO_ROS_REF="${MICRO_ROS_REF:-jazzy}"
+# Upstream pins — must match the same-named env vars in
+# .github/workflows/ros2-build.yml and .github/workflows/dist.yml or
+# the local hash will diverge from CI's and we won't find the cached
+# release. Bump deliberately (in all three files at once).
+ROS2_REPOS_REF="${ROS2_REPOS_REF:-release-jazzy-20260128}"
+MICRO_ROS_REF="${MICRO_ROS_REF:-5.0.2}"
 REPO_SLUG="${SAINT_REPO_SLUG:-input-inc/saintos}"
 
 CACHE_ROOT="${SAINT_LOCAL_CACHE:-${HOME}/.cache/saint-os}"
@@ -139,7 +144,7 @@ fi
 ( cd _ros2_src
   if [[ ! -f ros2.repos || $REFETCH_ROS2 -eq 1 ]]; then
       curl -fsSL \
-        "https://raw.githubusercontent.com/ros2/ros2/${ROS_DISTRO}/ros2.repos" \
+        "https://raw.githubusercontent.com/ros2/ros2/${ROS2_REPOS_REF}/ros2.repos" \
         -o ros2.repos
   fi
   # Reuse the cached micro-ROS SHA when we already have one. git ls-remote
@@ -147,8 +152,13 @@ fi
   # work — the cached ROS2 tarball was built against a known-good SHA so
   # the existing micro_ros.txt is fine for re-deriving the cache key.
   if [[ ! -f micro_ros.txt || $REFETCH_ROS2 -eq 1 ]]; then
+      # Resolve MICRO_ROS_REF as either a tag or a branch (or raw SHA).
+      # `git ls-remote` returns the matching ref's SHA; head -n1 picks
+      # the first match if there's ambiguity (rare — tags and branches
+      # don't usually share names).
       if MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git \
-            "refs/heads/${MICRO_ROS_REF}" 2>/dev/null | awk '{print $1}') \
+            "refs/tags/${MICRO_ROS_REF}" "refs/heads/${MICRO_ROS_REF}" "${MICRO_ROS_REF}" \
+            2>/dev/null | head -n1 | awk '{print $1}') \
             && [[ -n "$MICRO_SHA" ]]; then
           echo "micro_ros_setup_sha=${MICRO_SHA}" > micro_ros.txt
       else
