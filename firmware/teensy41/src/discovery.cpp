@@ -5,6 +5,7 @@
  */
 
 #include <Arduino.h>
+#include "platform.h"
 
 #ifndef SIMULATION
 

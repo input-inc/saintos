@@ -1,83 +1,182 @@
-// Teensy 4.1 (iMXRT1062) Platform for Renode
-// Cortex-M7 based microcontroller
+// Teensy 4.1 (iMXRT1062) platform for Renode.
+//
+// Hand-derived from Renode's `platforms/cpus/imxrt1064.repl`. We can't
+// `using "platforms/cpus/imxrt1064.repl"` directly because that base
+// registers `flex_spi` with a "ciphertext" BusMultiRegistration spanning
+// 0x60000000..0x6EFFFFFF, which routes reads/writes through the FlexSPI
+// command sequencer (it expects an attached SPI flash chip). Teensy 4.1
+// firmware is linked to run XIP from 0x60000000 and we don't model an
+// SPI flash chip for the sim, so we need that range to be plain
+// MappedMemory — which means registering flex_spi here without the
+// ciphertext region.
+//
+// On top of the iMXRT1064 baseline, we add:
+//   - 0x60000000 `external_flash` (8 MB Memory.MappedMemory). Backs the
+//     XIP address range so `sysbus LoadELF` of the firmware ELF drops
+//     the image directly where the CPU expects to fetch from at reset.
+//   - 0x50300000 `udp_bridge` — saint-os custom Renode peripheral that
+//     bridges the firmware's micro-ROS UDP transport to the host
+//     network stack. Identical register layout to the RP2040 sim.
+//   - 0x50400000 `persistent_storage` — bridges flash_storage.cpp's
+//     memory-mapped peripheral writes to a host file so node config
+//     survives stop/start cycles.
 
-// Flash (8MB via FlexSPI)
-flash: Memory.MappedMemory @ sysbus 0x60000000
-    size: 0x800000
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    systickFrequency: 600000000
+    priorityMask: 0xF0
+    IRQ -> cpu@0
 
-// ITCM (Instruction Tightly Coupled Memory - 512KB)
-itcm: Memory.MappedMemory @ sysbus 0x00000000
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m7"
+    nvic: nvic
+
+// Internal memories.
+itcm: Memory.MappedMemory @ sysbus 0x0
     size: 0x80000
 
-// DTCM (Data Tightly Coupled Memory - 512KB)
 dtcm: Memory.MappedMemory @ sysbus 0x20000000
     size: 0x80000
 
-// OCRAM (On-Chip RAM - 512KB)
+// OCRAM. The 1062 has 1 MB of OCRAM split as OCRAM1 (0x20200000) + OCRAM2
+// (0x20280000). The iMXRT1064 repl only models the 0x20200000 half;
+// the firmware's stack/heap may straddle into 0x20280000 so we extend
+// the region to cover both.
 ocram: Memory.MappedMemory @ sysbus 0x20200000
-    size: 0x80000
+    size: 0x100000
 
-// OCRAM2 (Additional On-Chip RAM - 512KB)
-ocram2: Memory.MappedMemory @ sysbus 0x20280000
-    size: 0x80000
-
-cpu0: CPU.CortexM @ sysbus
-    cpuType: "cortex-m7"
-    nvic: nvic0
-
-nvic0: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration {
-        address: 0xe000e000;
-        cpu: cpu0
-    }
-    systickFrequency: 600000000
-    -> cpu0@0
-
-// LPUART1 for debug output (pins 24/25 on Teensy, default Serial1)
-lpuart1: UART.PL011 @ sysbus 0x40184000
-
-// GPIO ports (simplified for simulation)
-gpio1: Memory.MappedMemory @ sysbus 0x401B8000
+wdog1: Python.PythonPeripheral @ sysbus 0x400B8000
     size: 0x4000
+    initable: true
+    filename: "scripts/pydev/ticker.py"
 
-gpio2: Memory.MappedMemory @ sysbus 0x401BC000
+trng: Miscellaneous.IMX_TRNG @ sysbus 0x400CC000
+
+wdog2: Python.PythonPeripheral @ sysbus 0x400D0000
     size: 0x4000
+    initable: true
+    filename: "scripts/pydev/ticker.py"
 
-// GPT1 timer
-gpt1: Memory.MappedMemory @ sysbus 0x401EC000
+wdog3: Python.PythonPeripheral @ sysbus 0x400BC000
     size: 0x4000
+    initable: true
+    filename: "scripts/pydev/ticker.py"
 
-// GPT2 timer
-gpt2: Memory.MappedMemory @ sysbus 0x401F0000
+iomuxc: Python.PythonPeripheral @ sysbus 0x401F8000
     size: 0x4000
+    initable: true
+    filename: "scripts/pydev/flipflop.py"
 
-// Pit timer (for millis() etc)
-pit: Memory.MappedMemory @ sysbus 0x40084000
+analog01: Python.PythonPeripheral @ sysbus 0x400D8000
+    size: 0x30
+    initable: true
+    filename: "scripts/pydev/flipflop.py"
+
+analog03: Python.PythonPeripheral @ sysbus 0x400D8034
+    size: 0x3fcc
+    initable: true
+    filename: "scripts/pydev/flipflop.py"
+
+dcdc: Python.PythonPeripheral @ sysbus 0x40080000
     size: 0x4000
+    initable: true
+    filename: "scripts/pydev/flipflop.py"
 
-// CCM (Clock Controller Module)
-ccm: Memory.MappedMemory @ sysbus 0x400FC000
-    size: 0x8000
+gpTimer1: Timers.IMX_GPTimer @ sysbus 0x401EC000
+    IRQ -> nvic@100
 
-// IOMUXC (for pin muxing)
-iomuxc: Memory.MappedMemory @ sysbus 0x401F8000
-    size: 0x4000
+lpuart1: UART.NXP_LPUART @ sysbus 0x40184000
+    IRQ -> nvic@20
 
-// OCOTP (for unique ID)
-ocotp: Memory.MappedMemory @ sysbus 0x401F4000
-    size: 0x4000
+lpuart2: UART.NXP_LPUART @ sysbus 0x40188000
+    IRQ -> nvic@21
 
-// USB (stubbed)
-usb1: Memory.MappedMemory @ sysbus 0x402E0000
-    size: 0x4000
+lpuart3: UART.NXP_LPUART @ sysbus 0x4018c000
+    IRQ -> nvic@22
 
-// DWT for cycle counting
-dwt: Miscellaneous.DWT @ sysbus 0xE0001000
-    frequency: 600000000
+lpuart4: UART.NXP_LPUART @ sysbus 0x40190000
+    IRQ -> nvic@23
 
-// Shared simulation peripherals (same as RP2040)
-// UDP Bridge for network simulation
+lpuart5: UART.NXP_LPUART @ sysbus 0x40194000
+    IRQ -> nvic@24
+
+// Serial1 (pins 0/1) on Teensy 4.1 maps here — this is where the
+// SIMULATION-mode `#define Serial Serial1` redirect (see
+// firmware/teensy41/include/platform.h) lands its output. The
+// node_manager-generated .resc hooks CreateFileBackend to this
+// peripheral.
+lpuart6: UART.NXP_LPUART @ sysbus 0x40198000
+    IRQ -> nvic@25
+
+lpuart7: UART.NXP_LPUART @ sysbus 0x4019c000
+    IRQ -> nvic@26
+
+lpuart8: UART.NXP_LPUART @ sysbus 0x401a0000
+    IRQ -> nvic@27
+
+gpio1: GPIOPort.IMXRT_GPIO @ sysbus 0x401B8000
+gpio2: GPIOPort.IMXRT_GPIO @ sysbus 0x401BC000
+gpio3: GPIOPort.IMXRT_GPIO @ sysbus 0x401C0000
+gpio4: GPIOPort.IMXRT_GPIO @ sysbus 0x401C4000
+gpio5: GPIOPort.IMXRT_GPIO @ sysbus 0x400C0000
+gpio6: GPIOPort.IMXRT_GPIO @ sysbus 0x42000000
+gpio7: GPIOPort.IMXRT_GPIO @ sysbus 0x42004000
+gpio8: GPIOPort.IMXRT_GPIO @ sysbus 0x42008000
+gpio9: GPIOPort.IMXRT_GPIO @ sysbus 0x4200C000
+
+enetIRQs: Miscellaneous.CombinedInput
+    numberOfInputs: 4
+    -> nvic@114
+
+enet: Network.K6xF_Ethernet @ sysbus 0x402D8000
+    [TxIRQ, RxIRQ, MiscIRQ, PtpIRQ] -> enetIRQs@[0-3]
+    TimerIRQ -> nvic@115
+
+// FlexSPI control-register face only — the ciphertext multi-registration
+// at 0x60000000 (in imxrt1064.repl) is intentionally dropped here so
+// `external_flash` below can claim that address range as plain memory.
+flex_spi: SPI.IMXRT_FlexSPI @ sysbus 0x402A8000
+
+flex_spi2: SPI.IMXRT_FlexSPI @ sysbus 0x402A4000
+
+lpspi1: SPI.IMXRT_LPSPI @ sysbus 0x40394000
+lpspi2: SPI.IMXRT_LPSPI @ sysbus 0x40398000
+lpspi3: SPI.IMXRT_LPSPI @ sysbus 0x4039C000
+lpspi4: SPI.IMXRT_LPSPI @ sysbus 0x403A0000
+
+adc1: Analog.IMXRT_ADC @ sysbus 0x400C4000
+    -> nvic@67
+
+adc2: Analog.IMXRT_ADC @ sysbus 0x400C8000
+    -> nvic@68
+
+pwm1: Timers.IMXRT_PWM @ sysbus 0x403DC000
+pwm2: Timers.IMXRT_PWM @ sysbus 0x403E0000
+    2 -> nvic@137
+pwm3: Timers.IMXRT_PWM @ sysbus 0x403E4000
+pwm4: Timers.IMXRT_PWM @ sysbus 0x403E8000
+
+// External QSPI flash backing. Teensy 4.1 has an 8 MB W25Q64. Production
+// firmware is linked XIP from 0x60000000; plain MappedMemory here lets
+// `LoadELF` populate it directly without modelling FlexSPI command
+// sequencing or attaching a separate SPI flash chip.
+external_flash: Memory.MappedMemory @ sysbus 0x60000000
+    size: 0x800000
+
+// saint-os custom peripherals (C# sources loaded by
+// cores/initialize_peripherals.resc).
 udp_bridge: Network.UDPBridge @ sysbus 0x50300000
 
-// Persistent Storage for node configuration
 persistent_storage: Storage.PersistentStorage @ sysbus 0x50400000
     nodeId: "default"
+
+sysbus:
+    init:
+        Tag <0x400FC000, 0x400FFFFF> "CCM"
+        Tag <0x400FC014, 0x400FC017> "CCM_CBCDR" 0x000A8200
+        Tag <0x400FC024, 0x400FC027> "CCM_CSCDR1" 0x40
+        Tag <0x400F8000, 0x400FBFFF> "SRC"
+        Tag <0x400F4000, 0x400F7FFF> "GPC"
+        Tag <0x401F4000, 0x401F7FFF> "OCOTP"
+        Tag <0x40084000, 0x40087FFF> "PIT"
+        Tag <0x402E0000, 0x402E3FFF> "USB"
+        Tag <0x400D8030, 0x400D8033> "analog02" 0x80002001

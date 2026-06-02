@@ -101,6 +101,16 @@ static std_msgs__msg__String announcement_msg;
 // it. See firmware/rp2040/src/main.c for the longer rationale.
 static char announcement_buffer[1024];
 
+/* Sync-ACK signal published via /announce. Server's
+ * _maybe_handle_announce_sync_ack edge-triggers on either field
+ * increasing and flips the UI's Sync pill. /log was the original
+ * carrier ("Config saved to flash" text-scan), but post-boot /log
+ * frames drop on this platform once the writer's micro-XRCE-DDS
+ * output stream saturates; /announce is the only writer that
+ * demonstrably keeps publishing even when /log goes quiet. */
+static volatile uint32_t g_last_config_save_ok_ms = 0;
+static volatile uint32_t g_last_config_save_fail_ms = 0;
+
 static std_msgs__msg__String config_msg;
 static char config_buffer[2048];
 
@@ -167,6 +177,13 @@ static void config_subscription_callback(const void* msgin)
             Serial.printf("Pin configuration applied successfully\n");
             if (pin_config_save()) {
                 Serial.printf("Pin configuration saved to flash\n");
+                /* /announce-borne sync-ACK — see the declaration of
+                 * g_last_config_save_ok_ms (in main.cpp's announce
+                 * builder) for why this lives in /announce instead of
+                 * /log. */
+                g_last_config_save_ok_ms = saint_log_uptime_ms();
+            } else {
+                g_last_config_save_fail_ms = saint_log_uptime_ms();
             }
         } else {
             // No pins / peripherals to apply (or apply failed cleanly).
@@ -175,7 +192,13 @@ static void config_subscription_callback(const void* msgin)
             // per-node /config topic when it considers us adopted,
             // and the operator may have adopted without configuring
             // any peripherals yet. Honor the adoption either way.
+            //
+            // We don't treat empty-pins as a fail: it's an intentional
+            // empty configure. Mark it as a successful save so the
+            // server's sync pill flips. (Skip the flash write — there
+            // are no pins to persist.)
             Serial.printf("Configure received with no pins to apply (empty/no-op)\n");
+            g_last_config_save_ok_ms = saint_log_uptime_ms();
         }
         if (g_node.state != NODE_STATE_ACTIVE) {
             // Transition regardless of apply outcome — receipt of the
@@ -425,6 +448,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
         "\"cpu_temp\":%.1f,"
+        "\"last_config_save_ok_ms\":%lu,"
+        "\"last_config_save_fail_ms\":%lu,"
         "\"peripherals\":{",
         g_node.node_id,
         chip_family,
@@ -438,7 +463,9 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         FIRMWARE_BUILD_TIMESTAMP,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
-        cpu_temp
+        cpu_temp,
+        (unsigned long)g_last_config_save_ok_ms,
+        (unsigned long)g_last_config_save_fail_ms
     );
 
     // Add peripheral connection status
@@ -512,7 +539,10 @@ static bool init_micro_ros(void)
     if (ret != RCL_RET_OK) return false;
 
     // Announcement publisher
-    ret = rclc_publisher_init_default(&announcement_pub, &ros_node,
+    /* BEST_EFFORT — see /log publisher's comment below. The Teensy's
+     * micro-XRCE-DDS output stream wedges under RELIABLE bursts and
+     * /announce stops reaching the server within ~15 s of boot. */
+    ret = rclc_publisher_init_best_effort(&announcement_pub, &ros_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), "/saint/nodes/announce");
     if (ret != RCL_RET_OK) return false;
 
@@ -555,15 +585,27 @@ static bool init_micro_ros(void)
     // State publisher
     snprintf(topic, sizeof(topic), "/saint/nodes/%s/state", g_node.node_id);
     for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
-    ret = rclc_publisher_init_default(&state_pub, &ros_node,
+    /* BEST_EFFORT — telemetry at 10 Hz, fresh-wins. Same stream-wedge
+     * concern as /announce; freshest reading matters more than every
+     * sample arriving. */
+    ret = rclc_publisher_init_best_effort(&state_pub, &ros_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic);
     if (ret != RCL_RET_OK) return false;
 
-    // Log publisher — per-node /log topic. Best-effort; shared/src/saint_log.c
-    // owns the publish path, this main just provides the rcl handle.
+    // Log publisher — per-node /log topic. Genuinely BEST_EFFORT,
+    // matching the comment. RELIABLE here used to wedge the
+    // micro-XRCE-DDS output stream on the first saint_log burst
+    // (RMW_UXRCE_STREAM_HISTORY_OUTPUT=4) — the writer started waiting
+    // indefinitely for ACKs that never made it back inside the same
+    // callback dispatch, and post-boot /log frames stopped reaching
+    // the server. On the Teensy that wedge also took /announce down
+    // (the agent saw the first announce, then silence for >15 s, then
+    // a fresh discovery → endless reconnect loop). Sync-ACK rides
+    // /announce now (see g_last_config_save_ok_ms below), so dropping
+    // /log to BEST_EFFORT is safe. See docs/SYNC_CONFIG_REGRESSION.md.
     snprintf(topic, sizeof(topic), "/saint/nodes/%s/log", g_node.node_id);
     for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
-    ret = rclc_publisher_init_default(&log_pub, &ros_node,
+    ret = rclc_publisher_init_best_effort(&log_pub, &ros_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic);
     if (ret != RCL_RET_OK) return false;
     saint_log_set_ros_ready(true);
@@ -577,8 +619,13 @@ static bool init_micro_ros(void)
         RCL_MS_TO_NS(STATE_PUBLISH_INTERVAL_MS), state_timer_callback);
     if (ret != RCL_RET_OK) return false;
 
-    // Executor (2 timers + 3 subscriptions)
-    ret = rclc_executor_init(&executor, &support.context, 5, &allocator);
+    // Executor — actual handle count is 2 timers + 3 subscriptions = 5.
+    // Provisioned with 8 instead to dodge a suspected rclc off-by-one
+    // when handle count exactly equals RMW_UXRCE_MAX_SUBSCRIPTIONS (=5)
+    // on micro-ROS. The same provisioning is used on RP2040; without
+    // it the Teensy's publishers create their DDS endpoints fine but
+    // every publish silently fails — see docs/SYNC_CONFIG_REGRESSION.md.
+    ret = rclc_executor_init(&executor, &support.context, 8, &allocator);
     if (ret != RCL_RET_OK) return false;
 
     rclc_executor_add_timer(&executor, &announce_timer);

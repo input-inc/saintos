@@ -23,6 +23,7 @@
 #include "teensy_ota.h"
 
 #include <Arduino.h>
+#include "platform.h"
 #include <NativeEthernet.h>
 
 extern "C" {

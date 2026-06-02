@@ -9,6 +9,7 @@
 #include "http_transport_ethernet.h"
 
 #include <Arduino.h>
+#include "platform.h"
 #include <NativeEthernet.h>
 
 #include <stdint.h>

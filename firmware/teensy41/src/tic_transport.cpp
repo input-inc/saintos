@@ -11,6 +11,7 @@
 #include "uart_serial_lookup.h"
 
 #include <Arduino.h>
+#include "platform.h"
 
 static HardwareSerial* s_port = nullptr;
 static uint8_t  s_tx_pin = 0xFF;

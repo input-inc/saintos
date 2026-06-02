@@ -6,6 +6,7 @@
  */
 
 #include <Arduino.h>
+#include "platform.h"
 
 extern "C" {
 #include "saint_node.h"

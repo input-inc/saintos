@@ -61,6 +61,25 @@ LOG_QOS = QoSProfile(
     depth=20,
     durability=QoSDurabilityPolicy.VOLATILE,
 )
+# /saint/nodes/announce  (shared, all nodes publish here)
+# /saint/nodes/<id>/state (per-node, 10 Hz)
+#   BEST_EFFORT for telemetry-direction topics. The Teensy's
+#   micro-XRCE-DDS client wedges RELIABLE publishers across the
+#   board after the first few publishes (same root cause as the
+#   /log wedge — output stream history fills with unacked samples
+#   inside callbacks before the agent has a chance to ACK). A
+#   BEST_EFFORT subscriber accepts both RELIABLE and BEST_EFFORT
+#   publishers, so the existing RP2040 nodes (whose RELIABLE
+#   publishers DO work) keep flowing while the Teensy's
+#   BEST_EFFORT publishers also match. Sync ACK still rides
+#   /announce — losing one sample just delays the pill flip until
+#   the next 1 Hz tick.
+TELEMETRY_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=10,
+    durability=QoSDurabilityPolicy.VOLATILE,
+)
 
 # Use std_msgs/String for node announcements (matches firmware)
 from std_msgs.msg import String
@@ -298,12 +317,15 @@ class SaintServerNode(Node):
 
     def _init_subscribers(self):
         """Initialize ROS2 subscribers."""
-        # Node announcements (using std_msgs/String with JSON payload)
+        # Node announcements (using std_msgs/String with JSON payload).
+        # TELEMETRY_QOS = BEST_EFFORT so it matches both RELIABLE
+        # (RP2040 today) and BEST_EFFORT (Teensy after the wedge fix)
+        # publishers — see the TELEMETRY_QOS comment above.
         self.announcement_sub = self.create_subscription(
             String,
             '/saint/nodes/announce',
             self._on_node_announcement,
-            10,
+            TELEMETRY_QOS,
             callback_group=self.callback_group
         )
         self.get_logger().info('Subscribed to /saint/nodes/announce')
@@ -760,7 +782,7 @@ class SaintServerNode(Node):
             String,
             topic,
             callback,
-            10,
+            TELEMETRY_QOS,
             callback_group=self.callback_group
         )
         self._node_state_subs[node_id] = sub

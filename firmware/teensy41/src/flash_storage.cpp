@@ -6,6 +6,7 @@
  */
 
 #include <Arduino.h>
+#include "platform.h"
 #include <string.h>
 
 extern "C" {

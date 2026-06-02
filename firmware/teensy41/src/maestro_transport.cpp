@@ -14,6 +14,7 @@
  */
 
 #include <Arduino.h>
+#include "platform.h"
 
 #ifndef SIMULATION
 #include <USBHost_t36.h>
