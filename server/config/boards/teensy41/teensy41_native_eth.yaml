@@ -11,9 +11,10 @@ display_name: "PJRC Teensy 4.1 (Native Ethernet)"
 chip_family: teensy41
 builtin: true        # shipped with SAINT.OS — UI marks uneditable
 
-# All 42 digital header pins are available. Pin 13 doubles as the
-# onboard LED — operators can still re-purpose it; the LED just
-# mirrors whatever the pin is driving.
+# Header pins broken out as operator-configurable GPIO. Pin 13 is NOT
+# in this list: it's the onboard LED, reserved below and exposed as
+# the onboard_led built-in peripheral so the dashboard can drive it
+# via the same NeoPixel wire protocol the Feather uses.
 available_pins:
   - {gpio:  0, name: "D0"}
   - {gpio:  1, name: "D1"}
@@ -28,7 +29,6 @@ available_pins:
   - {gpio: 10, name: "D10"}
   - {gpio: 11, name: "D11"}
   - {gpio: 12, name: "D12"}
-  - {gpio: 13, name: "D13 (LED)"}
   - {gpio: 14, name: "D14 / A0"}
   - {gpio: 15, name: "D15 / A1"}
   - {gpio: 16, name: "D16 / A2"}
@@ -59,7 +59,16 @@ available_pins:
   - {gpio: 41, name: "D41 / A17"}
 
 # Ethernet RMII pins live on the dedicated bottom-side magjack header,
-# not the main GPIO rails, so there's nothing to reserve here.
-reserved_pins: []
+# not the main GPIO rails. Pin 13 is wired to the onboard LED, owned
+# by firmware/teensy41/src/led_status.cpp for node-state indication
+# and operator-driven override — see builtin_peripherals below.
+reserved_pins:
+  - {gpio: 13, name: "ONBOARD_LED", reason: "Onboard status LED (built-in)"}
 
-builtin_peripherals: []
+# Peripherals permanently wired on this board. The server auto-seeds
+# these into the operator's peripheral_config on first capability
+# receipt, with builtin=True so they can't be removed (only re-routed
+# to widgets and signals). Same shape as the Feather's onboard NeoPixel.
+builtin_peripherals:
+  - id: onboard_led
+    type: neopixel

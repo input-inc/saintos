@@ -5,6 +5,11 @@
  */
 
 #include <Arduino.h>
+// platform.h's #define Serial Serial1 (under SIMULATION) must be in scope
+// BEFORE any code in this TU references `Serial`, otherwise Serial.begin()
+// here resolves to the USB CDC object — which Renode can't capture, and
+// also means LPUART6's CTRL.TE never gets set so its TX FIFO never drains.
+#include "platform.h"
 #include <string.h>
 
 extern "C" {
@@ -356,6 +361,56 @@ static void dispatch_action_buffer(const char* data, size_t size)
     if (strstr(data, "\"action\":\"identify\"") ||
         strstr(data, "\"action\": \"identify\"")) {
         led_identify(5);
+        return;
+    }
+
+    /* Server-controlled onboard-LED override. Matches the
+     * set_neopixel wire shape the Feather uses so the dashboard can
+     * target either board identically — the Teensy's single-color
+     * LED just collapses (r,g,b) at brightness > 0 to ON, brightness
+     * 0 (or all-black) to OFF. See led_set_override_color() in
+     * src/led_status.cpp.
+     *
+     * Wire format:
+     *   {"action":"set_neopixel","r":255,"g":0,"b":0,"brightness":128}
+     *   {"action":"set_neopixel","clear":true}     // resume state LED
+     */
+    if (strstr(data, "\"action\":\"set_neopixel\"") ||
+        strstr(data, "\"action\": \"set_neopixel\"")) {
+        if (strstr(data, "\"clear\":true") ||
+            strstr(data, "\"clear\": true")) {
+            led_clear_override();
+            Serial.printf("LED: override cleared — resuming state-driven LED\n");
+            return;
+        }
+        int r = 0, g = 0, b = 0, brightness = 255;
+        const char* p;
+        if ((p = strstr(data, "\"r\""))) {
+            p = strchr(p, ':');
+            if (p) { p++; while (*p == ' ') p++; r = atoi(p); }
+        }
+        if ((p = strstr(data, "\"g\""))) {
+            p = strchr(p, ':');
+            if (p) { p++; while (*p == ' ') p++; g = atoi(p); }
+        }
+        if ((p = strstr(data, "\"b\""))) {
+            p = strchr(p, ':');
+            if (p) { p++; while (*p == ' ') p++; b = atoi(p); }
+        }
+        if ((p = strstr(data, "\"brightness\""))) {
+            p = strchr(p, ':');
+            if (p) { p++; while (*p == ' ') p++; brightness = atoi(p); }
+        }
+        if (r < 0) r = 0; if (r > 255) r = 255;
+        if (g < 0) g = 0; if (g > 255) g = 255;
+        if (b < 0) b = 0; if (b > 255) b = 255;
+        if (brightness < 0) brightness = 0; if (brightness > 255) brightness = 255;
+        led_set_override_color((uint8_t)r, (uint8_t)g, (uint8_t)b,
+                                (uint8_t)brightness);
+        Serial.printf("LED: override set RGB=(%d,%d,%d) brightness=%d "
+                       "(collapsed to %s)\n",
+                       r, g, b, brightness,
+                       ((brightness > 0) && ((r | g | b) != 0)) ? "ON" : "OFF");
         return;
     }
 

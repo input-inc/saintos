@@ -15,7 +15,7 @@ machine LoadPlatformDescription @/Users/hackman/Projects/OpenSAINT/SaintOS/sourc
 # Configure peripherals for this specific node
 sysbus.persistent_storage StoragePath "/Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/simulation/teensy41_storage"
 sysbus.persistent_storage NodeId "teensy_smoke"
-sysbus.udp_bridge LocalPort 9983
+sysbus.udp_bridge LocalPort 9981
 
 # Load firmware into the external-flash region (0x60000000 — XIP base).
 sysbus LoadELF @/Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/teensy41/build/simulation/firmware.elf
@@ -46,7 +46,7 @@ cpu LogFunctionNames true
 logLevel -1 sysbus.lpuart6
 
 echo "SAINT.OS Teensy 4.1 Node: teensy_smoke"
-echo "  UDP Port: 9983"
+echo "  UDP Port: 9981"
 echo "  Storage: /Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/simulation/teensy41_storage/teensy_smoke.bin"
 echo "  UART log: /Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/simulation/logs/teensy_smoke.uart.log"
 
