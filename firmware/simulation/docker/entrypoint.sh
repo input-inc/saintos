@@ -16,13 +16,15 @@ PASSWORD="${PASSWORD:-12345}"
 
 # Mode controls what to run. Useful for debugging the container without
 # always running the full e2e flow.
-#   fake   — agent + server + Python fake-firmware + harness (DEFAULT;
-#            recommended path until the Renode RP2040 bootrom/XIP
-#            modelling gap is fixed and the real sim firmware boots)
-#   full   — agent + server + Renode-sim firmware + harness
-#            (currently blocked on Renode 1.15.3 / 1.16 XIP issues)
-#   smoke  — agent + (no server) + harness --no-server (sim-only check)
-#   shell  — agent + server, then drop into bash (manual probing)
+#   fake          — agent + server + Python fake-firmware + harness (DEFAULT;
+#                   recommended path until the Renode RP2040 bootrom/XIP
+#                   modelling gap is fixed and the real sim firmware boots)
+#   full          — agent + server + Renode RP2040 sim firmware + harness
+#                   (currently blocked on Renode 1.15.3 / 1.16 XIP issues)
+#   smoke         — agent + (no server) + RP2040 sim node bring-up only
+#   teensy_full   — agent + server + Renode Teensy 4.1 sim firmware + harness
+#   teensy_smoke  — agent + (no server) + Teensy 4.1 sim node bring-up only
+#   shell         — agent + server, then drop into bash (manual probing)
 MODE="${MODE:-fake}"
 
 mkdir -p /tmp/saint-os
@@ -82,7 +84,7 @@ done
 
 # ── Optionally start server ────────────────────────────────────────────
 SERVER_PID=""
-if [[ "${MODE}" != "smoke" ]]; then
+if [[ "${MODE}" != "smoke" && "${MODE}" != "teensy_smoke" ]]; then
     echo "[entrypoint] starting saint_server"
     # SAINT_LOG_DIR is set in the image; the server writes per-node
     # activity logs there for the harness to inspect on failure.
@@ -154,13 +156,26 @@ case "${MODE}" in
             --fake-firmware --node-id "${FAKE_FW_NODE_ID}"
         ;;
     full)
-        echo "[entrypoint] running full Renode e2e harness against ${WS_URL}"
+        echo "[entrypoint] running full Renode e2e harness (RP2040) against ${WS_URL}"
         python3 /work/firmware/simulation/test_sync_recovery.py \
-            --ws-url "${WS_URL}" --password "${PASSWORD}"
+            --ws-url "${WS_URL}" --password "${PASSWORD}" \
+            --node-type rp2040
         ;;
     smoke)
-        echo "[entrypoint] running --no-server smoke test"
-        python3 /work/firmware/simulation/test_sync_recovery.py --no-server
+        echo "[entrypoint] running --no-server smoke test (RP2040)"
+        python3 /work/firmware/simulation/test_sync_recovery.py \
+            --no-server --node-type rp2040
+        ;;
+    teensy_full)
+        echo "[entrypoint] running full Renode e2e harness (Teensy 4.1) against ${WS_URL}"
+        python3 /work/firmware/simulation/test_sync_recovery.py \
+            --ws-url "${WS_URL}" --password "${PASSWORD}" \
+            --node-type teensy41
+        ;;
+    teensy_smoke)
+        echo "[entrypoint] running --no-server smoke test (Teensy 4.1)"
+        python3 /work/firmware/simulation/test_sync_recovery.py \
+            --no-server --node-type teensy41
         ;;
     shell)
         echo "[entrypoint] agent + server up. Dropping into bash."
@@ -171,7 +186,7 @@ case "${MODE}" in
         exec bash
         ;;
     *)
-        echo "[entrypoint] unknown MODE=${MODE}; expected fake|full|smoke|shell" >&2
+        echo "[entrypoint] unknown MODE=${MODE}; expected fake|full|smoke|teensy_full|teensy_smoke|shell" >&2
         exit 2
         ;;
 esac

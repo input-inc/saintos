@@ -227,6 +227,32 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
         ],
         builtin_only=True,
     ),
+    # Single-color onboard LED, typically hardwired on the board (e.g.
+    # Teensy 4.1 pin 13). Distinct from `neopixel` because the LED has
+    # no hue — exposing a color picker would just confuse operators
+    # (any non-black collapses to "on"). Brightness IS preserved as a
+    # channel: on PWM-capable pins the firmware drives analogWrite,
+    # giving real dimming; on plain digital pins, brightness >0 maps to
+    # HIGH and brightness 0 maps to LOW. The pin's PWM capability is
+    # part of the platform, not the catalog metadata, so this type
+    # works for both cases.
+    "mono_led": PeripheralType(
+        id="mono_led", label="Onboard LED (single color)",
+        description=(
+            "Single-color LED hardwired on the board. State + brightness "
+            "control only — no color picker, because the LED is one fixed "
+            "hue. On PWM-capable pins (Teensy 4.1 pin 13, RP2040 PWM "
+            "slices) brightness produces real dimming; otherwise it's "
+            "binary on/off."
+        ),
+        pin_kind="builtin",
+        channels=[
+            PeripheralChannel("state",      "On",          "out", "digital_out"),
+            PeripheralChannel("brightness", "Brightness",  "out", "analog"),
+        ],
+        params=[],
+        builtin_only=True,
+    ),
     "fas100": PeripheralType(
         id="fas100", label="FAS100",
         description="FrSky FAS100 ADV current/voltage/temperature sensor over S.Port UART.",
@@ -457,6 +483,80 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
         ],
         params=[
             PeripheralTypeParam("poll_interval_ms", "Poll interval (ms)", "int", 1000, min=100, max=10000),
+        ],
+    ),
+    # On-host audio file playback. The catalog entry is platform-agnostic;
+    # `backend` picks the concrete implementation the node-side driver
+    # uses. Today only "pi_alsa" (python-vlc against the host's ALSA stack)
+    # ships, and the rpi5 board YAML auto-attaches one instance per Pi.
+    # A future RP2040 + UART MP3-trigger module would register as
+    # backend="<module_id>" with pin_kind/pins covering the UART pair —
+    # the catalog stays unchanged.
+    #
+    # Control surface:
+    #   - `play` / `stop` / `pause` (rising-edge triggers): wire a routing
+    #     source or controller binding into these to drive transport.
+    #   - `seek` (seconds): scrub the playhead to a timecode while playing.
+    #   - `volume` (0..1): playback gain.
+    #   - `is_playing` + `position` are read-only telemetry channels.
+    #
+    # The filename to play is selected via the out-of-band peripheral-
+    # command path (action="peripheral_command", command="play_file",
+    # args={"filename": "..."}), not a channel — channels carry numeric
+    # values only, and we don't want to limit the operator to a pre-
+    # enumerated file list.
+    "audio_player": PeripheralType(
+        id="audio_player", label="Audio Player",
+        description=(
+            "On-host audio file playback. The Raspberry Pi backend uses "
+            "python-vlc against the host's ALSA stack (HDMI, USB DAC, or "
+            "I²S HAT — pick the ALSA device). Route signals into "
+            "play/stop/pause/seek/volume, or send a play_file peripheral "
+            "command to pick an arbitrary file from the library folder."
+        ),
+        pin_kind="builtin",
+        channels=[
+            PeripheralChannel("play",       "Play (trigger)",  "out", "digital_out"),
+            PeripheralChannel("stop",       "Stop (trigger)",  "out", "digital_out"),
+            PeripheralChannel("pause",      "Pause (trigger)", "out", "digital_out"),
+            PeripheralChannel("seek",       "Seek (s)",        "out", "analog"),
+            PeripheralChannel("volume",     "Volume (0–1)",    "out", "analog"),
+            PeripheralChannel("is_playing", "Playing",         "in",  "digital_in"),
+            PeripheralChannel("position",   "Position (s)",    "in",  "analog"),
+        ],
+        params=[
+            PeripheralTypeParam(
+                "library_path", "Library path", "string",
+                "/var/lib/saint-os/audio",
+                help=(
+                    "Folder on this node holding the audio files. The "
+                    "driver does not pre-enumerate or restrict file types — "
+                    "send play_file with whatever filename you placed there."
+                ),
+            ),
+            PeripheralTypeParam(
+                "backend", "Backend", "string", "pi_alsa",
+                choices=[
+                    {"value": "pi_alsa", "label": "Raspberry Pi (python-vlc / ALSA)"},
+                ],
+                help=(
+                    "Audio backend implementation. Today only the Pi ALSA "
+                    "backend ships; future MP3-trigger modules will appear "
+                    "here without a catalog change."
+                ),
+            ),
+            PeripheralTypeParam(
+                "alsa_device", "ALSA device", "string", "default",
+                help=(
+                    "ALSA PCM device name. Use 'default' for the system "
+                    "default sink, or run `aplay -l` on the host to find "
+                    "specific cards (e.g. 'hw:0,0', 'plughw:Headphones')."
+                ),
+            ),
+            PeripheralTypeParam(
+                "initial_volume", "Initial volume (0–1)", "float", 0.8,
+                min=0.0, max=1.0,
+            ),
         ],
     ),
     "system_monitor": PeripheralType(

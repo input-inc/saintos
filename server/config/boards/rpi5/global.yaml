@@ -1,0 +1,74 @@
+# Chip family definition for the Raspberry Pi 5 (BCM2712 SoC + RP1 I/O
+# controller).
+#
+# Pi 5 routes the user-accessible GPIO header through the RP1
+# I/O controller, exposed to userspace as /dev/gpiochip4. The
+# saint_node Pi-side firmware (firmware/rpi5/saint_node/gpio_control.py)
+# already encodes the pin list and capability map; this YAML mirrors
+# that into the server's chip catalog so the Peripherals tab can
+# offer the same pins/UARTs as on the microcontroller boards.
+#
+# Pins not exposed here:
+#   GPIO 0, 1  — I²C-0 (ID EEPROM); reserved by the firmware
+#   GPIO 14, 15 — UART0 console; reserved by the firmware
+# Everything else on the 40-pin header (GPIO 2..13, 16..27) is
+# available, matching gpio_control.py's AVAILABLE_GPIOS list.
+
+chip_family: rpi5
+display_name: "Raspberry Pi 5"
+description: >
+  Broadcom BCM2712 + RP1 I/O controller. 28 user-accessible GPIO
+  pins on the 40-pin header, four hardware PWM channels (12/13/18/19),
+  one I²C bus (GPIO 2/3), one SPI bus (GPIO 7..11), one UART (14/15,
+  reserved for the console).
+
+# Pi 5 doesn't expose a numeric chip-ID register we read at adoption
+# time the way the RP2040/iMXRT1062 do; firmware reports HW string
+# "Raspberry Pi 5" and chip_family "rpi5" in the announcement message.
+chip_id_value: 0
+
+gpio_count: 28
+
+# Per-GPIO capabilities. `digital_in`/`digital_out` are universal;
+# `pwm` flags the four hardware-PWM channels (RP1 PWM0/PWM1 cores —
+# GPIO 12, 13, 18, 19). All other pins can still drive a software
+# PWM signal — the server marks them `pwm_soft` so the UI can sort
+# hardware-PWM-capable pins first when picking a servo output.
+# I²C and SPI capability tags follow the kernel's default RP1 pad
+# mux: I²C-1 on GPIO 2/3 (the canonical user bus on every Pi) and
+# SPI-0 on GPIO 7..11. PCM I²S pins (18..21) carry `i2s` so future
+# DAC HATs can declare themselves on the right pads.
+pin_capabilities:
+  - {gpio:  2, default_name: "GPIO2",  caps: ["digital_in", "digital_out", "pwm_soft", "i2c_sda"]}
+  - {gpio:  3, default_name: "GPIO3",  caps: ["digital_in", "digital_out", "pwm_soft", "i2c_scl"]}
+  - {gpio:  4, default_name: "GPIO4",  caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio:  5, default_name: "GPIO5",  caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio:  6, default_name: "GPIO6",  caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio:  7, default_name: "GPIO7",  caps: ["digital_in", "digital_out", "pwm_soft", "spi_cs"]}
+  - {gpio:  8, default_name: "GPIO8",  caps: ["digital_in", "digital_out", "pwm_soft", "spi_cs"]}
+  - {gpio:  9, default_name: "GPIO9",  caps: ["digital_in", "digital_out", "pwm_soft", "spi_rx"]}
+  - {gpio: 10, default_name: "GPIO10", caps: ["digital_in", "digital_out", "pwm_soft", "spi_tx"]}
+  - {gpio: 11, default_name: "GPIO11", caps: ["digital_in", "digital_out", "pwm_soft", "spi_sck"]}
+  - {gpio: 12, default_name: "GPIO12", caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio: 13, default_name: "GPIO13", caps: ["digital_in", "digital_out", "pwm"]}
+  - {gpio: 16, default_name: "GPIO16", caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio: 17, default_name: "GPIO17", caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio: 18, default_name: "GPIO18", caps: ["digital_in", "digital_out", "pwm", "i2s"]}
+  - {gpio: 19, default_name: "GPIO19", caps: ["digital_in", "digital_out", "pwm", "i2s"]}
+  - {gpio: 20, default_name: "GPIO20", caps: ["digital_in", "digital_out", "pwm_soft", "i2s"]}
+  - {gpio: 21, default_name: "GPIO21", caps: ["digital_in", "digital_out", "pwm_soft", "i2s"]}
+  - {gpio: 22, default_name: "GPIO22", caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio: 23, default_name: "GPIO23", caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio: 24, default_name: "GPIO24", caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio: 25, default_name: "GPIO25", caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio: 26, default_name: "GPIO26", caps: ["digital_in", "digital_out", "pwm_soft"]}
+  - {gpio: 27, default_name: "GPIO27", caps: ["digital_in", "digital_out", "pwm_soft"]}
+
+# UART pairs. The console UART (14/15) lives outside the operator-
+# available pin list, so a USB-serial dongle is the right answer for
+# UART-attached peripherals (RoboClaw, Maestro, etc.) on the Pi 5
+# itself — the firmware's UartTransport opens a path the operator
+# supplies, not a {tx, rx} pin pair. We declare no chip-level pin-
+# muxed UART pairs here so the Peripherals UART picker won't offer
+# the console pins for re-use.
+uart_pairs: []

@@ -74,6 +74,40 @@ onMounted(async () => {
   await loadBoards(initialBoardId)
 })
 
+/* Refresh built-in peripherals from the node's current board YAML
+ * without changing role/board/chip. Useful when the operator edits a
+ * board definition to add new built-ins (e.g. the Teensy onboard LED)
+ * and wants existing adopted nodes to pick those up without
+ * re-adoption.
+ *
+ * The result panel shows what got added so the operator knows
+ * something happened — silent "OK" buttons are a dark pattern for
+ * idempotent actions like this. Empty `added` is treated as a
+ * success too: "nothing new" is a valid outcome. */
+const refreshing = ref(false)
+const refreshResult = ref(null)
+
+async function refreshBuiltins () {
+  refreshing.value = true
+  refreshResult.value = null
+  error.value = ''
+  try {
+    const r = await ws.management('refresh_node_builtins', {
+      node_id: props.node.node_id,
+    })
+    if (r && r.success === false) {
+      error.value = r.message || 'Refresh failed'
+      return
+    }
+    refreshResult.value = r
+    emit('updated')  // so the parent reloads peripheral list
+  } catch (e) {
+    error.value = e.message || String(e)
+  } finally {
+    refreshing.value = false
+  }
+}
+
 async function submit () {
   error.value = ''
   if (!role.value)       { error.value = 'Please select a role'; return }
@@ -135,6 +169,29 @@ async function submit () {
         <p class="text-xs text-fg-faint mt-1">
           Changing the board re-derives pin layout and re-seeds built-in peripherals.
         </p>
+
+        <!-- Same-board refresh, for when the operator edits a board YAML
+             to add a new built-in peripheral (e.g. the Teensy onboard LED)
+             and wants existing adopted nodes assigned to that board to
+             pick it up without a destructive re-adoption. -->
+        <div class="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            class="btn-secondary text-xs"
+            :disabled="refreshing"
+            @click="refreshBuiltins">
+            <span class="material-icons icon-sm">refresh</span>
+            {{ refreshing ? 'Refreshing…' : 'Refresh built-ins from board' }}
+          </button>
+          <span v-if="refreshResult && refreshResult.added && refreshResult.added.length"
+                class="text-xs text-green-400">
+            Added: {{ refreshResult.added.join(', ') }}
+          </span>
+          <span v-else-if="refreshResult"
+                class="text-xs text-fg-faint">
+            No new built-ins — already up to date.
+          </span>
+        </div>
       </div>
 
       <div>

@@ -211,6 +211,76 @@ class PeripheralManager:
                 f".get_value({sub_channel}) raised: {e}")
             return None
 
+    # ── Lookup: peripheral logical id → driver + instance ─────────
+
+    def find_instance(self, peripheral_id: str
+                      ) -> Optional[tuple[PeripheralDriver, int]]:
+        """Resolve an operator-supplied peripheral id (the `id` field
+        from the configure message) to its (driver, instance_id)."""
+        for driver in self.all_drivers():
+            for inst_id, inst in driver._instances.items():
+                if inst.logical_name == peripheral_id:
+                    return driver, inst_id
+        return None
+
+    def set_channel_value(self, peripheral_id: str, channel_id: str,
+                          value: float) -> bool:
+        """Route a `set_channel` write to the driver that owns the named
+        instance, translating the channel name to its sub-channel
+        offset via the driver's SUB_CHANNEL_NAMES list. Used for
+        peripherals (built-ins, anything pinless) the server addresses
+        by id rather than vGPIO."""
+        routed = self.find_instance(peripheral_id)
+        if routed is None:
+            self._log("warn",
+                f"PeripheralManager: set_channel for unknown peripheral "
+                f"'{peripheral_id}'/{channel_id}")
+            return False
+        driver, inst_id = routed
+        names = type(driver).SUB_CHANNEL_NAMES
+        try:
+            sub = names.index(channel_id)
+        except ValueError:
+            self._log("warn",
+                f"PeripheralManager: {driver.TYPE_ID}#{inst_id} has no "
+                f"channel named '{channel_id}'")
+            return False
+        try:
+            return driver.set_value(inst_id, sub, float(value))
+        except Exception as e:
+            self._log("error",
+                f"PeripheralManager: {driver.TYPE_ID}#{inst_id}"
+                f".set_value({sub}, {value}) raised: {e}")
+            return False
+
+    # ── Out-of-band commands (string/structured args) ────────────
+
+    def dispatch_command(self, peripheral_id: str, command: str,
+                         args: Dict[str, Any]) -> bool:
+        """Route a `peripheral_command` to whichever driver owns the
+        instance with the given operator-supplied id (the `id` field
+        from the peripheral JSON). Returns True iff the driver handled
+        the command.
+
+        Channels carry floats; this is the path for everything else —
+        filenames, text blobs, structured payloads. The audio_player
+        driver uses it for `play_file(filename)`.
+        """
+        for driver in self.all_drivers():
+            for inst_id, inst in driver._instances.items():
+                if inst.logical_name == peripheral_id:
+                    try:
+                        return driver.handle_command(inst_id, command, args or {})
+                    except Exception as e:
+                        self._log("error",
+                            f"PeripheralManager: {driver.TYPE_ID}"
+                            f"#{inst_id}.handle_command({command!r}) raised: {e}")
+                        return False
+        self._log("warn",
+            f"PeripheralManager: no peripheral with id '{peripheral_id}' "
+            f"for command '{command}'")
+        return False
+
     # ── State publishing ──────────────────────────────────────────
 
     def collect_states(self) -> List[Dict[str, Any]]:

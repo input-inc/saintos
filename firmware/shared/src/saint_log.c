@@ -13,6 +13,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/* PLATFORM_SLEEP_MS — on Teensy resolves to Arduino delay() (which
+ * calls yield() in a loop, giving USB/event handlers cycles to drain);
+ * on RP2040 to pico-sdk sleep_ms (busy-wait, but still advances real
+ * time so peripheral models tick). Used by the inter-publish pacer
+ * below to ensure XRCE-DDS output streams actually flush between
+ * back-to-back /log emits. */
+#include "platform.h"
+
 /* Boot-log dimensions sized to fit every early-boot log line a node
  * is expected to emit before the second /announce goes out — driver
  * init traces, recovered-from-watchdog, OTA outcome, etc. Bumped from
@@ -93,6 +101,61 @@ static void json_escape(const char* text, char* out, size_t cap)
 static uint32_t g_emit_attempts = 0;
 static uint32_t g_emit_ok = 0;
 
+/* Inter-publish pacer for the /log publisher.
+ *
+ * The problem: `config_subscription_callback` (and a few other call
+ * sites) emit a burst of saint_log_publish lines back-to-back —
+ * "Config received (N bytes)" / "Config applied OK" / "Config saved to
+ * flash" — all inside the same executor-callback dispatch, so no
+ * `rclc_executor_spin_some` runs between them. Under that pacing,
+ * micro-XRCE-DDS's output stream (RMW_UXRCE_STREAM_HISTORY_OUTPUT = 4
+ * slots) delivers BEST_EFFORT publishes to the agent with *empty
+ * payloads* rather than dropping them — the server sees a sequence of
+ * `(malformed log frame: Expecting value: line 1 column 1 (char 0)) ''`
+ * warnings and never gets the actual text. RELIABLE wedges the stream
+ * entirely (see the QoS comment on `log_pub` init in main.cpp), so the
+ * project's pre-existing fix was to drop /log to BEST_EFFORT — but
+ * that's what exposed the empty-frame mode.
+ *
+ * The fix here has two coordinated pieces:
+ *
+ *   (a) PLATFORM_SLEEP_MS-based minimum interval. Forces real wall time
+ *       between publishes. On hardware the two clocks are 1:1 so 150 ms
+ *       wall is enough for the agent to drain the previous publish. On
+ *       Renode (sim) the firmware-clock runs ~12× wall, so 150 firmware-
+ *       ms ≈ 12 wall-ms — necessary but not sufficient on its own.
+ *
+ *   (b) `saint_log_emit_local` mirror of the JSON envelope right before
+ *       `saint_log_emit_ros`. This serves dual duty: it's a useful
+ *       diagnostic of intended-bytes-on-wire when debugging /log issues,
+ *       AND in Renode each byte of the local UART write generates an
+ *       LPUART bus access that forces the sim to dispatch peripherals
+ *       (including udp_bridge) for that slice of sim time. Without
+ *       this dispatch tick, udp_bridge.cs's pending UDP send doesn't
+ *       complete and the next rcl_publish overwrites its output-stream
+ *       slot. The local echo's role as a *pacer* (not just a tracer)
+ *       is load-bearing for sim — don't remove without verifying
+ *       MODE=teensy_full still passes Phase 2.
+ *
+ * Tradeoff: a /log burst of 4 lines adds at most 4 × interval of
+ * callback latency. On hardware that's 4 × 150 = 600 ms; well under
+ * the agent's keep-alive timeout (~5 s) and inside the executor-spin
+ * loop bound.
+ *
+ * Sim-vs-hardware: PLATFORM_SLEEP_MS uses firmware time (millis() →
+ * SysTick), which Renode runs ~12× faster than wall clock. 150 ms
+ * firmware-time ≈ 12 ms wall in sim — too short for the agent's
+ * Cyclone DDS layer to drain BEST_EFFORT samples between publishes,
+ * so the empty-frame symptom returns. Picking the threshold per
+ * platform keeps hardware latency low without sacrificing sim
+ * reliability. */
+#ifdef SIMULATION
+#define SAINT_LOG_MIN_PUBLISH_INTERVAL_MS 1500
+#else
+#define SAINT_LOG_MIN_PUBLISH_INTERVAL_MS 150
+#endif
+static uint32_t g_last_publish_ms = 0;
+
 static void publish_one(const char* level, const char* text)
 {
     json_escape(text, g_escaped, sizeof(g_escaped));
@@ -101,9 +164,27 @@ static void publish_one(const char* level, const char* text)
         level, g_escaped, (unsigned long)saint_log_uptime_ms());
     if (len < 0 || (size_t)len >= sizeof(g_envelope)) return;
     g_emit_attempts++;
+    /* Time-based pacer — see header comment block. */
+    if (g_last_publish_ms != 0) {
+        uint32_t elapsed = saint_log_uptime_ms() - g_last_publish_ms;
+        if (elapsed < SAINT_LOG_MIN_PUBLISH_INTERVAL_MS) {
+            PLATFORM_SLEEP_MS(SAINT_LOG_MIN_PUBLISH_INTERVAL_MS - elapsed);
+        }
+    }
+    /* Bus-activity pacer + intended-bytes trace — see (b) in the header
+     * comment block. Load-bearing for Renode sim; harmless extra local
+     * line on hardware. */
+    saint_log_emit_local("trace", g_envelope);
     if (saint_log_emit_ros(g_envelope, (size_t)len)) {
         g_emit_ok++;
     }
+    /* Post-publish settle so the just-published message has wall time to
+     * traverse the agent's relay before we either return to the caller
+     * (which might rcl_publish again) or update g_last_publish_ms. Covers
+     * the case where the FIRST publish in a burst would otherwise race
+     * out with no pacing in front of it. */
+    PLATFORM_SLEEP_MS(SAINT_LOG_MIN_PUBLISH_INTERVAL_MS / 2);
+    g_last_publish_ms = saint_log_uptime_ms();
 }
 
 uint32_t saint_log_emit_attempts(void) { return g_emit_attempts; }

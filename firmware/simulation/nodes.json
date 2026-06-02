@@ -21,18 +21,7 @@
       "status": "stopped",
       "udp_port": 9994,
       "started": "2026-05-31T15:38:40.775539"
-    },
-    "teensy_smoke": {
-      "id": "teensy_smoke",
-      "type": "teensy41",
-      "role": null,
-      "display_name": "teensy_smoke",
-      "created": "2026-06-01T18:52:36.431839",
-      "pid": null,
-      "status": "stopped",
-      "udp_port": 9981,
-      "started": "2026-06-01T18:52:36.493146"
     }
   },
-  "next_udp_port": 9980
+  "next_udp_port": 9979
 }

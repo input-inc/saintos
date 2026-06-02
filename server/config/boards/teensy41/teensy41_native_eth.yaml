@@ -68,7 +68,11 @@ reserved_pins:
 # Peripherals permanently wired on this board. The server auto-seeds
 # these into the operator's peripheral_config on first capability
 # receipt, with builtin=True so they can't be removed (only re-routed
-# to widgets and signals). Same shape as the Feather's onboard NeoPixel.
+# to widgets and signals). The Teensy 4.1's onboard LED on pin 13 is
+# a single-color LED — `mono_led` exposes state + brightness without
+# the misleading color picker that `neopixel` would render. Pin 13 is
+# PWM-capable (FlexPWM, ~4.5 kHz default), so the brightness channel
+# really does dim.
 builtin_peripherals:
   - id: onboard_led
-    type: neopixel
+    type: mono_led

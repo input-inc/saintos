@@ -1001,6 +1001,33 @@ class SaintServerNode(Node):
             f'Sent channel control to {node_id}: '
             f'{peripheral_type}/{peripheral_id}/{channel_id} = {value}')
 
+    def send_peripheral_command(self, node_id: str, peripheral_id: str,
+                                command: str, args: Dict[str, Any]):
+        """Send an out-of-band, structured command to a peripheral on a
+        node. The numeric set_channel path can't carry strings; this is
+        how audio_player.play_file(filename) and similar reach the
+        firmware. Routed over the RELIABLE command topic so a UDP drop
+        doesn't silently lose a one-shot trigger.
+        """
+        import json
+
+        pub = self._ensure_node_command_publisher(node_id)
+
+        control_data = {
+            "action": "peripheral_command",
+            "peripheral": peripheral_id,
+            "command": command,
+            "args": args or {},
+        }
+
+        msg = String()
+        msg.data = json.dumps(control_data)
+
+        pub.publish(msg)
+        self.get_logger().debug(
+            f'Sent peripheral command to {node_id}: '
+            f'{peripheral_id}.{command}({args})')
+
     def send_factory_reset_command(self, node_id: str):
         """Send factory reset command to a node via ROS2.
 
@@ -1578,6 +1605,17 @@ class SaintServerNode(Node):
                                                   channel_id, value,
                                                   peripheral_type)
                 )
+                self.web_server.ws_handler.set_send_peripheral_command_callback(
+                    lambda node_id, peripheral_id, command, args:
+                        self.send_peripheral_command(node_id, peripheral_id,
+                                                     command, args)
+                )
+                # Hand the same publisher to state_manager so animation
+                # trigger tracks of kind peripheral_command (audio cues
+                # synced to a movement timecode) can fire commands
+                # through the same wire path as the WS-issued one.
+                self.state_manager.set_peripheral_command_sender(
+                    self.send_peripheral_command)
                 self.web_server.ws_handler.set_firmware_update_callback(
                     lambda node_id, simulation, force: self.send_firmware_update_command(node_id, simulation, force)
                 )

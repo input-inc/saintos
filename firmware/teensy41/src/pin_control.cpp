@@ -15,6 +15,7 @@ extern "C" {
 #include "pin_control.h"
 #include "pin_config.h"
 #include "peripheral_driver.h"
+#include "saint_types.h"   // led_set_override_color / led_set_override_brightness / led_clear_override
 }
 
 // =============================================================================
@@ -383,6 +384,125 @@ void pin_control_estop(void)
     Serial.printf("ESTOP: Complete\n");
 }
 
+/* Extract a JSON string field's value into `out`. Pointer-only parser
+ * matching the style used by dispatch_action_buffer in main.cpp —
+ * cheap and reliable enough for the small set_channel envelope. */
+static bool extract_str_field(const char* json, const char* key,
+                              char* out, size_t out_size)
+{
+    const char* p = strstr(json, key);
+    if (!p) return false;
+    p = strchr(p, ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return false;
+    p++;
+    size_t n = 0;
+    while (*p && *p != '"' && n + 1 < out_size) {
+        out[n++] = *p++;
+    }
+    out[n] = '\0';
+    return n > 0;
+}
+
+/* Route a set_channel write for the onboard LED (peripheral type
+ * "neopixel" — same id used for the Feather's WS2812 so the dashboard
+ * widget targets either platform identically). RGB and brightness
+ * are tracked independently in led_status.cpp so the color picker
+ * and brightness slider can move on their own. The actual pin write
+ * still collapses to on/off — that's done inside led_update(). */
+static bool apply_neopixel_channel(const char* channel_id, float value)
+{
+    if (strcmp(channel_id, "color") == 0) {
+        uint32_t packed = (uint32_t)value;
+        uint8_t r = (uint8_t)((packed >> 16) & 0xFF);
+        uint8_t g = (uint8_t)((packed >>  8) & 0xFF);
+        uint8_t b = (uint8_t)( packed        & 0xFF);
+        led_set_override_color(r, g, b, 255);
+        Serial.printf("LED: override color via set_channel = (%u,%u,%u) "
+                       "(collapsed to %s)\n",
+                       (unsigned)r, (unsigned)g, (unsigned)b,
+                       ((r | g | b) != 0) ? "ON" : "OFF");
+        return true;
+    }
+    if (strcmp(channel_id, "brightness") == 0) {
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        uint8_t b8 = (uint8_t)(value * 255.0f + 0.5f);
+        led_set_override_brightness(b8);
+        Serial.printf("LED: override brightness via set_channel = %u (%.3f)\n",
+                       (unsigned)b8, value);
+        return true;
+    }
+    /* "state" — single binary channel that the State tab uses for
+     * mono LEDs that don't have a color picker. value > 0.5 → ON. */
+    if (strcmp(channel_id, "state") == 0) {
+        if (value > 0.5f) {
+            led_set_override_color(255, 255, 255, 255);
+        } else {
+            led_set_override_color(255, 255, 255, 0);
+        }
+        Serial.printf("LED: override state via set_channel = %s\n",
+                       (value > 0.5f) ? "ON" : "OFF");
+        return true;
+    }
+    Serial.printf("LED: unknown channel '%s' on set_channel\n", channel_id);
+    return false;
+}
+
+/* Dispatch a `set_channel` write. Mirrors RP2040's apply_set_channel
+ * shape: parse {peripheral, type, channel, value}, route to the
+ * NeoPixel override path for type=="neopixel", otherwise (eventually)
+ * walk pin_config to find the peripheral's slot. Today only the
+ * NeoPixel route is wired up on Teensy — other peripherals use
+ * apply_*_channel paths through pin_config_apply_json's set_pin
+ * branch or via their own driver-specific actions. */
+static bool apply_set_channel(const char* json)
+{
+    char peripheral_id[PIN_CONFIG_MAX_NAME_LEN];
+    char channel_id[PIN_CONFIG_MAX_NAME_LEN];
+    char peripheral_type[PIN_CONFIG_MAX_NAME_LEN];
+
+    if (!extract_str_field(json, "\"peripheral\"", peripheral_id, sizeof(peripheral_id))) {
+        Serial.printf("set_channel: missing 'peripheral' field\n");
+        return false;
+    }
+    if (!extract_str_field(json, "\"channel\"", channel_id, sizeof(channel_id))) {
+        Serial.printf("set_channel: missing 'channel' field\n");
+        return false;
+    }
+    peripheral_type[0] = '\0';
+    extract_str_field(json, "\"type\"", peripheral_type, sizeof(peripheral_type));
+
+    const char* value_str = strstr(json, "\"value\"");
+    if (!value_str) return false;
+    value_str = strchr(value_str, ':');
+    if (!value_str) return false;
+    value_str++;
+    while (*value_str == ' ') value_str++;
+    float value = (float)atof(value_str);
+
+    /* On-board LED routes — both `neopixel` (RGB) and `mono_led`
+     * (single-color, channels = state + brightness) end up in the
+     * same led_status override path. apply_neopixel_channel handles
+     * all three channel ids ("color", "brightness", "state"); the
+     * difference between the two peripheral types is whether the
+     * dashboard exposes a color picker, not how the firmware writes
+     * the pin. Id-substring fallback covers older servers and the
+     * builtin id our own seed uses. */
+    if (strcmp(peripheral_type, "mono_led") == 0
+        || strcmp(peripheral_type, "neopixel") == 0
+        || strstr(peripheral_id, "neopixel") != NULL
+        || strstr(peripheral_id, "onboard_led") != NULL) {
+        return apply_neopixel_channel(channel_id, value);
+    }
+
+    Serial.printf("set_channel: peripheral '%s' (type '%s') not routable yet\n",
+                   peripheral_id, peripheral_type);
+    return false;
+}
+
 bool pin_control_apply_json(const char* json, size_t json_len)
 {
     if (!json || json_len == 0) return false;
@@ -398,6 +518,16 @@ bool pin_control_apply_json(const char* json, size_t json_len)
     if (!found_null) {
         Serial.printf("Pin control: JSON not null-terminated within length\n");
         return false;
+    }
+
+    /* set_channel — peripheral-first wire shape used by the State
+     * tab's per-peripheral widgets (color picker / brightness slider
+     * / on-off toggle). Handled BEFORE set_pin so a set_channel
+     * envelope doesn't get mis-routed when both an action field and
+     * a peripheral field are present. */
+    if (strstr(json, "\"action\":\"set_channel\"") ||
+        strstr(json, "\"action\": \"set_channel\"")) {
+        return apply_set_channel(json);
     }
 
     // Check for set_pin action

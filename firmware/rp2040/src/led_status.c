@@ -212,6 +212,26 @@ void led_set_override_color(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness)
 }
 
 /**
+ * Update override brightness only — keeps the currently-stored
+ * override color intact. State tab's brightness slider moves
+ * independently of the color picker, so receiving "brightness=0.5"
+ * after "color=red" should produce dim red, not dim-white. If no
+ * color has been set yet (boot defaults are all zeros), seed the
+ * color with white so a brightness-only write produces a visible
+ * result instead of dim-black.
+ */
+void led_set_override_brightness(uint8_t brightness)
+{
+    if (override_r == 0 && override_g == 0 && override_b == 0) {
+        override_r = 255;
+        override_g = 255;
+        override_b = 255;
+    }
+    override_brightness = brightness;
+    override_active     = true;
+}
+
+/**
  * Clear the override and resume state-driven LED behavior.
  */
 void led_clear_override(void)

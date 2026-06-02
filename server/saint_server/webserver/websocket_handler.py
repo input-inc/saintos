@@ -156,6 +156,14 @@ class WebSocketHandler:
         self._send_channel_callback: Optional[
             Callable[[str, str, str, float, str], None]] = None
 
+        # Callback for sending out-of-band peripheral commands. These
+        # carry structured args (filenames, text blobs) that don't fit
+        # the numeric set_channel path. Signature:
+        # (node_id, peripheral_id, command, args) -> None.
+        # Today the only consumer is audio_player.play_file.
+        self._send_peripheral_command_callback: Optional[
+            Callable[[str, str, str, Dict[str, Any]], None]] = None
+
         # Callback for triggering firmware update (set by server_node)
         # Signature: (node_id: str, simulation: bool) -> None
         self._firmware_update_callback: Optional[Callable[[str, bool, bool], None]] = None
@@ -237,6 +245,12 @@ class WebSocketHandler:
         """Set callback for channel-addressed control.
         Takes (node_id, peripheral_id, channel_id, value, peripheral_type)."""
         self._send_channel_callback = callback
+
+    def set_send_peripheral_command_callback(
+            self, callback: Callable[[str, str, str, Dict[str, Any]], None]):
+        """Set callback for out-of-band peripheral commands.
+        Takes (node_id, peripheral_id, command, args)."""
+        self._send_peripheral_command_callback = callback
 
     def set_firmware_update_callback(self, callback: Callable[[str, bool, bool], None]):
         """Set callback for triggering firmware update. Callback takes (node_id, simulation, force)."""
@@ -843,6 +857,25 @@ class WebSocketHandler:
                 return {"status": "error", "message": "Missing node_id or board_id"}
             result = self.state_manager.set_node_board(node_id, board_id)
             return {"status": "ok", "data": result}
+
+        elif action == 'refresh_node_builtins':
+            # Re-seed builtin_peripherals from the node's current
+            # board YAML without changing the board assignment. Used
+            # by the Node settings panel's "Refresh from board" button
+            # after a board YAML edit adds a new built-in peripheral.
+            # Idempotent — safe to call repeatedly.
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            result = self.state_manager.refresh_node_builtins(node_id)
+            if result.get('success') and result.get('added'):
+                await self.broadcast_activity(
+                    f"Node {node_id}: refreshed built-ins from board "
+                    f"({', '.join(result['added'])})",
+                    'info'
+                )
+            return {"status": "ok" if result['success'] else "error",
+                    "data": result}
 
         elif action == 'get_board_yaml':
             board_id = params.get('board_id')
@@ -1819,6 +1852,35 @@ class WebSocketHandler:
                 return {"status": "ok", "data": state}
             else:
                 return {"status": "ok", "data": None, "message": "No runtime state available"}
+
+        elif action == 'peripheral_command':
+            # Out-of-band command path for peripherals that take
+            # non-numeric arguments (audio_player.play_file with a
+            # filename, future display drivers' text payloads). Channel
+            # writes still go through set_channel_value; this is for
+            # the rest.
+            node_id = params.get('node_id')
+            peripheral_id = params.get('peripheral_id')
+            command = params.get('command')
+            args = params.get('args') or {}
+
+            if not node_id or not peripheral_id or not command:
+                return {"status": "error",
+                        "message": "Missing node_id, peripheral_id, or command"}
+            if not isinstance(args, dict):
+                return {"status": "error",
+                        "message": "`args` must be an object"}
+
+            if self._send_peripheral_command_callback:
+                self._send_peripheral_command_callback(
+                    str(node_id), str(peripheral_id), str(command), dict(args))
+                self.log('info',
+                    f'[Control] CMD {node_id} {peripheral_id}.{command}({args})')
+                return {"status": "ok",
+                        "data": {"peripheral_id": peripheral_id,
+                                 "command": command}}
+            return {"status": "error",
+                    "message": "Peripheral-command path not wired to firmware"}
 
         else:
             return {"status": "error", "message": f"Unknown control action: {action}"}

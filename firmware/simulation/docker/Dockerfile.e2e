@@ -155,6 +155,13 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
 COPY firmware/simulation/ /work/firmware/simulation/
 COPY firmware/shared/ /work/firmware/shared/
 COPY firmware/rp2040/simulation/ /work/firmware/rp2040/simulation/
+# Teensy 4.1 Renode setup: peripheral .resc + board .repl. The C# peripheral
+# sources (UDPBridge, PersistentStorage) ship under firmware/rp2040/simulation/
+# above — the Teensy .resc references them by path. Pre-built firmware.elf
+# is mounted at runtime (see docker-compose.e2e.yml) instead of copied here,
+# matching the RP2040 pattern so image rebuilds don't depend on firmware
+# rebuilds.
+COPY firmware/teensy41/simulation/ /work/firmware/teensy41/simulation/
 
 # Renode binary discovery — the harness looks at $RENODE_PATH first.
 ENV RENODE_PATH=/usr/local/bin/renode

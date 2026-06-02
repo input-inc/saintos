@@ -73,13 +73,46 @@ REPO_ROOT = SCRIPT_DIR.parent.parent
 # defaults to (controller/README.md "ws://opensaint.local/api/ws").
 DEFAULT_WS_URL = "ws://localhost:80/api/ws"
 DEFAULT_PASSWORD = "12345"
-# Default node_id when driving the Renode-sim path. The --node-id
-# flag overrides this for the fake-firmware path (the python stand-in
-# announces as rp2040_fakefw by default).
-TEST_NODE_ID = "rp2040_synctest"
 RECONCILE_WAIT_S = 15.0
 SYNC_WAIT_S = 10.0
 ADOPT_WAIT_S = 30.0
+
+# Per-node-type defaults for the Renode-sim path. Each entry pins:
+#   - default_node_id: what node_manager.py names the sim node
+#   - board_id:        what the harness passes to /adopt_node (must match
+#                      a YAML under server/config/boards/<type>/)
+#   - firmware_path:   the .elf the .resc loads — also the file the
+#                      prereq check looks for
+# `--node-type` selects between rp2040 (current green path) and
+# teensy41 (which still uses node_manager's same create/start/reset
+# verbs — only the firmware ELF and renode platform are different).
+NODE_TYPES = {
+    "rp2040": {
+        "default_node_id": "rp2040_synctest",
+        "board_id":        "feather_rp2040_w5500",
+        "firmware_paths": [
+            REPO_ROOT / "firmware/rp2040/install/simulation/saint_node.elf",
+            REPO_ROOT / "firmware/rp2040/build_sim/saint_node.elf",
+        ],
+        "firmware_build_hint": (
+            "cd firmware/rp2040 && ./build.sh sim "
+            "&& (cd build_sim && make install_sim)"
+        ),
+    },
+    "teensy41": {
+        "default_node_id": "teensy41_synctest",
+        "board_id":        "teensy41_native_eth",
+        "firmware_paths": [
+            REPO_ROOT / "firmware/teensy41/build/simulation/firmware.elf",
+        ],
+        "firmware_build_hint": (
+            "cd firmware/teensy41 && ~/.platformio/penv/bin/pio run -e simulation"
+        ),
+    },
+}
+
+# Back-compat default for callers that don't pass --node-type yet.
+TEST_NODE_ID = NODE_TYPES["rp2040"]["default_node_id"]
 
 
 # ─── Prerequisite checks ───────────────────────────────────────────────
@@ -123,25 +156,26 @@ def _check_agent_running() -> Optional[str]:
             "Run: ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888")
 
 
-def _check_sim_firmware() -> Optional[str]:
-    """The sim build of saint_node.elf must exist for Renode to load it.
+def _check_sim_firmware(node_type: str = "rp2040") -> Optional[str]:
+    """The sim build of the firmware ELF must exist for Renode to load it.
 
-    Two paths are valid:
-      * firmware/rp2040/build_sim/saint_node.elf — the bare cmake output
-      * firmware/rp2040/install/simulation/saint_node.elf — what
-        `make install_sim` (and the Docker bind mount) put in place.
-    The .resc Renode loads references the install/simulation path
-    specifically, so that's the one we actually need; the build_sim
-    fallback covers a hand-cmake workflow where the operator hasn't
-    run install_sim yet.
+    Looks at every path the .resc for `node_type` might reference (see
+    `NODE_TYPES[node_type]["firmware_paths"]`) and accepts the first
+    one that exists. The RP2040 path covers both the bare cmake output
+    and `make install_sim`'s install dir; the Teensy path is a single
+    PlatformIO `build/simulation` slot. If none exist, the error
+    message names the first (canonical) path and quotes the per-type
+    build hint.
     """
-    install = REPO_ROOT / "firmware" / "rp2040" / "install" / "simulation" / "saint_node.elf"
-    build = REPO_ROOT / "firmware" / "rp2040" / "build_sim" / "saint_node.elf"
-    if install.exists() or build.exists():
-        return None
-    return (f"Sim firmware not installed: {install} missing. "
-            "Build + install with: cd firmware/rp2040 && ./build.sh sim "
-            "&& (cd build_sim && make install_sim)")
+    cfg = NODE_TYPES.get(node_type)
+    if cfg is None:
+        return f"Unknown --node-type '{node_type}' (expected one of: {list(NODE_TYPES)})"
+    for path in cfg["firmware_paths"]:
+        if Path(path).exists():
+            return None
+    primary = cfg["firmware_paths"][0]
+    return (f"Sim firmware not built: {primary} missing. "
+            f"Build with: {cfg['firmware_build_hint']}")
 
 
 def _check_websockets_lib() -> Optional[str]:
@@ -171,22 +205,27 @@ def _check_server_reachable(ws_url: str) -> Optional[str]:
         sock.close()
 
 
-def check_prereqs(ws_url: str, need_server: bool = True) -> list[str]:
+def check_prereqs(ws_url: str, need_server: bool = True,
+                  node_type: str = "rp2040") -> list[str]:
     """Verify everything the test needs is in place.
 
     ``need_server=False`` skips the websockets-lib + server-reachable
     probes — useful for the --no-server smoke-test mode that only
     proves the firmware build + agent + Renode path is alive.
+    ``node_type`` controls which firmware ELF is required to exist.
     """
     problems: list[str] = []
-    checks = [_check_renode, _check_agent_running, _check_sim_firmware]
-    if need_server:
-        checks += [_check_websockets_lib]
-    for check in checks:
+    for check in (_check_renode, _check_agent_running):
         msg = check()
         if msg:
             problems.append(msg)
+    msg = _check_sim_firmware(node_type)
+    if msg:
+        problems.append(msg)
     if need_server:
+        msg = _check_websockets_lib()
+        if msg:
+            problems.append(msg)
         msg = _check_server_reachable(ws_url)
         if msg:
             problems.append(msg)
@@ -358,33 +397,39 @@ def _say(phase: str, msg: str, ok: bool = True):
     print(f"[{phase:14s}] {sym} {msg}")
 
 
-def run_smoke_test() -> int:
+def run_smoke_test(node_type: str = "rp2040", node_id: Optional[str] = None) -> int:
     """No-server mode: build was OK + agent is up + sim node boots and
     establishes its micro-ROS session. This is what's verifiable on a
     Mac dev box without a Linux server in the loop.
 
     Reads the node's dedicated UART-capture file (set up by node_manager
-    via Renode's CreateFileBackend on uart0) for firmware printf output.
-    Falls back to the operational log only when the UART file doesn't
-    exist yet, in which case we'll likely see only Renode warnings.
+    via Renode's CreateFileBackend on the firmware's console UART) for
+    firmware printf output. Falls back to the operational log only when
+    the UART file doesn't exist yet, in which case we'll likely see
+    only Renode warnings.
     """
     failures = 0
     node_created = False
-    uart_log = SCRIPT_DIR / "logs" / f"{TEST_NODE_ID}.uart.log"
-    op_log = SCRIPT_DIR / "logs" / f"{TEST_NODE_ID}.log"
+    target_node_id = node_id or NODE_TYPES[node_type]["default_node_id"]
+    uart_log = SCRIPT_DIR / "logs" / f"{target_node_id}.uart.log"
+    op_log = SCRIPT_DIR / "logs" / f"{target_node_id}.log"
     log_path = uart_log
 
-    print("Smoke test (no server) — sim node bring-up only.\n")
+    print(f"Smoke test (no server) — sim node bring-up only — type={node_type}.\n")
     try:
-        _say("setup", f"creating sim node {TEST_NODE_ID}")
-        r = _run_node_manager("create", TEST_NODE_ID, "--type", "rp2040")
+        # Pre-clean: previous runs may have left the node behind. node_manager
+        # treats "remove" as best-effort.
+        _run_node_manager("remove", target_node_id)
+
+        _say("setup", f"creating sim node {target_node_id}")
+        r = _run_node_manager("create", target_node_id, "--type", node_type)
         if r.returncode != 0 and "already exists" not in r.stderr:
             _say("setup", f"create failed: {r.stderr.strip()}", ok=False)
             return 3
         node_created = True
 
         _say("setup", "starting node in Renode")
-        r = _run_node_manager("start", TEST_NODE_ID)
+        r = _run_node_manager("start", target_node_id)
         if r.returncode != 0:
             _say("setup", f"start failed: {r.stderr.strip()}", ok=False)
             return 3
@@ -435,11 +480,11 @@ def run_smoke_test() -> int:
                 # the pre-remove in the setup phase.
                 _say("teardown",
                      f"stopping sim node — log preserved at {log_path}")
-                _run_node_manager("stop", TEST_NODE_ID)
+                _run_node_manager("stop", target_node_id)
             else:
                 _say("teardown", "stopping + removing sim node")
-                _run_node_manager("stop", TEST_NODE_ID)
-                _run_node_manager("remove", TEST_NODE_ID)
+                _run_node_manager("stop", target_node_id)
+                _run_node_manager("remove", target_node_id)
 
     print()
     if failures:
@@ -454,19 +499,27 @@ def run_smoke_test() -> int:
 async def run_test(ws_url: str, password: str,
                     fake_firmware: bool = False,
                     existing_node: bool = False,
-                    node_id: str = TEST_NODE_ID) -> int:
+                    node_id: Optional[str] = None,
+                    node_type: str = "rp2040") -> int:
     failures = 0
     node_created = False
 
-    target_node_id = node_id
+    type_cfg = NODE_TYPES[node_type]
+    target_node_id = node_id or type_cfg["default_node_id"]
+    # The host-assigned name we register with node_manager. Stays put
+    # even when the firmware announces under a different chip-ID-derived
+    # name (sim chip-IDs read 0; see Phase 1 below). Used for every
+    # node_manager.py invocation: create / start / reset / stop / remove.
+    sim_node_id = target_node_id
+    board_id = type_cfg["board_id"]
     if existing_node:
         flavor = "existing-node"
     elif fake_firmware:
         flavor = "fake-firmware"
     else:
-        flavor = "Renode"
+        flavor = f"Renode/{node_type}"
     print(f"E2E sync-recovery test — {flavor} — target {ws_url}\n")
-    print(f"  test node: {target_node_id}\n")
+    print(f"  test node: {target_node_id} (board_id={board_id})\n")
 
     try:
         if existing_node:
@@ -487,8 +540,8 @@ async def run_test(ws_url: str, password: str,
             # Phase 1: create + start sim node. node_manager prints
             # "already exists" to STDOUT (not stderr) and exits non-zero
             # on the dup case, so check both streams.
-            _say("setup", f"creating sim node {target_node_id}")
-            r = _run_node_manager("create", target_node_id, "--type", "rp2040")
+            _say("setup", f"creating sim node {target_node_id} (type={node_type})")
+            r = _run_node_manager("create", target_node_id, "--type", node_type)
             combined = (r.stdout or "") + (r.stderr or "")
             if r.returncode != 0 and "already exists" not in combined:
                 _say("setup",
@@ -522,32 +575,79 @@ async def run_test(ws_url: str, password: str,
         ], rate_hz=10)
 
         if not existing_node:
-            # Phase 1: wait for unadopted announcement
+            # Phase 1: wait for unadopted announcement.
+            #
+            # In simulation, the firmware names itself from the chip's
+            # unique-ID fuses (OCOTP on Teensy, ID_FLASH on RP2040), which
+            # read back as zero under Renode — every fresh sim node
+            # announces as e.g. "teensy41_0000000000000000" / "rp2040_…0",
+            # not the host-assigned name we passed to node_manager.
+            # node_manager's NodeId on the persistent_storage peripheral
+            # only sets the backing filename, not the firmware's view of
+            # itself. So we prefer an exact match (in case someone
+            # pre-populated storage with the assigned ID) but fall back
+            # to the first announcement whose node_id starts with
+            # "<chip_family>_" — that's the firmware we just booted.
             _say("phase 1", "waiting for node to announce as UNADOPTED…")
             deadline = time.monotonic() + ADOPT_WAIT_S
-            unadopted_seen = False
+            chip_prefix = f"{node_type}_"
+            announced = None
             while time.monotonic() < deadline:
                 resp = await client.request("list_unadopted")
                 nodes = (resp.get("data") or {}).get("nodes") or []
-                if any(n.get("node_id") == target_node_id for n in nodes):
-                    unadopted_seen = True
+                announced = next(
+                    (n for n in nodes if n.get("node_id") == target_node_id),
+                    None,
+                )
+                if announced is None:
+                    announced = next(
+                        (n for n in nodes
+                         if (n.get("node_id") or "").startswith(chip_prefix)),
+                        None,
+                    )
+                if announced:
                     break
                 await asyncio.sleep(1.0)
-            if not unadopted_seen:
+            if announced is None:
                 _say("phase 1", "node never announced — agent or sim failure",
                      ok=False)
                 failures += 1
                 return failures
-            _say("phase 1", "node announced")
+            announced_id = announced.get("node_id") or target_node_id
+            if announced_id != target_node_id:
+                _say("phase 1",
+                     f"node announced as {announced_id} "
+                     f"(host-assigned {target_node_id} ignored — sim chip-ID "
+                     f"isn't modelled). Rewiring subscriptions.")
+                # Resubscribe under the announced node_id; the prior
+                # subscription is harmless to leave behind.
+                target_node_id = announced_id
+                await client.subscribe([
+                    f"node_log/{target_node_id}",
+                    f"sync_status/{target_node_id}",
+                ], rate_hz=10)
+            else:
+                _say("phase 1", "node announced")
 
             # Phase 2: adopt + sync
-            _say("phase 2", "adopting node")
+            _say("phase 2", f"adopting node (board_id={board_id})")
             await client.request("adopt_node", {
                 "node_id": target_node_id,
                 "role": "cradle_base",
                 "display_name": "SyncTest",
-                "board_id": "feather_rp2040_w5500",
+                "board_id": board_id,
             })
+
+        # Give the agent's just-created DDS endpoints time to discover
+        # and match with the server's subscribers. Without this,
+        # firmware /log publishes that fire from inside the very first
+        # config_subscription_callback (immediately after sync below)
+        # can land on the agent before any DDS reader is bound, and
+        # the agent forwards them as empty payloads — visible at the
+        # server as `(malformed log frame ... char 0)) ''` warnings.
+        # 1 s is the typical DDS unicast-discovery + readers-matched
+        # window; longer is unnecessary, shorter is racy.
+        await asyncio.sleep(1.0)
 
         _say("phase 2", "syncing initial config (publisher pre-create check)")
         await client.request("sync_node_peripherals",
@@ -605,8 +705,11 @@ async def run_test(ws_url: str, password: str,
                 json.dumps({"action": "lose_config"}),
             )
         else:
-            _run_node_manager("reset", target_node_id)
-            _run_node_manager("start", target_node_id)
+            # node_manager only knows the sim-side host-assigned name
+            # (sim_node_id) — target_node_id may have been swapped to the
+            # firmware's announced id in Phase 1.
+            _run_node_manager("reset", sim_node_id)
+            _run_node_manager("start", sim_node_id)
 
         _say("phase 3",
              f"waiting up to {RECONCILE_WAIT_S}s for server auto-reconcile")
@@ -637,16 +740,18 @@ async def run_test(ws_url: str, password: str,
     finally:
         if node_created:
             # Renode path owns a separately-spawned process; clean it up.
+            # Always use sim_node_id (node_manager's view) regardless of
+            # whether Phase 1 rewired target_node_id to the announced id.
             if failures:
                 # Preserve log + .resc so the operator can diagnose
                 # which hop failed. Next run's pre-clean removes them.
                 _say("teardown",
                      "stopping sim node (logs preserved for diagnosis)")
-                _run_node_manager("stop", target_node_id)
+                _run_node_manager("stop", sim_node_id)
             else:
                 _say("teardown", "stopping + removing sim node")
-                _run_node_manager("stop", target_node_id)
-                _run_node_manager("remove", target_node_id)
+                _run_node_manager("stop", sim_node_id)
+                _run_node_manager("remove", sim_node_id)
         # Fake-firmware lifetime is managed by entrypoint.sh; nothing
         # to do here — entrypoint's trap kills it on container exit.
 
@@ -690,12 +795,22 @@ def main() -> int:
                              "the sync_node_peripherals → firmware "
                              "log ack loop. Use --node-id to pick "
                              "which adopted node to drive.")
-    parser.add_argument("--node-id", default=TEST_NODE_ID,
+    parser.add_argument("--node-type", default="rp2040",
+                        choices=sorted(NODE_TYPES),
+                        help="Sim-node type to drive. Picks the firmware "
+                             "ELF the prereq check expects, the default "
+                             "node_id, and the board_id passed to "
+                             "/adopt_node. Default: rp2040 (the green "
+                             "path); use teensy41 for the Teensy 4.1 sim.")
+    parser.add_argument("--node-id", default=None,
                         help="Node ID to drive the test against. "
-                             f"Default: {TEST_NODE_ID} (matches the "
-                             "Renode path); use rp2040_fakefw to "
+                             "Default: per-type — `rp2040_synctest` / "
+                             "`teensy41_synctest`. Use rp2040_fakefw to "
                              "match the fake firmware's default.")
     args = parser.parse_args()
+
+    # Resolve a default node_id from --node-type if --node-id wasn't passed.
+    resolved_node_id = args.node_id or NODE_TYPES[args.node_type]["default_node_id"]
 
     print("Checking prerequisites…")
     # Renode is only needed for the non-fake, non-existing path.
@@ -704,6 +819,7 @@ def main() -> int:
     problems = check_prereqs(
         args.ws_url,
         need_server=not args.no_server,
+        node_type=args.node_type,
     )
     if not need_renode:
         # Filter out Renode-specific complaints since we don't need it.
@@ -726,12 +842,13 @@ def main() -> int:
 
     try:
         if args.no_server:
-            return run_smoke_test()
+            return run_smoke_test(node_type=args.node_type, node_id=resolved_node_id)
         return asyncio.run(run_test(
             args.ws_url, args.password,
             fake_firmware=args.fake_firmware,
             existing_node=args.existing_node,
-            node_id=args.node_id,
+            node_id=resolved_node_id,
+            node_type=args.node_type,
         ))
     except KeyboardInterrupt:
         return 130

@@ -37,6 +37,12 @@ from saint_server.animation.models import (
 SetUrdfJointValue = Callable[[str, float], bool]
 SetWSInput = Callable[[str, str, float], bool]
 SetTopicChannel = Callable[[str, str, float, str], Dict]
+# Out-of-band peripheral command — used by trigger tracks to fire
+# string-arg commands like audio_player.play_file. Signature matches
+# server_node.send_peripheral_command (node_id, peripheral_id, command,
+# args). Optional: if None at construction, peripheral_command
+# triggers are dropped with a warn.
+SendPeripheralCommand = Callable[[str, str, str, Dict], None]
 EstopGate = Callable[[], bool]   # returns True iff estop is engaged
 
 
@@ -62,6 +68,7 @@ class AnimationPlayer:
         set_ws_input: SetWSInput,
         set_topic_channel: SetTopicChannel,
         estop_active: EstopGate,
+        send_peripheral_command: Optional[SendPeripheralCommand] = None,
         on_finished: Optional[Callable[[str], None]] = None,
         logger=None,
     ):
@@ -69,6 +76,7 @@ class AnimationPlayer:
         self._set_urdf_joint_value = set_urdf_joint_value
         self._set_ws_input = set_ws_input
         self._set_topic_channel = set_topic_channel
+        self._send_peripheral_command = send_peripheral_command
         self._estop_active = estop_active
         self._on_finished = on_finished
         self.logger = logger
@@ -227,12 +235,57 @@ class AnimationPlayer:
                     endpoint, field, float(kf.value or 0.0),
                     f"_animation_{self.anim.id}",
                 )
+            elif kf.target_kind == "peripheral_command":
+                self._dispatch_peripheral_command(kf)
             else:
                 self._log("warn",
                           f"Unknown trigger target_kind: {kf.target_kind}")
         except Exception as e:
             self._log("error",
                       f"Trigger dispatch failed at t={kf.time}: {e}")
+
+    def _dispatch_peripheral_command(self, kf: TriggerKeyframe) -> None:
+        """Fire a peripheral_command trigger — the path animations use
+        to send audio_player.play_file (or any future non-numeric
+        peripheral command) at a specific timecode.
+
+        target is [node_id, peripheral_id]; value carries the command
+        + args. Bare-string values are desugared to play_file so the
+        TriggerEditor UI can offer a single "filename" field without
+        forcing operators to construct a nested object."""
+        if len(kf.target) < 2:
+            self._log("warn",
+                      f"peripheral_command trigger needs [node_id, "
+                      f"peripheral_id] target, got {kf.target!r}")
+            return
+        if self._send_peripheral_command is None:
+            self._log("warn",
+                      f"peripheral_command trigger at t={kf.time} but no "
+                      f"send_peripheral_command callback wired; dropping")
+            return
+        node_id, peripheral_id = kf.target[0], kf.target[1]
+
+        command: str
+        args: Dict
+        v = kf.value
+        if isinstance(v, dict):
+            command = str(v.get("command") or "")
+            args_in = v.get("args") or {}
+            args = dict(args_in) if isinstance(args_in, dict) else {}
+        elif isinstance(v, str):
+            # Operator typed a bare filename — the common case.
+            command = "play_file"
+            args = {"filename": v}
+        else:
+            self._log("warn",
+                      f"peripheral_command value must be a dict or "
+                      f"filename string; got {type(v).__name__}")
+            return
+        if not command:
+            self._log("warn",
+                      f"peripheral_command trigger missing command field")
+            return
+        self._send_peripheral_command(node_id, peripheral_id, command, args)
 
     def _log(self, level: str, msg: str) -> None:
         if self.logger:
@@ -256,11 +309,13 @@ class AnimationPlayerRegistry:
         set_ws_input: SetWSInput,
         set_topic_channel: SetTopicChannel,
         estop_active: EstopGate,
+        send_peripheral_command: Optional[SendPeripheralCommand] = None,
         logger=None,
     ):
         self._set_urdf_joint_value = set_urdf_joint_value
         self._set_ws_input = set_ws_input
         self._set_topic_channel = set_topic_channel
+        self._send_peripheral_command = send_peripheral_command
         self._estop_active = estop_active
         self.logger = logger
         self._players: Dict[str, AnimationPlayer] = {}
@@ -276,6 +331,7 @@ class AnimationPlayerRegistry:
             set_urdf_joint_value=self._set_urdf_joint_value,
             set_ws_input=self._set_ws_input,
             set_topic_channel=self._set_topic_channel,
+            send_peripheral_command=self._send_peripheral_command,
             estop_active=self._estop_active,
             on_finished=self._on_player_finished,
             logger=self.logger,

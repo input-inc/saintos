@@ -516,15 +516,19 @@ static bool apply_neopixel_channel(const char* channel_id, float value)
         return true;
     }
     if (strcmp(channel_id, "brightness") == 0) {
-        // Without a known active color, drawing a "brightness 0.5"
-        // override would just paint dim-black. Refuse rather than
-        // silently look wrong; the operator should set color first.
-        // (When we later track override color alongside brightness
-        // separately we can do better here.)
-        saint_log_publish("warn",
-            "NeoPixel: brightness-only override not implemented yet "
-            "(value=%.3f). Set color first via the color picker.", value);
-        return false;
+        /* Slider sends 0..1; we clamp and rescale to the 8-bit
+         * brightness the WS2812 driver expects. led_set_override_
+         * brightness keeps the previously-stored color intact (and
+         * seeds white if none has been set yet) so brightness can
+         * move independently of the color picker. */
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        uint8_t b8 = (uint8_t)(value * 255.0f + 0.5f);
+        led_set_override_brightness(b8);
+        saint_log_publish("info",
+            "NeoPixel: brightness override = %u (%.3f) via set_channel",
+            (unsigned)b8, value);
+        return true;
     }
     saint_log_publish("warn",
         "NeoPixel: unknown channel '%s' on set_channel", channel_id);

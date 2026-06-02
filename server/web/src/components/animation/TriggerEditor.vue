@@ -34,10 +34,18 @@ const inputsForSheet = computed(() => {
 })
 
 function onTargetKindChange () {
-  // Reset target shape when switching dispatch kind so we don't carry
-  // ws_input parts into a topic dispatch or vice versa.
+  // Reset target + value shape when switching dispatch kind. Carrying
+  // a numeric value into a peripheral_command would land an int as the
+  // filename; carrying a string into ws_input would land NaN at the
+  // routing evaluator.
   if (!kf.value) return
   kf.value.target = ['', '']
+  if (kf.value.target_kind === 'peripheral_command') {
+    // Bare-string desugars to play_file({filename}) on the server.
+    if (typeof kf.value.value !== 'string') kf.value.value = ''
+  } else {
+    if (typeof kf.value.value !== 'number') kf.value.value = 1
+  }
   animations.markDirty()
 }
 
@@ -66,6 +74,7 @@ function destroy () { emit('delete', track.value, props.kfIdx) }
         <select class="input-field" v-model="kf.target_kind" @change="onTargetKindChange">
           <option value="ws_input">Node sheet input</option>
           <option value="topic">ROS topic field</option>
+          <option value="peripheral_command">Peripheral command (audio cue, …)</option>
         </select>
       </label>
 
@@ -94,7 +103,7 @@ function destroy () { emit('delete', track.value, props.kfIdx) }
         </p>
       </template>
 
-      <template v-else>
+      <template v-else-if="kf.target_kind === 'topic'">
         <div class="grid grid-cols-2 gap-3">
           <label class="text-sm">
             <span class="block text-fg-muted mb-1">Topic endpoint</span>
@@ -109,10 +118,37 @@ function destroy () { emit('delete', track.value, props.kfIdx) }
         </div>
       </template>
 
+      <template v-else-if="kf.target_kind === 'peripheral_command'">
+        <div class="grid grid-cols-2 gap-3">
+          <label class="text-sm">
+            <span class="block text-fg-muted mb-1">Node ID</span>
+            <input class="input-field" placeholder="rpi5_abc123" v-model="kf.target[0]"
+                   @input="animations.markDirty()" />
+          </label>
+          <label class="text-sm">
+            <span class="block text-fg-muted mb-1">Peripheral ID</span>
+            <input class="input-field" placeholder="onboard_audio" v-model="kf.target[1]"
+                   @input="animations.markDirty()" />
+          </label>
+        </div>
+        <p class="text-xs text-fg-muted">
+          Sends a non-numeric command (e.g. <code>play_file</code>) to the peripheral.
+          Typing a filename in the value field below is the same as sending
+          <code>play_file({{ '{' }} filename {{ '}' }})</code> — the most common audio-cue case.
+        </p>
+      </template>
+
       <label class="text-sm block">
-        <span class="block text-fg-muted mb-1">Value</span>
-        <input type="number" step="0.01" class="input-field" v-model.number="kf.value"
-               @input="animations.markDirty()" />
+        <template v-if="kf.target_kind === 'peripheral_command'">
+          <span class="block text-fg-muted mb-1">Filename (or JSON for advanced commands)</span>
+          <input class="input-field" placeholder="my-cue.wav" v-model="kf.value"
+                 @input="animations.markDirty()" />
+        </template>
+        <template v-else>
+          <span class="block text-fg-muted mb-1">Value</span>
+          <input type="number" step="0.01" class="input-field" v-model.number="kf.value"
+                 @input="animations.markDirty()" />
+        </template>
       </label>
     </div>
 

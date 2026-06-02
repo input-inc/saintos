@@ -133,6 +133,24 @@ class PeripheralDriver(abc.ABC):
         """Read most recent value. Returns None if no value available
         yet (e.g. telemetry hasn't polled this register)."""
 
+    # ── Optional: out-of-band commands keyed by name ──────────────
+    #
+    # Channels carry numeric values only. Some peripherals (audio
+    # players, future displays, anything that takes a filename / text
+    # blob) need string or structured arguments. Those arrive via the
+    # `peripheral_command` control action and land here. Drivers that
+    # have no command surface can leave this as the default no-op.
+
+    def handle_command(self, instance_id: int, command: str,
+                       args: Dict[str, Any]) -> bool:
+        """Dispatch a named command to one of this driver's instances.
+        Returns True if the driver recognized and handled it. Default
+        implementation logs and returns False."""
+        self._log("warn",
+            f"{self.TYPE_ID}#{instance_id}: ignoring unknown command "
+            f"'{command}' (args={args})")
+        return False
+
     # ── Optional: respond to factory reset / cleanup ───────────────
 
     def reset(self) -> None:

@@ -27,6 +27,13 @@ classifiers = [
 dependencies = [
     "pyyaml>=6.0",
     "pyserial>=3.5",
+    # python-vlc backs the built-in audio_player peripheral. Wraps
+    # libvlc, which must also be installed at the system level
+    # (`apt install vlc-bin libvlc-dev` on Raspberry Pi OS). The Python
+    # import is lazy in the driver, so a host without libvlc just
+    # logs an error and disables the audio_player — the rest of the
+    # node keeps running.
+    "python-vlc>=3.0",
 ]
 
 [project.optional-dependencies]

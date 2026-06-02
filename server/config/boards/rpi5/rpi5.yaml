@@ -1,0 +1,74 @@
+# Default board profile for a Raspberry Pi 5 running saint-node.
+#
+# The Pi 5 doesn't have a per-board mezzanine the way the RP2040
+# FeatherWing or Teensy header carrier do — the 40-pin GPIO header
+# is the entire user-facing pinout. This board file therefore exposes
+# every operator-pickable GPIO from the chip's global.yaml and reserves
+# only the kernel-claimed pins (I²C-0 ID EEPROM at GPIO 0/1 and the
+# UART0 console at GPIO 14/15), matching gpio_control.py's
+# AVAILABLE_GPIOS / RESERVED_PINS lists.
+#
+# Built-in peripherals seed automatically on adoption:
+#   - audio_player: on-host audio file playback through python-vlc +
+#     ALSA. Library defaults to /var/lib/saint-os/audio; change the
+#     `library_path` param to point elsewhere, or `alsa_device` to
+#     pick a specific output (HDMI, USB DAC, I²S HAT). One instance
+#     per node — the saint-node host can drive exactly one ALSA
+#     output card at a time through this driver.
+
+board_id: rpi5
+display_name: "Raspberry Pi 5 (40-pin header)"
+chip_family: rpi5
+builtin: true        # shipped with SAINT.OS — UI marks uneditable
+
+# Every header pin we don't reserve for kernel use. Order follows the
+# physical 40-pin layout so the Peripherals tab lists them top-down
+# the way they appear on the silkscreen.
+available_pins:
+  - {gpio:  2, name: "GPIO2 / SDA"}
+  - {gpio:  3, name: "GPIO3 / SCL"}
+  - {gpio:  4, name: "GPIO4 / GPCLK0"}
+  - {gpio:  5, name: "GPIO5"}
+  - {gpio:  6, name: "GPIO6"}
+  - {gpio:  7, name: "GPIO7 / CE1"}
+  - {gpio:  8, name: "GPIO8 / CE0"}
+  - {gpio:  9, name: "GPIO9 / MISO"}
+  - {gpio: 10, name: "GPIO10 / MOSI"}
+  - {gpio: 11, name: "GPIO11 / SCLK"}
+  - {gpio: 12, name: "GPIO12 / PWM0"}
+  - {gpio: 13, name: "GPIO13 / PWM1"}
+  - {gpio: 16, name: "GPIO16"}
+  - {gpio: 17, name: "GPIO17"}
+  - {gpio: 18, name: "GPIO18 / PCM_CLK / PWM"}
+  - {gpio: 19, name: "GPIO19 / PCM_FS / PWM"}
+  - {gpio: 20, name: "GPIO20 / PCM_DIN"}
+  - {gpio: 21, name: "GPIO21 / PCM_DOUT"}
+  - {gpio: 22, name: "GPIO22"}
+  - {gpio: 23, name: "GPIO23"}
+  - {gpio: 24, name: "GPIO24"}
+  - {gpio: 25, name: "GPIO25"}
+  - {gpio: 26, name: "GPIO26"}
+  - {gpio: 27, name: "GPIO27"}
+
+# Pins claimed by the kernel / firmware. Operators can't route
+# peripherals to these; the names match gpio_control.py's
+# RESERVED_PINS list.
+reserved_pins:
+  - {gpio:  0, name: "ID_SD",   reason: "I²C-0 EEPROM (HAT identification)"}
+  - {gpio:  1, name: "ID_SC",   reason: "I²C-0 EEPROM (HAT identification)"}
+  - {gpio: 14, name: "UART_TX", reason: "Serial console TX (UART0)"}
+  - {gpio: 15, name: "UART_RX", reason: "Serial console RX (UART0)"}
+
+# Peripherals always present on a Pi 5 host. The server auto-seeds
+# these on adoption with builtin=True so the operator can re-route
+# them through widgets/signals but can't delete them.
+builtin_peripherals:
+  - id: onboard_audio
+    type: audio_player
+    label: "On-board Audio"
+    pins: {}
+    params:
+      library_path: "/var/lib/saint-os/audio"
+      backend: "pi_alsa"
+      alsa_device: "default"
+      initial_volume: 0.8

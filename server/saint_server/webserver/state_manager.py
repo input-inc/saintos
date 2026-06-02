@@ -660,6 +660,11 @@ class StateManager:
         # ROS bridge is up. Whenever sheets change we call .reconcile()
         # on it so it can refresh its subscriptions.
         self._routing_evaluator = None
+        # Out-of-band peripheral-command publisher (set by
+        # server_node.py once ROS publishers are up). Used by the
+        # animation player when a trigger track of kind
+        # peripheral_command fires.
+        self._peripheral_command_sender = None
         # The animation player needs to publish to ROS topics for the
         # trigger-track `topic` dispatch path. Wired alongside the
         # routing evaluator at server_node startup.
@@ -1367,6 +1372,54 @@ class StateManager:
             node_id=node_id
         )
         return {"success": True, "board_id": board_id}
+
+    def refresh_node_builtins(self, node_id: str) -> Dict[str, Any]:
+        """Re-seed builtin_peripherals from the current board YAML for
+        an already-adopted node, without changing role/board/chip.
+
+        Adoption time + ``set_node_board`` are the only existing paths
+        that seed builtin peripherals into a node's config. When the
+        operator edits a board's YAML to add a new builtin (e.g. the
+        onboard LED), already-adopted nodes assigned to that board
+        miss the update — their saved peripheral_config was frozen at
+        adoption time. The traditional workarounds were factory-reset
+        + re-adopt (destructive) or hand-editing the YAML on the
+        server (ops-only). This action wires up a non-destructive UI
+        path: "Refresh from board" pulls the latest YAML, idempotently
+        seeds anything missing, and saves.
+
+        Returns the new + previously-present built-in IDs so the UI
+        can highlight what just got added. Idempotent — calling it
+        twice in a row is a no-op the second time.
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return {"success": False, "message": f"Node {node_id} not found"}
+        if not node.board_id:
+            return {"success": False,
+                    "message": f"Node {node_id} has no board assigned"}
+
+        before_ids = (set(p.id for p in node.peripheral_config.peripherals)
+                      if node.peripheral_config else set())
+        self._seed_builtin_peripherals_from_board(node)
+        after_ids = (set(p.id for p in node.peripheral_config.peripherals)
+                     if node.peripheral_config else set())
+        added = sorted(after_ids - before_ids)
+
+        if added:
+            self._save_node_config(node_id)
+            self._log_activity(
+                f"Refreshed built-ins from board '{node.board_id}': "
+                f"added {', '.join(added)}",
+                "info", node_id=node_id,
+            )
+        return {
+            "success": True,
+            "node_id": node_id,
+            "board_id": node.board_id,
+            "added": added,
+            "already_present": sorted(after_ids & before_ids),
+        }
 
     def _seed_builtin_peripherals_from_board(self, node: NodeInfo) -> None:
         """Apply builtin_peripherals from the node's board YAML.
@@ -2323,6 +2376,15 @@ class StateManager:
         self._ros_bridge = bridge
         self._maybe_init_animation_registry()
 
+    def set_peripheral_command_sender(self, sender) -> None:
+        """Wire the out-of-band peripheral-command publisher (normally
+        ``ServerNode.send_peripheral_command``) so animation trigger
+        tracks of kind ``peripheral_command`` can fire string-arg
+        commands at specific timecodes (e.g. audio_player.play_file).
+        Optional — if unset, trigger tracks of that kind are dropped
+        with a warn at fire time."""
+        self._peripheral_command_sender = sender
+
     def _maybe_init_animation_registry(self) -> None:
         if self._animation_registry is not None:
             return
@@ -2340,6 +2402,7 @@ class StateManager:
             set_ws_input=evaluator.set_ws_input,
             set_topic_channel=bridge.set_topic_channel,
             estop_active=estop_active,
+            send_peripheral_command=self._peripheral_command_sender,
             logger=self.logger,
         )
 

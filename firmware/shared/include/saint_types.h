@@ -118,6 +118,12 @@ void led_identify(uint8_t flash_count);
 // clearing the override. r/g/b is the logical color the operator wants
 // to see (the driver handles GRB ordering and brightness scaling).
 void led_set_override_color(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness);
+/* Update brightness only — keeps the currently-stored override color
+ * intact. Used by the State tab's brightness slider, which moves
+ * independently of the color picker. If no color override has been
+ * set yet (just-booted node), implementations default the stored
+ * color to white so brightness alone produces a visible result. */
+void led_set_override_brightness(uint8_t brightness);
 void led_clear_override(void);
 bool led_override_active(void);
 

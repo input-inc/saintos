@@ -174,20 +174,30 @@ static void config_subscription_callback(const void* msgin)
     Serial.printf("Config received: %.*s\n",
                    (int)(msg->data.size < 100 ? msg->data.size : 100),
                    msg->data.data);
+    // Mirror to the /log topic so the e2e harness (and dashboard Logs
+    // tab) can see config-receipt over the wire — Serial.printf alone
+    // only lands in the Renode-captured UART file. RP2040 does the same;
+    // test_sync_recovery's Phase 2 substring-matches "Config received"
+    // against the server-relayed /log stream.
+    saint_log_publish("info", "Config received (%zu bytes), applying…",
+                      msg->data.size);
 
     if (strstr(msg->data.data, "\"action\":\"configure\"") ||
         strstr(msg->data.data, "\"action\": \"configure\"")) {
         bool applied = pin_config_apply_json(msg->data.data, msg->data.size);
         if (applied) {
             Serial.printf("Pin configuration applied successfully\n");
+            saint_log_publish("info", "Config applied OK");
             if (pin_config_save()) {
                 Serial.printf("Pin configuration saved to flash\n");
+                saint_log_publish("info", "Config saved to flash");
                 /* /announce-borne sync-ACK — see the declaration of
                  * g_last_config_save_ok_ms (in main.cpp's announce
                  * builder) for why this lives in /announce instead of
                  * /log. */
                 g_last_config_save_ok_ms = saint_log_uptime_ms();
             } else {
+                saint_log_publish("error", "Config save to flash failed");
                 g_last_config_save_fail_ms = saint_log_uptime_ms();
             }
         } else {
@@ -762,6 +772,17 @@ static bool check_agent_connection(void)
         agent_connected = false;
     }
 
+    /* Previously gated agent liveness on a periodic
+     * rmw_uros_ping_agent (true round-trip) to catch the
+     * NativeEthernet-UDP-returns-OK-after-server-restart case. The
+     * ping IS the right answer architecturally, but in this build of
+     * micro_ros_platformio the ping path hung the main loop after
+     * post-reconnect init — no `[N] state:` status print, no
+     * announces, while the agent's session looked alive. Until we
+     * root-cause that, fall back to the last_successful_comm
+     * timeout heuristic: dist installs will reconnect within the
+     * usual 15 s instead of the ~2 s the ping enabled. Tracked as a
+     * follow-up in docs/SYNC_CONFIG_REGRESSION.md. */
     if (agent_connected && last_successful_comm > 0) {
         if (now - last_successful_comm > CONNECTION_TIMEOUT_MS) {
             agent_connected = false;

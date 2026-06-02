@@ -51,7 +51,17 @@ uint32_t hardware_get_unique_id(char* buffer, size_t len)
 
 float hardware_get_cpu_temp(void)
 {
+#ifdef SIMULATION
+    // Renode doesn't model the iMXRT1062 temperature monitor (TEMPMON at
+    // 0x400D8000), so the ADC reads back zero and tempmonGetTemp()'s
+    // calibration math divides by zero → NaN. `snprintf("%.1f", NaN)`
+    // prints the literal "nan", which then sails out to the server as
+    // part of the announcement JSON and crashes json.loads at the cpu_temp
+    // field. Returning a real (if synthetic) value keeps the JSON valid.
+    return 0.0f;
+#else
     return tempmonGetTemp();
+#endif
 }
 
 } // extern "C"

@@ -28,6 +28,7 @@ from .peripherals.roboclaw import RoboClawDriver
 from .peripherals.tic import TicDriver
 from .peripherals.pathfinder_bms import PathfinderBMSDriver
 from .peripherals.fas100 import FAS100Driver
+from .peripherals.audio_player import PiAudioPlayerDriver
 
 
 class NodeState(Enum):
@@ -55,6 +56,11 @@ class SaintNode(Node):
 
     # Hardware identification
     HW_TYPE = "Raspberry Pi 5"
+    # Server-side board catalog key. Must match a directory under
+    # server/config/boards/; the server uses this to assign a default
+    # board (and its built-in peripherals — onboard_audio, etc.) on
+    # adoption.
+    CHIP_FAMILY = "rpi5"
 
     def __init__(self):
         # Generate node ID before calling super().__init__
@@ -89,6 +95,11 @@ class SaintNode(Node):
         self._peripherals.register(TicDriver)
         self._peripherals.register(PathfinderBMSDriver)
         self._peripherals.register(FAS100Driver)
+        # Built-in audio playback: lives on every Pi-host saint-node,
+        # auto-seeded by the rpi5 board YAML's builtin_peripherals
+        # entry. libVLC is loaded lazily — a missing system package
+        # logs an error but doesn't crash the node.
+        self._peripherals.register(PiAudioPlayerDriver)
 
         # Firmware updater
         self._updater = FirmwareUpdater(self.get_logger())
@@ -256,6 +267,7 @@ class SaintNode(Node):
             'mac': self._get_mac_address() or 'unknown',
             'ip': self._get_ip_address(),
             'hw': self.HW_TYPE,
+            'chip_family': self.CHIP_FAMILY,
             'fw': __version__,
             'fw_build': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'state': self._state.value,
@@ -412,6 +424,37 @@ class SaintNode(Node):
                         self._peripherals.set_value(gpio_i, float(value))
                     else:
                         self._gpio.set_value(gpio_i, float(value))
+
+            elif action == 'set_channel':
+                # Peripheral-first addressing: server sends a
+                # (peripheral_id, channel_id, value) triple and the
+                # manager resolves to (driver, instance, sub_channel)
+                # by logical name. Used for pinless built-ins like
+                # the on-board audio player.
+                peripheral_id = data.get('peripheral')
+                channel_id = data.get('channel')
+                value = data.get('value')
+                if not peripheral_id or not channel_id or value is None:
+                    self.get_logger().warn(
+                        'set_channel missing peripheral/channel/value')
+                else:
+                    self._peripherals.set_channel_value(
+                        str(peripheral_id), str(channel_id), float(value))
+
+            elif action == 'peripheral_command':
+                # Out-of-band command for peripherals that take
+                # non-numeric args — audio_player's `play_file`
+                # (filename), future display drivers' text payloads,
+                # etc.
+                peripheral_id = data.get('peripheral')
+                command = data.get('command')
+                args = data.get('args') or {}
+                if not peripheral_id or not command:
+                    self.get_logger().warn(
+                        'peripheral_command missing peripheral or command')
+                else:
+                    self._peripherals.dispatch_command(
+                        str(peripheral_id), str(command), dict(args))
 
             elif action == 'estop':
                 self._handle_estop()

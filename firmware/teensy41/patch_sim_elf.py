@@ -71,21 +71,43 @@ NEUTERED_SYMBOLS = (
 # so the ring fills, `write9bit` spins on `tx_buffer_tail_ == head`, and
 # no bytes ever land in Renode's UART analyzer.
 #
-# Replacement (8 bytes — fits inside the original ~200 B function):
+# Replacement (14 bytes — fits inside the original ~200 B function):
 #   ldr  r3, [r0, #16]    ; r3 = this->port_addr (offset 16 — confirmed
-#                         ;       from disasm at 0xA18A in build/sim).
-#   str  r1, [r3, #28]    ; *(uint32_t*)(port_addr + 0x1C) = c
-#                         ;   (LPUART_DATA register, offset 0x1C from
-#                         ;    the base of an IMXRT_LPUART_t.)
+#                         ;       from disasm at HardwareSerialIMXRT::begin,
+#                         ;       which uses the same offset).
+#   .poll:
+#   ldr  r2, [r3, #20]    ; r2 = port->STAT (offset 0x14)
+#   lsls r2, r2, #8       ; shift TDRE (bit 23) up into N flag; only
+#                         ; r2 is touched (caller-save, fine to clobber).
+#   bpl  .poll            ; loop while TDRE=0 (TX FIFO full)
+#   str  r1, [r3, #28]    ; *(uint32_t*)(port_addr + 0x1C) = c (DATA)
 #   movs r0, #1           ; return 1 (one byte "transmitted")
 #   bx   lr
 #
 # r0 = `this` (AAPCS hidden first arg for non-static method).
 # r1 = c (first explicit `uint32_t` arg).
+# r0..r3 + r12 are caller-save; r4..r11 must be preserved across a
+# function. The earlier shim used `lsls r4, r2, #8` for the flag
+# shift, which corrupted r4 without saving it — that played havoc
+# with the caller's locals and we ended up writing zeros to DATA
+# every iteration. Shifting in-place on r2 keeps the whole shim
+# inside caller-save registers, so no push/pop is needed.
+#
+# The TDRE poll is critical: Renode's NXP_LPUART exposes a 4-deep TX
+# FIFO and emits "Trying to write to a full Tx FIFO" when it's
+# overflowed, silently dropping bytes. Without the poll, any
+# Serial.printf burst longer than ~4 bytes loses the tail. The .repl
+# wires `lpuart6 IRQ -> nvic@25` but the NVIC doesn't dispatch the
+# IRQHandler, so the firmware can't drain by interrupt — polling is
+# the only synchronous option that survives.
+#
 # Reading port_addr from `this` rather than hard-coding LPUART6 means
 # Serial2/3/... still work if the firmware ever opens them.
 WRITE9BIT_SYNC_SHIM = bytes((
     0x03, 0x69,  # ldr  r3, [r0, #16]
+    0x5A, 0x69,  # .poll: ldr  r2, [r3, #20]
+    0x12, 0x02,  # lsls r2, r2, #8
+    0xFC, 0xD5,  # bpl  .poll   (back to offset 2)
     0xD9, 0x61,  # str  r1, [r3, #28]
     0x01, 0x20,  # movs r0, #1
     0x70, 0x47,  # bx   lr

@@ -85,9 +85,20 @@ class TriggerKeyframe:
 
     ``target_kind`` selects the dispatch path:
       * ``"ws_input"`` — target is [sheet_id, ws_input_id]; the
-        animation player calls routing_evaluator.set_ws_input(...).
-      * ``"topic"``    — target is [endpoint_path, field]; the
-        animation player calls ros_bridge.set_topic_channel(...).
+        animation player calls routing_evaluator.set_ws_input(...) with
+        ``value`` cast to float.
+      * ``"topic"`` — target is [endpoint_path, field]; the animation
+        player calls ros_bridge.set_topic_channel(...) with ``value``
+        cast to float.
+      * ``"peripheral_command"`` — target is [node_id, peripheral_id];
+        ``value`` is a dict ``{"command": str, "args": dict}`` (or just
+        a string filename, which is desugared to
+        ``{"command": "play_file", "args": {"filename": ...}}`` so
+        operators authoring an audio cue can skip the wrapper).
+        Dispatched through server_node.send_peripheral_command, which
+        publishes the same JSON action as a websocket-issued
+        peripheral_command — i.e. an animation-fired play_file is
+        wire-indistinguishable from one a UI button sent.
     """
     time: float
     target_kind: str
