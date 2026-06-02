@@ -136,6 +136,52 @@ static char log_buffer[256];               // One log line at a time
 // first /announce).
 static unsigned g_announce_count = 0;
 
+/* Post-init-hang diagnostics — see firmware/teensy41/docs/POST_INIT_HANG.md.
+ *
+ * The Teensy intermittently boots through `init_micro_ros()` cleanly,
+ * prints `micro-ROS initialized successfully`, and then loop() stops
+ * producing any output and no UDP traffic ever leaves the chip. From
+ * the outside the chip stays pingable and the agent's DDS view of the
+ * node looks fine, so there's no obvious failure to attribute the hang
+ * to.
+ *
+ * These counters give us observable progress at three nested layers —
+ * the main loop, the rclc executor, and the transport's RX poll —
+ * surfaced in /announce so the operator can `ros2 topic echo` (or read
+ * the dashboard) and see which one stopped advancing. Each is plain
+ * uint32_t (no locks; we only read+publish from the announce timer
+ * callback, which is on the same rclc executor as anything that
+ * increments these, so concurrent access can't happen).
+ *
+ * Counter pairs are written as entries→exits so an arrested call
+ * shows as (entries > exits) without needing a timestamp. Reading
+ * `entries == exits` AND a freshly-incrementing `loop_iter` means
+ * the firmware is alive and just not publishing — likely the agent
+ * lost the publisher silently. Reading `loop_iter` frozen means the
+ * loop itself wedged before reaching either the executor or the
+ * status print. Reading executor entries advancing but exits not
+ * keeping up points at the executor (or a callback) blocking.
+ *
+ * Volatile because the transport hooks are reached from inside
+ * micro-XRCE-DDS callbacks the compiler can't see across; without
+ * volatile, LTO can prove a non-reentrant write isn't observed and
+ * fold the increments. */
+static volatile uint32_t g_loop_iter             = 0;
+static volatile uint32_t g_executor_spin_entries = 0;
+static volatile uint32_t g_executor_spin_exits   = 0;
+/* Transport-layer counters live here (so the announce builder can read
+ * them as plain locals) but are incremented from inside the per-
+ * transport read/write hooks in firmware/shared/src/transport_udp_bridge.cpp
+ * and firmware/teensy41/transport/transport_native_eth.cpp via
+ * `saint_diag_transport_*`. extern "C" linkage keeps the symbol stable
+ * across the C/C++ boundary. */
+extern "C" {
+volatile uint32_t g_transport_read_entries  = 0;
+volatile uint32_t g_transport_read_exits    = 0;
+volatile uint32_t g_transport_write_entries = 0;
+volatile uint32_t g_transport_write_exits   = 0;
+} // extern "C"
+
 #define STATE_PUBLISH_INTERVAL_MS 100
 
 // Connection monitoring
@@ -547,7 +593,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     snprintf(announcement_buffer + ann_len,
         sizeof(announcement_buffer) - ann_len, "}}");
     ann_len = strlen(announcement_buffer);
-    //Serial.printf("Announcement: %s, len=%d\n", announcement_buffer, ann_len);
+    Serial.printf("Announcement len=%d\n", ann_len);
 
     announcement_msg.data.data = announcement_buffer;
     announcement_msg.data.size = strlen(announcement_buffer);
@@ -983,6 +1029,13 @@ static uint32_t last_status_print = 0;
 
 void loop()
 {
+    /* Heartbeat for the post-init-hang investigation. Bumped before any
+     * other work so a hang inside led_update / peripheral_update_all /
+     * the executor / transport leaves loop_iter pinned at the value it
+     * had when the offending call started — diffable across two
+     * announces. See g_loop_iter declaration. */
+    g_loop_iter++;
+
     uint32_t now = millis();
 
     // Update state
@@ -1007,14 +1060,39 @@ void loop()
         return;
     }
 
-    // Spin executor
+    // Spin executor — bracketed by entry/exit counters so a hang
+    // *inside* the executor (a callback that never returns, or
+    // transport read that blocks past its timeout) shows up as
+    // exec_in > exec_out in the next announce. See g_loop_iter.
+    g_executor_spin_entries++;
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+    g_executor_spin_exits++;
 
-    // Periodic status
+    // Periodic status + post-init-hang diagnostic counters. Mirrored
+    // to Serial1 (always the hardware UART on D0/D1) so hypothesis 4
+    // in docs/POST_INIT_HANG.md becomes directly testable on hardware:
+    // if Serial1 keeps printing but Serial (USB CDC) doesn't, the loop
+    // IS running and only the USB path is broken. Under SIMULATION
+    // `Serial` is already `Serial1` (see platform.h), so these are
+    // redundant — the second line is a harmless mirror in the sim
+    // UART log.
     if (now - last_status_print >= 10000) {
-        Serial.printf("[%lu] state: %s, agent: %s\n",
+        Serial.printf("[%lu] state: %s, agent: %s | "
+                       "loop=%lu exec=%lu/%lu tx=%lu/%lu rx=%lu/%lu\n",
                        now / 1000, node_state_to_string(g_node.state),
-                       agent_connected ? "connected" : "disconnected");
+                       agent_connected ? "connected" : "disconnected",
+                       (unsigned long)g_loop_iter,
+                       (unsigned long)g_executor_spin_entries,
+                       (unsigned long)g_executor_spin_exits,
+                       (unsigned long)g_transport_write_entries,
+                       (unsigned long)g_transport_write_exits,
+                       (unsigned long)g_transport_read_entries,
+                       (unsigned long)g_transport_read_exits);
+        Serial1.printf("[%lu] hwuart-alive loop=%lu exec=%lu/%lu\n",
+                       now / 1000,
+                       (unsigned long)g_loop_iter,
+                       (unsigned long)g_executor_spin_entries,
+                       (unsigned long)g_executor_spin_exits);
         last_status_print = now;
     }
 

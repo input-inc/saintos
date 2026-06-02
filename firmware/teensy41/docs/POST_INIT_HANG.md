@@ -177,19 +177,57 @@ In rough order of "easiest to falsify first":
 In-firmware:
 
 - `firmware/shared/src/saint_log.c` — has `g_emit_attempts` and
-  `g_emit_ok` static counters, plus a recently-added
-  `saint_log_emit_local("trace", g_envelope);` inside `publish_one`
-  that mirrors the JSON envelope to local serial. If the loop is
-  running, these counters will tick and the trace lines will appear
-  on Serial. If neither shows up, the loop isn't running.
+  `g_emit_ok` static counters, plus a `saint_log_emit_local("trace",
+  g_envelope);` call inside `publish_one` that mirrors the JSON
+  envelope to local serial. If the loop is running, these counters
+  will tick and the trace lines will appear on Serial. If neither
+  shows up, the loop isn't running.
 - `firmware/teensy41/src/main.cpp` — the announce JSON includes
   `last_config_save_ok_ms` and `last_config_save_fail_ms` so the
   server can detect config-apply success via `/announce` instead of
   `/log` (in case `/log` is wedged but `/announce` isn't).
-- `getter` accessors exist for sub-counts and log-emit counts; we
-  surface them in `/announce` to make the loop's progress observable
-  even when serial is dead. The current firmware in the dist has
-  most of these.
+- **Post-init-hang counters (Hypotheses 1–3 made directly testable).**
+  Six `g_*` volatile uint32_t counters in `main.cpp` track nested
+  forward progress: `g_loop_iter`, `g_executor_spin_entries/exits`,
+  `g_transport_write_entries/exits`, `g_transport_read_entries/exits`.
+  Surfaced every 10 s in the periodic status print as a single line:
+  ```
+  [N] state: <state>, agent: <state> | loop=L exec=A/B tx=C/D rx=E/F
+  ```
+  Reading this line after the hang tells you exactly which layer
+  wedged: see "How to read the counters" below. The increments live
+  at `loop()` top, around the `rclc_executor_spin_some` call, and
+  inside `transport_native_eth_read/write` (sim equivalents live in
+  `firmware/shared/src/transport_udp_bridge.cpp`). Same hooks fire
+  in sim and hardware, so a future sim-side reproduction will produce
+  exactly the same trace shape — but **the hang doesn't reproduce in
+  the Docker e2e** as of 2026-06-01 (server-restart with the Teensy
+  adopted ran 70 s+ wall-time and ~870 s sim-time without hanging).
+- **Serial1 hwuart heartbeat — hypothesis 4 directly testable.**
+  The same status print also emits a parallel `Serial1.printf` line:
+  ```
+  [N] hwuart-alive loop=L exec=A/B
+  ```
+  `Serial1` on Teensy 4.1 is the hardware UART on D0/D1, completely
+  independent of the USB CDC `Serial` device. If during a hang
+  `cat /dev/ttyACM0` produces nothing but a logic-analyzer / FTDI
+  cable on D0 still shows `[N] hwuart-alive ...` lines marching
+  forward, the loop IS running and only USB CDC is broken — a
+  totally different bug than "loop hung." Under SIMULATION the
+  `Serial → Serial1` redefinition (`firmware/teensy41/include/platform.h`)
+  makes these two prints both land in the same captured UART file,
+  which is harmless duplication.
+
+### How to read the counters
+
+| Counter shape | Interpretation |
+|---|---|
+| `loop` frozen | `loop()` itself wedged before reaching the executor — earlier code path (`led_update`, `peripheral_update_all`, `node_state_update`, `check_agent_connection`) is the suspect. Hypothesis 6 (analogWrite/FlexPWM interaction). |
+| `loop` advancing, `exec` `A=B` advancing, no `/announce` | Loop and executor are both fine; the executor is just not finding callbacks to fire OR all rcl_publish calls return RCL_RET_ERROR. Likely an agent-side bookkeeping issue (the agent silently lost the publisher), independent of the loop. |
+| `loop` advancing, `exec` `A>B` (A growing faster) | Executor entered a callback and didn't return. The callback is either an inbound subscription (config / control / command) or the announce/state timer. Look for transport-read `C>D` to confirm whether it's stuck in the transport-read poll specifically (hypothesis 2). |
+| `loop` + `exec` advancing, `rx` `C>D` | Transport read entered but didn't exit — FNET / `udp.parsePacket()` is blocking past its timeout. Hypothesis 2 confirmed. |
+| `loop` + `exec` advancing, `tx` `E>F` | Transport write entered but didn't exit — `udp.beginPacket/endPacket` blocking. Likely a NativeEthernet TX path issue. |
+| All counters frozen | Loop+executor+transport all wedged together. CPU is either stuck in an ISR, in a `delay()` derivative, or in the `usb_isr` (USB CDC). Hypothesis 7 territory. |
 
 Off-board:
 

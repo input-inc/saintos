@@ -147,6 +147,15 @@ bool transport_udp_bridge_close(struct uxrCustomTransport* transport)
     return true;
 }
 
+/* Post-init-hang diagnostic counters — defined in main.cpp. See the
+ * comment block over g_loop_iter for what they catch. */
+extern "C" {
+extern volatile uint32_t g_transport_read_entries;
+extern volatile uint32_t g_transport_read_exits;
+extern volatile uint32_t g_transport_write_entries;
+extern volatile uint32_t g_transport_write_exits;
+}
+
 size_t transport_udp_bridge_write(
     struct uxrCustomTransport* transport,
     const uint8_t* buf,
@@ -154,9 +163,11 @@ size_t transport_udp_bridge_write(
     uint8_t* err)
 {
     (void)transport;
+    g_transport_write_entries++;
 
     if (!socket_open || len == 0) {
         *err = 1;
+        g_transport_write_exits++;
         return 0;
     }
 
@@ -174,6 +185,7 @@ size_t transport_udp_bridge_write(
     UDP_WRITE32(UDP_REG_CONTROL, UDP_CTRL_SEND);
 
     *err = 0;
+    g_transport_write_exits++;
     return len;
 }
 
@@ -185,9 +197,11 @@ size_t transport_udp_bridge_read(
     uint8_t* err)
 {
     (void)transport;
+    g_transport_read_entries++;
 
     if (!socket_open) {
         *err = 1;
+        g_transport_read_exits++;
         return 0;
     }
 
@@ -213,6 +227,7 @@ size_t transport_udp_bridge_read(
             }
 
             *err = 0;
+            g_transport_read_exits++;
             return rx_len;
         }
 
@@ -225,5 +240,6 @@ size_t transport_udp_bridge_read(
     }
 
     *err = 0;
+    g_transport_read_exits++;
     return 0;
 }

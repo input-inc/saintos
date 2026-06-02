@@ -40,6 +40,16 @@ static bool connected = false;
 
 extern "C" void led_update(void);  // led_status.cpp
 
+/* Post-init-hang diagnostic counters — defined in main.cpp. See the
+ * g_loop_iter comment block there for what they catch. We bracket
+ * the transport read/write hooks here so hypothesis 2 in
+ * docs/POST_INIT_HANG.md ("Is transport_native_eth_read blocking
+ * indefinitely?") becomes directly answerable from /announce. */
+extern volatile uint32_t g_transport_read_entries;
+extern volatile uint32_t g_transport_read_exits;
+extern volatile uint32_t g_transport_write_entries;
+extern volatile uint32_t g_transport_write_exits;
+
 extern "C" {
 
 bool transport_native_eth_init(void)
@@ -184,6 +194,7 @@ size_t transport_native_eth_write(
     uint8_t* err)
 {
     (void)transport;
+    g_transport_write_entries++;
 
     IPAddress dest(agent_ip[0], agent_ip[1], agent_ip[2], agent_ip[3]);
 
@@ -193,10 +204,12 @@ size_t transport_native_eth_write(
 
     if (written != len) {
         *err = 1;
+        g_transport_write_exits++;
         return 0;
     }
 
     *err = 0;
+    g_transport_write_exits++;
     return written;
 }
 
@@ -208,6 +221,7 @@ size_t transport_native_eth_read(
     uint8_t* err)
 {
     (void)transport;
+    g_transport_read_entries++;
 
     uint32_t start = millis();
 
@@ -217,6 +231,7 @@ size_t transport_native_eth_read(
             size_t to_read = (size_t)packet_size < len ? (size_t)packet_size : len;
             size_t read_bytes = udp.read(buf, to_read);
             *err = 0;
+            g_transport_read_exits++;
             return read_bytes;
         }
         /* Tried __WFI here as a heat optimization, betting on the ENET
@@ -237,6 +252,7 @@ size_t transport_native_eth_read(
     }
 
     *err = 0;
+    g_transport_read_exits++;
     return 0;
 }
 
