@@ -32,7 +32,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 # Create temporary directory for packaging
 TEMP_DIR=$(mktemp -d)
-PACKAGE_DIR="${TEMP_DIR}/saint_firmware_rpi5_${VERSION}"
+PACKAGE_DIR="${TEMP_DIR}/saint_firmware_raspberrypi_${VERSION}"
 mkdir -p "${PACKAGE_DIR}"
 
 # Copy firmware files
@@ -48,7 +48,7 @@ find "${PACKAGE_DIR}" -name "*.pyc" -delete 2>/dev/null || true
 # Create package info
 cat > "${PACKAGE_DIR}/package_info.json" << EOF
 {
-    "type": "rpi5",
+    "type": "raspberrypi",
     "version": "${VERSION}",
     "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "files": [
@@ -62,12 +62,12 @@ cat > "${PACKAGE_DIR}/package_info.json" << EOF
 EOF
 
 # Create zip package
-PACKAGE_NAME="saint_firmware_rpi5_${VERSION}.zip"
+PACKAGE_NAME="saint_firmware_raspberrypi_${VERSION}.zip"
 PACKAGE_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}"
 
 echo "Creating package: ${PACKAGE_NAME}"
 cd "${TEMP_DIR}"
-zip -r "${PACKAGE_PATH}" "saint_firmware_rpi5_${VERSION}"
+zip -r "${PACKAGE_PATH}" "saint_firmware_raspberrypi_${VERSION}"
 
 # Calculate checksum
 CHECKSUM=$(shasum -a 256 "${PACKAGE_PATH}" | cut -d' ' -f1)
@@ -75,7 +75,7 @@ CHECKSUM=$(shasum -a 256 "${PACKAGE_PATH}" | cut -d' ' -f1)
 # Create info.json for server
 cat > "${OUTPUT_DIR}/info.json" << EOF
 {
-    "type": "rpi5",
+    "type": "raspberrypi",
     "latest_version": "${VERSION}",
     "latest_package": "${PACKAGE_NAME}",
     "latest_checksum": "${CHECKSUM}",
@@ -99,5 +99,5 @@ echo "Package created: ${PACKAGE_PATH}"
 echo "Checksum: ${CHECKSUM}"
 echo ""
 echo "To deploy to server:"
-echo "  cp ${PACKAGE_PATH} /path/to/server/resources/firmware/rpi5/"
-echo "  cp ${OUTPUT_DIR}/info.json /path/to/server/resources/firmware/rpi5/"
+echo "  cp ${PACKAGE_PATH} /path/to/server/resources/firmware/raspberrypi/"
+echo "  cp ${OUTPUT_DIR}/info.json /path/to/server/resources/firmware/raspberrypi/"

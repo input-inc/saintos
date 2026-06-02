@@ -261,8 +261,7 @@ bool flash_storage_save(const flash_storage_data_t* data)
     // session keep-alive window. The first-time save (all bytes
     // changing) still blocks; if that re-introduces the symptom, the
     // follow-up is to defer the save to the main loop instead of
-    // running it inline in the callback. See
-    // docs/SYNC_CONFIG_REGRESSION.md.
+    // running it inline in the callback.
     const uint8_t* src = (const uint8_t*)data;
     for (size_t i = 0; i < sizeof(flash_storage_data_t); i++) {
         EEPROM.update(EEPROM_OFFSET + i, src[i]);

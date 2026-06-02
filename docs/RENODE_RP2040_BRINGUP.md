@@ -307,7 +307,8 @@ Strip these before merging once the sim is green.
 | `firmware/rp2040/simulation/renode_rp2040/cores/rp2040_simple.repl` | I2C0 instantiation updated for new ctor signature (`gpio: gpio; id: 0;`). |
 | `firmware/simulation/node_manager.py` | (a) Dropped `--console` from the background Renode invocation — `--disable-xwt` already implies `HideMonitor`; with `--console` the monitor read EOF from `stdin=DEVNULL` and disposed the machine ~100 ms after start. (b) Removed `MaximumBlockSize 1` + `LogFunctionNames true` + `logLevel -1 sysbus.{xip_ssi,uart0}` diagnostics that were slowing the CPU by orders of magnitude and masking real progress as a hang. |
 
-Sync-config-bug related changes (separate work item — see
-`docs/SYNC_CONFIG_REGRESSION.md`) are in
+Sync-config-bug related additions live in
 `firmware/simulation/test_sync_recovery.py` (the `--existing-node`
-mode). Those should stay regardless of how Renode bring-up lands.
+mode, plus the full 6-phase suite that now exercises every node
+lifecycle stage). Those should stay regardless of how Renode bring-up
+lands.

@@ -14,7 +14,7 @@ Unified simulation manager for both RP2040 and Raspberry Pi 5 nodes.
 
 ```bash
 # Create nodes
-./node_manager.py create head_sim --type rpi5 --role head
+./node_manager.py create head_sim --type raspberrypi --role head
 ./node_manager.py create mcu_node --type rp2040
 
 # Start nodes
@@ -36,7 +36,7 @@ Unified simulation manager for both RP2040 and Raspberry Pi 5 nodes.
 | Type | Platform | Emulation | ROS | Requirements |
 |------|----------|-----------|-----|--------------|
 | `rp2040` | RP2040 MCU | Renode VM | micro-ROS | Renode, micro-ROS agent |
-| `rpi5` | Raspberry Pi 5 | Native Python | Full ROS2 | ROS2 installed |
+| `raspberrypi` | Raspberry Pi 5 | Native Python | Full ROS2 | ROS2 installed |
 
 ## Commands
 
@@ -56,10 +56,10 @@ Unified simulation manager for both RP2040 and Raspberry Pi 5 nodes.
 ## Create Options
 
 ```bash
-./node_manager.py create <node_id> --type <rp2040|rpi5> [options]
+./node_manager.py create <node_id> --type <rp2040|raspberrypi> [options]
 
 Options:
-  --type, -t     Node type (required): rp2040 or rpi5
+  --type, -t     Node type (required): rp2040 or raspberrypi
   --role, -r     Node role: head, arms_left, arms_right, tracks, etc.
   --name, -n     Display name
   --port, -p     UDP port (RP2040 only, auto-assigned if not specified)
@@ -71,7 +71,7 @@ Options:
 
 ```bash
 # Create all nodes
-./node_manager.py create sim_head --type rpi5 --role head --name "Head Controller"
+./node_manager.py create sim_head --type raspberrypi --role head --name "Head Controller"
 ./node_manager.py create sim_left_arm --type rp2040 --role arms_left
 ./node_manager.py create sim_right_arm --type rp2040 --role arms_right
 ./node_manager.py create sim_tracks --type rp2040 --role tracks
@@ -93,7 +93,7 @@ ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888 &
 
 ```bash
 # Start only Pi 5 nodes (no agent needed)
-./node_manager.py start-all --type rpi5
+./node_manager.py start-all --type raspberrypi
 
 # Or only RP2040 nodes
 ./node_manager.py start-all --type rp2040
@@ -108,7 +108,7 @@ firmware/simulation/
 ├── logs/                # Node output logs
 ├── rp2040_storage/      # RP2040 persistent storage
 ├── rp2040_scripts/      # Generated Renode scripts
-└── rpi5_configs/        # Pi 5 node configurations
+└── raspberrypi_configs/        # Pi 5 node configurations
 ```
 
 ## Teensy 4.1 Nodes (work in progress)

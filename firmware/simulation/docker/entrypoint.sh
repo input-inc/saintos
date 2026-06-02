@@ -180,39 +180,79 @@ case "${MODE}" in
     teensy_hang_repro)
         # Hand-orchestrated reproduction of firmware/teensy41/docs/POST_INIT_HANG.md.
         # The hardware reproducer is `sudo systemctl restart saint-os` on
-        # the Pi — that restarts both the agent and the saint_server.
-        # Here we mimic the second half (server restart) while the
-        # Teensy sim is connected, then leave the container running so
-        # an operator can ros2-topic-echo or docker-exec to inspect
-        # state. agent + server + sim node are all up before the
-        # restart fires; the sim node uses node_manager rather than
-        # being orchestrated by the harness so the firmware survives
-        # the restart and we can observe what its loop()/executor/
-        # transport counters do across the event.
+        # the Pi — that restarts both the agent and saint_server while
+        # the Teensy is ADOPTED. We mirror that here: start sim, run a
+        # small adopt-only WS script so the firmware enters ACTIVE,
+        # then SIGTERM+restart agent and server, then watch the
+        # firmware's counter print across the event. node_manager owns
+        # the sim node, NOT the harness, so the firmware survives the
+        # restart and we can see its loop()/executor/transport counters
+        # advance, freeze, or fall out of lockstep.
         echo "[entrypoint] hang-repro: agent + server up"
         echo "[entrypoint] hang-repro: starting Teensy sim node"
         TEENSY_NODE_ID="${TEENSY_NODE_ID:-teensy41_hangtest}"
         ./firmware/simulation/node_manager.py remove "${TEENSY_NODE_ID}" 2>/dev/null || true
         ./firmware/simulation/node_manager.py create "${TEENSY_NODE_ID}" --type teensy41
         ./firmware/simulation/node_manager.py start "${TEENSY_NODE_ID}"
-        echo "[entrypoint] hang-repro: waiting 15s for adoption / steady state…"
-        sleep 15
-        echo "[entrypoint] hang-repro: --- pre-restart counters ---"
-        tail -2 /work/firmware/simulation/logs/"${TEENSY_NODE_ID}".uart.log || true
-        echo "[entrypoint] hang-repro: kill -SIGTERM saint_server (PID ${SERVER_PID})"
+
+        echo "[entrypoint] hang-repro: driving adopt via WS so firmware enters ACTIVE"
+        if python3 /work/firmware/simulation/docker/hang_repro_adopt.py \
+                --ws-url "${WS_URL}" --password "${PASSWORD}"; then
+            echo "[entrypoint] hang-repro: adopt OK"
+        else
+            echo "[entrypoint] hang-repro: adopt failed — continuing anyway " >&2
+            echo "                          (still useful: see if the restart " >&2
+            echo "                           wedges the UNADOPTED loop)" >&2
+        fi
+
+        sleep 5
+        echo "[entrypoint] hang-repro: --- pre-restart counters (last status line) ---"
+        grep -E "loop=|hwuart-alive" \
+            /work/firmware/simulation/logs/"${TEENSY_NODE_ID}".uart.log \
+            2>/dev/null | tail -4 || echo "(no status lines yet)"
+
+        # Mirror `systemctl restart saint-os`: take both agent and server
+        # down, then bring them back up. The hardware repro brings BOTH
+        # back. We do it the same way so the firmware sees the same
+        # session-loss pattern.
+        echo "[entrypoint] hang-repro: SIGTERM agent (PID ${AGENT_PID}) + server (PID ${SERVER_PID})"
         kill -TERM "${SERVER_PID}" 2>/dev/null || true
+        kill -TERM "${AGENT_PID}"  2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
+        wait "${AGENT_PID}"  2>/dev/null || true
         sleep 2
-        echo "[entrypoint] hang-repro: restart saint_server"
+
+        echo "[entrypoint] hang-repro: restart agent + server"
+        ( export LD_LIBRARY_PATH="/opt/uros_libs:/uros_ws/install/micro_ros_agent/lib:/uros_ws/install/micro_ros_msgs/lib:/opt/ros/jazzy/lib"; \
+          exec /uros_ws/install/micro_ros_agent/lib/micro_ros_agent/micro_ros_agent \
+              udp4 --port "${AGENT_PORT}" > /tmp/agent.log 2>&1 ) &
+        AGENT_PID=$!
         ros2 run saint_os saint_server > /tmp/server.log 2>&1 &
         SERVER_PID=$!
-        echo "[entrypoint] hang-repro: ${HANG_OBSERVE_S:-60}s observation window…"
-        sleep "${HANG_OBSERVE_S:-60}"
-        echo "[entrypoint] hang-repro: --- post-restart counters ---"
-        tail -4 /work/firmware/simulation/logs/"${TEENSY_NODE_ID}".uart.log || true
+
+        echo "[entrypoint] hang-repro: ${HANG_OBSERVE_S:-60}s observation window — "
+        echo "                          watching for the firmware's status print "
+        echo "                          to freeze or stay in lockstep."
+        # Stream the last few lines every 10s so progress is visible
+        # from `docker compose logs -f` without waiting for completion.
+        END=$(( $(date +%s) + ${HANG_OBSERVE_S:-60} ))
+        while [ "$(date +%s)" -lt "${END}" ]; do
+            sleep 10
+            echo "[entrypoint] hang-repro: t=$(($(date +%s) - END + ${HANG_OBSERVE_S:-60}))s"
+            grep -E "loop=|hwuart-alive|Announce publish" \
+                /work/firmware/simulation/logs/"${TEENSY_NODE_ID}".uart.log \
+                2>/dev/null | tail -3 || true
+        done
+
+        echo "[entrypoint] hang-repro: --- final counters ---"
+        grep -E "loop=|hwuart-alive" \
+            /work/firmware/simulation/logs/"${TEENSY_NODE_ID}".uart.log \
+            2>/dev/null | tail -6 || true
+
         echo "[entrypoint] hang-repro: stopping sim node"
         ./firmware/simulation/node_manager.py stop "${TEENSY_NODE_ID}" 2>/dev/null || true
-        echo "[entrypoint] hang-repro: done. Tail the UART log under firmware/simulation/logs/."
+        echo "[entrypoint] hang-repro: done. Full UART log at "
+        echo "                          firmware/simulation/logs/${TEENSY_NODE_ID}.uart.log"
         ;;
     shell)
         echo "[entrypoint] agent + server up. Dropping into bash."

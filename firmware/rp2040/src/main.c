@@ -314,8 +314,7 @@ static unsigned g_announce_count = 0;
  * subscription dispatch even when /log is dropping frames. Bumped
  * inside each subscription callback. Reading the values back off
  * /announce tells us whether the executor is delivering messages,
- * which is independent of the /log writer's health. See
- * docs/SYNC_CONFIG_REGRESSION.md. */
+ * which is independent of the /log writer's health. */
 static volatile uint32_t g_config_recv_count = 0;
 static volatile uint32_t g_control_recv_count = 0;
 static volatile uint32_t g_command_recv_count = 0;
@@ -324,10 +323,9 @@ static volatile uint32_t g_command_recv_count = 0;
  * successful pin_config_save(). Server watches this field flip
  * forward to flip the UI's "Sync to Node" pill green. Used to ride
  * on /log ("Config saved to flash") but post-boot /log publishes
- * are dropping on this platform (rcl_publish returns RCL_RET_ERROR;
- * see docs/SYNC_CONFIG_REGRESSION.md); /announce is the only writer
- * that demonstrably keeps working. Zero = no successful save since
- * boot. */
+ * historically dropped on this platform; /announce is the
+ * independent writer that demonstrably keeps working even when /log
+ * is wedged. Zero = no successful save since boot. */
 static volatile uint32_t g_last_config_save_ok_ms = 0;
 /* And a parallel signal for the failure case so the server can flip
  * the pill red instead of leaving it spinning. */
@@ -380,6 +378,14 @@ bool saint_log_emit_ros(const char* json, size_t len)
         return false;
     }
     memcpy(log_buffer, json, len);
+    /* Null-terminate the tail. std_msgs/String's CDR serializer reads
+     * `data` as a null-terminated C string for length on at least one
+     * code path; without this, leftover bytes from a previous longer
+     * publish past `len` corrupt the wire payload — the server sees
+     * `(malformed log frame ... '')` for every short publish that
+     * follows a longer one. Mirrors the Teensy fix in
+     * firmware/teensy41/src/main.cpp:saint_log_emit_ros. */
+    log_buffer[len] = '\0';
     log_msg.data.data     = log_buffer;
     log_msg.data.size     = len;
     log_msg.data.capacity = sizeof(log_buffer);
@@ -978,12 +984,15 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         // First announcement triggers server-side log subscription;
         // once we're past it, deferred boot-status lines can be sent.
         if (g_announce_count < 1000) g_announce_count++;
-        // The server creates the per-node /log subscription lazily on
-        // first announce, so wait for ≥2 announces before flushing the
-        // boot-log buffer — that gives the subscriber time to come up.
-        if (g_announce_count >= 2) {
-            saint_log_drain_boot_queue();
-        }
+        // saint_log_drain_pending is intentionally NOT called here.
+        // Draining from a timer callback means rcl_publish runs while
+        // the rclc executor is mid-callback, sharing the XRCE-DDS
+        // output stream with the just-received inbound message — back-
+        // to-back publishes overwrite each other's slot and the agent
+        // forwards empty payloads to the server (the SYNC_CONFIG
+        // regression). The main loop drains instead; this callback
+        // just bumps g_announce_count so the loop knows when it's
+        // safe to start draining.
     } else {
         printf("Announce publish failed: %d\n", ret);
     }
@@ -1164,7 +1173,7 @@ static bool init_micro_ros(void)
     // ("Config saved to flash" → server's _maybe_handle_sync_ack)
     // still rides this topic, but a dropped sync-ack is recoverable
     // (operator presses Sync again) whereas a wedged /log stream is
-    // not. See docs/SYNC_CONFIG_REGRESSION.md.
+    // not.
     char log_topic[64];
     snprintf(log_topic, sizeof(log_topic),
              "/saint/nodes/%s/log", g_node.node_id);
@@ -1215,8 +1224,7 @@ static bool init_micro_ros(void)
     // count exactly equals RMW_UXRCE_MAX_SUBSCRIPTIONS (=5). After
     // commit bc310cb added the /command sub the executor went 4→5,
     // and the RELIABLE /config subscription stopped dispatching even
-    // though both endpoints match in the DDS graph — see
-    // docs/SYNC_CONFIG_REGRESSION.md (Experiment 2). 8 leaves headroom
+    // though both endpoints match in the DDS graph. 8 leaves headroom
     // for the next sub/timer without bumping into the cap again.
     ret = rclc_executor_init(&executor, &support.context, 8, &allocator);
     if (ret != RCL_RET_OK) {
@@ -1827,6 +1835,18 @@ int main(void)
 
         // Spin micro-ROS executor (process timers and callbacks)
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+
+        // Drain queued /log lines one per iteration. saint_log_publish
+        // enqueues from any context (subscription/timer callbacks
+        // included); the drain runs AFTER spin_some returns so each
+        // rcl_publish lands outside callback dispatch and doesn't
+        // collide with the inbound message's output-stream slot.
+        // Gated on ≥2 announces because the server creates per-node
+        // /log subscribers lazily on first /announce — draining
+        // sooner just leaks bytes into the void.
+        if (g_announce_count >= 2) {
+            saint_log_drain_pending();
+        }
 
         // Periodic status print (every 10 seconds)
         if (now - last_status_print >= 10000) {

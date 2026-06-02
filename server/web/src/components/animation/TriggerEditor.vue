@@ -122,7 +122,7 @@ function destroy () { emit('delete', track.value, props.kfIdx) }
         <div class="grid grid-cols-2 gap-3">
           <label class="text-sm">
             <span class="block text-fg-muted mb-1">Node ID</span>
-            <input class="input-field" placeholder="rpi5_abc123" v-model="kf.target[0]"
+            <input class="input-field" placeholder="raspberrypi_abc123" v-model="kf.target[0]"
                    @input="animations.markDirty()" />
           </label>
           <label class="text-sm">

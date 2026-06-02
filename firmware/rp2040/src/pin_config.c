@@ -610,10 +610,10 @@ bool pin_config_load(void)
     // store) would silently re-open a UART at boot, leaving floating
     // pads claimed across the board. That sometimes wire-OR-ed onto
     // another peripheral's RX input — concretely, this is what was
-    // killing FAS100 readings after the driver consolidation (see
-    // docs/SYNC_CONFIG_REGRESSION.md). Skipping load_config for
-    // drivers whose pin_mode has no matching pin in pin_config keeps
-    // the hardware-ownership contract intact.
+    // killing FAS100 readings after the driver consolidation.
+    // Skipping load_config for drivers whose pin_mode has no
+    // matching pin in pin_config keeps the hardware-ownership
+    // contract intact.
     for (uint8_t d = 0; d < peripheral_get_count(); d++) {
         const peripheral_driver_t* drv = peripheral_get(d);
         if (!drv || !drv->load_config) continue;

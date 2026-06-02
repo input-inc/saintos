@@ -125,7 +125,7 @@ if (( CLEAN )); then
     # that wipes them.
     rm -rf firmware/rp2040/build
     rm -rf firmware/teensy41/.pio
-    rm -rf firmware/rpi5/dist
+    rm -rf firmware/raspberrypi/dist
 fi
 
 # colcon `build/` and `install/` at the repo root persist between runs
@@ -288,18 +288,18 @@ build_firmware_teensy41() {
     fi
 }
 
-build_firmware_rpi5() {
-    local pkg=firmware/rpi5/scripts/package.sh
+build_firmware_raspberrypi() {
+    local pkg=firmware/raspberrypi/scripts/package.sh
     if [[ ! -x "$pkg" ]]; then
         warn "Pi5 package script missing — skipping"
         return
     fi
     log "Packaging Pi5 firmware"
-    ( cd firmware/rpi5/scripts && ./package.sh "${VERSION}" ) \
+    ( cd firmware/raspberrypi/scripts && ./package.sh "${VERSION}" ) \
         || { warn "Pi5 firmware package failed — leaving existing staged files"; return; }
-    if [[ -d firmware/rpi5/dist ]]; then
-        mkdir -p server/resources/firmware/rpi5
-        cp -rv firmware/rpi5/dist/. server/resources/firmware/rpi5/
+    if [[ -d firmware/raspberrypi/dist ]]; then
+        mkdir -p server/resources/firmware/raspberrypi
+        cp -rv firmware/raspberrypi/dist/. server/resources/firmware/raspberrypi/
     fi
 }
 
@@ -335,15 +335,15 @@ elif (( FETCH_FIRMWARE )); then
     [[ -n "$RUN_ID" ]] || die "No successful dist.yml runs on main found"
     log "Using run ${RUN_ID}"
     gh run download "$RUN_ID" --dir _fw \
-        --name firmware-rp2040 --name firmware-teensy41 --name firmware-rpi5 \
+        --name firmware-rp2040 --name firmware-teensy41 --name firmware-raspberrypi \
         --name appimage-controller
-    mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5,controller}
+    mkdir -p server/resources/firmware/{rp2040,teensy41,raspberrypi,controller}
     [[ -d _fw/firmware-rp2040 ]] && find _fw/firmware-rp2040 -type f \
         \( -name '*.uf2' -o -name '*.elf' \) \
         -exec cp {} server/resources/firmware/rp2040/ \;
     [[ -d _fw/firmware-teensy41 ]] && find _fw/firmware-teensy41 -type f \
         -name '*.hex' -exec cp {} server/resources/firmware/teensy41/ \;
-    [[ -d _fw/firmware-rpi5 ]] && cp -r _fw/firmware-rpi5/. server/resources/firmware/rpi5/
+    [[ -d _fw/firmware-raspberrypi ]] && cp -r _fw/firmware-raspberrypi/. server/resources/firmware/raspberrypi/
     # Controller artifact ships the .AppImage + info.json already shaped
     # for the firmware-list endpoint — just copy it over verbatim.
     [[ -d _fw/appimage-controller ]] && cp -r _fw/appimage-controller/. server/resources/firmware/controller/
@@ -353,7 +353,7 @@ else
     log "Building firmware + controller locally so the server tarball contains the latest"
     build_firmware_rp2040
     build_firmware_teensy41
-    build_firmware_rpi5
+    build_firmware_raspberrypi
     if (( SKIP_CONTROLLER_BUILD )); then
         log "Skipping controller AppImage build (--skip-controller-build); using existing staged bundle if any"
     else

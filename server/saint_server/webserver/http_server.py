@@ -81,7 +81,7 @@ class WebServer:
     # (Tauri AppImage); the others are node firmware. They share the same
     # /api/firmware* surface — the controller just happens to ship a single
     # .AppImage file instead of a .zip.
-    FIRMWARE_TYPES = ['rp2040', 'rpi5', 'teensy41', 'controller']
+    FIRMWARE_TYPES = ['rp2040', 'raspberrypi', 'teensy41', 'controller']
 
     def __init__(
         self,

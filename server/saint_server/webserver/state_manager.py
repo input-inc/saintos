@@ -2991,7 +2991,7 @@ class StateManager:
                                          file_glob_suffix: str,
                                          filename_contains: Optional[str] = None
                                          ) -> None:
-        """Shared body for package-firmware (rpi5, controller) info reads.
+        """Shared body for package-firmware (raspberrypi, controller) info reads.
 
         These don't ship a flash image — they ship a versioned archive
         (zip / AppImage) plus an info.json manifest. info.json carries the
@@ -3271,7 +3271,7 @@ class StateManager:
             "simulation": self.get_firmware_build_info("simulation"),
             "hardware": self.get_firmware_build_info("hardware"),
             "teensy41": self.get_firmware_info_for_type("teensy41"),
-            "rpi5": self.get_firmware_info_for_type("rpi5"),
+            "raspberrypi": self.get_firmware_info_for_type("raspberrypi"),
             "controller": self.get_firmware_info_for_type("controller"),
         }
 
@@ -3399,7 +3399,7 @@ class StateManager:
         Get firmware info for a specific platform type.
 
         Args:
-            fw_type: 'rp2040', 'teensy41', 'rpi5', or 'controller'
+            fw_type: 'rp2040', 'teensy41', 'raspberrypi', or 'controller'
 
         Returns dict with:
             - available: Whether firmware is available
@@ -3446,18 +3446,18 @@ class StateManager:
             self._populate_node_firmware_info(result, 'teensy41', 'saint_node.bin')
             return result
 
-        elif fw_type == 'rpi5':
+        elif fw_type == 'raspberrypi':
             # Pi 5 firmware is a zip package, not a flash image. info.json
             # is produced by the Pi 5 build script and carries the version
             # / checksum / package name. Fallback parses the filename if
             # info.json is missing.
             self._populate_package_firmware_info(
-                result, 'rpi5', file_glob_suffix='.zip', filename_contains='rpi5')
+                result, 'raspberrypi', file_glob_suffix='.zip', filename_contains='raspberrypi')
             return result
 
         elif fw_type == 'controller':
             # Steam Deck controller .AppImage. Same info.json shape as
-            # rpi5 (controller/appimage/build-bundle.sh emits it).
+            # raspberrypi (controller/appimage/build-bundle.sh emits it).
             self._populate_package_firmware_info(
                 result, 'controller', file_glob_suffix='.AppImage')
 

@@ -1,13 +1,18 @@
 """
-GPIO Controller for Raspberry Pi 5
+GPIO Controller for Raspberry Pi (3 / 4 / 5)
 
 Provides GPIO control using libgpiod (gpiod) for digital I/O
 and hardware PWM for servo/PWM outputs.
 
-Raspberry Pi 5 GPIO differences from earlier models:
-- Uses RP1 chip for GPIO (not BCM2835/BCM2711)
-- libgpiod is the recommended interface (not RPi.GPIO)
-- Hardware PWM available on GPIO 12, 13, 18, 19
+GPIO chip selection is model-dependent and handled here via fallback
+in _init_gpio:
+  - Pi 5: 40-pin header routed through the RP1 I/O chip — /dev/gpiochip4
+  - Pi 3 / Pi 4: BCM2835/2711 SoC GPIO — /dev/gpiochip0
+
+Hardware PWM is available on GPIO 12, 13, 18, 19 on every supported
+generation (the pin numbering on the 40-pin header is identical).
+libgpiod is used in lieu of RPi.GPIO since the latter does not
+support the Pi 5's RP1 I/O scheme.
 """
 
 import os
@@ -83,7 +88,7 @@ class PinCapability:
 
 class GPIOController:
     """
-    GPIO controller for Raspberry Pi 5.
+    GPIO controller for Raspberry Pi (3 / 4 / 5).
 
     Uses libgpiod for digital I/O and software PWM for PWM outputs.
     Hardware PWM is available on specific pins if needed.

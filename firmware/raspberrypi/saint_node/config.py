@@ -1,5 +1,5 @@
 """
-Configuration Manager for Raspberry Pi 5 Node
+Configuration Manager for Raspberry Pi Node
 
 Handles persistent storage of node configuration including:
 - Node identity (ID, role, display name)

@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-SAINT.OS Raspberry Pi 5 Node
+SAINT.OS Raspberry Pi Node
 
-Main ROS2 node implementation for Raspberry Pi 5 GPIO control.
-Communicates with SAINT.OS server using the same protocol as RP2040 nodes.
+Main ROS2 node implementation for Raspberry Pi 3 / 4 / 5 GPIO control
+and on-host peripherals (audio playback, future I²S/I²C/SPI peripherals).
+Communicates with SAINT.OS server using the same protocol as the
+microcontroller node firmwares (RP2040, Teensy 4.1).
+
+Model-specific behavior (which GPIO chip libgpiod opens, what the
+announcement reports under ``hw``) is detected at startup from
+``/proc/device-tree/model`` so a single firmware build runs on any
+supported Pi without operator configuration.
 """
 
 import json
@@ -29,6 +36,7 @@ from .peripherals.tic import TicDriver
 from .peripherals.pathfinder_bms import PathfinderBMSDriver
 from .peripherals.fas100 import FAS100Driver
 from .peripherals.audio_player import PiAudioPlayerDriver
+from .pi_model import detect_pi_model
 
 
 class NodeState(Enum):
@@ -44,7 +52,7 @@ class NodeState(Enum):
 
 class SaintNode(Node):
     """
-    SAINT.OS Raspberry Pi 5 Node.
+    SAINT.OS Raspberry Pi Node — runs on Pi 3 / Pi 4 / Pi 5.
 
     Implements the same communication protocol as RP2040 nodes:
     - Publishes announcements to /saint/nodes/announce
@@ -54,15 +62,21 @@ class SaintNode(Node):
     - Subscribes to /saint/nodes/<id>/control for runtime control
     """
 
-    # Hardware identification
-    HW_TYPE = "Raspberry Pi 5"
     # Server-side board catalog key. Must match a directory under
     # server/config/boards/; the server uses this to assign a default
     # board (and its built-in peripherals — onboard_audio, etc.) on
-    # adoption.
-    CHIP_FAMILY = "rpi5"
+    # adoption. One catalog entry serves every Pi generation — model-
+    # specific bits (audio jack, GPIO chip name) are runtime concerns.
+    CHIP_FAMILY = "raspberrypi"
 
     def __init__(self):
+        # Detect actual Pi model from /proc/device-tree/model so the
+        # announcement carries "Raspberry Pi 4 Model B" / "Raspberry
+        # Pi 5" / etc. rather than a hardcoded constant. Falls back to
+        # plain "Raspberry Pi" off-Pi (dev host) so the firmware boots
+        # in CI / on a Mac without crashing.
+        self.HW_TYPE = detect_pi_model()
+
         # Generate node ID before calling super().__init__
         self._node_id = self._generate_node_id()
 
@@ -96,7 +110,7 @@ class SaintNode(Node):
         self._peripherals.register(PathfinderBMSDriver)
         self._peripherals.register(FAS100Driver)
         # Built-in audio playback: lives on every Pi-host saint-node,
-        # auto-seeded by the rpi5 board YAML's builtin_peripherals
+        # auto-seeded by the raspberrypi board YAML's builtin_peripherals
         # entry. libVLC is loaded lazily — a missing system package
         # logs an error but doesn't crash the node.
         self._peripherals.register(PiAudioPlayerDriver)
@@ -179,7 +193,7 @@ class SaintNode(Node):
                         serial = line.split(':')[1].strip()
                         # Use last 12 characters of hash
                         hash_id = hashlib.md5(serial.encode()).hexdigest()[:12]
-                        return f'rpi5_{hash_id}'
+                        return f'raspberrypi_{hash_id}'
         except Exception:
             pass
 
@@ -188,14 +202,14 @@ class SaintNode(Node):
             mac = self._get_mac_address()
             if mac:
                 hash_id = hashlib.md5(mac.encode()).hexdigest()[:12]
-                return f'rpi5_{hash_id}'
+                return f'raspberrypi_{hash_id}'
         except Exception:
             pass
 
         # Last resort: use hostname
         hostname = socket.gethostname()
         hash_id = hashlib.md5(hostname.encode()).hexdigest()[:12]
-        return f'rpi5_{hash_id}'
+        return f'raspberrypi_{hash_id}'
 
     def _get_mac_address(self) -> Optional[str]:
         """Get MAC address of primary network interface."""

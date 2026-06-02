@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-SAINT.OS Raspberry Pi 5 Firmware Updater
+SAINT.OS Raspberry Pi Firmware Updater
 
-Handles over-the-air firmware updates for Pi 5 nodes.
+Handles over-the-air firmware updates for Raspberry Pi nodes (Pi 3 /
+Pi 4 / Pi 5). The firmware package is model-independent, so the same
+update artifact reaches every adopted Pi regardless of generation.
 The update process:
 1. Receive update notification via ROS2 control topic
 2. Download update package from server via HTTP
@@ -28,13 +30,13 @@ from . import __version__
 
 
 class FirmwareUpdater:
-    """Handles firmware self-updates for Pi 5 nodes."""
+    """Handles firmware self-updates for Raspberry Pi nodes."""
 
     # Where the firmware is installed
-    DEFAULT_INSTALL_DIR = Path("/opt/saint/firmware/rpi5")
+    DEFAULT_INSTALL_DIR = Path("/opt/saint/firmware/raspberrypi")
 
     # Backup directory for rollback
-    BACKUP_DIR = Path("/opt/saint/firmware/rpi5.backup")
+    BACKUP_DIR = Path("/opt/saint/firmware/raspberrypi.backup")
 
     # Staging directory for new firmware
     STAGING_DIR = Path("/tmp/saint_firmware_staging")
@@ -195,20 +197,24 @@ class FirmwareUpdater:
 
             self._report_progress("extracting", 100)
 
-            # Find the saint_node directory
-            # It might be at root or in a subdirectory
-            for candidate in [extract_dir / "saint_node", extract_dir]:
-                if (candidate / "__init__.py").exists():
-                    return candidate
-
-            # Check one level deep
-            for subdir in extract_dir.iterdir():
-                if subdir.is_dir():
-                    candidate = subdir / "saint_node"
-                    if candidate.exists() and (candidate / "__init__.py").exists():
-                        return subdir
-                    if (subdir / "__init__.py").exists():
-                        return subdir.parent
+            # Locate the directory that CONTAINS a saint_node/ subpackage —
+            # that's what install_update copies to the install dir and what
+            # validate_update walks with rel paths like "saint_node/node.py".
+            # Two archive shapes ship today:
+            #   (a) saint_node/...                       (zip --no-prefix)
+            #   (b) saint_firmware_raspberrypi_<v>/saint_node/...
+            #       (the layout package.sh emits)
+            # Walk extract_dir + one level of subdirs looking for the
+            # first match. Previous logic returned the saint_node dir
+            # itself in case (a), which silently broke validate.
+            candidates = [extract_dir]
+            for child in extract_dir.iterdir():
+                if child.is_dir():
+                    candidates.append(child)
+            for parent in candidates:
+                init_file = parent / "saint_node" / "__init__.py"
+                if init_file.exists():
+                    return parent
 
             self._log("error", "Could not find saint_node package in update")
             return None

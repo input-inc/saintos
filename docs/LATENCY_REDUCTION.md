@@ -78,7 +78,7 @@ Files:
 - `firmware/rp2040/src/main.c` — control subscription switched to
   `rclc_subscription_init_best_effort`.
 - `firmware/teensy41/src/main.cpp` — same.
-- `firmware/rpi5/saint_node/node.py` — added a `_qos_control`
+- `firmware/raspberrypi/saint_node/node.py` — added a `_qos_control`
   (BEST_EFFORT + depth=1) profile; control subscription uses it,
   everything else stays on `_qos_reliable`.
 

@@ -488,7 +488,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     # On-host audio file playback. The catalog entry is platform-agnostic;
     # `backend` picks the concrete implementation the node-side driver
     # uses. Today only "pi_alsa" (python-vlc against the host's ALSA stack)
-    # ships, and the rpi5 board YAML auto-attaches one instance per Pi.
+    # ships, and the raspberrypi board YAML auto-attaches one instance per Pi.
     # A future RP2040 + UART MP3-trigger module would register as
     # backend="<module_id>" with pin_kind/pins covering the UART pair —
     # the catalog stays unchanged.

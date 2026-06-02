@@ -5,7 +5,7 @@ SAINT.OS Unified Node Simulation Manager
 Manages simulated nodes for RP2040 (via Renode), Teensy 4.1 (via Renode), and Raspberry Pi 5 (native Python).
 
 Usage:
-    ./node_manager.py create <node_id> --type <rp2040|rpi5|teensy41> [options]
+    ./node_manager.py create <node_id> --type <rp2040|raspberrypi|teensy41> [options]
     ./node_manager.py start <node_id>
     ./node_manager.py run <node_id>              # Start + follow logs (Ctrl+C detaches)
     ./node_manager.py stop <node_id>
@@ -19,7 +19,7 @@ Usage:
 Node Types:
     rp2040    - Simulated via Renode (micro-ROS, requires micro-ROS agent)
     teensy41  - Simulated via Renode (micro-ROS over UDP, requires micro-ROS agent)
-    rpi5      - Native Python process (full ROS2, no agent needed)
+    raspberrypi      - Native Python process (full ROS2, no agent needed)
 """
 
 import argparse
@@ -40,9 +40,9 @@ class NodeManager:
 
     # Node types
     TYPE_RP2040 = "rp2040"
-    TYPE_RPI5 = "rpi5"
+    TYPE_RASPBERRYPI = "raspberrypi"
     TYPE_TEENSY41 = "teensy41"
-    VALID_TYPES = [TYPE_RP2040, TYPE_RPI5, TYPE_TEENSY41]
+    VALID_TYPES = [TYPE_RP2040, TYPE_RASPBERRYPI, TYPE_TEENSY41]
 
     def __init__(self):
         # Base directories
@@ -73,8 +73,8 @@ class NodeManager:
         self.teensy41_scripts_dir = self.script_dir / "teensy41_scripts"
 
         # Pi 5 specific paths
-        self.rpi5_dir = self.firmware_dir / "rpi5"
-        self.rpi5_config_dir = self.script_dir / "rpi5_configs"
+        self.raspberrypi_dir = self.firmware_dir / "raspberrypi"
+        self.raspberrypi_config_dir = self.script_dir / "raspberrypi_configs"
 
         # Renode path (configurable via environment)
         self.renode_path = os.environ.get(
@@ -168,7 +168,7 @@ class NodeManager:
         self.rp2040_scripts_dir.mkdir(exist_ok=True)
         self.teensy41_storage_dir.mkdir(exist_ok=True)
         self.teensy41_scripts_dir.mkdir(exist_ok=True)
-        self.rpi5_config_dir.mkdir(exist_ok=True)
+        self.raspberrypi_config_dir.mkdir(exist_ok=True)
 
     # =========================================================================
     # Common Operations
@@ -204,7 +204,7 @@ class NodeManager:
         elif node_type == self.TYPE_TEENSY41:
             success = self._create_teensy41(node_id, node, udp_port)
         else:
-            success = self._create_rpi5(node_id, node, role, display_name)
+            success = self._create_raspberrypi(node_id, node, role, display_name)
 
         if success:
             self.state["nodes"][node_id] = node
@@ -238,7 +238,7 @@ class NodeManager:
         elif node["type"] == self.TYPE_TEENSY41:
             return self._start_teensy41(node_id, node, foreground=foreground)
         else:
-            return self._start_rpi5(node_id, node)
+            return self._start_raspberrypi(node_id, node)
 
     def stop(self, node_id: str) -> bool:
         """Stop a running node."""
@@ -307,7 +307,7 @@ class NodeManager:
             if storage_path.exists():
                 storage_path.unlink()
         else:
-            config_dir = self.rpi5_config_dir / node_id
+            config_dir = self.raspberrypi_config_dir / node_id
             if config_dir.exists():
                 shutil.rmtree(config_dir)
                 config_dir.mkdir()
@@ -345,7 +345,7 @@ class NodeManager:
             if script_path.exists():
                 script_path.unlink()
         else:
-            config_dir = self.rpi5_config_dir / node_id
+            config_dir = self.raspberrypi_config_dir / node_id
             if config_dir.exists():
                 shutil.rmtree(config_dir)
 
@@ -1003,11 +1003,11 @@ start
     # Pi 5 Specific
     # =========================================================================
 
-    def _create_rpi5(self, node_id: str, node: Dict,
+    def _create_raspberrypi(self, node_id: str, node: Dict,
                      role: Optional[str], display_name: Optional[str]) -> bool:
         """Create Pi 5 node configuration."""
         # Create config directory
-        config_dir = self.rpi5_config_dir / node_id
+        config_dir = self.raspberrypi_config_dir / node_id
         config_dir.mkdir(exist_ok=True)
 
         # Create initial config file
@@ -1028,17 +1028,17 @@ start
         print(f"  Config: {config_dir}")
         return True
 
-    def _start_rpi5(self, node_id: str, node: Dict) -> bool:
+    def _start_raspberrypi(self, node_id: str, node: Dict) -> bool:
         """Start a Pi 5 node as native Python process."""
         # Prepare environment
         env = os.environ.copy()
         env["SAINT_SIMULATION"] = "1"
         env["SAINT_NODE_ID"] = node_id
-        env["SAINT_CONFIG_DIR"] = str(self.rpi5_config_dir / node_id)
+        env["SAINT_CONFIG_DIR"] = str(self.raspberrypi_config_dir / node_id)
         env["ROS_DOMAIN_ID"] = str(node.get("ros_domain_id", 0))
 
         # Add saint_node to Python path
-        saint_node_path = self.rpi5_dir
+        saint_node_path = self.raspberrypi_dir
         if "PYTHONPATH" in env:
             env["PYTHONPATH"] = f"{saint_node_path}:{env['PYTHONPATH']}"
         else:
@@ -1170,10 +1170,10 @@ def main():
 Node Types:
   rp2040    RP2040 microcontroller (Renode + micro-ROS)
   teensy41  Teensy 4.1 microcontroller (Renode + micro-ROS over UDP)
-  rpi5      Raspberry Pi 5 (native Python + ROS2)
+  raspberrypi      Raspberry Pi 5 (native Python + ROS2)
 
 Examples:
-  %(prog)s create head_sim --type rpi5 --role head
+  %(prog)s create head_sim --type raspberrypi --role head
   %(prog)s create mcu_node --type rp2040 --port 9999
   %(prog)s start head_sim
   %(prog)s run head_sim          # Start and follow logs (Ctrl+C to detach)
@@ -1187,7 +1187,7 @@ Examples:
     create_p = subparsers.add_parser("create", help="Create a new node")
     create_p.add_argument("node_id", help="Unique node identifier")
     create_p.add_argument("--type", "-t", required=True, choices=NodeManager.VALID_TYPES,
-                         help="Node type (rp2040 or rpi5)")
+                         help="Node type (rp2040 or raspberrypi)")
     create_p.add_argument("--role", "-r", help="Node role (head, arms_left, etc.)")
     create_p.add_argument("--name", "-n", help="Display name")
     create_p.add_argument("--port", "-p", type=int, help="UDP port (RP2040 only)")

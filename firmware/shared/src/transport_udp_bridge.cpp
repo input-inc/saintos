@@ -147,13 +147,20 @@ bool transport_udp_bridge_close(struct uxrCustomTransport* transport)
     return true;
 }
 
-/* Post-init-hang diagnostic counters — defined in main.cpp. See the
- * comment block over g_loop_iter for what they catch. */
+/* Post-init-hang diagnostic counters. Defined here (the sim transport
+ * TU) rather than in per-platform main.cpp/main.c so that both the
+ * Teensy sim and the RP2040 sim — which differ in main but share this
+ * transport — link cleanly. Per-platform main extern-declares them
+ * and surfaces them in /announce or the status print. Hardware
+ * transports (transport_native_eth.cpp on Teensy, transport_w5500.c
+ * on RP2040) define their own when the hardware path is the one
+ * being built. See the comment block over g_loop_iter in main.cpp
+ * for what they catch. */
 extern "C" {
-extern volatile uint32_t g_transport_read_entries;
-extern volatile uint32_t g_transport_read_exits;
-extern volatile uint32_t g_transport_write_entries;
-extern volatile uint32_t g_transport_write_exits;
+volatile uint32_t g_transport_read_entries  = 0;
+volatile uint32_t g_transport_read_exits    = 0;
+volatile uint32_t g_transport_write_entries = 0;
+volatile uint32_t g_transport_write_exits   = 0;
 }
 
 size_t transport_udp_bridge_write(

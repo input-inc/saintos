@@ -16,9 +16,9 @@
 #     per node — the saint-node host can drive exactly one ALSA
 #     output card at a time through this driver.
 
-board_id: rpi5
+board_id: raspberrypi
 display_name: "Raspberry Pi 5 (40-pin header)"
-chip_family: rpi5
+chip_family: raspberrypi
 builtin: true        # shipped with SAINT.OS — UI marks uneditable
 
 # Every header pin we don't reserve for kernel use. Order follows the

@@ -55,8 +55,24 @@ void saint_log_set_ros_ready(bool ready);
 /* Replay any buffered lines through saint_log_publish, then mark the
  * buffer as flushed. Idempotent. Call from the announce-tick callback
  * once ≥2 announcements have gone out (the server creates per-node
- * /log subscriptions lazily on first /announce). */
+ * /log subscriptions lazily on first /announce).
+ *
+ * Now an alias for saint_log_drain_pending() — kept for source
+ * compatibility while per-platform mains migrate their call sites
+ * out of timer-callback context. New callers should use
+ * saint_log_drain_pending() directly. */
 void saint_log_drain_boot_queue(void);
+
+/* Drain one queued /log entry. Call from the main loop AFTER
+ * rclc_executor_spin_some() returns — NEVER from a subscription
+ * or timer callback. Non-blocking: if the inter-publish pacer
+ * hasn't elapsed, returns false without popping. See the comment
+ * block over publish_one() in saint_log.c for why the deferred-
+ * drain pattern is load-bearing here.
+ *
+ * Returns true iff an entry was actually published (lets callers
+ * know whether to keep draining or move on). */
+bool saint_log_drain_pending(void);
 
 /* Diagnostic counters — number of saint_log_publish calls that reached
  * the post-boot publish path, and how many of those reported success
@@ -65,6 +81,10 @@ void saint_log_drain_boot_queue(void);
  * /log channel itself is suspect. */
 uint32_t saint_log_emit_attempts(void);
 uint32_t saint_log_emit_ok(void);
+/* Number of queued log entries dropped because the pending queue was
+ * full at enqueue time. Non-zero values mean the firmware is logging
+ * faster than the agent can drain — surface in /announce to spot it. */
+uint32_t saint_log_dropped(void);
 
 /* ── Per-platform hooks (implemented in <platform>/src/main.*) ─────── */
 

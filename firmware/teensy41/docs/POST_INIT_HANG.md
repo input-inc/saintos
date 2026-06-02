@@ -233,11 +233,10 @@ Off-board:
 
 - `ros2 topic info -v /saint/nodes/announce` distinguishes
   "DDS endpoint exists" from "data is flowing".
-- The raw `python3 + AF_PACKET` sniffer (used during this session)
-  reliably shows whether ANY UDP bytes are crossing the wire to /
-  from `192.168.10.81`. Recipe is in
-  [`docs/SYNC_CONFIG_REGRESSION.md`](../../../docs/SYNC_CONFIG_REGRESSION.md)
-  if you need it.
+- A raw `python3 + AF_PACKET` sniffer reliably shows whether ANY UDP
+  bytes are crossing the wire to / from the node's IP. Useful for
+  distinguishing "firmware silent" from "firmware sending, agent or
+  server dropping."
 - micro-ROS agent log lines (`micro_ros_agent-2 …
   SessionManager.hpp | establish_session`, `destroy_session`,
   `delete_client`) are in `journalctl -u saint-os` and tell you

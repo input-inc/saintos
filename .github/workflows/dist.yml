@@ -136,7 +136,7 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  firmware-rpi5:
+  firmware-raspberrypi:
     needs: meta
     runs-on: ubuntu-22.04
     steps:
@@ -144,13 +144,13 @@ jobs:
 
       - name: Package Pi 5 node firmware
         run: |
-          cd firmware/rpi5/scripts
+          cd firmware/raspberrypi/scripts
           ./package.sh "${{ needs.meta.outputs.version }}"
 
       - uses: actions/upload-artifact@v6
         with:
-          name: firmware-rpi5
-          path: firmware/rpi5/dist/
+          name: firmware-raspberrypi
+          path: firmware/raspberrypi/dist/
           if-no-files-found: error
           retention-days: 30
 
@@ -237,7 +237,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   package-server:
-    needs: [meta, firmware-rp2040, firmware-teensy41, firmware-rpi5, appimage-controller]
+    needs: [meta, firmware-rp2040, firmware-teensy41, firmware-raspberrypi, appimage-controller]
     strategy:
       fail-fast: false
       matrix:
@@ -323,7 +323,7 @@ jobs:
       - name: Stage firmware into resources
         run: |
           set -eo pipefail
-          mkdir -p server/resources/firmware/{rp2040,teensy41,rpi5,controller}
+          mkdir -p server/resources/firmware/{rp2040,teensy41,raspberrypi,controller}
           if [[ -d _fw/firmware-rp2040 ]]; then
             find _fw/firmware-rp2040 -type f \( -name '*.uf2' -o -name '*.elf' \) \
               -exec cp -v {} server/resources/firmware/rp2040/ \;
@@ -353,8 +353,8 @@ jobs:
               cp -v "${teensy_ver}" server/resources/firmware/teensy41/generated/version.h
             fi
           fi
-          if [[ -d _fw/firmware-rpi5 ]]; then
-            cp -rv _fw/firmware-rpi5/. server/resources/firmware/rpi5/
+          if [[ -d _fw/firmware-raspberrypi ]]; then
+            cp -rv _fw/firmware-raspberrypi/. server/resources/firmware/raspberrypi/
           fi
           # The appimage-controller artifact ships the .AppImage + the
           # already-populated info.json (built by build-bundle.sh),

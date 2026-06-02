@@ -221,10 +221,10 @@ popd >/dev/null
 # --- stage into server/resources/firmware/controller/ ---------------
 #
 # Match the saint_firmware_<type>_<version>-local.<sha>.<ext> naming
-# established by firmware/rpi5/scripts/package.sh + the on-Deck
+# established by firmware/raspberrypi/scripts/package.sh + the on-Deck
 # build.sh's stage_to_server helper. The server's /api/firmware*
 # endpoints just read info.json, so as long as the shape matches
-# server/resources/firmware/rpi5/info.json, nothing on the server
+# server/resources/firmware/raspberrypi/info.json, nothing on the server
 # needs to know this happened.
 
 # Reuse the same version string the binary baked in at compile time
@@ -256,7 +256,7 @@ mkdir -p "$DEST_DIR"
 #     from info.json, but any stray .AppImage left here would still
 #     be servable via /api/firmware/controller/<filename> and confuse
 #     the OTA flow if an operator pointed at it manually.
-# Other firmware staging dirs (rp2040/teensy41/rpi5) keep their
+# Other firmware staging dirs (rp2040/teensy41/raspberrypi) keep their
 # version-stamped artifacts on purpose — that's their convention.
 find "$DEST_DIR" -maxdepth 1 -type f -name '*.AppImage' -delete
 cp "$APPIMAGE_SRC" "$DEST_DIR/$FILENAME"

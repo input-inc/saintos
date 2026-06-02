@@ -294,10 +294,11 @@ class SaintServerNode(Node):
         # acked on. When a fresh announce shows a larger value than
         # what's here, we treat the increase as the firmware's "I just
         # saved config" handshake and flip the UI's Sync pill. Used to
-        # be sourced from /log, but post-boot /log frames drop on
-        # RP2040 firmware (rcl_publish RCL_RET_ERROR) — /announce is
-        # the only writer that demonstrably keeps publishing, so the
-        # sync handshake rides it. See docs/SYNC_CONFIG_REGRESSION.md.
+        # be sourced from /log, but post-boot /log frames historically
+        # dropped on RP2040 (the underlying empty-payload bug is now
+        # fixed in saint_log_emit_ros) — /announce is the independent
+        # writer that demonstrably keeps publishing through any /log
+        # regression, so the sync handshake rides it.
         self._node_last_save_ok_ms: Dict[str, int] = {}
         self._node_last_save_fail_ms: Dict[str, int] = {}
 
@@ -1173,9 +1174,11 @@ class SaintServerNode(Node):
 
         pub = self._ensure_node_command_publisher(node_id)
 
-        if 'Raspberry Pi' in hw_type or 'rpi5' in hw_type.lower():
-            # Pi 5 node - send download URL
-            self._send_rpi5_firmware_update(pub, node_id, force)
+        if 'Raspberry Pi' in hw_type or 'raspberrypi' in hw_type.lower():
+            # Raspberry Pi node (any generation) — server stages a
+            # zipped Python package; the node downloads + extracts it
+            # in-place over HTTP.
+            self._send_raspberrypi_firmware_update(pub, node_id, force)
         elif 'Teensy' in hw_type or 'teensy' in node_id.lower():
             # Teensy 4.1 — same OTA wire format as RP2040 (size + crc32),
             # different resource path so the server serves the right .bin.
@@ -1184,22 +1187,56 @@ class SaintServerNode(Node):
             # RP2040 node
             self._send_rp2040_firmware_update(pub, node_id, simulation, force)
 
-    def _send_rpi5_firmware_update(self, pub, node_id: str, force: bool = False):
-        """Send firmware update command to a Pi 5 node."""
+    def _resolve_server_url_for_node(self, node_id: str, port: int,
+                                     path: str) -> str:
+        """Build an absolute http URL the node can fetch from.
+
+        The node's saint-node updater uses ``urllib.request.urlretrieve``
+        which won't resolve a relative path; the server has to embed
+        its own reachable IP. We pick the IP of *our* interface that
+        routes to the node's last-known address, so multi-homed
+        servers (Ethernet + WiFi AP, NVMe + USB tether) hand the node
+        a URL on the same subnet it adopted us on.
+        """
+        node = self.state_manager.get_node(node_id)
+        node_ip = (node or {}).get('ip') or ''
+        # Mirror discovery.py's heuristic: open a UDP socket toward the
+        # node and ask the OS which local address it would source from.
+        # No packets actually leave (SOCK_DGRAM connect is a route lookup).
+        server_ip = "127.0.0.1"
+        try:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                target = node_ip or '8.8.8.8'
+                s.connect((target, 80))
+                server_ip = s.getsockname()[0]
+        except Exception as e:
+            self.get_logger().warning(
+                f'Could not derive server IP for {node_id} '
+                f'(node_ip={node_ip!r}): {e}; falling back to {server_ip}')
+        return f"http://{server_ip}:{port}{path}"
+
+    def _send_raspberrypi_firmware_update(self, pub, node_id: str, force: bool = False):
+        """Send firmware update command to a Raspberry Pi node.
+
+        Pi nodes ship a zipped Python package and use urllib to fetch
+        it over HTTP. The URL embedded here must be absolute — see
+        _resolve_server_url_for_node for how the reachable server IP
+        is derived from the node's last-known address.
+        """
         import json
 
-        # Get Pi 5 firmware info
-        fw_info = self.state_manager.get_firmware_info_for_type('rpi5')
+        fw_info = self.state_manager.get_firmware_info_for_type('raspberrypi')
 
         if not fw_info or not fw_info.get('available'):
-            self.get_logger().error(f'No Pi 5 firmware available for update')
+            self.get_logger().error(
+                f'No Raspberry Pi firmware available for update')
             return
 
-        # Construct download URL using server's address
         server_port = getattr(self.web_server, 'port', 80) if hasattr(self, 'web_server') else 80
-        # Use the node's last known IP to determine which interface the server should use
-        # For now, use a relative path that assumes the node can reach the server
-        download_url = f'http://{{server_ip}}:{server_port}/api/firmware/rpi5/{fw_info["filename"]}'
+        download_url = self._resolve_server_url_for_node(
+            node_id, server_port,
+            f'/api/firmware/raspberrypi/{fw_info["filename"]}')
 
         control_data = {
             "action": "firmware_update",
@@ -1214,7 +1251,10 @@ class SaintServerNode(Node):
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
-        self.get_logger().info(f'Sent Pi 5 firmware update command to {node_id} (version: {fw_info.get("version")}, force: {force})')
+        self.get_logger().info(
+            f'Sent Raspberry Pi firmware update to {node_id} '
+            f'(version: {fw_info.get("version")}, force: {force}, '
+            f'url: {download_url})')
 
     def _send_teensy41_firmware_update(self, pub, node_id: str, force: bool = False):
         """Send firmware update command to a Teensy 4.1 node.

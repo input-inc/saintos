@@ -5,7 +5,7 @@
 # Expects (relative to repo root):
 #   - ./install/       saint_os colcon install tree (--merge-install output)
 #   - ./_ros2/opt/ros/<distro>/install/   bundled ROS2 install tree
-#   - server/resources/firmware/{rp2040,teensy41,rpi5}/   staged firmware
+#   - server/resources/firmware/{rp2040,teensy41,raspberrypi}/   staged firmware
 #
 # Usage: make-dist.sh <version> <arch> <ros_distro>
 # Output: dist/saint-os_<version>_<arch>_<ros_distro>.tar.zst

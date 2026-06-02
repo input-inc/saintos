@@ -32,7 +32,7 @@ https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html
 ### 2. Install SAINT Node
 
 ```bash
-cd firmware/rpi5
+cd firmware/raspberrypi
 sudo ./scripts/install.sh
 ```
 
@@ -54,7 +54,7 @@ journalctl -u saint-node -f
 Configuration is stored in `/etc/saint-node/config.yaml`:
 
 ```yaml
-node_id: rpi5_abc123def456
+node_id: raspberrypi_abc123def456
 role: head
 display_name: "Head Controller"
 adopted: true
@@ -117,7 +117,7 @@ All messages use JSON payloads in std_msgs/String, identical to RP2040 nodes.
 ### Announcement
 ```json
 {
-  "node_id": "rpi5_abc123def456",
+  "node_id": "raspberrypi_abc123def456",
   "mac": "dc:a6:32:xx:xx:xx",
   "ip": "192.168.1.100",
   "hw": "Raspberry Pi 5",

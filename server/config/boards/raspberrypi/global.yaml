@@ -3,7 +3,7 @@
 #
 # Pi 5 routes the user-accessible GPIO header through the RP1
 # I/O controller, exposed to userspace as /dev/gpiochip4. The
-# saint_node Pi-side firmware (firmware/rpi5/saint_node/gpio_control.py)
+# saint_node Pi-side firmware (firmware/raspberrypi/saint_node/gpio_control.py)
 # already encodes the pin list and capability map; this YAML mirrors
 # that into the server's chip catalog so the Peripherals tab can
 # offer the same pins/UARTs as on the microcontroller boards.
@@ -14,7 +14,7 @@
 # Everything else on the 40-pin header (GPIO 2..13, 16..27) is
 # available, matching gpio_control.py's AVAILABLE_GPIOS list.
 
-chip_family: rpi5
+chip_family: raspberrypi
 display_name: "Raspberry Pi 5"
 description: >
   Broadcom BCM2712 + RP1 I/O controller. 28 user-accessible GPIO
@@ -24,7 +24,7 @@ description: >
 
 # Pi 5 doesn't expose a numeric chip-ID register we read at adoption
 # time the way the RP2040/iMXRT1062 do; firmware reports HW string
-# "Raspberry Pi 5" and chip_family "rpi5" in the announcement message.
+# "Raspberry Pi 5" and chip_family "raspberrypi" in the announcement message.
 chip_id_value: 0
 
 gpio_count: 28

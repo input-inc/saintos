@@ -247,7 +247,7 @@ size_t transport_native_eth_read(
          * in the DDS graph). delay(1) is a busy yield at 600 MHz —
          * yes, hotter — but keeps RX latency in the microseconds
          * where XRCE expects it. The matching revert is in
-         * src/main.cpp. See docs/SYNC_CONFIG_REGRESSION.md. */
+         * src/main.cpp. */
         delay(1);
     }
 

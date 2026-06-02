@@ -169,17 +169,18 @@ static unsigned g_announce_count = 0;
 static volatile uint32_t g_loop_iter             = 0;
 static volatile uint32_t g_executor_spin_entries = 0;
 static volatile uint32_t g_executor_spin_exits   = 0;
-/* Transport-layer counters live here (so the announce builder can read
- * them as plain locals) but are incremented from inside the per-
- * transport read/write hooks in firmware/shared/src/transport_udp_bridge.cpp
- * and firmware/teensy41/transport/transport_native_eth.cpp via
- * `saint_diag_transport_*`. extern "C" linkage keeps the symbol stable
- * across the C/C++ boundary. */
+/* Transport-layer counters are defined in the per-transport TU that
+ * actually increments them (firmware/shared/src/transport_udp_bridge.cpp
+ * for the sim path, firmware/teensy41/transport/transport_native_eth.cpp
+ * for hardware). Defining them here would conflict at link time for
+ * the sim build (both this file and transport_udp_bridge.cpp ship
+ * the same firmware). extern "C" so the C++ name mangling doesn't
+ * disagree across the TU boundary. */
 extern "C" {
-volatile uint32_t g_transport_read_entries  = 0;
-volatile uint32_t g_transport_read_exits    = 0;
-volatile uint32_t g_transport_write_entries = 0;
-volatile uint32_t g_transport_write_exits   = 0;
+extern volatile uint32_t g_transport_read_entries;
+extern volatile uint32_t g_transport_read_exits;
+extern volatile uint32_t g_transport_write_entries;
+extern volatile uint32_t g_transport_write_exits;
 } // extern "C"
 
 #define STATE_PUBLISH_INTERVAL_MS 100
@@ -593,7 +594,6 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     snprintf(announcement_buffer + ann_len,
         sizeof(announcement_buffer) - ann_len, "}}");
     ann_len = strlen(announcement_buffer);
-    Serial.printf("Announcement len=%d\n", ann_len);
 
     announcement_msg.data.data = announcement_buffer;
     announcement_msg.data.size = strlen(announcement_buffer);
@@ -606,9 +606,13 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         // first announce, so wait for ≥2 announces before flushing the
         // boot-log buffer — that gives the subscriber time to come up.
         if (g_announce_count < 1000) g_announce_count++;
-        if (g_announce_count >= 2) {
-            saint_log_drain_boot_queue();
-        }
+        // saint_log_drain_pending is intentionally NOT called here. It
+        // used to be (as saint_log_drain_boot_queue) but that put
+        // rcl_publish calls inside the executor's timer-callback
+        // dispatch — the exact context that produced the empty-/log-
+        // frame regression. The main loop now drains; this callback
+        // just bumps g_announce_count so the loop knows when it's
+        // safe to start draining.
     } else {
         // Surface publish failures instead of swallowing them. Without
         // this, an XRCE-DDS session that's lost its publisher (e.g.
@@ -713,7 +717,7 @@ static bool init_micro_ros(void)
     // (the agent saw the first announce, then silence for >15 s, then
     // a fresh discovery → endless reconnect loop). Sync-ACK rides
     // /announce now (see g_last_config_save_ok_ms below), so dropping
-    // /log to BEST_EFFORT is safe. See docs/SYNC_CONFIG_REGRESSION.md.
+    // /log to BEST_EFFORT is safe.
     snprintf(topic, sizeof(topic), "/saint/nodes/%s/log", g_node.node_id);
     for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
     ret = rclc_publisher_init_best_effort(&log_pub, &ros_node,
@@ -735,7 +739,7 @@ static bool init_micro_ros(void)
     // when handle count exactly equals RMW_UXRCE_MAX_SUBSCRIPTIONS (=5)
     // on micro-ROS. The same provisioning is used on RP2040; without
     // it the Teensy's publishers create their DDS endpoints fine but
-    // every publish silently fails — see docs/SYNC_CONFIG_REGRESSION.md.
+    // every publish silently fails.
     ret = rclc_executor_init(&executor, &support.context, 8, &allocator);
     if (ret != RCL_RET_OK) return false;
 
@@ -781,6 +785,13 @@ extern "C" bool saint_log_emit_ros(const char* json, size_t len)
 {
     if (len >= sizeof(log_buffer)) return false;
     memcpy(log_buffer, json, len);
+    /* std_msgs/String's CDR serializer reads `data` as a null-terminated
+     * C string for length computation in addition to honoring data.size;
+     * if leftover bytes from a previous, longer publish sit past `len`
+     * with no intervening null, the serialized payload silently truncates
+     * or scrambles at the boundary. Zero the tail so every publish
+     * starts from a clean buffer. */
+    log_buffer[len] = '\0';
     log_msg.data.data     = log_buffer;
     log_msg.data.size     = len;
     log_msg.data.capacity = sizeof(log_buffer);
@@ -827,8 +838,7 @@ static bool check_agent_connection(void)
      * announces, while the agent's session looked alive. Until we
      * root-cause that, fall back to the last_successful_comm
      * timeout heuristic: dist installs will reconnect within the
-     * usual 15 s instead of the ~2 s the ping enabled. Tracked as a
-     * follow-up in docs/SYNC_CONFIG_REGRESSION.md. */
+     * usual 15 s instead of the ~2 s the ping enabled. */
     if (agent_connected && last_successful_comm > 0) {
         if (now - last_successful_comm > CONNECTION_TIMEOUT_MS) {
             agent_connected = false;
@@ -1068,6 +1078,18 @@ void loop()
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
     g_executor_spin_exits++;
 
+    // Drain queued /log lines, one per iteration. Pacer inside the
+    // drain enforces SAINT_LOG_MIN_PUBLISH_INTERVAL_MS between
+    // publishes so back-to-back enqueues from a subscription
+    // callback (config_subscription_callback's 4-line burst) trickle
+    // out at the right cadence instead of overrunning the agent's
+    // Cyclone DDS relay. Gated on ≥2 announces — the server creates
+    // per-node /log subscribers lazily on first /announce, so
+    // draining sooner just leaks bytes into the void.
+    if (g_announce_count >= 2) {
+        saint_log_drain_pending();
+    }
+
     // Periodic status + post-init-hang diagnostic counters. Mirrored
     // to Serial1 (always the hardware UART on D0/D1) so hypothesis 4
     // in docs/POST_INIT_HANG.md becomes directly testable on hardware:
@@ -1107,8 +1129,7 @@ void loop()
      * node appeared online to the agent only briefly, then went
      * dark for the 15 s server timeout, repeatedly. delay(1) is a
      * yield-busy-loop on Teensy 4 — chip runs hotter when idle, but
-     * the rest of the stack works. See
-     * docs/SYNC_CONFIG_REGRESSION.md. */
+     * the rest of the stack works. */
     uint32_t loop_deadline = now + 10;
     while ((int32_t)(millis() - loop_deadline) < 0) {
         delay(1);

@@ -7,16 +7,16 @@ Simulated nodes run as Python processes with mock GPIO, communicating via standa
 
 ```bash
 # Create a simulated node
-./rpi5_node_manager.py create sim_head --role head --name "Simulated Head"
+./raspberrypi_node_manager.py create sim_head --role head --name "Simulated Head"
 
 # Start the node
-./rpi5_node_manager.py start sim_head
+./raspberrypi_node_manager.py start sim_head
 
 # View logs
-./rpi5_node_manager.py logs sim_head -f
+./raspberrypi_node_manager.py logs sim_head -f
 
 # Stop the node
-./rpi5_node_manager.py stop sim_head
+./raspberrypi_node_manager.py stop sim_head
 ```
 
 ## Requirements
@@ -50,7 +50,7 @@ Simulated nodes run as Python processes with mock GPIO, communicating via standa
 
 ```
 simulation/
-├── rpi5_node_manager.py  # Node management script
+├── raspberrypi_node_manager.py  # Node management script
 ├── nodes.json            # Node registry
 ├── node_configs/         # Per-node configuration
 │   ├── sim_head/
@@ -85,25 +85,25 @@ Simulated nodes appear in the SAINT.OS web UI just like real hardware:
 
 ```bash
 # Create several nodes
-./rpi5_node_manager.py create sim_head --role head
-./rpi5_node_manager.py create sim_left_arm --role arms_left
-./rpi5_node_manager.py create sim_right_arm --role arms_right
+./raspberrypi_node_manager.py create sim_head --role head
+./raspberrypi_node_manager.py create sim_left_arm --role arms_left
+./raspberrypi_node_manager.py create sim_right_arm --role arms_right
 
 # Start all
-./rpi5_node_manager.py start-all
+./raspberrypi_node_manager.py start-all
 
 # Check status
-./rpi5_node_manager.py list
+./raspberrypi_node_manager.py list
 
 # Stop all
-./rpi5_node_manager.py stop-all
+./raspberrypi_node_manager.py stop-all
 ```
 
 ## Debugging
 
 View real-time logs:
 ```bash
-./rpi5_node_manager.py logs sim_head -f
+./raspberrypi_node_manager.py logs sim_head -f
 ```
 
 Check ROS2 topics:

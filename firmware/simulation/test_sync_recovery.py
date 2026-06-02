@@ -735,6 +735,173 @@ async def run_test(ws_url: str, password: str,
             else:
                 _say("phase 3", "node healed itself end-to-end")
 
+        # ── Phase 4: basic control — identify_node ───────────────────
+        # Exercises the /command subscription path (RELIABLE one-shots).
+        # `identify_node` is the cheapest action that ends in a
+        # firmware-side side effect we can observe: the firmware's
+        # `dispatch_action_buffer` for action=="identify" calls
+        # `led_identify(5)`, which Serial.printf's `LED identify:
+        # flashing 5 times`. If /command dispatches correctly, that
+        # line goes via saint_log_emit_local → Serial → /log topic
+        # (when called from saint_log_publish wrappers) — but identify
+        # only Serial-prints, so we have to check the UART log
+        # file directly, not /log. node_manager owns the UART file
+        # capture so the path is stable across sim runs.
+        _say("phase 4", "issuing identify_node (RELIABLE /command path)")
+        identify_uart_log = SCRIPT_DIR / "logs" / f"{sim_node_id}.uart.log"
+        # Snapshot file length so we only match lines emitted AFTER
+        # the WS call. Without this, a stale "LED identify" from a
+        # previous run trivially passes.
+        identify_offset = (identify_uart_log.stat().st_size
+                            if identify_uart_log.exists() else 0)
+        await client.request("identify_node", {"node_id": target_node_id})
+        identify_deadline = time.monotonic() + SYNC_WAIT_S
+        identify_seen = False
+        while time.monotonic() < identify_deadline:
+            if identify_uart_log.exists():
+                with open(identify_uart_log, "rb") as f:
+                    f.seek(identify_offset)
+                    if b"LED identify" in f.read():
+                        identify_seen = True
+                        break
+            await asyncio.sleep(0.5)
+        if identify_seen:
+            _say("phase 4", "firmware processed identify (LED flash logged)")
+        else:
+            _say("phase 4",
+                 f"firmware never logged 'LED identify' within {SYNC_WAIT_S}s "
+                 "— /command subscription may not be dispatching",
+                 ok=False)
+            failures += 1
+
+        # ── Phase 5: OTA update flow ─────────────────────────────────
+        # Issues firmware_update via the /command path. The server's
+        # force_firmware_update assembles the payload (version + size
+        # + crc32 of the staged firmware) and publishes it to
+        # /saint/nodes/<id>/command. The firmware's
+        # `handle_firmware_update` Serial.printf's "FIRMWARE UPDATE
+        # REQUESTED" before deciding whether to apply it. On
+        # SIMULATION it halts after — node_manager would relaunch
+        # with the new ELF in a real OTA flow.
+        _say("phase 5", "issuing force_firmware_update (OTA path)")
+        ota_uart_log = SCRIPT_DIR / "logs" / f"{sim_node_id}.uart.log"
+        ota_offset = (ota_uart_log.stat().st_size
+                      if ota_uart_log.exists() else 0)
+        # build_type=simulation tells the server which staged firmware
+        # to broadcast — under SIMULATION we want the sim ELF, not the
+        # hardware .bin. force_firmware_update bypasses the "is your
+        # current version older" check, which we want for a smoke run.
+        # The server's force_firmware_update gate now routes by chip
+        # family (Teensy nodes look up server/resources/firmware/teensy41/,
+        # RP2040 nodes still hit firmware/rp2040/build_sim/) so the
+        # call works on both platforms.
+        ota_resp = await client.request("force_firmware_update",
+                                        {"node_id": target_node_id,
+                                         "build_type": "simulation"})
+        ota_resp_msg = ota_resp.get("message") or ""
+        if ota_resp.get("status") != "ok":
+            _say("phase 5",
+                 f"server rejected force_firmware_update: {ota_resp_msg}",
+                 ok=False)
+            failures += 1
+        else:
+            ota_deadline = time.monotonic() + SYNC_WAIT_S
+            ota_seen = False
+            while time.monotonic() < ota_deadline:
+                if ota_uart_log.exists():
+                    with open(ota_uart_log, "rb") as f:
+                        f.seek(ota_offset)
+                        if b"FIRMWARE UPDATE REQUESTED" in f.read():
+                            ota_seen = True
+                            break
+                await asyncio.sleep(0.5)
+            if ota_seen:
+                _say("phase 5", "firmware acknowledged OTA request")
+            else:
+                _say("phase 5",
+                     f"firmware never logged 'FIRMWARE UPDATE REQUESTED' "
+                     f"within {SYNC_WAIT_S}s",
+                     ok=False)
+                failures += 1
+
+        # ── Phase 6: server-initiated unadopt + re-adopt ─────────────
+        # `remove_node` is the operator's "Forget this node" button.
+        # The server sends factory_reset to the firmware (which clears
+        # flash + reboots), then drops the node from its adopted set.
+        # After the sim node restarts, it announces fresh as UNADOPTED
+        # — different from Phase 3's "server still thinks it's adopted,
+        # auto-reconcile pushes config back" path. Re-adopting from
+        # this state should walk through the full Phase 2 sequence
+        # again.
+        _say("phase 6",
+             "issuing remove_node (server-initiated factory reset)")
+        remove_resp = await client.request("remove_node",
+                                           {"node_id": target_node_id})
+        if remove_resp.get("status") != "ok":
+            _say("phase 6",
+                 f"server rejected remove_node: "
+                 f"{remove_resp.get('message') or '(no msg)'}",
+                 ok=False)
+            failures += 1
+        else:
+            # The firmware halts after factory_reset under SIMULATION;
+            # node_manager has to restart it to see the post-wipe boot.
+            _say("phase 6", "restarting sim node after factory reset")
+            _run_node_manager("stop", sim_node_id)
+            _run_node_manager("reset", sim_node_id)
+            _run_node_manager("start", sim_node_id)
+
+            # Wait for the firmware to announce again (under whatever
+            # node_id its chip-derived hash gives — same as Phase 1).
+            _say("phase 6", "waiting for fresh UNADOPTED announcement")
+            chip_prefix = f"{node_type}_"
+            re_announce_deadline = time.monotonic() + ADOPT_WAIT_S
+            re_announced = None
+            while time.monotonic() < re_announce_deadline:
+                resp = await client.request("list_unadopted")
+                nodes = (resp.get("data") or {}).get("nodes") or []
+                re_announced = next(
+                    (n for n in nodes
+                     if (n.get("node_id") or "").startswith(chip_prefix)),
+                    None,
+                )
+                if re_announced:
+                    break
+                await asyncio.sleep(1.0)
+            if not re_announced:
+                _say("phase 6",
+                     "no fresh announcement after factory reset",
+                     ok=False)
+                failures += 1
+            else:
+                target_node_id = re_announced.get("node_id")
+                _say("phase 6", f"node re-announced as {target_node_id}")
+                # Re-subscribe under the (possibly new) announced id.
+                await client.subscribe([
+                    f"node_log/{target_node_id}",
+                    f"sync_status/{target_node_id}",
+                ], rate_hz=10)
+                # Re-adopt and verify the config flows again.
+                await client.request("adopt_node", {
+                    "node_id": target_node_id,
+                    "role": "cradle_base",
+                    "display_name": "SyncTest-Readopt",
+                    "board_id": board_id,
+                })
+                await asyncio.sleep(1.0)  # let DDS settle (Phase 2 logic)
+                await client.request("sync_node_peripherals",
+                                     {"node_id": target_node_id})
+                entry = await client.wait_for_node_log_containing(
+                    target_node_id, "Config saved to flash", SYNC_WAIT_S)
+                if entry:
+                    _say("phase 6", "re-adoption ack'd via /announce")
+                else:
+                    _say("phase 6",
+                         f"re-adopt issued but no 'Config saved to "
+                         f"flash' ack within {SYNC_WAIT_S}s",
+                         ok=False)
+                    failures += 1
+
         await client.close()
 
     finally:

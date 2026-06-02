@@ -163,6 +163,20 @@ COPY firmware/rp2040/simulation/ /work/firmware/rp2040/simulation/
 # rebuilds.
 COPY firmware/teensy41/simulation/ /work/firmware/teensy41/simulation/
 
+# Expose the repo's firmware-resource tree under the ament share dir
+# so saint_server's `_firmware_staging_dir(fw_type)` candidate-path 3
+# (the get_package_share_directory + 'resources/firmware/<fw_type>'
+# probe) finds the staged firmware bins. setup.py doesn't install
+# `server/resources/` (it only installs `share/saint_os/config` and
+# the web dist), so without this the OTA flow on Teensy reports
+# "No simulation firmware build found" even though
+# `server/resources/firmware/teensy41/saint_node.bin` is in the image.
+# The repo `COPY server/ /work/server/` earlier puts the resources at
+# their dev location; the symlink keeps the package-share lookup
+# working for any per-chip artifact without needing setup.py edits.
+RUN mkdir -p /work/install/share/saint_os \
+    && ln -s /work/server/resources /work/install/share/saint_os/resources
+
 # Renode binary discovery — the harness looks at $RENODE_PATH first.
 ENV RENODE_PATH=/usr/local/bin/renode
 # Default agent address inside the container is loopback; harness

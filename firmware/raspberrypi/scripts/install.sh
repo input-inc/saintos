@@ -1,12 +1,13 @@
 #!/bin/bash
 #
-# SAINT.OS Raspberry Pi 5 Node Installation Script
+# SAINT.OS Raspberry Pi Node Installation Script
 #
-# This script installs the SAINT node firmware on a Raspberry Pi 5.
-# It should be run with sudo privileges.
+# Installs the SAINT node firmware on any supported Raspberry Pi
+# (Pi 3 / Pi 4 / Pi 5). Run with sudo privileges:
 #
-# Usage: sudo ./install.sh
+#   sudo ./install.sh
 #
+# See firmware/raspberrypi/docs/INSTALL.md for the full guide.
 
 set -e
 
@@ -21,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIRMWARE_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}SAINT.OS Raspberry Pi 5 Node Installer${NC}"
+echo -e "${GREEN}SAINT.OS Raspberry Pi Node Installer${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 
@@ -31,15 +32,17 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Check if running on a Raspberry Pi
+# Detect device model. The firmware itself runs on Pi 3 / 4 / 5;
+# the installer warns only on non-Pi hosts so a developer testing on
+# a desktop x86 box still gets a clear signal.
 if [ ! -f /proc/device-tree/model ]; then
-    echo -e "${YELLOW}Warning: Cannot detect device model${NC}"
+    echo -e "${YELLOW}Warning: Cannot detect device model (not running on a Pi?)${NC}"
 else
     MODEL=$(cat /proc/device-tree/model)
     echo -e "Detected: ${GREEN}$MODEL${NC}"
 
-    if [[ "$MODEL" != *"Raspberry Pi 5"* ]]; then
-        echo -e "${YELLOW}Warning: This installer is designed for Raspberry Pi 5${NC}"
+    if [[ "$MODEL" != *"Raspberry Pi"* ]]; then
+        echo -e "${YELLOW}Warning: Not a Raspberry Pi — installer untested here${NC}"
         read -p "Continue anyway? (y/N) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -50,8 +53,18 @@ fi
 
 echo ""
 echo "Step 1: Installing system dependencies..."
+# libvlc-dev + vlc-bin: backs the built-in audio_player peripheral.
+#   python-vlc (installed in step 3) wraps libvlc; without these
+#   system packages the audio_player driver disables itself with a
+#   loud error and the rest of the node keeps running.
+# libgpiod2 / python3-gpiod: GPIO control (works on Pi 3/4 gpiochip0
+#   and Pi 5 RP1 gpiochip4 alike).
 apt-get update
-apt-get install -y python3-pip python3-venv python3-gpiod libgpiod2
+apt-get install -y \
+    python3-pip python3-venv \
+    python3-gpiod libgpiod2 \
+    vlc-bin libvlc-dev python3-vlc \
+    alsa-utils
 
 echo ""
 echo "Step 2: Checking for ROS2 installation..."
@@ -74,6 +87,8 @@ source "$ROS_SETUP"
 
 echo ""
 echo "Step 3: Installing Python dependencies..."
+# python-vlc is installed via apt (python3-vlc above) so this pip
+# step covers only what apt doesn't ship.
 pip3 install --break-system-packages pyyaml gpiod || pip3 install pyyaml gpiod
 
 echo ""
@@ -92,9 +107,14 @@ ln -sf "$INSTALL_DIR/saint_node" "$SITE_PACKAGES/saint_node" 2>/dev/null || \
     cp -r "$INSTALL_DIR/saint_node" "$SITE_PACKAGES/"
 
 echo ""
-echo "Step 5: Creating configuration directory..."
+echo "Step 5: Creating configuration + state directories..."
 mkdir -p /etc/saint-node
 chmod 755 /etc/saint-node
+# Audio library: the built-in audio_player peripheral plays files
+# from this folder. Default path matches the rpi5 board YAML's
+# `library_path` param — operators drop .wav / .mp3 / .flac here.
+mkdir -p /var/lib/saint-os/audio
+chmod 755 /var/lib/saint-os/audio
 
 echo ""
 echo "Step 6: Installing systemd service..."
@@ -138,4 +158,7 @@ echo "To view logs:"
 echo "  journalctl -u saint-node -f"
 echo ""
 echo "Configuration files are stored in: /etc/saint-node/"
+echo "Audio library:                     /var/lib/saint-os/audio/"
+echo ""
+echo "See firmware/raspberrypi/docs/INSTALL.md for OTA + troubleshooting."
 echo ""

@@ -1969,7 +1969,7 @@ source/
 ├── firmware/                         # Node firmware (separate from ROS build)
 │   ├── rp2040/                       # Raspberry Pi Pico (C / Pico SDK)
 │   ├── teensy41/                     # Teensy 4.1 (Arduino / PlatformIO)
-│   ├── rpi5/                         # Pi 5 peripheral nodes (Python systemd)
+│   ├── raspberrypi/                         # Pi 5 peripheral nodes (Python systemd)
 │   ├── shared/                       # Platform-agnostic headers + sources
 │   └── simulation/                   # Renode bring-up for rp2040 + teensy41
 │
@@ -2006,7 +2006,7 @@ source/
 │   └── firmware/                     # Built node firmware artifacts
 │       ├── rp2040/                   # saint_node.uf2, saint_node_combined.uf2, …
 │       ├── teensy41/                 # firmware.hex
-│       └── rpi5/                     # saint_firmware_rpi5_<ver>.zip
+│       └── raspberrypi/                     # saint_firmware_raspberrypi_<ver>.zip
 │
 ├── launch/
 │   ├── server.launch.py              # Launch main server

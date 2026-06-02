@@ -156,7 +156,7 @@ supported node types are:
 |---|---|---|
 | `rp2040` | `saint_node.uf2` (initial flash) and `saint_node_combined.uf2` (initial + OTA bootloader for the first install) | Raspberry Pi Pico W |
 | `teensy41` | `firmware.hex` | Teensy 4.1 |
-| `rpi5` | `saint_firmware_rpi5_<ver>.zip` | Raspberry Pi 5 acting as a peripheral node (not the server) |
+| `raspberrypi` | `saint_firmware_raspberrypi_<ver>.zip` | Raspberry Pi 5 acting as a peripheral node (not the server) |
 
 The web UI surfaces them on the **Firmware** page with one-click
 download buttons.
@@ -205,9 +205,9 @@ fine.
 
 For a Pi-5 used as a peripheral (analog heartbeat + audio + display
 sink rather than the server), download
-`saint_firmware_rpi5_<ver>.zip`, unzip it on the target Pi, and run
+`saint_firmware_raspberrypi_<ver>.zip`, unzip it on the target Pi, and run
 the install script inside. It registers itself with the upstream
-SAINT.OS server via mDNS. See `firmware/rpi5/` for details
+SAINT.OS server via mDNS. See `firmware/raspberrypi/` for details
 on the script and systemd unit it installs.
 
 ---

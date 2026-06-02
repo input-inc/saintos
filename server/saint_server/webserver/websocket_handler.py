@@ -1475,9 +1475,26 @@ class WebSocketHandler:
             if build_type not in ('simulation', 'hardware'):
                 return {"status": "error", "message": "Invalid build_type (must be 'simulation' or 'hardware')"}
 
-            # Get firmware info for the requested build type
-            fw_info = self.state_manager.get_firmware_build_info(build_type)
-            if not fw_info["available"]:
+            # Pick the firmware-info lookup based on the target node's
+            # chip family. `get_firmware_build_info` is RP2040-only
+            # (walks firmware/rp2040/build* paths for sim/hardware
+            # variants); for Teensy + Pi 5 the per-chip helper
+            # `get_firmware_info_for_type` knows where the staged
+            # artifact actually lives. Without this branch, OTA pushes
+            # to a Teensy node always returned "No <build_type> firmware
+            # build found" even when server/resources/firmware/teensy41/
+            # had a staged .bin. send_firmware_update_command already
+            # routes to the right per-chip publisher on the callback
+            # side — this just makes the WS gate match.
+            node_info = self.state_manager.get_node(node_id)
+            hw_type = (node_info.get('hw') or '') if node_info else ''
+            if 'Teensy' in hw_type or node_id.startswith('teensy41_'):
+                fw_info = self.state_manager.get_firmware_info_for_type('teensy41')
+            elif 'Raspberry Pi' in hw_type or 'raspberrypi' in hw_type.lower():
+                fw_info = self.state_manager.get_firmware_info_for_type('raspberrypi')
+            else:
+                fw_info = self.state_manager.get_firmware_build_info(build_type)
+            if not fw_info.get("available"):
                 return {"status": "error", "message": f"No {build_type} firmware build found"}
 
             # Trigger firmware update via callback (forced)

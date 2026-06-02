@@ -23,10 +23,10 @@ const tab = ref('server')
 // Server-side data
 const clients = ref([])
 // `get_firmware_builds` returns a dict keyed by firmware type:
-//   { simulation, hardware, rpi5, controller, (teensy41?) }
+//   { simulation, hardware, raspberrypi, controller, (teensy41?) }
 // Each entry has at least { available, version, build_date, ... } —
 // the exact extras depend on the type (rp2040 has git_hash/version_full,
-// rpi5/controller have filename/checksum, teensy41 has bin_size/crc32).
+// raspberrypi/controller have filename/checksum, teensy41 has bin_size/crc32).
 const firmwareBuilds = ref({})
 const firmwareLastChecked = ref(null)  // ms epoch — drives the "checked 5s ago" label
 
@@ -181,9 +181,9 @@ function fmtDuration (sec) {
 
 // ── Firmware-tab formatters ─────────────────────────────────────────
 // File size in binary units. Backend returns `bin_size` for RP2040/Teensy
-// and (sometimes) raw `size` for rpi5/controller from info.json packages
+// and (sometimes) raw `size` for raspberrypi/controller from info.json packages
 // array — but `get_firmware_info_for_type` doesn't lift `size` into the
-// top-level dict today, so for rpi5/controller this returns "—".
+// top-level dict today, so for raspberrypi/controller this returns "—".
 function fmtBytes (bytes) {
   if (bytes == null) return '—'
   const KiB = 1024, MiB = KiB * 1024
@@ -194,7 +194,7 @@ function fmtBytes (bytes) {
 
 // Build date arrives in two shapes:
 //   - RP2040/Teensy: "YYYY-MM-DD HH:MM:SS" (local-time string)
-//   - rpi5/controller: ISO "2026-05-26T02:58:32Z"
+//   - raspberrypi/controller: ISO "2026-05-26T02:58:32Z"
 // Parse both, fall back to the raw string if parsing fails.
 function parseBuildDate (s) {
   if (!s) return null
@@ -219,7 +219,7 @@ function fmtBuildDate (s) {
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-// Short hash for display. Accepts sha256 (rpi5/controller) or git hash (rp2040).
+// Short hash for display. Accepts sha256 (raspberrypi/controller) or git hash (rp2040).
 function fmtShortHash (h) {
   if (!h) return null
   const s = String(h)
@@ -241,7 +241,7 @@ const FIRMWARE_TYPES = [
   { key: 'simulation', label: 'RP2040 Simulation Build',  detail: 'For Renode-simulated RP2040 nodes',          icon: 'computer',         iconClass: 'text-cyan-400'   },
   { key: 'hardware',   label: 'RP2040 Hardware Build',    detail: 'For physical Feather RP2040 + Ethernet nodes', icon: 'developer_board',  iconClass: 'text-violet-400' },
   { key: 'teensy41',   label: 'Teensy 4.1 Hardware Build', detail: 'For physical Teensy 4.1 nodes',             icon: 'developer_board',  iconClass: 'text-amber-400'  },
-  { key: 'rpi5',       label: 'Raspberry Pi 5 Production Build', detail: 'For Raspberry Pi 5 nodes with GPIO control', icon: 'memory',     iconClass: 'text-rose-400'   },
+  { key: 'raspberrypi',       label: 'Raspberry Pi 5 Production Build', detail: 'For Raspberry Pi 5 nodes with GPIO control', icon: 'memory',     iconClass: 'text-rose-400'   },
   { key: 'controller', label: 'Steam Deck Controller AppImage', detail: 'Tauri operator app — self-contained AppImage', icon: 'sports_esports', iconClass: 'text-cyan-400' },
 ]
 

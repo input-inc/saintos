@@ -1,15 +1,15 @@
-"""Tests for the rpi5 board YAMLs + the audio_player peripheral type.
+"""Tests for the raspberrypi board YAMLs + the audio_player peripheral type.
 
-Pins down the wire-shape contract that the rpi5 Pi-side firmware
+Pins down the wire-shape contract that the raspberrypi Pi-side firmware
 relies on:
 
-  * `chip_family: rpi5` is registered and resolves a default board
-    (`rpi5`) — required for adoption to auto-assign the board.
+  * `chip_family: raspberrypi` is registered and resolves a default board
+    (`raspberrypi`) — required for adoption to auto-assign the board.
   * `audio_player` lives in the catalog with the channels and params
     the Pi driver expects (channel name → sub-channel index mapping
     has to stay in lockstep with PiAudioPlayerDriver.SUB_CHANNEL_NAMES;
-    that test lives next to the driver, see firmware/rpi5/tests).
-  * The rpi5 board's `builtin_peripherals` list includes the
+    that test lives next to the driver, see firmware/raspberrypi/tests).
+  * The raspberrypi board's `builtin_peripherals` list includes the
     `onboard_audio` entry of type `audio_player` so adoption seeds it
     automatically.
   * Built-ins refuse to be removed from a NodePeripheralConfig (the
@@ -44,10 +44,10 @@ def board_manager() -> BoardConfigManager:
 # ── chip + board discovery ─────────────────────────────────────────
 
 
-def test_rpi5_chip_loads(board_manager):
-    chip = board_manager.get_chip("rpi5")
-    assert chip is not None, "rpi5 chip YAML missing from boards/"
-    assert chip.chip_family == "rpi5"
+def test_raspberrypi_chip_loads(board_manager):
+    chip = board_manager.get_chip("raspberrypi")
+    assert chip is not None, "raspberrypi chip YAML missing from boards/"
+    assert chip.chip_family == "raspberrypi"
     assert chip.gpio_count > 0
     # The four hardware-PWM pins must carry the `pwm` cap so the UI
     # can offer them for servo outputs.
@@ -55,24 +55,24 @@ def test_rpi5_chip_loads(board_manager):
     assert {12, 13, 18, 19}.issubset(pwm_pins)
 
 
-def test_rpi5_board_loads_and_is_default(board_manager):
-    board = board_manager.get_board("rpi5")
-    assert board is not None, "rpi5 board YAML missing"
+def test_raspberrypi_board_loads_and_is_default(board_manager):
+    board = board_manager.get_board("raspberrypi")
+    assert board is not None, "raspberrypi board YAML missing"
     assert board.builtin is True, \
-        "rpi5 must be shipped (builtin=True) so the UI marks it uneditable"
-    assert board.chip_family == "rpi5"
+        "raspberrypi must be shipped (builtin=True) so the UI marks it uneditable"
+    assert board.chip_family == "raspberrypi"
 
-    default = board_manager.default_board_for_chip("rpi5")
+    default = board_manager.default_board_for_chip("raspberrypi")
     assert default is not None
-    assert default.board_id == "rpi5", \
-        "rpi5 must be the default board so adoption auto-assigns it"
+    assert default.board_id == "raspberrypi", \
+        "raspberrypi must be the default board so adoption auto-assigns it"
 
 
 def test_reserved_pins_match_firmware_list(board_manager):
     """The Pi-side gpio_control.py keeps RESERVED_PINS = [0, 1, 14, 15].
     The board YAML must list the same set or adoption hands the operator
     pins the kernel won't actually let them poke."""
-    board = board_manager.get_board("rpi5")
+    board = board_manager.get_board("raspberrypi")
     reserved = {p.gpio for p in board.reserved_pins}
     assert {0, 1, 14, 15} <= reserved
 
@@ -81,12 +81,12 @@ def test_derive_capabilities_intersects_chip_and_board(board_manager):
     """End-to-end check: derive_capabilities (called from the
     websocket capabilities derive) returns a coherent view with pins
     + uart_pairs + builtin_peripherals all wired through."""
-    chip = board_manager.get_chip("rpi5")
-    board = board_manager.get_board("rpi5")
+    chip = board_manager.get_chip("raspberrypi")
+    board = board_manager.get_board("raspberrypi")
     caps = derive_capabilities(chip, board)
 
-    assert caps["chip_family"] == "rpi5"
-    assert caps["board_id"] == "rpi5"
+    assert caps["chip_family"] == "raspberrypi"
+    assert caps["board_id"] == "raspberrypi"
     # Every available pin must come back with its chip-level cap list.
     assert all("capabilities" in p for p in caps["pins"])
     # Built-ins list the audio_player entry.
@@ -163,10 +163,10 @@ def test_audio_player_catalog_params():
 
 
 def test_onboard_audio_is_in_board_builtin_peripherals(board_manager):
-    board = board_manager.get_board("rpi5")
+    board = board_manager.get_board("raspberrypi")
     by_id = {b.id: b for b in board.builtin_peripherals}
     assert "onboard_audio" in by_id, \
-        "rpi5 board must declare an onboard_audio audio_player"
+        "raspberrypi board must declare an onboard_audio audio_player"
     assert by_id["onboard_audio"].type == "audio_player"
     # Params should carry sensible defaults so the operator can adopt
     # without touching anything.

@@ -82,7 +82,7 @@ def test_peripheral_command_keyframe_roundtrips():
     kf = TriggerKeyframe(
         time=3.5,
         target_kind="peripheral_command",
-        target=["rpi5_abc123", "onboard_audio"],
+        target=["raspberrypi_abc123", "onboard_audio"],
         value={"command": "play_file", "args": {"filename": "intro.wav"}},
         label="audio cue at 3.5s",
     )
@@ -95,7 +95,7 @@ def test_peripheral_command_keyframe_roundtrips():
     assert len(track.keyframes) == 1
     restored_kf = track.keyframes[0]
     assert restored_kf.target_kind == "peripheral_command"
-    assert restored_kf.target == ["rpi5_abc123", "onboard_audio"]
+    assert restored_kf.target == ["raspberrypi_abc123", "onboard_audio"]
     assert restored_kf.value == {
         "command": "play_file",
         "args": {"filename": "intro.wav"},
@@ -111,7 +111,7 @@ def test_peripheral_command_keyframe_with_bare_string_value():
     kf = TriggerKeyframe(
         time=1.0,
         target_kind="peripheral_command",
-        target=["rpi5_abc", "onboard_audio"],
+        target=["raspberrypi_abc", "onboard_audio"],
         value="ding.wav",
     )
     anim = _anim_with_trigger(kf)
@@ -128,7 +128,7 @@ def test_player_fires_peripheral_command_at_crossed_timecode():
     kf = TriggerKeyframe(
         time=2.0,
         target_kind="peripheral_command",
-        target=["rpi5_xyz", "onboard_audio"],
+        target=["raspberrypi_xyz", "onboard_audio"],
         value={"command": "play_file", "args": {"filename": "boom.wav"}},
     )
     spy = _CallSpy()
@@ -139,7 +139,7 @@ def test_player_fires_peripheral_command_at_crossed_timecode():
     assert len(spy.calls) == 1
     args, _ = spy.calls[0]
     node_id, peripheral_id, command, kwargs = args
-    assert node_id == "rpi5_xyz"
+    assert node_id == "raspberrypi_xyz"
     assert peripheral_id == "onboard_audio"
     assert command == "play_file"
     assert kwargs == {"filename": "boom.wav"}
@@ -179,7 +179,7 @@ def test_bare_string_value_desugars_to_play_file():
     kf = TriggerKeyframe(
         time=1.0,
         target_kind="peripheral_command",
-        target=["rpi5_abc", "onboard_audio"],
+        target=["raspberrypi_abc", "onboard_audio"],
         value="hello.wav",
     )
     spy = _CallSpy()
@@ -340,7 +340,7 @@ def test_mixed_targets_fan_out_to_correct_callbacks():
             TriggerTrack(id="audio", name="audio", keyframes=[
                 TriggerKeyframe(
                     time=1.0, target_kind="peripheral_command",
-                    target=["rpi5_main", "onboard_audio"],
+                    target=["raspberrypi_main", "onboard_audio"],
                     value="cue.wav",
                 ),
             ]),

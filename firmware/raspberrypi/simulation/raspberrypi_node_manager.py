@@ -6,14 +6,14 @@ Manages simulated Pi 5 nodes for development and testing.
 Each simulated node runs as a separate Python process with mock GPIO.
 
 Usage:
-    ./rpi5_node_manager.py create <node_id> [--role ROLE]
-    ./rpi5_node_manager.py start <node_id>
-    ./rpi5_node_manager.py stop <node_id>
-    ./rpi5_node_manager.py list
-    ./rpi5_node_manager.py reset <node_id>
-    ./rpi5_node_manager.py start-all
-    ./rpi5_node_manager.py stop-all
-    ./rpi5_node_manager.py logs <node_id>
+    ./raspberrypi_node_manager.py create <node_id> [--role ROLE]
+    ./raspberrypi_node_manager.py start <node_id>
+    ./raspberrypi_node_manager.py stop <node_id>
+    ./raspberrypi_node_manager.py list
+    ./raspberrypi_node_manager.py reset <node_id>
+    ./raspberrypi_node_manager.py start-all
+    ./raspberrypi_node_manager.py stop-all
+    ./raspberrypi_node_manager.py logs <node_id>
 """
 
 import argparse
