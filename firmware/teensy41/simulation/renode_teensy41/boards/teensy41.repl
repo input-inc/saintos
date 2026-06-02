@@ -22,13 +22,20 @@
 //     survives stop/start cycles.
 
 nvic: IRQControllers.NVIC @ sysbus 0xE000E000
-    systickFrequency: 600000000
+    // Matches Renode's in-tree imxrt1064.repl. The SysTick reference
+    // clock is independent of the configured CPU clock; this value is
+    // what NXP's SDK + the Teensy core happen to assume.
+    systickFrequency: 72000000
     priorityMask: 0xF0
     IRQ -> cpu@0
 
 cpu: CPU.CortexM @ sysbus
     cpuType: "cortex-m7"
     nvic: nvic
+    // iMXRT1062 implements 16 MPU regions. Teensy's startup configures
+    // regions 0..15; the default of 8 here triggers a CPU abort partway
+    // through MPU setup.
+    numberOfMPURegions: 16
 
 // Internal memories.
 itcm: Memory.MappedMemory @ sysbus 0x0

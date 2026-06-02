@@ -243,9 +243,29 @@ bool flash_storage_save(const flash_storage_data_t* data)
 {
     if (!storage_initialized || !data) return false;
 
+    // EEPROM.update() short-circuits the per-byte
+    // erase-and-rewrite on Teensy 4.1's flash-backed EEPROM emulation
+    // when the byte already holds the new value, while EEPROM.write()
+    // forces the erase+write regardless. On a 2-4 KB config blob
+    // that's the difference between ~milliseconds (typical re-save:
+    // most bytes unchanged) and seconds (every byte different).
+    //
+    // The seconds-long-blocking case is what was killing the Teensy
+    // node here: pin_config_save() runs inline inside
+    // config_subscription_callback, the rclc executor doesn't spin
+    // while the loop runs, the micro-XRCE-DDS session keep-alive
+    // misses its 1 s deadline, the agent destroys the session, and
+    // the server flips the node to "offline" 15 s later. Server's
+    // adopted/UNADOPTED reconcile then re-pushes /config, and the
+    // cycle repeats. update() keeps the typical re-save under the
+    // session keep-alive window. The first-time save (all bytes
+    // changing) still blocks; if that re-introduces the symptom, the
+    // follow-up is to defer the save to the main loop instead of
+    // running it inline in the callback. See
+    // docs/SYNC_CONFIG_REGRESSION.md.
     const uint8_t* src = (const uint8_t*)data;
     for (size_t i = 0; i < sizeof(flash_storage_data_t); i++) {
-        EEPROM.write(EEPROM_OFFSET + i, src[i]);
+        EEPROM.update(EEPROM_OFFSET + i, src[i]);
     }
 
     Serial.printf("Flash storage: saved config\n");

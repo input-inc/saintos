@@ -942,15 +942,21 @@ void loop()
         last_status_print = now;
     }
 
-    /* Throttle the loop to ~100 Hz, but with the core actually
-     * sleeping between SysTick wakes instead of yield-polling at full
-     * 600 MHz. Each __WFI halts the CPU until the next interrupt
-     * (SysTick fires at 1 kHz, ENET fires on packet arrival), so a
-     * burst of inbound traffic wakes us immediately. This is the heat
-     * fix: idle iMXRT1062 at 600 MHz with WFI runs ~30 °C cooler than
-     * with delay(10), because delay() is itself a yield-busy-loop. */
+    /* Tried __WFI here for idle heat reduction, claiming the ENET
+     * interrupt would wake us on incoming packets. That assumption is
+     * false on Teensy 4.1's NativeEthernet — FNET is polled, not
+     * interrupt-driven, so __WFI gated rclc_executor_spin_some() at
+     * 1 ms (SysTick-only wake). That fed back into the XRCE-DDS
+     * client's transport read: it couldn't keep up with the agent's
+     * RELIABLE ACK pacing, the output stream filled, and announce /
+     * state publishers stopped landing on the wire end-to-end — the
+     * node appeared online to the agent only briefly, then went
+     * dark for the 15 s server timeout, repeatedly. delay(1) is a
+     * yield-busy-loop on Teensy 4 — chip runs hotter when idle, but
+     * the rest of the stack works. See
+     * docs/SYNC_CONFIG_REGRESSION.md. */
     uint32_t loop_deadline = now + 10;
     while ((int32_t)(millis() - loop_deadline) < 0) {
-        asm volatile ("wfi");
+        delay(1);
     }
 }

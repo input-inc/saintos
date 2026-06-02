@@ -111,6 +111,21 @@ firmware/simulation/
 └── rpi5_configs/        # Pi 5 node configurations
 ```
 
+## Teensy 4.1 Nodes (work in progress)
+
+Teensy 4.1 nodes also run in Renode, against a hand-derived iMXRT1062
+platform that inherits from Renode's in-tree `imxrt1064.repl`. Status:
+firmware builds, CPU boots through MPU + IOMUXC + CCM clock setup,
+then stalls deep in the Teensy core's `configure_cache` function
+(cache/MPU control-space writes). No UART output yet. Full handoff +
+proposed next experiments in `docs/RENODE_TEENSY41_BRINGUP.md`.
+
+**Requirements**:
+- PlatformIO installed locally: `~/.platformio/penv/bin/pip install platformio`
+- Firmware built: `cd firmware/teensy41 && ~/.platformio/penv/bin/pio run -e simulation`
+- Renode 1.16+ (Teensy 4.1 needs `numberOfMPURegions: 16`, set in the repl)
+- micro-ROS agent (same setup as RP2040)
+
 ## RP2040 Nodes
 
 RP2040 nodes run in Renode and communicate via micro-ROS:

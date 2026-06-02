@@ -15,17 +15,22 @@ machine LoadPlatformDescription @/Users/hackman/Projects/OpenSAINT/SaintOS/sourc
 # Configure peripherals for this specific node
 sysbus.persistent_storage StoragePath "/Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/simulation/teensy41_storage"
 sysbus.persistent_storage NodeId "teensy_smoke"
-sysbus.udp_bridge LocalPort 9991
+sysbus.udp_bridge LocalPort 9983
 
 # Load firmware into the external-flash region (0x60000000 — XIP base).
 sysbus LoadELF @/Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/teensy41/build/simulation/firmware.elf
 
-# Point the Cortex-M's vector table at the XIP base so the CPU reads its
-# reset SP / reset handler from the firmware ELF instead of the empty
-# ITCM at 0x00000000 (where VTOR defaults). The Teensy bootloader does
-# this on real silicon by copying VT to ITCM + writing VTOR; bypassing
-# the bootloader, we just point VTOR at flash directly.
-sysbus.cpu VectorTableOffset 0x60000000
+# Teensy 4.1 startup, in real life:
+#   bootrom @0x00200000 → reads FlexSPI Config Block @0x60000000 → reads
+#   IVT @0x60001000 → IVT[entry] = 0x6000164D (the application's
+#   ResetHandler) → bootrom jumps there. ResetHandler then copies
+#   .text.itcm from flash to ITCM @0x0, writes VTOR, calls main().
+# We can't run the bootrom in the sim (no model), so jump straight to
+# the ResetHandler. Initial SP can be anywhere valid — the Teensy
+# startup code reinitializes it before any real stack use. DTCM at
+# 0x20080000 (top of DTCM, grows down) is the natural choice.
+sysbus.cpu PC 0x6000164D
+sysbus.cpu SP 0x20080000
 
 # Capture firmware UART output to a dedicated file. The firmware redirects
 # `Serial` → `Serial1` under SIMULATION (see firmware/teensy41/include/
@@ -35,8 +40,13 @@ sysbus.cpu VectorTableOffset 0x60000000
 sysbus.lpuart6 CreateFileBackend @/Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/simulation/logs/teensy_smoke.uart.log true
 showAnalyzer sysbus.lpuart6
 
+# Diagnostics — function-level tracing (SAINT_TEENSY_TRACE=1).
+sysbus LoadSymbolsFrom @/Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/teensy41/build/simulation/firmware.elf
+cpu LogFunctionNames true
+logLevel -1 sysbus.lpuart6
+
 echo "SAINT.OS Teensy 4.1 Node: teensy_smoke"
-echo "  UDP Port: 9991"
+echo "  UDP Port: 9983"
 echo "  Storage: /Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/simulation/teensy41_storage/teensy_smoke.bin"
 echo "  UART log: /Users/hackman/Projects/OpenSAINT/SaintOS/source/firmware/simulation/logs/teensy_smoke.uart.log"
 

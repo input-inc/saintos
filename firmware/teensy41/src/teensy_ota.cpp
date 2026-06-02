@@ -90,6 +90,37 @@ extern "C" saint_ota_result_t saint_ota_perform(uint32_t expected_size,
                   (unsigned long)expected_size,
                   (unsigned long)expected_crc32);
 
+    /* 0. Wipe the staging region BEFORE asking FlashTxx for a buffer.
+     *
+     * Without this, every OTA after the first one fails with
+     * "firmware_buffer_init rc=1, size=0":
+     *
+     *   - flash_move() in the previous OTA copied staging → app, then
+     *     rebooted. It did NOT erase the staging region.
+     *   - firmware_buffer_init() walks backward from
+     *     FLASH_BASE_ADDR+FLASH_SIZE-FLASH_RESERVE looking for the first
+     *     non-0xFFFFFFFF word — which, on a node that's been OTA'd
+     *     once, is the stale staging blob, not the running code.
+     *   - It computes buffer_addr above the stale region, which lands
+     *     past the usable end of flash, so buffer_size comes out as 0
+     *     (or wraps into a tiny positive) and the OTA aborts.
+     *
+     * Pre-erasing the conservative upper half of flash (everything
+     * from app_max upward) guarantees firmware_buffer_init's scan hits
+     * the real end of code. The app's allowed to be up to half the
+     * 8 MB flash, which is multiples larger than what we're shipping
+     * (~500 KB) and leaves room to grow without revisiting this
+     * boundary. flash_erase_block is a no-op on already-erased
+     * sectors, so the worst case is a few ms of redundant erase.
+     */
+    {
+        const uint32_t app_max  = FLASH_BASE_ADDR + (FLASH_SIZE / 2);
+        const uint32_t stage_top = FLASH_BASE_ADDR + FLASH_SIZE - FLASH_RESERVE;
+        Serial.printf("OTA: pre-erasing staging 0x%08lX..0x%08lX\n",
+                      (unsigned long)app_max, (unsigned long)stage_top);
+        flash_erase_block(app_max, stage_top - app_max);
+    }
+
     /* 1. Allocate staging buffer in flash.
      *
      * firmware_buffer_init returns a BUFFER TYPE, not a success/error

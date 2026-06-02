@@ -27,11 +27,12 @@
       "type": "teensy41",
       "role": null,
       "display_name": "teensy_smoke",
-      "created": "2026-06-01T17:21:12.901048",
+      "created": "2026-06-01T18:31:11.826343",
       "pid": null,
       "status": "stopped",
-      "udp_port": 9991
+      "udp_port": 9983,
+      "started": "2026-06-01T18:31:11.879154"
     }
   },
-  "next_udp_port": 9990
+  "next_udp_port": 9982
 }

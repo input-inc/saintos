@@ -219,14 +219,21 @@ size_t transport_native_eth_read(
             *err = 0;
             return read_bytes;
         }
-        /* Was delay(1), which on Teensy 4 is a yield-busy-loop at full
-         * 600 MHz. __WFI halts the core until the next interrupt — the
-         * SysTick fires every 1 ms and the ENET interrupt fires when a
-         * packet actually arrives, so this is functionally equivalent
-         * to delay(1) but the chip stops drawing 600 MHz current
-         * during the wait. Same fix applied at the loop tail in
-         * src/main.cpp. */
-        asm volatile ("wfi");
+        /* Tried __WFI here as a heat optimization, betting on the ENET
+         * interrupt waking the core when a packet arrived. That bet
+         * was wrong: NativeEthernet on the Teensy 4.1 uses POLLED FNET
+         * — there is no ENET RX interrupt firing — so __WFI slept the
+         * core until the next SysTick (1 ms later), gating every
+         * packet read to 1 ms granularity. Inside the XRCE-DDS
+         * RELIABLE handshake that's enough to fall behind the
+         * agent's ACK rate, the output stream fills, and the
+         * client's publishers wedge end-to-end (announce/state stop
+         * landing on the wire even though publisher endpoints exist
+         * in the DDS graph). delay(1) is a busy yield at 600 MHz —
+         * yes, hotter — but keeps RX latency in the microseconds
+         * where XRCE expects it. The matching revert is in
+         * src/main.cpp. See docs/SYNC_CONFIG_REGRESSION.md. */
+        delay(1);
     }
 
     *err = 0;
