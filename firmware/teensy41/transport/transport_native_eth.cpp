@@ -39,6 +39,7 @@ static bool connected = false;
 #define DHCP_FAST_ATTEMPTS       20u
 
 extern "C" void led_update(void);  // led_status.cpp
+extern "C" void watchdog_feed(void);  // watchdog.cpp — fed during DHCP retry
 
 /* Post-init-hang diagnostic counters — defined in main.cpp. See the
  * g_loop_iter comment block there for what they catch. We bracket
@@ -71,13 +72,20 @@ bool transport_native_eth_init(void)
     return true;
 }
 
-/* Pump LED animation while we sleep in 100ms slices. */
+/* Pump LED animation AND the hardware watchdog while we sleep in 100ms
+ * slices. Without the watchdog feed here, a DHCP server that takes
+ * longer than SAINT_WATCHDOG_TIMEOUT_S (~30 s default) to respond
+ * triggers a chip reset mid-connect — and the post-reset boot hits
+ * the same blocked DHCP path, infinite loop. Feeding inside the
+ * wait keeps WDOG1 reset-protection scoped to "loop() actually
+ * wedged" instead of "DHCP is taking its sweet time." */
 static void wait_with_led(uint32_t total_ms)
 {
     uint32_t slept = 0;
     while (slept < total_ms) {
         delay(100);
         led_update();
+        watchdog_feed();
         slept += 100;
     }
 }

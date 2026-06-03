@@ -243,11 +243,47 @@ Off-board:
   what the agent's bookkeeping is doing — independent of what the
   firmware thinks.
 
+### Watchdog safety net
+
+WDOG1 (iMXRT1062's primary hardware watchdog) is armed in `setup()`
+via `firmware/teensy41/src/watchdog.cpp` with a 30 s timeout. `loop()`
+feeds it at the top of every iteration (before any of the suspect
+calls). If `loop()` wedges anywhere for >30 s, the chip self-resets —
+**no physical power cycle needed.** Long-running calls in setup
+(DHCP retry in `transport_native_eth_connect`, server-discovery in
+`discover_server`) explicitly feed mid-loop so they don't trigger
+spurious resets while still working.
+
+After a watchdog-triggered reset, the boot log prints
+`Watchdog: previous reset was WDOG1 timeout (SRSR=0x…)` and a /log
+line `"Recovered from watchdog reset (post-init-hang protection)"`
+goes out on first /announce — so the operator can see in the
+dashboard that the node hit the hang and self-recovered. Override
+the timeout at build time with `-DSAINT_WATCHDOG_TIMEOUT_S=N` (range
+1..128 s).
+
+Disabled under `SIMULATION` (no chip-reset semantics to model in
+Renode; node_manager handles sim lifecycle).
+
 ## Recovery while debugging
 
-Every time the firmware enters the hung state, a power-cycle is
-required — `/command restart` won't reach a wedged loop, and the
+The 30 s WDOG1 (above) auto-resets the chip when `loop()` actually
+wedges, so a power cycle is no longer required in the common case.
+The watchdog covers:
+
+- Hard hang in `loop()` or anywhere it calls (peripheral_update_all,
+  rclc_executor_spin_some, transport read/write blocking past the
+  timeout, etc.) — loop stops feeding, 30 s later chip resets.
+- Wedged init paths in `setup()` — DHCP retry + server discovery feed
+  mid-loop so they don't trigger spurious resets while making
+  progress, but DO trigger a reset if they themselves wedge.
+
+The watchdog does NOT cover the silent-session-loss case:
+`/command restart` won't reach a wedged loop, and the
 `last_successful_comm` reconnect heuristic never fires because
 NativeEthernet UDP's `udp.endPacket()` always returns success even
-when the agent has no session for this client. (Fixing this is the
-"session-liveness without ping_agent hang" follow-up.)
+when the agent has no session for this client. The firmware happily
+keeps publishing into the void; `loop()` is alive, watchdog is fed,
+no reset. (Fixing this is the "session-liveness without
+ping_agent hang" follow-up — needs a real round-trip liveness check
+to detect the dead session.)

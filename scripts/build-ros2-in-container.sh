@@ -229,11 +229,16 @@ done
 # → agent → firmware bridge while announcements (the reverse direction)
 # look fine.
 #
-# This sed bumps the pinned tag to v3.0.1 (latest 3.x with type-hash
-# support) before build_agent.sh fetches and builds it. Idempotent —
-# if the upstream micro-ROS-Agent jazzy branch ever updates its own
-# pin past 3.0.1, this rewrite becomes a no-op.
-PIN_TARGET_VERSION="v3.0.1"
+# This sed bumps the pinned tag to v3.0.0 (first 3.x with type-hash
+# support, ships against Jazzy's Fast-DDS v2). v3.0.1 broke compatibility
+# with Jazzy: its CMakeLists.txt added `find_package(fastdds 3 REQUIRED)`,
+# and Jazzy ships Fast-DDS v2 under the `fastrtps` package name — so
+# colcon fails with "Could not find a package configuration file
+# provided by 'fastdds' (requested version 3)". Stay on v3.0.0 until
+# Jazzy ships Fast-DDS v3 (or until xrceagent gets a fastrtps fallback).
+# Idempotent — if upstream micro-ROS-Agent jazzy branch ever updates
+# its own pin past v3.0.0, this rewrite becomes a no-op.
+PIN_TARGET_VERSION="v3.0.0"
 SUPERBUILD_CMAKE=$(find "${TARGETDIR}" -path '*micro-ROS-Agent*SuperBuild.cmake' -type f -print -quit)
 if [[ -z "${SUPERBUILD_CMAKE}" ]]; then
     echo "WARNING: SuperBuild.cmake not found — couldn't bump Micro-XRCE-DDS-Agent pin." >&2

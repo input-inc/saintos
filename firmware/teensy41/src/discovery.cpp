@@ -15,6 +15,7 @@
 extern "C" {
 #include "saint_node.h"
 #include "discovery.h"
+#include "watchdog.h"
 }
 
 static EthernetUDP discovery_udp;
@@ -98,6 +99,12 @@ bool discover_server(uint8_t* server_ip, uint16_t* server_port,
         }
 
         Serial.printf("Discovery timeout, retrying...\n");
+        // Feed the hardware watchdog between attempts. Default timeout
+        // is 30 s and max_attempts × timeout_ms can easily exceed
+        // that on a slow server-discovery (10 × 2 s = 20 s here, but
+        // chained with the DHCP loop above we can be close). No-op
+        // under SIMULATION.
+        watchdog_feed();
     }
 
     discovery_udp.stop();

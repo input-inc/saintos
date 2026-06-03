@@ -26,6 +26,7 @@ extern "C" {
 #include "pathfinder_bms_driver.h"
 #include "tic_driver.h"
 #include "tmc2208_driver.h"
+#include "watchdog.h"
 extern "C" {
 #include "saint_log.h"
 }
@@ -169,6 +170,20 @@ static unsigned g_announce_count = 0;
 static volatile uint32_t g_loop_iter             = 0;
 static volatile uint32_t g_executor_spin_entries = 0;
 static volatile uint32_t g_executor_spin_exits   = 0;
+/* "Furthest stage loop() reached this iteration", incremented at every
+ * known-safe checkpoint. The status print emits the last-seen value;
+ * if loop_iter keeps advancing but g_loop_stage stays at, say, 3, the
+ * wedge is between checkpoint 3 and 4. Acts like a coarse program
+ * counter that survives an in-progress hang because we capture it
+ * AFTER each stage completes. Stages:
+ *   1 = after led_update
+ *   2 = after peripheral_update_all
+ *   3 = after check_agent_connection
+ *   4 = after rclc_executor_spin_some
+ *   5 = after saint_log_drain_pending  (end of normal iteration)
+ * 0 = haven't reached stage 1 yet (probably wedged in led_update or
+ * before, or this is the very first iteration). */
+static volatile uint32_t g_loop_stage = 0;
 /* Transport-layer counters are defined in the per-transport TU that
  * actually increments them (firmware/shared/src/transport_udp_bridge.cpp
  * for the sim path, firmware/teensy41/transport/transport_native_eth.cpp
@@ -885,6 +900,15 @@ void setup()
     Serial.begin(115200);
     delay(100);
 
+    // Arm WDOG1 (hardware build only — see watchdog.cpp). Done right
+    // after Serial.begin so the "previous reset was watchdog" line on
+    // line 1 of the boot banner makes recovery cycles obvious, and
+    // before any of the long-running init paths that could themselves
+    // wedge (transport_native_eth_connect's DHCP loop,
+    // init_micro_ros). 30 s default timeout — plenty for normal init,
+    // tight enough that the operator doesn't think the node is dead.
+    watchdog_init();
+
     Serial.printf("\n\n");
     Serial.printf("****************************************\n");
     Serial.printf("* SAINT.OS Node Firmware\n");
@@ -1045,6 +1069,14 @@ void loop()
      * had when the offending call started — diffable across two
      * announces. See g_loop_iter declaration. */
     g_loop_iter++;
+    g_loop_stage = 0;
+
+    // Feed WDOG1 at the very top, every iteration. A wedge anywhere
+    // after this point will stop the feeds and WDOG1's timeout
+    // (default 30 s) auto-resets the chip — no physical power cycle
+    // needed. See firmware/teensy41/docs/POST_INIT_HANG.md and
+    // firmware/teensy41/src/watchdog.cpp for the rationale.
+    watchdog_feed();
 
     uint32_t now = millis();
 
@@ -1054,9 +1086,11 @@ void loop()
 
     // Update LED
     led_update();
+    g_loop_stage = 1;
 
     // Poll peripheral drivers (Maestro USB host, SyRen, etc.)
     peripheral_update_all();
+    g_loop_stage = 2;
 
     // Error state - just blink LED
     if (g_node.state == NODE_STATE_ERROR) {
@@ -1069,6 +1103,7 @@ void loop()
         delay(100);
         return;
     }
+    g_loop_stage = 3;
 
     // Spin executor — bracketed by entry/exit counters so a hang
     // *inside* the executor (a callback that never returns, or
@@ -1077,6 +1112,7 @@ void loop()
     g_executor_spin_entries++;
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
     g_executor_spin_exits++;
+    g_loop_stage = 4;
 
     // Drain queued /log lines, one per iteration. Pacer inside the
     // drain enforces SAINT_LOG_MIN_PUBLISH_INTERVAL_MS between
@@ -1089,6 +1125,7 @@ void loop()
     if (g_announce_count >= 2) {
         saint_log_drain_pending();
     }
+    g_loop_stage = 5;
 
     // Periodic status + post-init-hang diagnostic counters. Mirrored
     // to Serial1 (always the hardware UART on D0/D1) so hypothesis 4
@@ -1110,9 +1147,10 @@ void loop()
                        (unsigned long)g_transport_write_exits,
                        (unsigned long)g_transport_read_entries,
                        (unsigned long)g_transport_read_exits);
-        Serial1.printf("[%lu] hwuart-alive loop=%lu exec=%lu/%lu\n",
+        Serial1.printf("[%lu] hwuart-alive loop=%lu stage=%lu exec=%lu/%lu\n",
                        now / 1000,
                        (unsigned long)g_loop_iter,
+                       (unsigned long)g_loop_stage,
                        (unsigned long)g_executor_spin_entries,
                        (unsigned long)g_executor_spin_exits);
         last_status_print = now;
