@@ -31,10 +31,11 @@ services:
       args:
         # Must match the micro-ROS client baked into the firmware.
         # The Pico SDK lib (lib/micro_ros_raspberrypi_pico_sdk) has a
-        # branch per distro — keep it on `jazzy` to match. Mismatched
-        # versions crash the agent on the first XRCE packet — see
-        # Dockerfile.e2e comment on ROS_DISTRO for the gory details.
-        ROS_DISTRO: jazzy
+        # branch per distro — keep this in sync with the SDK's checked-out
+        # branch (currently kilted). Mismatched versions crash the agent
+        # on the first XRCE packet — see Dockerfile.e2e comment on
+        # ROS_DISTRO for the gory details.
+        ROS_DISTRO: kilted
         # 1.16+ is needed for arm64 support; older Mono-based builds
         # crashed under Rosetta on Apple Silicon. The bootrom/XIP
         # concern that motivated the old 1.15.3 pin is re-evaluated
@@ -43,7 +44,7 @@ services:
         RENODE_VERSION: 1.16.1
 
     environment:
-      ROS_DISTRO: jazzy
+      ROS_DISTRO: kilted
       # Default to the Python fake-firmware path. MODE=full uses
       # Renode-sim firmware (currently blocked on the bootrom/XIP
       # modelling issue described in the entrypoint header).

@@ -1,8 +1,8 @@
 # SAINT.OS end-to-end test image.
 #
 # What's in here:
-#   - ROS2 jazzy (base layer)
-#   - micro-ROS agent (ros-jazzy-micro-ros-agent)
+#   - ROS2 (distro from ROS_DISTRO arg; default kilted) base layer
+#   - micro-ROS agent (microros/micro-ros-agent:${ROS_DISTRO})
 #   - Renode (pinned version — see RENODE_VERSION arg)
 #   - Python 3 + websockets + the test harness
 #   - saint_server source, built via colcon at image-build time
@@ -24,12 +24,13 @@
 #   discovery-server profile; that's a tractable follow-up but out
 #   of scope here.
 
-ARG ROS_DISTRO=jazzy
+ARG ROS_DISTRO=kilted
 # NB: the firmware's micro-ROS client (lib/micro_ros_raspberrypi_pico_sdk)
-# must be checked out to the matching distro branch (`jazzy`). A mismatch
+# must be checked out to the matching distro branch (kilted). A mismatch
 # crashes the agent on the first XRCE-DDS packet with
 # `*** stack smashing detected ***` because the CREATE_SESSION_Payload
-# layout shifted between humble and jazzy. See docs/RENODE_RP2040_BRINGUP.md.
+# layout has shifted between distros (humble → jazzy → kilted).
+# See docs/RENODE_RP2040_BRINGUP.md.
 # TARGETARCH is auto-populated by buildkit ("amd64" or "arm64"). We use
 # it below to pick the right Renode tarball — Renode 1.16+ ships native
 # arm64 + amd64 .NET builds, so we don't need Rosetta on Apple Silicon
@@ -65,21 +66,23 @@ COPY --from=uros_agent /uros_ws/install /uros_ws/install
 # MICROROS_DISABLE_SHM=1. We replicate that behavior here.
 COPY --from=uros_agent /tmp/disable_fastdds_shm.xml /opt/disable_fastdds_shm.xml
 
-# Stash the bare agent image's entire /opt/ros/jazzy/lib so the agent
-# can resolve every Fast-DDS / rmw_fastrtps lib against the exact
-# versions it was linked against. The apt-installed libs in our final
-# /opt/ros/jazzy/lib are 2.14.6 / 2.2.7, which:
-#   (a) subtly break the SHM transport's stack-frame layout → the agent
-#       aborts with `*** stack smashing detected ***` on the first
+# Stash the bare agent image's entire /opt/ros/${ROS_DISTRO}/lib so the
+# agent can resolve every Fast-DDS / rmw_fastrtps lib against the exact
+# versions it was linked against.
+#
+# Historical (jazzy): apt-installed libs were 2.14.6 / 2.2.7 while the
+# agent image was linked against 2.14.5 / 2.2.5, which:
+#   (a) subtly broke the SHM transport's stack-frame layout → agent
+#       aborted with `*** stack smashing detected ***` on the first
 #       received packet, and
-#   (b) drop a fastcdr symbol the agent's typesupport libs require
+#   (b) dropped a fastcdr symbol the agent's typesupport libs require
 #       → `undefined symbol: _ZN8eprosima7fastcdr3Cdr9serializeEj`
-#       once a session establishes.
-# Stashing instead of overwriting keeps the apt-installed libs in place
-# for the saint_os colcon build (it links against 2.14.6/2.2.7 headers
-# that the apt feed ships) and for the saint_server runtime. The agent
-# alone gets the matched set via LD_LIBRARY_PATH (see entrypoint.sh).
-COPY --from=uros_agent /opt/ros/jazzy/lib /opt/uros_libs
+#       once a session established.
+# Kilted ships Fast-DDS v3.x, which may not have the same drift —
+# stashing is kept as a defensive workaround. If kilted's apt feed and
+# microros agent image stay in sync, this stash is harmless overhead;
+# if drift recurs, LD_LIBRARY_PATH in entrypoint.sh still wins.
+COPY --from=uros_agent /opt/ros/${ROS_DISTRO}/lib /opt/uros_libs
 
 # ── System packages ────────────────────────────────────────────────────
 # - python3-websockets: harness uses it to drive the server's WS API.
@@ -138,9 +141,10 @@ COPY configs/ /work/configs/
 # colcon build the saint_os ROS2 package. Same flags package-server
 # uses in dist.yml — keeps test ABI aligned with production.
 SHELL ["/bin/bash", "-c"]
-# --break-system-packages only exists on pip ≥ 23 (Ubuntu 24.04 / jazzy).
-# Humble's base (Ubuntu 22.04) ships an older pip that doesn't know
-# the flag and has no PEP 668 lockdown, so a plain install works.
+# --break-system-packages only exists on pip ≥ 23 (Ubuntu 24.04 noble,
+# which is jazzy + kilted's base). Humble's base (Ubuntu 22.04) ships an
+# older pip that doesn't know the flag and has no PEP 668 lockdown, so
+# a plain install works there. Try with the flag, fall back without it.
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
     && cd /work \
     && (pip3 install aiohttp pyyaml \

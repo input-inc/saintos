@@ -2,7 +2,7 @@
 #
 # SAINT.OS Server installer.
 #
-# Self-contained: ROS2 (jazzy + micro-ROS agent) is bundled in the payload
+# Self-contained: ROS2 (kilted + micro-ROS agent) is bundled in the payload
 # and extracted to /opt/ros/<distro>/ — no apt repos to configure.
 #
 # Supported targets (arm64):

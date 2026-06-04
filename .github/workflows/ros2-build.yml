@@ -14,7 +14,7 @@ on:
     inputs:
       ros_distro:
         description: 'ROS2 distro to build'
-        default: jazzy
+        default: kilted
         required: false
       force_rebuild:
         description: 'Rebuild even if a release with the computed tag exists'
@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 180
     env:
-      ROS_DISTRO: ${{ github.event.inputs.ros_distro || 'jazzy' }}
+      ROS_DISTRO: ${{ github.event.inputs.ros_distro || 'kilted' }}
 
       # Upstream pins. Both used to track moving branches (`jazzy`),
       # which meant the content hash drifted whenever upstream
@@ -50,15 +50,18 @@ jobs:
       # of *this repo's* state only. Bump deliberately when a fix
       # or feature you want lands upstream.
       #
-      #   ROS2_REPOS_REF: ros2/ros2 release tag — date-stamped jazzy
-      #     releases live at refs/tags/release-jazzy-YYYYMMDD. See
-      #     https://github.com/ros2/ros2/tags?q=release-jazzy for the
-      #     full list.
+      #   ROS2_REPOS_REF: ros2/ros2 release tag. Date-stamped releases
+      #     per distro live at refs/tags/release-<distro>-YYYYMMDD. See
+      #     https://github.com/ros2/ros2/tags?q=release-kilted for the
+      #     full list. Jazzy was on release-jazzy-20260128; we migrated
+      #     to kilted (Fast-DDS v3 line) so xrceagent v3.0.1 builds
+      #     cleanly. Lyrical Luth is the next target once micro-ROS
+      #     publishes a lyrical branch upstream (none as of 2026-06).
       #   MICRO_ROS_REF: micro-ROS/micro_ros_setup tag (or branch / SHA;
-      #     the git operations below accept all three). 5.0.2 is the
-      #     current jazzy-line head as a tagged release.
-      ROS2_REPOS_REF: release-jazzy-20260128
-      MICRO_ROS_REF: 5.0.2
+      #     the git operations below accept all three). 6.0.1 is the
+      #     current kilted-line head as a tagged release.
+      ROS2_REPOS_REF: release-kilted-20250728
+      MICRO_ROS_REF: 6.0.1
 
       ARCH: arm64
       DEBIAN_RELEASE: bookworm

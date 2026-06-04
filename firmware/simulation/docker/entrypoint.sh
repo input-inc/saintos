@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-ROS_DISTRO="${ROS_DISTRO:-jazzy}"
+ROS_DISTRO="${ROS_DISTRO:-kilted}"
 AGENT_PORT="${AGENT_PORT:-8888}"
 WS_URL="${WS_URL:-ws://localhost:9090}"
 PASSWORD="${PASSWORD:-12345}"
@@ -46,21 +46,25 @@ source /work/install/setup.bash
 set -u
 
 # ── Start agent ────────────────────────────────────────────────────────
-# The agent was linked against libfastrtps.so.2.14.5 / libfastcdr.so.2.2.5
-# (versions baked into microros/micro-ros-agent:jazzy). ros:jazzy-ros-base's
-# apt feeds now ship .6 / .7, which subtly break the SHM transport's
-# stack-frame layout — the agent then aborts with `*** stack smashing
-# detected ***` on the first received packet. We stash the matched libs
-# under /opt/uros_libs and prepend that to LD_LIBRARY_PATH.
+# Historical (jazzy): the agent image was linked against
+# libfastrtps.so.2.14.5 / libfastcdr.so.2.2.5, while ros:jazzy-ros-base's
+# apt feeds shipped .6 / .7. That drift broke the SHM transport's
+# stack-frame layout — agent aborted with `*** stack smashing detected
+# ***` on the first received packet. The fix was to stash the matched
+# libs under /opt/uros_libs and prepend that to LD_LIBRARY_PATH.
 #
-# Why we invoke the binary directly instead of via `ros2 run`: ros2 CLI
-# loads extra typesupport libs (librmw_dds_common__rosidl_typesupport_*)
-# from /opt/ros/jazzy/lib that were built against 2.2.7 and require a
-# fastcdr symbol that doesn't exist in 2.2.5 — leading to a symbol
-# lookup error on the first serialization. The agent itself doesn't
-# need those libs, so bypassing `ros2 run` keeps the lib scope tight.
+# Kilted uses Fast-DDS v3.x; the same drift may or may not recur. We
+# keep the LD_LIBRARY_PATH stash defensively — if the apt feed matches
+# the agent image exactly, the prepended path is a no-op.
+#
+# Why we invoke the binary directly instead of via `ros2 run`: under
+# jazzy, ros2 CLI loaded extra typesupport libs from /opt/ros/jazzy/lib
+# that were built against 2.2.7 and required a fastcdr symbol that
+# didn't exist in 2.2.5 — leading to a symbol lookup error on the
+# first serialization. The agent doesn't need those libs, so bypassing
+# `ros2 run` keeps the lib scope tight regardless of distro drift.
 echo "[entrypoint] starting micro-ROS agent on UDP ${AGENT_PORT}"
-( export LD_LIBRARY_PATH="/opt/uros_libs:/uros_ws/install/micro_ros_agent/lib:/uros_ws/install/micro_ros_msgs/lib:/opt/ros/jazzy/lib"; \
+( export LD_LIBRARY_PATH="/opt/uros_libs:/uros_ws/install/micro_ros_agent/lib:/uros_ws/install/micro_ros_msgs/lib:/opt/ros/${ROS_DISTRO}/lib"; \
   exec /uros_ws/install/micro_ros_agent/lib/micro_ros_agent/micro_ros_agent \
       udp4 --port "${AGENT_PORT}" > /tmp/agent.log 2>&1 ) &
 AGENT_PID=$!
@@ -223,7 +227,7 @@ case "${MODE}" in
         sleep 2
 
         echo "[entrypoint] hang-repro: restart agent + server"
-        ( export LD_LIBRARY_PATH="/opt/uros_libs:/uros_ws/install/micro_ros_agent/lib:/uros_ws/install/micro_ros_msgs/lib:/opt/ros/jazzy/lib"; \
+        ( export LD_LIBRARY_PATH="/opt/uros_libs:/uros_ws/install/micro_ros_agent/lib:/uros_ws/install/micro_ros_msgs/lib:/opt/ros/${ROS_DISTRO}/lib"; \
           exec /uros_ws/install/micro_ros_agent/lib/micro_ros_agent/micro_ros_agent \
               udp4 --port "${AGENT_PORT}" > /tmp/agent.log 2>&1 ) &
         AGENT_PID=$!

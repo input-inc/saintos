@@ -254,3 +254,5 @@ target/
 # writes rp2040_synctest.uart.log.<n> into here). Host-local, regenerated
 # on every test run — never committed.
 firmware/simulation/logs/
+
+ros2-install.tar.gz

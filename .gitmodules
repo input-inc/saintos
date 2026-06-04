@@ -4,4 +4,4 @@
 [submodule "firmware/rp2040/lib/micro_ros_raspberrypi_pico_sdk"]
 	path = firmware/rp2040/lib/micro_ros_raspberrypi_pico_sdk
 	url = https://github.com/micro-ROS/micro_ros_raspberrypi_pico_sdk.git
-	branch = humble
+	branch = kilted

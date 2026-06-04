@@ -244,13 +244,13 @@ jobs:
         include:
           - runs-on: ubuntu-22.04-arm
             arch: arm64
-            ros: jazzy
+            ros: kilted
             # Upstream pins — keep in sync with the same-named env vars
             # in .github/workflows/ros2-build.yml. Bumping either here
             # without bumping there (or vice versa) produces a hash
             # mismatch and "No ROS2 release …-<hash> found".
-            ros2_repos_ref: release-jazzy-20260128
-            micro_ros_ref: 5.0.2
+            ros2_repos_ref: release-kilted-20250728
+            micro_ros_ref: 6.0.1
             debian_release: bookworm
     runs-on: ${{ matrix.runs-on }}
     env:

@@ -71,10 +71,24 @@ apt-get install -y --no-install-recommends \
     libxslt1-dev \
     libyaml-dev \
     libzstd-dev \
+    nlohmann-json3-dev \
     uuid-dev
 
 # Use C.UTF-8 — built into glibc, no locale generation needed.
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+# Rust toolchain for zenoh_cpp_vendor. Kilted pulled rmw_zenoh into
+# ros_base's transitive deps (via zenoh_cpp_vendor / zenoh_c_vendor),
+# which compiles zenoh-c from Rust source via cargo. Debian Bookworm's
+# apt cargo is 0.66 (Rust 1.63, Dec 2022) — too old for current
+# zenoh-c. Use rustup with a current stable toolchain.
+# minimal profile = no docs / no rust-src / no rustfmt → 5-10 min less.
+export RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+export PATH="${CARGO_HOME}/bin:${PATH}"
+rustc --version
+cargo --version
 
 # ROS2 build tooling — these aren't in Debian's apt repos (only Ubuntu's
 # via packages.ros.org), so we follow the ROS2 source-install procedure for
@@ -106,6 +120,49 @@ cd "${ROS_ROOT}"
 
 echo ">>> Importing ros2.repos..."
 vcs import --input /work/_ros2_src/ros2.repos src
+
+# --- GCC 12 / Fast-DDS workaround ------------------------------------------
+#
+# Fast-DDS v3.2.2 (Kilted's pin) sets `-Werror` unconditionally in its
+# top-level CMakeLists.txt and is tested upstream against GCC 13
+# (Ubuntu 24.04 noble's default). GCC 12 (Debian Bookworm's default,
+# which we target to stay binary-compatible with Raspberry Pi OS
+# Bookworm / glibc 2.36 / libpython3.11) emits a false-positive
+# `-Wmaybe-uninitialized` on a templated std::string destructor inside
+# TypeObjectUtils.cpp — which then becomes a hard error and kills the
+# build. GCC 13 doesn't fire the warning at all.
+#
+# Bookworm has no gcc-13 (not even in bookworm-backports), and switching
+# the base to Trixie or noble would break our libpython3.11 / glibc 2.36
+# target compat. The narrow fix: append `-Wno-error=maybe-uninitialized`
+# after the upstream `-Werror`, demoting only that one class back to a
+# warning while keeping the rest of -Werror's safety net. Same surgical
+# patch pattern we use for the xrceagent pin below.
+echo ">>> Patching Fast-DDS to silence the GCC 12 maybe-uninitialized false-positive"
+FASTDDS_CMAKE=$(find src -path '*Fast-DDS/CMakeLists.txt' -type f -print -quit)
+if [[ -z "${FASTDDS_CMAKE}" ]]; then
+    echo "WARNING: Fast-DDS CMakeLists.txt not found — skipping warning patch." >&2
+else
+    python3 - "${FASTDDS_CMAKE}" <<'PY'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+# Match the literal line:  "${CMAKE_CXX_FLAGS} -Werror")
+# Append -Wno-error=maybe-uninitialized inside the closing quote.
+new, n = re.subn(
+    r'("\$\{CMAKE_CXX_FLAGS\} -Werror)("\))',
+    r'\1 -Wno-error=maybe-uninitialized\2',
+    src,
+)
+if n == 0:
+    print(f"WARNING: -Werror line not found in {path} — upstream may have refactored", file=sys.stderr)
+else:
+    with open(path, 'w') as f:
+        f.write(new)
+    print(f"Patched {n} -Werror occurrence(s) in {path}")
+PY
+fi
 
 # ros2/variants holds the ros_base / ros_core / desktop meta-packages.
 # It's NOT included in Jazzy's ros2.repos (was in Humble), but it still
@@ -218,27 +275,34 @@ done
 # the colcon build below will fail with a useful CMake-level error — much
 # clearer than rosdep's "no Debian mapping" cryptic failures.
 
-# --- Phase 3.5: pin Micro-XRCE-DDS-Agent to a Jazzy-compatible version -----
+# --- Phase 3.5: pin Micro-XRCE-DDS-Agent to a working version -----------
 #
-# micro-ROS-Agent's jazzy branch (SuperBuild.cmake) pins the underlying
-# eProsima Micro-XRCE-DDS-Agent to v2.4.3, which predates ROS2 Iron's
-# type-hash propagation (Feb 2023 release, Jazzy support landed in v3.0.0
-# Apr 2024). The v2.4.3 agent creates DDS-side bridge endpoints with
-# `Topic type hash: INVALID`, and Jazzy publishers won't deliver to them
-# — every Sync to Node / control / command silently fails at the server
-# → agent → firmware bridge while announcements (the reverse direction)
-# look fine.
+# micro-ROS-Agent's per-distro branches (SuperBuild.cmake) pin the
+# underlying eProsima Micro-XRCE-DDS-Agent to v2.4.3, which predates
+# ROS2 Iron's type-hash propagation (Feb 2023; Jazzy support landed in
+# xrceagent v3.0.0, Apr 2024). The v2.4.3 agent creates DDS-side bridge
+# endpoints with `Topic type hash: INVALID`, and modern ROS2 publishers
+# won't deliver to them — every Sync to Node / control / command
+# silently fails at the server → agent → firmware bridge while
+# announcements (the reverse direction) look fine.
 #
-# This sed bumps the pinned tag to v3.0.0 (first 3.x with type-hash
-# support, ships against Jazzy's Fast-DDS v2). v3.0.1 broke compatibility
-# with Jazzy: its CMakeLists.txt added `find_package(fastdds 3 REQUIRED)`,
-# and Jazzy ships Fast-DDS v2 under the `fastrtps` package name — so
-# colcon fails with "Could not find a package configuration file
-# provided by 'fastdds' (requested version 3)". Stay on v3.0.0 until
-# Jazzy ships Fast-DDS v3 (or until xrceagent gets a fastrtps fallback).
-# Idempotent — if upstream micro-ROS-Agent jazzy branch ever updates
-# its own pin past v3.0.0, this rewrite becomes a no-op.
-PIN_TARGET_VERSION="v3.0.0"
+# Distro compatibility for the post-v2.4.3 bump:
+#   - Jazzy ships Fast-DDS v2.14.x as the `fastrtps` CMake package.
+#     xrceagent v3.0.0+ requires `find_package(fastdds 3 REQUIRED)`,
+#     which fails on Jazzy with "Could not find package configuration
+#     provided by 'fastdds' (requested version 3)". No middle pin works:
+#     v2.4.3 is the last v2 release, v3.0.0 the first with type-hash.
+#   - Kilted (current) ships Fast-DDS v3.2.x, which exposes the
+#     `fastdds` v3 CMake package. xrceagent v3.0.1 builds cleanly.
+#   - Lyrical Luth (released 2026-05-22) ships Fast-DDS v3.6.1 and is
+#     the long-term target; micro-ROS upstream hasn't published a
+#     lyrical branch yet (no refs/heads/lyrical on micro_ros_setup or
+#     micro-ROS-Agent as of 2026-06).
+#
+# This sed bumps the SuperBuild GIT_TAG to v3.0.1. Idempotent — if a
+# future upstream micro-ROS-Agent branch already pins past v3.0.1, the
+# rewrite becomes a no-op.
+PIN_TARGET_VERSION="v3.0.1"
 SUPERBUILD_CMAKE=$(find "${TARGETDIR}" -path '*micro-ROS-Agent*SuperBuild.cmake' -type f -print -quit)
 if [[ -z "${SUPERBUILD_CMAKE}" ]]; then
     echo "WARNING: SuperBuild.cmake not found — couldn't bump Micro-XRCE-DDS-Agent pin." >&2

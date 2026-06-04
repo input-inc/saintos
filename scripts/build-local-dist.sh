@@ -47,15 +47,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-ROS_DISTRO="jazzy"
+ROS_DISTRO="kilted"
 ARCH="arm64"
 DEBIAN_RELEASE="bookworm"
 # Upstream pins — must match the same-named env vars in
 # .github/workflows/ros2-build.yml and .github/workflows/dist.yml or
 # the local hash will diverge from CI's and we won't find the cached
 # release. Bump deliberately (in all three files at once).
-ROS2_REPOS_REF="${ROS2_REPOS_REF:-release-jazzy-20260128}"
-MICRO_ROS_REF="${MICRO_ROS_REF:-5.0.2}"
+ROS2_REPOS_REF="${ROS2_REPOS_REF:-release-kilted-20250728}"
+MICRO_ROS_REF="${MICRO_ROS_REF:-6.0.1}"
 REPO_SLUG="${SAINT_REPO_SLUG:-input-inc/saintos}"
 
 CACHE_ROOT="${SAINT_LOCAL_CACHE:-${HOME}/.cache/saint-os}"
