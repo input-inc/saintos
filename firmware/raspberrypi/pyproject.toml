@@ -34,6 +34,13 @@ dependencies = [
     # logs an error and disables the audio_player — the rest of the
     # node keeps running.
     "python-vlc>=3.0",
+    # bleak is the cross-platform BLE central client. Used by the
+    # ble_transport for JBD-protocol BMSes (and any future BLE
+    # peripherals). On Linux/Pi it talks to BlueZ over D-Bus; the
+    # `saint` service user needs to be in the `bluetooth` group.
+    # Import is lazy — a host without bleak still loads the driver,
+    # only BLE-mode instances fail to open.
+    "bleak>=0.21",
 ]
 
 [project.optional-dependencies]

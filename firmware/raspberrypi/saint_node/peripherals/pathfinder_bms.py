@@ -1,8 +1,10 @@
 """
 SAINT.OS Pi node — Pathfinder / JBD-compatible BMS driver.
 
-Port of firmware/shared/src/pathfinder_bms_driver.c. JBD UART protocol
-at 9600 baud, 8N1:
+Originally a port of firmware/shared/src/pathfinder_bms_driver.c. JBD
+protocol over UART (9600 baud, 8N1) OR over BLE (JBD service
+0x0000FF00, write 0xFF02, notify 0xFF01) — same frame format either
+way:
 
     [0xDD] [Action] [Register] [Length] [Data...] [CRC_hi] [CRC_lo] [0x77]
 
@@ -10,7 +12,10 @@ We read register 0x03 (basic info) periodically: pack voltage,
 current, SOC, cycles, protection bits, NTC temps. Operator-facing
 sub-channels are a subset of those.
 
-Single-instance peripheral — only one BMS per node. Channels:
+Multi-instance — up to MAX_INSTANCES BMSes per Pi (mixed transports
+allowed, e.g. one UART + two BLE). Each instance's `params["transport"]`
+selects "uart" (default, backwards-compatible) or "ble". Channels:
+
   0  pack_voltage  (V)
   1  current       (A)
   2  soc           (%)
@@ -19,7 +24,14 @@ Single-instance peripheral — only one BMS per node. Channels:
   5  temp_2        (°C)
   6  cycles        (count)
   7  protection    (uint16 bitset)
-  8..23 cell_NN    (V each, up to 16 cells)
+  8..23 cell_NN    (V each, up to 16 cells — reserved, not yet decoded)
+
+Virtual GPIO base is 1024 on the Pi (Pi-side only). The
+firmware-shared header still says 276 because RP2040/Teensy only run
+one BMS each. On the Pi we need MAX_INSTANCES × 24 = 96 channels and
+the 276..371 range would collide with Tic (300+) and TMC2208 (348+).
+Server-side addressing is `(peripheral_id, channel_id)` per the
+peripheral-first refactor — the vGPIO number is internal routing only.
 """
 
 from __future__ import annotations
@@ -28,6 +40,7 @@ import time
 from typing import Any, Dict, Optional
 
 from .base import PeripheralDriver
+from ..ble_transport import BleTransport
 from ..uart_transport import UartTransport
 
 
@@ -37,11 +50,14 @@ JBD_FRAME_END                  = 0x77
 JBD_ACTION_READ                = 0xA5
 JBD_ACTION_OK                  = 0x00
 JBD_REG_BASIC_INFO             = 0x03
-JBD_VIRTUAL_GPIO_BASE          = 276
+JBD_VIRTUAL_GPIO_BASE          = 1024
 JBD_CHANNEL_COUNT              = 24
+JBD_MAX_INSTANCES              = 4
 JBD_DEFAULT_POLL_S             = 1.0
 JBD_RESPONSE_MAX_DATA          = 64
 JBD_READ_REQUEST_SIZE          = 7
+JBD_UART_TIMEOUT_S             = 0.2
+JBD_BLE_TIMEOUT_S              = 2.0
 
 # Channel indexes
 JBD_CH_PACK_VOLTAGE     = 0
@@ -146,57 +162,69 @@ class PathfinderBMSDriver(PeripheralDriver):
     MODE_STRING = "pathfinder_bms_sensor"
     VIRTUAL_GPIO_BASE = JBD_VIRTUAL_GPIO_BASE
     CHANNELS_PER_INSTANCE = JBD_CHANNEL_COUNT
-    MAX_INSTANCES = 1
+    MAX_INSTANCES = JBD_MAX_INSTANCES
     SUB_CHANNEL_NAMES = _SUB_CHANNEL_NAMES
 
-    _transport_cls = UartTransport
+    # Transport factories — tests monkey-patch these to inject mocks.
+    _uart_transport_cls = UartTransport
+    _ble_transport_cls = BleTransport
 
     def __init__(self, logger=None):
         super().__init__(logger=logger)
-        self._uart: Optional[UartTransport] = None
-        self._uart_pins: tuple[int, int, int] = (0, 0, JBD_BAUD)
-        self._poll_interval_s: float = JBD_DEFAULT_POLL_S
-        self._last_poll: float = 0.0
+        self._transports: Dict[int, Any] = {}
+        self._poll_interval_s: Dict[int, float] = {}
+        self._last_poll: Dict[int, float] = {}
 
     def apply_config(self, instance_id: int, pins: Dict[str, int],
                      params: Dict[str, Any]) -> bool:
-        if instance_id != 0:
+        if instance_id < 0 or instance_id >= self.MAX_INSTANCES:
             return False
-        tx = int(pins.get("uart_tx", 0))
-        rx = int(pins.get("uart_rx", 0))
-        baud = int(params.get("baud", JBD_BAUD))
-        poll_ms = int(params.get("poll_interval_ms", int(JBD_DEFAULT_POLL_S * 1000)))
-        self._poll_interval_s = max(0.1, poll_ms / 1000.0)
+        transport_type = str(params.get("transport", "uart")).lower()
+        poll_ms = int(params.get("poll_interval_ms",
+                                  int(JBD_DEFAULT_POLL_S * 1000)))
+        poll_s = max(0.1, poll_ms / 1000.0)
 
-        if self._uart is None or self._uart_pins != (tx, rx, baud):
-            if self._uart is not None:
-                self._uart.close()
-            # JBD responses are up to ~34 bytes — generous timeout.
-            self._uart = self._transport_cls(
-                tx, rx, baud, timeout_s=0.2, logger=self._logger)
-            if not self._uart.open():
-                return False
-            self._uart_pins = (tx, rx, baud)
+        # Drop any prior transport on this slot before swapping.
+        self._teardown_instance(instance_id)
 
-        inst = self._get_or_create_instance(0)
+        transport = self._build_transport(
+            instance_id, transport_type, pins, params)
+        if transport is None:
+            return False
+        if not transport.open():
+            try:
+                transport.close()
+            except Exception:
+                pass
+            return False
+
+        self._transports[instance_id] = transport
+        self._poll_interval_s[instance_id] = poll_s
+        self._last_poll[instance_id] = 0.0
+
+        inst = self._get_or_create_instance(instance_id)
         inst.pins = dict(pins)
         inst.params = dict(params)
-        # Try a first poll so connected flips quickly.
-        if self._poll_basic_info():
-            inst.connected = True
-            self._last_poll = time.monotonic()
+
+        # Best-effort first poll. UART usually succeeds immediately;
+        # BLE returns False until the async connect lands — update()
+        # will keep retrying every poll interval.
+        if self._poll_basic_info(instance_id):
+            self._last_poll[instance_id] = time.monotonic()
         return True
 
     def update(self) -> None:
-        if self._uart is None:
-            return
         now = time.monotonic()
-        if now - self._last_poll < self._poll_interval_s:
-            return
-        self._last_poll = now
-        self._poll_basic_info()
+        for instance_id in list(self._transports.keys()):
+            interval = self._poll_interval_s.get(
+                instance_id, JBD_DEFAULT_POLL_S)
+            if now - self._last_poll.get(instance_id, 0.0) < interval:
+                continue
+            self._last_poll[instance_id] = now
+            self._poll_basic_info(instance_id)
 
-    def set_value(self, instance_id: int, sub_channel: int, value: float) -> bool:
+    def set_value(self, instance_id: int, sub_channel: int,
+                  value: float) -> bool:
         return False  # read-only
 
     def get_value(self, instance_id: int, sub_channel: int) -> Optional[float]:
@@ -206,25 +234,63 @@ class PathfinderBMSDriver(PeripheralDriver):
         return inst.last_values.get(sub_channel)
 
     def reset(self) -> None:
-        if self._uart is not None:
-            self._uart.close()
-            self._uart = None
-        self._uart_pins = (0, 0, JBD_BAUD)
+        for instance_id in list(self._transports.keys()):
+            self._teardown_instance(instance_id)
         super().reset()
 
-    def _poll_basic_info(self) -> bool:
-        if self._uart is None:
+    # ── internals ──────────────────────────────────────────────────
+
+    def _build_transport(self, instance_id: int, transport_type: str,
+                         pins: Dict[str, int],
+                         params: Dict[str, Any]):
+        if transport_type == "uart":
+            tx = int(pins.get("uart_tx", 0))
+            rx = int(pins.get("uart_rx", 0))
+            baud = int(params.get("baud", JBD_BAUD))
+            return self._uart_transport_cls(
+                tx, rx, baud,
+                timeout_s=JBD_UART_TIMEOUT_S, logger=self._logger)
+        if transport_type == "ble":
+            mac = str(params.get("mac", "")).strip()
+            if not mac:
+                self._log("error",
+                    f"pathfinder_bms#{instance_id}: BLE transport "
+                    f"requires 'mac' param")
+                return None
+            return self._ble_transport_cls(
+                mac,
+                timeout_s=JBD_BLE_TIMEOUT_S, logger=self._logger)
+        self._log("error",
+            f"pathfinder_bms#{instance_id}: unknown transport "
+            f"'{transport_type}' (expected 'uart' or 'ble')")
+        return None
+
+    def _teardown_instance(self, instance_id: int) -> None:
+        old = self._transports.pop(instance_id, None)
+        self._poll_interval_s.pop(instance_id, None)
+        self._last_poll.pop(instance_id, None)
+        if old is None:
+            return
+        try:
+            old.close()
+        except Exception:
+            pass
+
+    def _poll_basic_info(self, instance_id: int) -> bool:
+        transport = self._transports.get(instance_id)
+        inst = self._instances.get(instance_id)
+        if transport is None or inst is None:
+            return False
+        if not transport.is_open():
+            # Normal for BLE before the async connect completes.
+            inst.connected = False
             return False
         req = build_read_request(JBD_REG_BASIC_INFO)
-        # Response is variable-length. Read a generous block; parsing
-        # tolerates trailing zeros.
-        reply = self._uart.write_then_read(req, JBD_RESPONSE_MAX_DATA,
-                                              drain_echo=False)
+        reply = transport.write_then_read(
+            req, JBD_RESPONSE_MAX_DATA, drain_echo=False)
         decoded = parse_basic_info_response(reply)
         if decoded is None:
-            return False
-        inst = self._instances.get(0)
-        if inst is None:
+            inst.connected = False
             return False
         inst.connected = True
         inst.last_values[JBD_CH_PACK_VOLTAGE] = decoded["pack_voltage"]

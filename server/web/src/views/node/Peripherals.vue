@@ -85,6 +85,20 @@ onUnmounted(async () => {
     try { await ws.unsubscribe([syncTopic]) } catch (_) {}
     syncTopic = null
   }
+  await detachScanFeed()
+})
+
+// When the modal closes, drop the scan subscription and clear the
+// per-modal scan state so a re-open starts clean. Driven by `watch`
+// rather than the close handler so it covers ESC, backdrop click,
+// and the explicit Cancel button.
+watch(modalOpen, async (open) => {
+  if (!open) {
+    scanResults.value = []
+    scanError.value = ''
+    scanRunning.value = false
+    await detachScanFeed()
+  }
 })
 
 const typesById = computed(() => {
@@ -164,10 +178,134 @@ function coerceChoiceValue (param, raw) {
   return raw
 }
 
+// `visible_when` predicate from the catalog: hide a param unless
+// every named dependency in modalParams matches. Used by the BMS
+// type to gate the MAC field behind transport=ble.
+function paramVisible (param) {
+  if (!param.visible_when) return true
+  for (const [k, v] of Object.entries(param.visible_when)) {
+    if (modalParams.value[k] !== v) return false
+  }
+  return true
+}
+
+// Pin selectors (UART pair or single GPIO) are normally shown for any
+// non-builtin pin_kind. But peripherals that swap to a wireless
+// transport (BMS with transport=ble) have no pins — hide the picker
+// in that case so the operator doesn't get a pointless "no pair
+// selected" error.
+const pinsVisible = computed(() => {
+  const t = modalType.value
+  if (!t) return false
+  if (t.pin_kind === 'builtin') return false
+  // If the type declares a `transport` param and the operator has
+  // picked a non-uart transport, pins don't apply.
+  const transportParam = (t.params || []).find(p => p.id === 'transport')
+  if (transportParam && modalParams.value.transport &&
+      modalParams.value.transport !== 'uart') {
+    return false
+  }
+  return true
+})
+
+// ── BLE scan (BMS discovery) ────────────────────────────────────
+// Toggled by a button on the modal when the catalog type is the
+// BMS *and* the operator has picked the BLE transport. Results
+// arrive asynchronously on `ble_scan_results/<node_id>`; we
+// subscribe lazily right before triggering the action so other
+// nodes' scans don't leak into this modal.
+const scanRunning = ref(false)
+const scanResults = ref([])
+const scanError = ref('')
+let scanTopic = null
+let scanRequestId = null
+
+function onScanFrame (msg) {
+  if (typeof msg?.node !== 'string') return
+  if (msg.node !== scanTopic) return
+  const data = msg.data
+  if (!data || typeof data !== 'object') return
+  // Late frames from a prior scan are ignored.
+  if (scanRequestId && data.request_id && data.request_id !== scanRequestId) return
+  scanRunning.value = false
+  if (data.status === 'ok') {
+    scanResults.value = Array.isArray(data.devices) ? data.devices : []
+    if (!scanResults.value.length) {
+      scanError.value = 'No JBD-protocol BMSes found. Make sure the BMS is powered on and within range.'
+    } else {
+      scanError.value = ''
+    }
+  } else {
+    scanError.value = data.message || `Scan ${data.status || 'failed'}`
+  }
+}
+
+async function attachScanFeed () {
+  if (scanTopic) return
+  scanTopic = `ble_scan_results/${props.nodeId}`
+  ws.on('state', onScanFrame)
+  try { await ws.subscribe([scanTopic], 5) } catch (_) {}
+}
+
+async function detachScanFeed () {
+  ws.off('state', onScanFrame)
+  if (scanTopic) {
+    try { await ws.unsubscribe([scanTopic]) } catch (_) {}
+    scanTopic = null
+  }
+  scanRequestId = null
+}
+
+async function scanForBms () {
+  scanError.value = ''
+  scanResults.value = []
+  scanRunning.value = true
+  await attachScanFeed()
+  // Random request id so result frames from a previous scan don't
+  // overwrite a newer one if the node publishes them back-to-back.
+  scanRequestId = `scan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    const r = await ws.management('ble_scan_node', {
+      node_id: props.nodeId,
+      duration_s: 8,
+      filter_jbd: true,
+      request_id: scanRequestId,
+    })
+    if (r?.status === 'error') {
+      scanRunning.value = false
+      scanError.value = r.message || 'Scan request failed'
+    }
+  } catch (e) {
+    scanRunning.value = false
+    scanError.value = e.message || String(e)
+  }
+}
+
+function pickScanResult (device) {
+  modalParams.value.mac = device.mac
+  // Pre-fill the label too if the operator hasn't typed one.
+  if (!modalLabel.value && device.name) modalLabel.value = device.name
+}
+
+const scanAvailable = computed(() =>
+  modalType.value?.id === 'pathfinder_bms' &&
+  modalParams.value.transport === 'ble'
+)
+
 async function saveModal () {
   modalError.value = ''
   const type = typesById.value[modalTypeId.value]
   if (!type) { modalError.value = 'Pick a type'; return }
+
+  // Drop params hidden by `visible_when` from the saved payload so
+  // stale values (e.g. a MAC entered before switching transport
+  // back to UART) don't reach the firmware. Pins likewise get
+  // cleared when the picker is hidden.
+  const params = {}
+  for (const p of (type.params || [])) {
+    if (paramVisible(p)) params[p.id] = modalParams.value[p.id]
+  }
+  const pins = pinsVisible.value ? { ...modalPins.value } : {}
 
   // Server contract (websocket_handler.py:1018): expects
   //   { node_id, peripheral: { id?, type, label, pins, params } }
@@ -175,8 +313,8 @@ async function saveModal () {
   const peripheral = {
     type: type.id,
     label: modalLabel.value || type.label,
-    pins: { ...modalPins.value },
-    params: { ...modalParams.value },
+    pins,
+    params,
   }
   if (modalMode.value === 'edit') peripheral.id = modalEditingId.value
   try {
@@ -376,7 +514,7 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
           <input v-model="modalLabel" type="text" class="input-field w-full" :placeholder="modalType?.label" />
         </div>
 
-        <div v-if="modalType?.pin_kind === 'uart'">
+        <div v-if="pinsVisible && modalType?.pin_kind === 'uart'">
           <label class="block text-sm font-medium text-fg mb-1">UART pins</label>
           <select
             class="input-field w-full"
@@ -396,7 +534,7 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
           </select>
         </div>
 
-        <div v-else-if="modalType && modalType.pin_kind !== 'builtin'">
+        <div v-else-if="pinsVisible && modalType && modalType.pin_kind !== 'builtin'">
           <label class="block text-sm font-medium text-fg mb-1">Pin</label>
           <select
             class="input-field w-full"
@@ -416,7 +554,8 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
         </div>
 
         <div v-if="modalType?.params?.length" class="space-y-3 pt-2 border-t border-line">
-          <div v-for="p in modalType.params" :key="p.id">
+          <template v-for="p in modalType.params" :key="p.id">
+          <div v-if="paramVisible(p)">
             <label class="block text-xs text-fg-muted mb-1">{{ p.label }}</label>
             <!-- Constrained-choice params (catalog `choices: [...]`)
                  render as a dropdown regardless of base `type`. Each
@@ -482,7 +621,38 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
                  about what the param actually does. Single-line if
                  short, wraps if longer. -->
             <p v-if="p.help" class="text-[11px] text-fg-faint mt-1 leading-snug">{{ p.help }}</p>
+            <!-- BMS-specific: a "Scan for BMS" button sits under the
+                 MAC field so the operator doesn't have to type the
+                 address by hand. We attach to the result topic
+                 lazily on first click. -->
+            <div v-if="p.id === 'mac' && scanAvailable" class="mt-2 space-y-2">
+              <button type="button"
+                      class="btn-secondary text-sm"
+                      :disabled="scanRunning"
+                      @click="scanForBms">
+                <span class="material-icons icon-sm">{{ scanRunning ? 'hourglass_top' : 'bluetooth_searching' }}</span>
+                {{ scanRunning ? 'Scanning…' : 'Scan for BMS' }}
+              </button>
+              <div v-if="scanError"
+                   class="px-2 py-1 text-xs rounded bg-amber-500/20 border border-amber-500/40 text-amber-300">
+                {{ scanError }}
+              </div>
+              <div v-if="scanResults.length" class="rounded border border-line bg-surface/40 divide-y divide-line/60">
+                <button v-for="d in scanResults" :key="d.mac"
+                        type="button"
+                        class="w-full flex items-center justify-between px-3 py-2 text-left text-xs hover:bg-surface transition-colors"
+                        :class="modalParams.mac === d.mac ? 'bg-cyan-900/30' : ''"
+                        @click="pickScanResult(d)">
+                  <span class="flex flex-col">
+                    <span class="text-fg-strong">{{ d.name || '(unnamed)' }}</span>
+                    <span class="font-mono text-fg-faint">{{ d.mac }}</span>
+                  </span>
+                  <span class="text-fg-muted">{{ d.rssi }} dBm</span>
+                </button>
+              </div>
+            </div>
           </div>
+          </template>
         </div>
       </div>
 

@@ -17,6 +17,7 @@ import json
 import time
 import socket
 import hashlib
+import threading
 from enum import Enum
 from typing import Optional, Dict, Any
 
@@ -37,6 +38,7 @@ from .peripherals.pathfinder_bms import PathfinderBMSDriver
 from .peripherals.fas100 import FAS100Driver
 from .peripherals.audio_player import PiAudioPlayerDriver
 from .pi_model import detect_pi_model
+from . import ble_transport
 
 
 class NodeState(Enum):
@@ -153,6 +155,15 @@ class SaintNode(Node):
             String, f'/saint/nodes/{self._node_id}/state', self._qos_reliable)
         self._pub_update_progress = self.create_publisher(
             String, f'/saint/nodes/{self._node_id}/update_progress', self._qos_reliable)
+        # Async scan results (BLE BMS discovery). Operator-triggered,
+        # one frame per scan completion. Reliable QoS so a dropped
+        # packet doesn't strand the UI's progress spinner.
+        self._pub_ble_scan = self.create_publisher(
+            String, f'/saint/nodes/{self._node_id}/ble_scan_results',
+            self._qos_reliable)
+        # Re-entry guard: one scan at a time. BlueZ doesn't like
+        # parallel scans on the same adapter.
+        self._ble_scan_thread: Optional[threading.Thread] = None
 
         # Subscribers
         self._sub_config = self.create_subscription(
@@ -488,6 +499,9 @@ class SaintNode(Node):
             elif action == 'check_update':
                 self._handle_check_update(data)
 
+            elif action == 'ble_scan':
+                self._handle_ble_scan(data)
+
             else:
                 self.get_logger().warn(f'Unknown control action: {action}')
 
@@ -514,6 +528,71 @@ class SaintNode(Node):
         self._state = NodeState.UNADOPTED
 
         self.get_logger().info('Factory reset complete')
+
+    def _handle_ble_scan(self, data: Dict[str, Any]):
+        """Operator-triggered BLE scan for JBD-protocol BMSes.
+
+        Request: {action: "ble_scan", duration_s: 8, filter_jbd: true,
+                  request_id: "..."}
+        Reply (on /ble_scan_results topic):
+          {status: "ok", devices: [{mac, name, rssi}], duration_s, ...}
+          {status: "busy"|"error", message: "..."}
+
+        Runs the actual scan in a worker thread so the main ROS loop
+        keeps ticking. BlueZ rejects parallel scans on the same
+        adapter, so we guard against re-entry.
+        """
+        duration_s = float(data.get('duration_s', 8.0))
+        duration_s = max(1.0, min(30.0, duration_s))
+        filter_jbd = bool(data.get('filter_jbd', True))
+        request_id = str(data.get('request_id', ''))
+
+        existing = self._ble_scan_thread
+        if existing is not None and existing.is_alive():
+            self._publish_ble_scan_result({
+                "status": "busy",
+                "message": "Another scan is already running",
+                "request_id": request_id,
+            })
+            return
+
+        def worker():
+            started_at = time.time()
+            try:
+                devices = ble_transport.scan_jbd_devices(
+                    duration_s=duration_s,
+                    filter_service=filter_jbd,
+                    logger=self.get_logger())
+                payload = {
+                    "status": "ok",
+                    "devices": devices,
+                    "duration_s": duration_s,
+                    "filter_jbd": filter_jbd,
+                    "started_at": started_at,
+                    "finished_at": time.time(),
+                    "request_id": request_id,
+                }
+            except Exception as e:
+                self.get_logger().error(f"BLE scan failed: {e}")
+                payload = {
+                    "status": "error",
+                    "message": str(e),
+                    "request_id": request_id,
+                }
+            self._publish_ble_scan_result(payload)
+
+        thread = threading.Thread(
+            target=worker, name="saint-ble-scan", daemon=True)
+        self._ble_scan_thread = thread
+        thread.start()
+        self.get_logger().info(
+            f"BLE scan started ({duration_s:.1f}s, "
+            f"filter_jbd={filter_jbd}, request_id={request_id!r})")
+
+    def _publish_ble_scan_result(self, payload: Dict[str, Any]) -> None:
+        msg = String()
+        msg.data = json.dumps(payload)
+        self._pub_ble_scan.publish(msg)
 
     def _handle_estop(self):
         """Operator-triggered emergency stop: fan out to every

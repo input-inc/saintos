@@ -79,6 +79,15 @@ class PeripheralTypeParam:
     # Peripheral modal. Keep it to 1–2 sentences — anything longer
     # belongs in a docs page.
     help: Optional[str] = None
+    # Conditional visibility predicate. `{other_param_id: value, ...}`
+    # — the field is hidden in the modal unless every named param has
+    # the matching value. Example: a `mac` field with
+    # `visible_when={"transport": "ble"}` only appears when the
+    # operator has picked the BLE transport. Used by the BMS catalog
+    # entry to swap UART pins for a MAC field. The hidden field's
+    # value is also stripped from the saved payload so it doesn't
+    # confuse driver-side config parsers.
+    visible_when: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -91,6 +100,8 @@ class PeripheralTypeParam:
             d.pop("choices")
         if d["help"] is None:
             d.pop("help")
+        if d["visible_when"] is None:
+            d.pop("visible_when")
         return d
 
 
@@ -472,7 +483,13 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "pathfinder_bms": PeripheralType(
         id="pathfinder_bms", label="Pathfinder BMS",
-        description="JBD-compatible battery management system.",
+        description="JBD-compatible battery management system. "
+                    "Connect via UART (one BMS per UART pair) or "
+                    "Bluetooth Low Energy (multiple BMSes per Pi).",
+        # pin_kind="uart" so the modal renders the UART pin pair
+        # selector. We hide those pin widgets via visible_when on the
+        # frontend when transport=ble — the driver ignores them in
+        # that case.
         pin_kind="uart",
         channels=[
             PeripheralChannel("pack_voltage", "Pack voltage",   "in", "analog"),
@@ -482,7 +499,22 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralChannel("temp_2",       "Temp 2",         "in", "analog"),
         ],
         params=[
-            PeripheralTypeParam("poll_interval_ms", "Poll interval (ms)", "int", 1000, min=100, max=10000),
+            PeripheralTypeParam(
+                "transport", "Transport", "string", "uart",
+                choices=[
+                    {"value": "uart", "label": "UART (serial)"},
+                    {"value": "ble",  "label": "Bluetooth (BLE)"},
+                ],
+                help="UART is more robust; BLE lets one Pi host multiple "
+                     "BMSes without wiring."),
+            PeripheralTypeParam(
+                "mac", "BLE MAC address", "string", "",
+                visible_when={"transport": "ble"},
+                help="The BMS's Bluetooth MAC. Use the Scan button to "
+                     "discover nearby JBD devices."),
+            PeripheralTypeParam(
+                "poll_interval_ms", "Poll interval (ms)", "int", 1000,
+                min=100, max=10000),
         ],
     ),
     # On-host audio file playback. The catalog entry is platform-agnostic;

@@ -288,6 +288,7 @@ class SaintServerNode(Node):
         self._node_command_pubs: Dict[str, Any] = {} # node_id -> command publisher (one-shots, RELIABLE)
         self._node_state_subs: Dict[str, Any] = {}   # node_id -> state subscription
         self._node_log_subs: Dict[str, Any] = {}     # node_id -> log subscription
+        self._node_ble_scan_subs: Dict[str, Any] = {}  # node_id -> ble_scan_results subscription
 
         # Sync-ACK signal carried in /announce. Maps node_id to the most
         # recent value of last_config_save_{ok,fail}_ms we've already
@@ -411,6 +412,10 @@ class SaintServerNode(Node):
                 self._ensure_node_log_subscriber(announced_node_id)
                 self._ensure_node_state_subscriber(announced_node_id)
                 self._ensure_node_capabilities_subscriber(announced_node_id)
+                # Pi-side nodes publish ble_scan_results when the
+                # operator triggers a scan; other targets never
+                # publish here, but the subscription is free.
+                self._ensure_node_ble_scan_subscriber(announced_node_id)
 
                 # Pre-create per-node publishers at first contact so DDS
                 # discovery completes during the quiet stretch between
@@ -818,6 +823,62 @@ class SaintServerNode(Node):
         )
         self._node_log_subs[node_id] = sub
         self.get_logger().info(f'Subscribed to log: {topic}')
+
+    def _ensure_node_ble_scan_subscriber(self, node_id: str):
+        """Subscribe to /saint/nodes/<id>/ble_scan_results. The Pi node
+        publishes one frame per scan completion (or busy/error). We
+        forward each frame to WebSocket clients via the normal ROS-
+        bridge broadcast so the Peripherals modal can render the
+        discovered device list."""
+        if node_id in self._node_ble_scan_subs:
+            return
+        sanitized_id = self._sanitize_topic_name(node_id)
+        topic = f'/saint/nodes/{sanitized_id}/ble_scan_results'
+
+        def callback(msg: String):
+            self._on_node_ble_scan(node_id, msg)
+
+        sub = self.create_subscription(
+            String, topic, callback, TELEMETRY_QOS,
+            callback_group=self.callback_group,
+        )
+        self._node_ble_scan_subs[node_id] = sub
+        self.get_logger().info(f'Subscribed to ble_scan: {topic}')
+
+    def _on_node_ble_scan(self, node_id: str, msg: String):
+        """Forward a scan-result frame to WebSocket subscribers.
+        Payload shape lives in firmware/raspberrypi/saint_node/node.py's
+        `_handle_ble_scan` worker."""
+        try:
+            data = json.loads(msg.data)
+        except Exception:
+            self.get_logger().warning(
+                f'ble_scan_results: invalid JSON from {node_id}: {msg.data!r}')
+            return
+        topic = f'ble_scan_results/{node_id}'
+        self._broadcast_ros_message(topic, data)
+
+    def send_ble_scan_command(self, node_id: str, duration_s: float = 8.0,
+                              filter_jbd: bool = True,
+                              request_id: str = "") -> None:
+        """Push a `ble_scan` control action to the node. Results come
+        back asynchronously on the ble_scan_results topic."""
+        import json as _json
+        pub = self._ensure_node_control_publisher(node_id)
+        self._ensure_node_ble_scan_subscriber(node_id)
+        payload = {
+            "action": "ble_scan",
+            "duration_s": float(duration_s),
+            "filter_jbd": bool(filter_jbd),
+            "request_id": str(request_id),
+        }
+        msg = String()
+        msg.data = _json.dumps(payload)
+        pub.publish(msg)
+        self.get_logger().info(
+            f'Sent ble_scan to {node_id}: '
+            f'duration_s={duration_s} filter_jbd={filter_jbd} '
+            f'request_id={request_id!r}')
 
     def _on_node_log(self, node_id: str, msg: String):
         """Receive a firmware log line and feed it into the per-node buffer.
@@ -1673,6 +1734,11 @@ class SaintServerNode(Node):
                 )
                 self.web_server.ws_handler.set_roboclaw_debug_callback(
                     lambda node_id, payload: self.send_roboclaw_debug_command(node_id, payload)
+                )
+                self.web_server.ws_handler.set_ble_scan_callback(
+                    lambda node_id, duration_s, filter_jbd, request_id:
+                        self.send_ble_scan_command(
+                            node_id, duration_s, filter_jbd, request_id)
                 )
 
                 # Initialize ROS Bridge for WebSocket-ROS communication

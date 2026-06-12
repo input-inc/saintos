@@ -188,6 +188,14 @@ class WebSocketHandler:
         # roboclaw_debug_handle_json format.
         self._roboclaw_debug_callback: Optional[Callable[[str, dict], None]] = None
 
+        # Callback for triggering a BLE scan on a node (set by
+        # server_node). Signature: (node_id, duration_s, filter_jbd,
+        # request_id) -> None. Results arrive asynchronously on the
+        # ble_scan_results/<node_id> WS topic; clients subscribe to
+        # that channel before invoking the action.
+        self._ble_scan_callback: Optional[
+            Callable[[str, float, bool, str], None]] = None
+
         # System-wide E-Stop latch state. Mutated by 'estop' command
         # handlers; broadcast to subscribers on the 'estop' topic so
         # multiple dashboards stay in sync.
@@ -267,6 +275,12 @@ class WebSocketHandler:
     def set_identify_node_callback(self, callback: Callable[[str], None]):
         """Set callback for sending identify command to node. Callback takes (node_id)."""
         self._identify_node_callback = callback
+
+    def set_ble_scan_callback(
+            self, callback: Callable[[str, float, bool, str], None]):
+        """Set callback for triggering a BLE scan on a node.
+        Callback takes (node_id, duration_s, filter_jbd, request_id)."""
+        self._ble_scan_callback = callback
 
     def set_estop_node_callback(self, callback: Callable[[str, str], None]):
         """Set callback for sending emergency stop to a node.
@@ -965,6 +979,26 @@ class WebSocketHandler:
                 "active": self._estop_active,
                 "changed_at": self._estop_changed_at,
             }}
+
+        elif action == 'ble_scan_node':
+            # Trigger a BLE scan on a node so the operator can pick a
+            # BMS by MAC inside the Add-Peripheral modal. Results
+            # arrive asynchronously on the `ble_scan_results/<node_id>`
+            # WS topic — the client subscribes before sending this.
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            duration_s = float(params.get('duration_s', 8.0))
+            duration_s = max(1.0, min(30.0, duration_s))
+            filter_jbd = bool(params.get('filter_jbd', True))
+            request_id = str(params.get('request_id', ''))
+            if self._ble_scan_callback:
+                self._ble_scan_callback(
+                    node_id, duration_s, filter_jbd, request_id)
+                return {"status": "ok",
+                        "data": {"duration_s": duration_s,
+                                 "request_id": request_id}}
+            return {"status": "error", "message": "BLE scan callback not configured"}
 
         elif action == 'roboclaw_debug':
             # Diagnostic passthrough to the RoboClaw driver on a node.
