@@ -497,6 +497,17 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralChannel("soc",          "State of charge","in", "analog"),
             PeripheralChannel("temp_1",       "Temp 1",         "in", "analog"),
             PeripheralChannel("temp_2",       "Temp 2",         "in", "analog"),
+            PeripheralChannel("protection",   "Protection bits","in", "analog"),
+            PeripheralChannel("fet_status",   "FET status",     "in", "analog"),
+            PeripheralChannel("remain_cap",   "Remaining cap",  "in", "analog"),
+            PeripheralChannel("cycles",       "Cycle count",    "in", "analog"),
+        ] + [
+            # JBD reports up to 16 series cells in register 0x04. For
+            # smaller packs (4S, 8S, …) the unused slots stay at 0;
+            # the BMS card hides any channel reading 0 V so they
+            # don't clutter the display.
+            PeripheralChannel(f"cell_{i:02d}", f"Cell {i}", "in", "analog")
+            for i in range(1, 17)
         ],
         params=[
             PeripheralTypeParam(

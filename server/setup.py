@@ -58,6 +58,18 @@ setup(
         'pyyaml>=6.0',
         'numpy>=1.21.0',
         'psutil>=5.9.0',
+        # bleak powers the host_controller's in-process BLE BMS
+        # driver (saint_server/host_peripherals/). On Linux/Pi it
+        # talks to BlueZ over D-Bus; the `saint` service user must be
+        # in the `bluetooth` group. Import is lazy in the driver, so
+        # a host without bleak still loads the server — only the
+        # host_controller BLE features fail to come up.
+        #
+        # Floor is 0.20 because that's what Debian Bookworm ships as
+        # `python3-bleak`. APIs used by the driver
+        # (BleakClient.disconnected_callback, BleakScanner.start/stop,
+        # advert_data.rssi) all landed by 0.20.
+        'bleak>=0.20',
     ],
     extras_require={
         'dev': [

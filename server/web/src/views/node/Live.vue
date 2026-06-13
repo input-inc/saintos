@@ -5,6 +5,7 @@ import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useWsTopic } from '@/composables/useWsTopic'
 import { useChannelHistory } from '@/composables/useChannelHistory'
 import Sparkline from '@/components/Sparkline.vue'
+import BMSCard from '@/components/peripherals/BMSCard.vue'
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -62,18 +63,17 @@ watch(() => props.nodeId, async () => {
 
 // Route live pin_state samples into the channel-history rings. The
 // composable trims to the 30s window on every push, so this is safe
-// to run at the topic's full broadcast rate.
+// to run at the topic's full broadcast rate. We feed EVERY incoming
+// channel regardless of the peripheral's log_enabled flag — that
+// flag only controls disk persistence; the live in-memory ring (and
+// the sparkline it backs) should always reflect what the operator
+// can see updating in front of them.
 watch(pinState, (data) => {
   if (!data) return
   const channels = Array.isArray(data.channels) ? data.channels : []
-  // Only feed rings for peripherals the operator has enabled logging
-  // on — matches the legacy behaviour where flipping Log off stops
-  // the sparkline from growing.
-  const loggedIds = new Set(peripherals.value.filter(p => p.log_enabled).map(p => p.id))
   const now = Date.now()
   for (const ch of channels) {
     if (!ch.peripheral_id || !ch.channel_id) continue
-    if (!loggedIds.has(ch.peripheral_id)) continue
     if (typeof ch.value !== 'number') continue
     history.pushSample(`${props.nodeId}/${ch.peripheral_id}/${ch.channel_id}`, ch.value, now)
   }
@@ -129,7 +129,18 @@ function sparkSamples (nodeId, peripheralId, channelId) {
     </div>
 
     <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div v-for="p in peripherals" :key="p.id" class="card">
+      <template v-for="p in peripherals" :key="p.id">
+      <!-- Peripheral-specific cards opt out of the generic table
+           layout. BMSCard renders SOC, pack metrics, cell bars,
+           temps, and fault badges from the same `values` map the
+           generic path uses — no extra subscriptions. -->
+      <BMSCard
+        v-if="p.type === 'pathfinder_bms'"
+        :peripheral="p"
+        :channels="values[p.id] || {}"
+        :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"
+      />
+      <div v-else class="card">
         <header class="flex items-center justify-between mb-3">
           <div>
             <h4 class="text-base font-semibold text-fg-strong flex items-center gap-2 flex-wrap">
@@ -156,15 +167,14 @@ function sparkSamples (nodeId, peripheralId, channelId) {
           >
             <span class="text-fg-muted">{{ ch.display || ch.id }}</span>
             <div class="flex items-center gap-3">
+              <!-- 30s in-memory sparkline runs for every input channel
+                   while the modal/tab is mounted. log_enabled only
+                   controls whether samples are PERSISTED to the
+                   on-disk NDJSON; the live view is independent. -->
               <Sparkline
-                v-if="ch.dir === 'in' && p.log_enabled"
+                v-if="ch.dir === 'in'"
                 :samples="sparkSamples(nodeId, p.id, ch.id)"
               />
-              <span
-                v-else-if="ch.dir === 'in'"
-                class="text-[10px] italic text-fg-faint"
-                title="Enable logging on this peripheral to see history"
-              >not logging</span>
               <span
                 v-if="values[p.id]?.[ch.id] && values[p.id][ch.id].value !== null && values[p.id][ch.id].value !== undefined"
                 :class="ch.dir === 'in' ? 'text-cyan-300' : 'text-amber-300'"
@@ -175,6 +185,7 @@ function sparkSamples (nodeId, peripheralId, channelId) {
           </div>
         </div>
       </div>
+      </template>
     </div>
   </div>
 </template>

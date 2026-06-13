@@ -90,7 +90,9 @@ import signal
 import threading
 from typing import Optional, Dict, Any, List
 
-from saint_server.webserver.state_manager import StateManager
+from saint_server.webserver.state_manager import (
+    StateManager, HOST_CONTROLLER_NODE_ID)
+from saint_server.host_peripherals import HostPeripheralManager
 from saint_server.peripheral_logger import PeripheralLogger
 from saint_server.roles import RoleManager
 from saint_server.livelink import LiveLinkReceiver, LiveLinkRouter
@@ -158,6 +160,10 @@ class SaintServerNode(Node):
         self._async_loop: Optional[asyncio.AbstractEventLoop] = None
         self._async_thread: Optional[threading.Thread] = None
         self._shutdown_event: Optional[asyncio.Event] = None
+        # Owns in-process BLE drivers for the host_controller virtual
+        # node (currently: JBD BMSes). Created once the async loop is
+        # up — see _run_async_loop.
+        self._host_peripheral_manager: Optional[HostPeripheralManager] = None
 
         # State manager - shared with web server
         self.state_manager = StateManager(
@@ -856,13 +862,22 @@ class SaintServerNode(Node):
                 f'ble_scan_results: invalid JSON from {node_id}: {msg.data!r}')
             return
         topic = f'ble_scan_results/{node_id}'
-        self._broadcast_ros_message(topic, data)
+        self._broadcast_ws_state(topic, data)
 
     def send_ble_scan_command(self, node_id: str, duration_s: float = 8.0,
                               filter_jbd: bool = True,
                               request_id: str = "") -> None:
         """Push a `ble_scan` control action to the node. Results come
         back asynchronously on the ble_scan_results topic."""
+        # host_controller's BLE stack lives in-process — there's no
+        # Pi-node firmware on the wire to receive a /control message.
+        # Dispatch directly to the HostPeripheralManager and broadcast
+        # the result the same way (`ble_scan_results/<node_id>`) so
+        # the UI's scan modal flow is identical for both paths.
+        if node_id == HOST_CONTROLLER_NODE_ID:
+            self._dispatch_host_ble_scan(duration_s, filter_jbd, request_id)
+            return
+
         import json as _json
         pub = self._ensure_node_control_publisher(node_id)
         self._ensure_node_ble_scan_subscriber(node_id)
@@ -879,6 +894,79 @@ class SaintServerNode(Node):
             f'Sent ble_scan to {node_id}: '
             f'duration_s={duration_s} filter_jbd={filter_jbd} '
             f'request_id={request_id!r}')
+
+    def _dispatch_host_ble_scan(self, duration_s: float, filter_jbd: bool,
+                                request_id: str) -> None:
+        """Run a scan on the server's BLE adapter and broadcast results
+        on `ble_scan_results/host_controller` once it completes. Mirrors
+        the payload shape a Pi-node would publish so the frontend's
+        result handler is unchanged."""
+        if self._async_loop is None:
+            self._broadcast_ws_state(
+                f'ble_scan_results/{HOST_CONTROLLER_NODE_ID}',
+                {"status": "error",
+                 "message": "host BLE stack not ready (no async loop)",
+                 "request_id": request_id})
+            return
+
+        import time
+        from saint_server.host_peripherals.scanner import scan_jbd_devices
+
+        started_at = time.time()
+
+        topic = f'ble_scan_results/{HOST_CONTROLLER_NODE_ID}'
+
+        def on_progress(devices_so_far):
+            # Fire each time a new device is discovered so the
+            # operator's modal populates incrementally instead of
+            # staring at a spinner for the full scan window. Same
+            # envelope shape as the final result, with status=scanning
+            # so the frontend keeps the progress indicator up.
+            self._broadcast_ws_state(topic, {
+                "status": "scanning",
+                "devices": devices_so_far,
+                "duration_s": duration_s,
+                "filter_jbd": filter_jbd,
+                "started_at": started_at,
+                "request_id": request_id,
+            })
+
+        async def _run():
+            try:
+                devices = await scan_jbd_devices(
+                    duration_s=duration_s,
+                    filter_service=filter_jbd,
+                    on_progress=on_progress)
+                payload = {
+                    "status": "ok",
+                    "devices": devices,
+                    "duration_s": duration_s,
+                    "filter_jbd": filter_jbd,
+                    "started_at": started_at,
+                    "finished_at": time.time(),
+                    "request_id": request_id,
+                }
+            except Exception as e:
+                self.get_logger().warning(f'host BLE scan failed: {e}')
+                payload = {
+                    "status": "error",
+                    "message": str(e),
+                    "request_id": request_id,
+                }
+            self._broadcast_ws_state(topic, payload)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_run(), self._async_loop)
+        except RuntimeError as e:
+            self._broadcast_ws_state(
+                topic,
+                {"status": "error",
+                 "message": f"failed to schedule scan: {e}",
+                 "request_id": request_id})
+            return
+        self.get_logger().info(
+            f'Started host BLE scan: duration_s={duration_s} '
+            f'filter_jbd={filter_jbd} request_id={request_id!r}')
 
     def _on_node_log(self, node_id: str, msg: String):
         """Receive a firmware log line and feed it into the per-node buffer.
@@ -1637,16 +1725,76 @@ class SaintServerNode(Node):
         asyncio.set_event_loop(self._async_loop)
         self._shutdown_event = asyncio.Event()
 
+        # Construct the manager up-front so other call sites that
+        # check `self._host_peripheral_manager is not None` see it
+        # consistently. The actual reconcile wiring happens inside
+        # _async_main, once the loop is running (reconcile schedules
+        # coroutines on the loop and needs it live).
+        self._host_peripheral_manager = HostPeripheralManager(
+            loop=self._async_loop,
+            state_cb=self._host_peripheral_state_cb,
+            log_cb=self._host_peripheral_log_cb,
+        )
+
         try:
             self._async_loop.run_until_complete(self._async_main())
         except Exception as e:
             self.get_logger().error(f'Async loop error: {e}')
         finally:
+            try:
+                if self._host_peripheral_manager is not None:
+                    self._host_peripheral_manager.shutdown()
+            except Exception:
+                pass
             self._async_loop.close()
+
+    def _host_peripheral_state_cb(self, peripheral_id: str,
+                                  channel_id: str, value: float) -> None:
+        """Bridge from a host_peripherals driver to NodeRuntimeState.
+        Called on the async loop thread; mutating the channels dict
+        races with the broadcast tick but the practical impact is just
+        an occasional empty ChannelRuntimeState being created twice."""
+        runtime = self.state_manager.get_or_create_runtime_state(
+            HOST_CONTROLLER_NODE_ID)
+        if runtime is None:
+            return
+        runtime.set_channel(peripheral_id, channel_id, float(value))
+
+    def _host_peripheral_log_cb(self, level: str, msg: str) -> None:
+        log = self.get_logger()
+        fn = getattr(log, level if level in ("debug", "info", "warning",
+                                              "warn", "error") else "info",
+                     log.info)
+        # rclpy uses `warning` not `warn`.
+        if level == "warn":
+            fn = log.warning
+        try:
+            fn(msg)
+        except Exception:
+            pass
 
     async def _async_main(self):
         """Main async coroutine managing all async services."""
         await self.start_async_services()
+
+        # Loop is live now — safe to wire the host_peripheral reconcile
+        # callback. State manager fires it once immediately with the
+        # currently-loaded config so any BMSes saved in host_controller's
+        # YAML come up without operator action.
+        if self._host_peripheral_manager is not None:
+            # Flush first so any stale BlueZ link from a previous
+            # saint-os process (SIGKILL, OOM, reboot, fast restart)
+            # gets torn down before we try to reconnect — JBD radios
+            # only allow one central connection at a time and won't
+            # accept us back until the stale link is dropped. Awaited
+            # so the reconcile that follows sees a clean adapter.
+            try:
+                await self._host_peripheral_manager.flush_stale_connections()
+            except Exception as e:
+                self.get_logger().warning(
+                    f'host_peripherals flush failed: {e}')
+            self.state_manager.set_host_peripheral_reconcile_callback(
+                self._host_peripheral_manager.reconcile)
 
         # Wait for shutdown signal
         await self._shutdown_event.wait()
@@ -1853,7 +2001,19 @@ class SaintServerNode(Node):
                 )
 
     def _broadcast_ros_message(self, topic: str, data: Dict[str, Any]):
-        """Broadcast ROS message to WebSocket clients (thread-safe)."""
+        """Broadcast ROS message to WebSocket clients (thread-safe).
+
+        Uses the ros-bridge envelope: `{type: "ros_state", topic, data}`
+        with subscription key `ros:<topic>`. Right wire format for
+        forwarding actual rclpy topics through the ROS bridge to web
+        clients that subscribe via `ros:` prefix.
+
+        For server-originated state pushed to topic-keyed UI subscribers
+        (`pin_state/<id>`, `sync_status/<id>`, scan-results, etc.) use
+        `_broadcast_ws_state` — its envelope matches the frontend's
+        `ws.on('state', …)` listener and `ws.subscribe([topic], …)`
+        flow.
+        """
         if self.web_server and self.web_server.ws_handler:
             if self._async_loop:
                 # Use call_soon_threadsafe to schedule broadcast in async loop
@@ -1862,6 +2022,20 @@ class SaintServerNode(Node):
                         self.web_server.ws_handler.broadcast_ros_state(t, d)
                     )
                 )
+
+    def _broadcast_ws_state(self, topic: str, data: Dict[str, Any]):
+        """Push a `{type: "state", node: topic, data}` frame to web
+        clients subscribed to `topic`. Matches the WS pattern that
+        backs `pin_state/<node_id>`, `sync_status/<node_id>`,
+        `ble_scan_results/<node_id>`, etc. Threadsafe."""
+        if not (self.web_server and self.web_server.ws_handler
+                and self._async_loop):
+            return
+        self._async_loop.call_soon_threadsafe(
+            lambda t=topic, d=data: asyncio.create_task(
+                self.web_server.ws_handler.broadcast_state(t, d)
+            )
+        )
 
     # Throttle state for the routing-evaluator value broadcast. We want
     # live values on the routing UI but a Joy stream at 30Hz drags too

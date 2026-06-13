@@ -48,7 +48,10 @@ JBD_BAUD                       = 9600
 JBD_FRAME_START                = 0xDD
 JBD_FRAME_END                  = 0x77
 JBD_ACTION_READ                = 0xA5
-JBD_ACTION_OK                  = 0x00
+# Request/response byte positions differ — see comment block below.
+JBD_ACTION_READ                = 0xA5    # request byte[1]
+JBD_ACTION_OK                  = 0x00    # legacy alias; same value as JBD_STATUS_OK
+JBD_STATUS_OK                  = 0x00    # response byte[2] when the read succeeded
 JBD_REG_BASIC_INFO             = 0x03
 JBD_VIRTUAL_GPIO_BASE          = 1024
 JBD_CHANNEL_COUNT              = 24
@@ -96,20 +99,33 @@ def build_read_request(reg: int) -> bytes:
 
 def parse_basic_info_response(frame: bytes) -> Optional[Dict[str, float]]:
     """Validate a JBD basic-info response and return a dict of decoded
-    fields. Returns None on framing / checksum / length errors."""
+    fields. Returns None on framing / checksum / length errors.
+
+    Wire format (request vs response have different byte[1..2]):
+        REQUEST   [0xDD] [action]   [register] [length] [...] [crc] [0x77]
+        RESPONSE  [0xDD] [register] [status]   [length] [...] [crc] [0x77]
+
+    Earlier versions had the response interpretation swapped (treated
+    byte[1] as status), which rejected every real reply. They also
+    included the register byte in the checksum input — the wire only
+    covers [length, data]. Confirmed against captured frames from a
+    Right-track JBD-clone BMS.
+    """
     if len(frame) < 4 + 3:
         return None
     if frame[0] != JBD_FRAME_START or frame[-1] != JBD_FRAME_END:
         return None
-    if frame[1] != JBD_ACTION_OK:
+    reg = frame[1]
+    if reg != JBD_REG_BASIC_INFO:
         return None
-    reg = frame[2]
+    if frame[2] != JBD_STATUS_OK:
+        return None
     data_len = frame[3]
     if data_len < 23 or 4 + data_len + 3 > len(frame):
         return None
     data = frame[4: 4 + data_len]
-    # Checksum covers [register, length, data]
-    expected = jbd_checksum(bytes([reg, data_len]) + data)
+    # Checksum covers [length, data] — register and status excluded.
+    expected = jbd_checksum(bytes([data_len]) + data)
     received = (frame[4 + data_len] << 8) | frame[4 + data_len + 1]
     if expected != received:
         return None

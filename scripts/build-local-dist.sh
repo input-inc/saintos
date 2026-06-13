@@ -188,7 +188,19 @@ if (( REFETCH_ROS2 )); then
     rm -rf "$EXTRACTED_INSTALL"
 fi
 
-if [[ -f "${EXTRACTED_INSTALL}/setup.bash" ]]; then
+# Tighter completeness check: require both shell entry points AND a
+# canonical ament cmake config. setup.bash alone isn't enough — a
+# partial/interrupted prior extract can leave just that file behind
+# and silently break the colcon build later. Anything looking
+# incomplete forces a full re-extract from the cached tarball.
+EXTRACT_COMPLETE=1
+for f in "${EXTRACTED_INSTALL}/setup.bash" \
+         "${EXTRACTED_INSTALL}/local_setup.bash" \
+         "${EXTRACTED_INSTALL}/share/ament_cmake/cmake/ament_cmakeConfig.cmake"; do
+    [[ -f "$f" ]] || { EXTRACT_COMPLETE=0; break; }
+done
+
+if (( EXTRACT_COMPLETE )); then
     log "Using already-extracted ROS2 install tree at ${EXTRACTED_INSTALL} (skipping download)"
 else
     if [[ ! -f "$ROS_CACHE_TARBALL" ]]; then
@@ -200,12 +212,15 @@ else
     else
         log "Using cached ROS2 tarball ($(du -h "$ROS_CACHE_TARBALL" | cut -f1))"
     fi
-    log "Extracting ROS2 install tree"
+    log "Extracting ROS2 install tree (wiping any partial prior extract)"
+    rm -rf "_ros2/opt/ros/${ROS_DISTRO}"
     mkdir -p "_ros2/opt/ros/${ROS_DISTRO}"
     tar -xzf "$ROS_CACHE_TARBALL" -C "_ros2/opt/ros/${ROS_DISTRO}"
 fi
 [[ -f "${EXTRACTED_INSTALL}/setup.bash" ]] \
     || die "ROS2 setup.bash missing after extract"
+[[ -f "${EXTRACTED_INSTALL}/local_setup.bash" ]] \
+    || die "ROS2 local_setup.bash missing after extract — tarball is incomplete"
 
 # --- firmware --------------------------------------------------------------
 #
@@ -388,6 +403,7 @@ python3-empy
 python3-catkin-pkg
 python3-importlib-metadata
 python3-argcomplete
+python3-bleak
 libpython3.11
 python3.11
 network-manager
@@ -507,6 +523,16 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 mkdir -p "/opt/ros/${ROS_DISTRO}"
 cp -a "/work/_ros2/opt/ros/${ROS_DISTRO}/install" "/opt/ros/${ROS_DISTRO}/install"
 source "/opt/ros/${ROS_DISTRO}/install/setup.bash"
+
+# Fail loud if sourcing setup.bash didn't actually set the ament
+# prefix — almost always a sign of a half-extracted install tree
+# (e.g. the per-package local_setup hooks didn't run because the
+# top-level local_setup.bash was missing). The outer script's
+# EXTRACT_COMPLETE check should catch this earlier, but guard here
+# too so the colcon build below dies with a useful message rather
+# than the cryptic CMake "Could not find ament_cmake".
+[[ -n "${AMENT_PREFIX_PATH:-}" ]] \
+    || { echo "ERROR: AMENT_PREFIX_PATH unset after sourcing setup.bash — ROS install is broken" >&2; exit 1; }
 
 # --base-paths server: scope colcon's package discovery to the one
 # directory that actually contains the ROS package. Without it colcon

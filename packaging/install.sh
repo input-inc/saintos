@@ -142,6 +142,13 @@ COMMON_DEPS=(
     python3-catkin-pkg
     python3-importlib-metadata
     python3-argcomplete
+    # bleak: BLE client used by host_controller's in-process BMS
+    # driver (saint_server/host_peripherals). Bookworm ships 0.20;
+    # setup.py's floor is set to match. If the apt package is
+    # missing (Ubuntu noble, minimal distros), the driver still
+    # imports lazily and just logs "bleak not installed" — the
+    # rest of the server keeps running.
+    python3-bleak
     # mDNS — so clients on the SAINT-OS AP can reach opensaint.local
     # without knowing the assigned IP. libnss-mdns lets the Pi itself
     # resolve .local hostnames (useful for any local tooling).
@@ -288,10 +295,14 @@ if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
 fi
 
 # Add to standard hardware-access groups so the service can:
-#   dialout — RC receiver / SBUS UART
-#   gpio    — direct GPIO from Python
-#   video   — vcgencmd (CPU temp / throttle status via /dev/vchiq)
-for grp in dialout gpio video; do
+#   dialout   — RC receiver / SBUS UART
+#   gpio      — direct GPIO from Python
+#   video     — vcgencmd (CPU temp / throttle status via /dev/vchiq)
+#   bluetooth — BlueZ D-Bus access for host_controller's BLE BMS driver
+#               (saint_server/host_peripherals). Skipped silently if
+#               bluez isn't installed — the rest of the server still
+#               starts; only the BLE peripheral path is dark.
+for grp in dialout gpio video bluetooth; do
     if getent group "$grp" >/dev/null; then
         run usermod -aG "$grp" "${SERVICE_USER}"
     fi

@@ -227,6 +227,15 @@ function onScanFrame (msg) {
   if (!data || typeof data !== 'object') return
   // Late frames from a prior scan are ignored.
   if (scanRequestId && data.request_id && data.request_id !== scanRequestId) return
+  if (data.status === 'scanning') {
+    // Progressive update: a new device just entered the result set.
+    // Keep the spinner up; the operator will see new rows appear as
+    // each radio advertises. Clear any prior "no devices" hint since
+    // we may be partway through the scan.
+    scanResults.value = Array.isArray(data.devices) ? data.devices : []
+    if (scanResults.value.length) scanError.value = ''
+    return
+  }
   scanRunning.value = false
   if (data.status === 'ok') {
     scanResults.value = Array.isArray(data.devices) ? data.devices : []
@@ -514,45 +523,14 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
           <input v-model="modalLabel" type="text" class="input-field w-full" :placeholder="modalType?.label" />
         </div>
 
-        <div v-if="pinsVisible && modalType?.pin_kind === 'uart'">
-          <label class="block text-sm font-medium text-fg mb-1">UART pins</label>
-          <select
-            class="input-field w-full"
-            :value="modalPins.uart_tx !== undefined ? `${modalPins.uart_tx}:${modalPins.uart_rx}` : ''"
-            @change="(e) => { const [tx, rx] = e.target.value.split(':').map(n => parseInt(n,10)); modalPins = { uart_tx: tx, uart_rx: rx } }"
-          >
-            <option value="" disabled>Pick a UART pin pair…</option>
-            <option
-              v-for="pair in (capabilities?.uart_pairs || [])"
-              :key="`${pair.tx}:${pair.rx}`"
-              :value="`${pair.tx}:${pair.rx}`"
-              :disabled="!!(claimedPins[pair.tx] || claimedPins[pair.rx])"
-            >
-              UART{{ pair.uart }}: TX=GP{{ pair.tx }}, RX=GP{{ pair.rx }}
-              {{ (claimedPins[pair.tx] || claimedPins[pair.rx]) ? ` — in use by ${(claimedPins[pair.tx] || claimedPins[pair.rx]).label}` : '' }}
-            </option>
-          </select>
-        </div>
-
-        <div v-else-if="pinsVisible && modalType && modalType.pin_kind !== 'builtin'">
-          <label class="block text-sm font-medium text-fg mb-1">Pin</label>
-          <select
-            class="input-field w-full"
-            :value="modalPins.gpio !== undefined ? String(modalPins.gpio) : ''"
-            @change="(e) => { modalPins = { gpio: parseInt(e.target.value, 10) } }"
-          >
-            <option value="" disabled>Pick a pin…</option>
-            <option
-              v-for="pin in (capabilities?.pins || [])"
-              :key="pin.gpio"
-              :value="pin.gpio"
-              :disabled="!!claimedPins[pin.gpio]"
-            >
-              GP{{ pin.gpio }} ({{ pin.name }}){{ claimedPins[pin.gpio] ? ` — in use by ${claimedPins[pin.gpio].label}` : '' }}
-            </option>
-          </select>
-        </div>
-
+        <!-- Params block comes BEFORE pin pickers so the Transport
+             dropdown (which gates whether pins are even relevant for
+             this peripheral) appears at the top of the dependent
+             fields. For UART-only peripherals the params section
+             holds non-pin tuning; for BLE/dual-transport types
+             (Pathfinder BMS) the operator picks Transport first and
+             the pin selectors below either appear or stay hidden via
+             `pinsVisible`. -->
         <div v-if="modalType?.params?.length" class="space-y-3 pt-2 border-t border-line">
           <template v-for="p in modalType.params" :key="p.id">
           <div v-if="paramVisible(p)">
@@ -653,6 +631,51 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
             </div>
           </div>
           </template>
+        </div>
+
+        <!-- Pin selectors live below the params block — Transport sits
+             at the top so the operator picks BLE vs UART before being
+             offered a UART pair that may not even apply. `pinsVisible`
+             hides this whole section when the catalog type declares a
+             `transport` param and the operator has selected anything
+             other than uart. -->
+        <div v-if="pinsVisible && modalType?.pin_kind === 'uart'">
+          <label class="block text-sm font-medium text-fg mb-1">UART pins</label>
+          <select
+            class="input-field w-full"
+            :value="modalPins.uart_tx !== undefined ? `${modalPins.uart_tx}:${modalPins.uart_rx}` : ''"
+            @change="(e) => { const [tx, rx] = e.target.value.split(':').map(n => parseInt(n,10)); modalPins = { uart_tx: tx, uart_rx: rx } }"
+          >
+            <option value="" disabled>Pick a UART pin pair…</option>
+            <option
+              v-for="pair in (capabilities?.uart_pairs || [])"
+              :key="`${pair.tx}:${pair.rx}`"
+              :value="`${pair.tx}:${pair.rx}`"
+              :disabled="!!(claimedPins[pair.tx] || claimedPins[pair.rx])"
+            >
+              UART{{ pair.uart }}: TX=GP{{ pair.tx }}, RX=GP{{ pair.rx }}
+              {{ (claimedPins[pair.tx] || claimedPins[pair.rx]) ? ` — in use by ${(claimedPins[pair.tx] || claimedPins[pair.rx]).label}` : '' }}
+            </option>
+          </select>
+        </div>
+
+        <div v-else-if="pinsVisible && modalType && modalType.pin_kind !== 'builtin'">
+          <label class="block text-sm font-medium text-fg mb-1">Pin</label>
+          <select
+            class="input-field w-full"
+            :value="modalPins.gpio !== undefined ? String(modalPins.gpio) : ''"
+            @change="(e) => { modalPins = { gpio: parseInt(e.target.value, 10) } }"
+          >
+            <option value="" disabled>Pick a pin…</option>
+            <option
+              v-for="pin in (capabilities?.pins || [])"
+              :key="pin.gpio"
+              :value="pin.gpio"
+              :disabled="!!claimedPins[pin.gpio]"
+            >
+              GP{{ pin.gpio }} ({{ pin.name }}){{ claimedPins[pin.gpio] ? ` — in use by ${claimedPins[pin.gpio].label}` : '' }}
+            </option>
+          </select>
         </div>
       </div>
 

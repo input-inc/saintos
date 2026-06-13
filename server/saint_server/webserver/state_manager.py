@@ -582,6 +582,13 @@ class StateManager:
         self.state = SystemState(server_name=server_name)
         self.logger = logger
         self._activity_callback: Optional[Callable[[str, str], None]] = None
+        # Optional callback fired whenever host_controller's peripheral
+        # config mutates (upsert / remove / load). Wired by server_node
+        # to the HostPeripheralManager so it can reconcile its BLE
+        # driver set. Takes the new peripherals list (each entry is the
+        # standard {id, type, pins, params} dict).
+        self._host_peripheral_reconcile_cb: Optional[
+            Callable[[List[Dict[str, Any]]], None]] = None
         # Optional callback fired when a node-scoped log entry is recorded.
         # Wired by server_node.py to broadcast on node_log/<id>.
         self._node_log_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
@@ -1750,6 +1757,7 @@ class StateManager:
         self._log_activity(
             f"Saved peripheral '{peripheral.label}'", "info", node_id=node_id
         )
+        self._maybe_notify_host_peripheral_change(node_id)
         return {
             "success": True,
             "peripheral": peripheral.to_dict(),
@@ -1798,6 +1806,7 @@ class StateManager:
         self._log_activity(
             f"Removed peripheral {peripheral_id}", "info", node_id=node_id
         )
+        self._maybe_notify_host_peripheral_change(node_id)
         return {"success": True}
 
     def mark_node_synced(self, node_id: str, success: bool = True) -> None:
@@ -2610,6 +2619,44 @@ class StateManager:
                 uart_pairs=[],
                 last_updated=time.time(),
             )
+
+    def set_host_peripheral_reconcile_callback(
+            self, cb: Callable[[List[Dict[str, Any]]], None]) -> None:
+        """Server wires this to HostPeripheralManager.reconcile so the
+        BLE driver set follows host_controller config changes. We also
+        fire it once immediately with the currently-loaded config so
+        BMSes from /etc/saint-os/nodes/host_controller.yaml come up at
+        startup without waiting for an operator edit."""
+        self._host_peripheral_reconcile_cb = cb
+        self._maybe_notify_host_peripheral_change(HOST_CONTROLLER_NODE_ID)
+
+    def _maybe_notify_host_peripheral_change(self, node_id: str) -> None:
+        """Fire the reconcile callback when host_controller's peripheral
+        list changes. No-op for other nodes (their drivers run in their
+        own Pi-node firmware, not in-process)."""
+        if node_id != HOST_CONTROLLER_NODE_ID:
+            return
+        cb = self._host_peripheral_reconcile_cb
+        if cb is None:
+            return
+        node = self.state.adopted_nodes.get(HOST_CONTROLLER_NODE_ID)
+        peripherals: List[Dict[str, Any]] = []
+        if node and node.peripheral_config:
+            for p in node.peripheral_config.peripherals:
+                if p.builtin:
+                    continue  # system_monitor handled separately
+                peripherals.append({
+                    "id": p.id,
+                    "type": p.type,
+                    "pins": dict(p.pins or {}),
+                    "params": dict(p.params or {}),
+                })
+        try:
+            cb(peripherals)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(
+                    f"host_peripheral reconcile callback raised: {e}")
 
     def update_host_controller_runtime(self) -> None:
         """Push current system metrics into the host node's runtime_state.
