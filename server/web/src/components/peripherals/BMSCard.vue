@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import { useDisplayStore } from '@/stores/display'
 
 // Compact BMS card for the Live tab. Renders a pathfinder_bms
 // peripheral's pack-level metrics, per-cell voltages with imbalance
@@ -7,15 +8,19 @@ import { computed } from 'vue'
 //
 // All data comes from the per-channel `values` map the Live tab
 // builds out of the pin_state/<node_id> WS topic — no extra
-// subscriptions or routing. Channels reading 0 V are treated as
-// "absent" (4S packs only fill cell_01..cell_04; the unused slots
-// stay zeroed by the driver to keep the wire format stable).
+// subscriptions or routing. Cell visibility is driven by the BMS-
+// reported `cell_count` channel: cells inside that count are always
+// shown (even at 0 V — a real 0 V reading means a dropped sensor or
+// a fully-failed cell, exactly what the operator wants to see); only
+// cells beyond `cell_count` are hidden as unused slots.
 
 const props = defineProps({
   peripheral: { type: Object, required: true },
   channels:   { type: Object, default: () => ({}) },   // { channel_id: { value, last_updated } }
   sparkSamples: { type: Function, default: () => [] },  // (channelId) => samples
 })
+
+const display = useDisplayStore()
 
 function ch (id) {
   const c = props.channels?.[id]
@@ -59,17 +64,29 @@ const protBits    = computed(() => ch('protection'))
 const fetStatus   = computed(() => ch('fet_status'))
 const temp1       = computed(() => ch('temp_1'))
 const temp2       = computed(() => ch('temp_2'))
-
-// Cells: keep only the non-zero ones. JBD pads to 16 in the catalog
-// but a 4S pack only fills cell_01..cell_04, the rest are 0 V which
-// would dominate the min/avg calculations.
-const cells = computed(() => {
-  const out = []
+// `cell_count` is the BMS-reported series count. Until the first
+// basic-info poll lands, fall back to detecting non-zero cells so
+// we don't render a blank Cells block during the first second.
+const cellCount   = computed(() => {
+  const reported = ch('cell_count')
+  if (reported && reported > 0) return Math.round(reported)
+  let highest = 0
   for (let i = 1; i <= 16; i++) {
     const v = ch(`cell_${String(i).padStart(2, '0')}`)
-    if (v === null || v === undefined) continue
-    if (v < 0.5) continue   // unused slot
-    out.push({ idx: i, v })
+    if (v !== null && v !== undefined && v > 0.5) highest = i
+  }
+  return highest
+})
+
+// Cells inside the reported series count are always shown (a real
+// 0 V reading is operator-actionable, not noise). Cells beyond the
+// count are hidden as unused slots.
+const cells = computed(() => {
+  const n = cellCount.value
+  const out = []
+  for (let i = 1; i <= n; i++) {
+    const v = ch(`cell_${String(i).padStart(2, '0')}`)
+    out.push({ idx: i, v: v ?? 0 })
   }
   return out
 })
@@ -93,11 +110,16 @@ const IMBALANCE_THRESHOLD_V = 0.050
 // Cell-voltage bar: scale within [min, max] of the current pack so
 // imbalance is visually obvious even on packs that operate at very
 // different cell voltages (LFP at 3.2-3.4 vs Li-ion at 3.6-4.2).
+// We reserve the [10%, 90%] band so the lowest cell's bar still
+// renders a visible sliver in its color (otherwise a `v === min`
+// cell maps to 0% width and the bar disappears — the operator can
+// see the readout but not which cell is the outlier).
 function cellBarPct (v) {
   const lo = cellMin.value
   const hi = cellMax.value
   if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return 50
-  return Math.round(((v - lo) / (hi - lo)) * 100)
+  const ratio = (v - lo) / (hi - lo)
+  return Math.round(10 + ratio * 80)
 }
 function cellColor (v) {
   if (cellSpread.value < IMBALANCE_THRESHOLD_V) return 'bg-cyan-500'
@@ -113,6 +135,13 @@ const dischargeOn = computed(() => ((fetStatus.value | 0) & 0x02) === 0x02)
 function fmt (v, places = 2, unit = '') {
   if (v === null || v === undefined || !isFinite(v)) return '—'
   return `${v.toFixed(places)}${unit ? ' ' + unit : ''}`
+}
+
+// NTC readings flow through the user's display preference so a
+// server-wide °F setting carries through the BMS card. The store's
+// formatTemperature also handles the —/missing case.
+function fmtTemp (celsius) {
+  return display.formatTemperature(celsius)
 }
 
 // SOC bar — gradient color across red/amber/green so a 12% SOC
@@ -168,10 +197,10 @@ function socColor (s) {
     <!-- Temps + cycle count row -->
     <div class="grid grid-cols-3 gap-2 text-xs font-mono">
       <div class="flex justify-between bg-surface/30 rounded px-2 py-1">
-        <span class="text-fg-faint">Temp 1</span><span class="text-rose-300">{{ fmt(temp1, 1, '°C') }}</span>
+        <span class="text-fg-faint">Temp 1</span><span class="text-rose-300">{{ fmtTemp(temp1) }}</span>
       </div>
       <div class="flex justify-between bg-surface/30 rounded px-2 py-1">
-        <span class="text-fg-faint">Temp 2</span><span class="text-rose-300">{{ fmt(temp2, 1, '°C') }}</span>
+        <span class="text-fg-faint">Temp 2</span><span class="text-rose-300">{{ fmtTemp(temp2) }}</span>
       </div>
       <div class="flex justify-between bg-surface/30 rounded px-2 py-1">
         <span class="text-fg-faint">Cycles</span><span class="text-fg-strong">{{ fmt(cycles, 0) }}</span>

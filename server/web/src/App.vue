@@ -9,6 +9,11 @@ import { useWsStore } from '@/stores/ws'
 const ws = useWsStore()
 const needLogin = computed(() => ws.authRequired && !ws.authenticated)
 
+// Console kiosk routes opt out of the operator-UI chrome (AppHeader,
+// NavBar, max-w container) via meta.chromeless. They render their own
+// title bar / button bar via ConsoleScreen and take the full viewport.
+const chromeless = computed(() => !!useRoute().meta?.chromeless)
+
 // Full-bleed pages (Routes, Logs) opt out of <main>'s max-w-7xl + padding
 // via body-level classes that style.css keys off — matches vanilla's
 // `body.routing-fullwidth` / `body.logs-fullwidth` mechanism.
@@ -29,6 +34,11 @@ watch(
 
 <template>
   <LoginScreen v-if="needLogin" />
+  <div v-else-if="chromeless" class="h-screen w-screen overflow-hidden">
+    <RouterView v-slot="{ Component, route }">
+      <component :is="Component" :key="route.fullPath" />
+    </RouterView>
+  </div>
   <div v-else class="flex flex-col h-screen overflow-hidden">
     <AppHeader />
     <NavBar />

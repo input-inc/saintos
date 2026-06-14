@@ -302,6 +302,39 @@ async function saveAddOperator () {
   }
 }
 
+const signalModal = ref({ open: false, name: '', label: '', error: '' })
+function openAddSignal () {
+  if (!activeSheetId.value) return
+  signalModal.value = { open: true, name: '', label: '', error: '' }
+}
+// Distinct names of signals already declared on ANY sheet — surfaced
+// as a datalist so the operator can reuse one without retyping.
+const knownSignalNames = computed(() => {
+  const names = new Set()
+  for (const s of Object.values(routing.value?.sheets || {})) {
+    for (const n of (s.signals || [])) {
+      if (n.name) names.add(n.name)
+    }
+  }
+  return [...names].sort()
+})
+async function saveAddSignal () {
+  const { name, label } = signalModal.value
+  signalModal.value.error = ''
+  if (!name.trim()) { signalModal.value.error = 'Pick a signal name'; return }
+  try {
+    const r = await ws.management('add_routing_signal', {
+      node_id: activeSheetId.value,
+      name: name.trim(),
+      label: label.trim(),
+    })
+    if (r && r.success === false) { signalModal.value.error = r.message || 'Failed'; return }
+    signalModal.value.open = false
+  } catch (e) {
+    signalModal.value.error = e.message || String(e)
+  }
+}
+
 const widgetModal = ref({ open: false, type: '', label: '', error: '' })
 function openAddWidget () {
   if (!activeSheetId.value) return
@@ -423,6 +456,10 @@ const sheetCounts = computed(() => {
             <button class="btn-secondary" :disabled="!activeSheetId" @click="openAddWidget">
               <span class="material-icons icon-sm">widgets</span>
               Widget
+            </button>
+            <button class="btn-secondary" :disabled="!activeSheetId" @click="openAddSignal" title="Cross-sheet named signal">
+              <span class="material-icons icon-sm">sync_alt</span>
+              Signal
             </button>
             <button class="btn-secondary" :disabled="!activeSheetId" title="Auto-arrange nodes" @click="autoLayout">
               <span class="material-icons icon-sm">grid_view</span>
@@ -566,6 +603,38 @@ const sheetCounts = computed(() => {
       <template #actions>
         <button class="btn-secondary" @click="operatorModal.open = false">Cancel</button>
         <button class="btn-primary" @click="saveAddOperator">Add</button>
+      </template>
+    </AppModal>
+
+    <!-- Add Signal modal — global named float that crosses sheet
+         boundaries. The same name on two sheets references the
+         same value, so safety conditions / interlocks computed on
+         one sheet can gate commands on another. -->
+    <AppModal v-if="signalModal.open" title="Add signal" @close="signalModal.open = false">
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-fg mb-1">Signal name</label>
+          <input v-model="signalModal.name" list="known-signal-names" type="text"
+                 class="input-field w-full font-mono"
+                 placeholder="shoulder_safe, elbow_engaged, ..." />
+          <datalist id="known-signal-names">
+            <option v-for="n in knownSignalNames" :key="n" :value="n" />
+          </datalist>
+          <p class="text-xs text-fg-faint mt-1">
+            Type a new name to declare a signal, or pick one already in use
+            on another sheet to subscribe to it.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-fg mb-1">Label (optional)</label>
+          <input v-model="signalModal.label" type="text" class="input-field w-full"
+                 placeholder="Defaults to the signal name" />
+        </div>
+        <p v-if="signalModal.error" class="text-sm text-red-300">{{ signalModal.error }}</p>
+      </div>
+      <template #actions>
+        <button class="btn-secondary" @click="signalModal.open = false">Cancel</button>
+        <button class="btn-primary" @click="saveAddSignal">Add</button>
       </template>
     </AppModal>
 

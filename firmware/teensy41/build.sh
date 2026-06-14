@@ -16,6 +16,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# PlatformIO installs `pio` into ~/.platformio/penv/bin, which isn't on PATH
+# under a non-interactive shell (or any shell that hasn't sourced the VSCode
+# extension's profile). Make the script self-sufficient.
+if ! command -v pio >/dev/null 2>&1 && [[ -x "$HOME/.platformio/penv/bin/pio" ]]; then
+    export PATH="$HOME/.platformio/penv/bin:$PATH"
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

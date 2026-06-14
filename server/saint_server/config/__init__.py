@@ -16,6 +16,12 @@ class WebSocketConfig:
     """WebSocket configuration."""
     password: Optional[str] = None
     auth_timeout: float = 10.0
+    # Long-lived shared secret used by Console-kiosk Pis to skip the
+    # operator password prompt. Generated on first server start and
+    # persisted in server_config.yaml; rotateable from the Settings
+    # panel. None means "no kiosk token configured" — kiosks then
+    # only work when websocket.password is also None.
+    kiosk_token: Optional[str] = None
 
 
 @dataclass
@@ -97,6 +103,7 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
         if ws_data:
             config.websocket.password = ws_data.get('password')
             config.websocket.auth_timeout = ws_data.get('auth_timeout', config.websocket.auth_timeout)
+            config.websocket.kiosk_token = ws_data.get('kiosk_token') or None
 
         # Network settings
         net_data = data.get('network', {})
@@ -121,6 +128,20 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
             level = log_data.get('level', config.logging.level)
             if isinstance(level, str) and level.strip():
                 config.logging.level = level.strip().upper()
+
+    # Auto-generate the kiosk token on first run so Console-kiosk Pis
+    # have a stable shared secret to authenticate with — without
+    # forcing the operator to set one by hand. We persist immediately
+    # so the next read sees the same value; rotateable later.
+    if config.websocket.kiosk_token is None:
+        import secrets
+        config.websocket.kiosk_token = secrets.token_urlsafe(32)
+        _config = config
+        try:
+            save_config(config)
+        except Exception:
+            # Non-fatal: the token still lives in memory for this run.
+            pass
 
     _config = config
     return config
@@ -170,6 +191,7 @@ def save_config(config: Optional[ServerConfig] = None) -> bool:
         'websocket': {
             'password': config.websocket.password,
             'auth_timeout': config.websocket.auth_timeout,
+            'kiosk_token': config.websocket.kiosk_token,
         },
         'network': {
             'web_port': config.network.web_port,
@@ -223,6 +245,7 @@ def config_to_dict(config: Optional[ServerConfig] = None) -> dict:
         'websocket': {
             'password': config.websocket.password,
             'auth_timeout': config.websocket.auth_timeout,
+            'kiosk_token': config.websocket.kiosk_token,
         },
         'network': {
             'web_port': config.network.web_port,
@@ -269,6 +292,8 @@ def update_config_from_dict(data: dict) -> ServerConfig:
             _config.websocket.password = ws['password'] if ws['password'] else None
         if 'auth_timeout' in ws:
             _config.websocket.auth_timeout = float(ws['auth_timeout'])
+        if 'kiosk_token' in ws:
+            _config.websocket.kiosk_token = ws['kiosk_token'] if ws['kiosk_token'] else None
 
     # Network settings
     if 'network' in data:

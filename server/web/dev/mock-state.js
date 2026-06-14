@@ -127,171 +127,21 @@ export const nodePeripherals = {
 }
 
 // ── Catalog (peripheral / widget / operator types) ───────────────────
+//
+// All three catalogs are populated at mock-server boot by spawning
+// `python3 scripts/dump_catalog.py` against the canonical Python
+// model (server/saint_server/peripheral_model.py). The arrays exported
+// below are intentionally empty — the boot script splices the dumped
+// types in-place so importers keep their live references.
 
-export const peripheralCatalog = [
-  ptype('button', 'Button', 'A momentary switch.', 'gpio',
-    [chan('pressed', 'Pressed', 'in', 'digital_in')],
-    [{ id: 'pull_up', label: 'Pull-up', type: 'bool', default: true },
-     { id: 'active_low', label: 'Active low', type: 'bool', default: true },
-     { id: 'debounce_ms', label: 'Debounce (ms)', type: 'int', default: 20, min: 0, max: 500 }]),
-  ptype('led', 'LED', 'A digital output on a GPIO pin.', 'gpio',
-    [chan('on', 'On', 'out', 'digital_out')],
-    [{ id: 'active_low', label: 'Active low', type: 'bool', default: false }]),
-  ptype('servo', 'Servo (PWM)', 'Hobby servo on a PWM-capable pin.', 'pwm',
-    [chan('angle', 'Angle', 'out', 'analog')],
-    [{ id: 'min_pulse_us', label: 'Min pulse (µs)', type: 'int', default:  500, min: 100, max: 3000 },
-     { id: 'max_pulse_us', label: 'Max pulse (µs)', type: 'int', default: 2500, min: 100, max: 3000 }]),
-  ptype('pwm', 'PWM Output',
-    'Generic PWM output on a PWM-capable pin. Independent frequency and duty cycle.',
-    'pwm',
-    [chan('duty', 'Duty cycle (0–1)', 'out', 'analog')],
-    [{ id: 'frequency_hz', label: 'Frequency (Hz)',    type: 'int',   default: 1000, min: 1,   max: 200000 },
-     { id: 'initial_duty', label: 'Initial duty (0–1)', type: 'float', default: 0.0,  min: 0.0, max: 1.0 },
-     { id: 'invert',       label: 'Invert output',     type: 'bool',  default: false }]),
-  // Pololu Maestro — one entry with channel_count as a constrained
-  // enum param. Catalog exposes 24 channels statically; UI clips to
-  // the operator's chosen count. See server/docs/MAESTRO_PROTOCOL.md.
-  ptype('maestro', 'Pololu Maestro',
-    'Pololu Maestro USB / TTL servo controller. Pick channel count to match your SKU.',
-    'uart',
-    Array.from({ length: 24 }, (_, i) => chan(`ch${i}`, `Channel ${i}`, 'out', 'analog')),
-    [{ id: 'channel_count',  label: 'Channel count', type: 'int', default: 6, choices: [
-        { value:  6, label: 'Micro Maestro · 6 ch' },
-        { value: 12, label: 'Mini Maestro · 12 ch' },
-        { value: 18, label: 'Mini Maestro · 18 ch' },
-        { value: 24, label: 'Mini Maestro · 24 ch' },
-     ] },
-     { id: 'device_number',  label: 'Device number (0–127)',  type: 'int',   default: 12,   min: 0,   max: 127 },
-     { id: 'baud_rate',      label: 'Baud rate',              type: 'int',   default: 9600,
-       choices: [
-         { value:   1200, label:   '1200 bps' },
-         { value:   2400, label:   '2400 bps' },
-         { value:   4800, label:   '4800 bps' },
-         { value:   9600, label:   '9600 bps (Maestro default)' },
-         { value:  19200, label:  '19200 bps' },
-         { value:  38400, label:  '38400 bps' },
-         { value:  57600, label:  '57600 bps' },
-         { value: 115200, label: '115200 bps (auto-detect max)' },
-         { value: 200000, label: '200000 bps (fixed-baud max)' },
-       ],
-       help: "Must match the rate configured in the Maestro Control Center. The Maestro's auto-detect mode locks onto the first 0xAA byte and supports up to 115200; fixed-baud mode goes up to 200000.",
-     },
-     { id: 'min_pulse_us',   label: 'Min pulse (µs)',         type: 'int',   default: 1000, min: 64,  max: 3200 },
-     { id: 'max_pulse_us',   label: 'Max pulse (µs)',         type: 'int',   default: 2000, min: 64,  max: 3200 },
-     { id: 'idle_value',     label: 'Idle value (0–1)',       type: 'float', default: 0.5,  min: 0.0, max: 1.0 },
-     { id: 'speed_limit',    label: 'Speed limit (0 = off)',  type: 'int',   default: 0,    min: 0,   max: 65535 },
-     { id: 'accel_limit',    label: 'Accel limit (0 = off)',  type: 'int',   default: 0,    min: 0,   max: 255 },
-     { id: 'poll_positions', label: 'Poll live positions',    type: 'bool',  default: false,
-       help: "When on, the driver issues a Get Position query for each channel every tick so the UI can show what the Maestro is actually doing (servos honoring speed / accel limits land here gradually, not instantly). Off by default: at 9600 baud each query costs ≈3 ms, so polling 24 channels is too expensive for a 100 Hz control loop. Leave it off unless you're debugging.",
-     }]),
-  ptype('analog_in', 'Analog Input', 'Voltage reading on an ADC pin.', 'adc',
-    [chan('voltage', 'Voltage', 'in', 'analog')],
-    [{ id: 'divider_ratio', label: 'Voltage divider ratio', type: 'float', default: 1.0 }]),
-  ptype('neopixel', 'NeoPixel (RGB)', 'WS2812 RGB LED hardwired on the board.', 'builtin',
-    [chan('color', 'Color (RGB)', 'out', 'rgb'),
-     chan('brightness', 'Brightness', 'out', 'analog')],
-    [{ id: 'default_color', label: 'Idle color', type: 'string', default: '#1e293b' }],
-    true),
-  ptype('roboclaw', 'RoboClaw Motor', 'RoboClaw Solo 60A motor controller.', 'uart',
-    [chan('motor',   'Motor duty',    'out', 'analog'),
-     chan('encoder', 'Encoder',       'in',  'analog'),
-     chan('voltage', 'Bus voltage',   'in',  'analog'),
-     chan('current', 'Motor current', 'in',  'analog'),
-     chan('temp',    'Temperature',   'in',  'analog')],
-    [{ id: 'address',  label: 'Address',  type: 'int', default: 128, min: 128, max: 135 },
-     { id: 'deadband', label: 'Deadband', type: 'int', default: 0,   min: 0,   max: 127 },
-     { id: 'max_current_ma', label: 'Max current (mA)', type: 'int', default: 0, min: 0, max: 60000 },
-     { id: 'estop_pin', label: 'E-stop pin', type: 'gpio', default: 0, min: 0, max: 29 },
-     { id: 'uart_swap', label: 'Use PIO UART', type: 'bool', default: false },
-     { id: 'invert_direction', label: 'Invert direction', type: 'bool', default: false }]),
-  ptype('fas100', 'FAS100', 'FrSky FAS100 ADV current/voltage/temperature sensor.', 'uart',
-    [chan('amps',  'Current (A)', 'in', 'analog'),
-     chan('volts', 'Voltage (V)', 'in', 'analog'),
-     chan('temp1', 'Temp 1 (°C)', 'in', 'analog'),
-     chan('temp2', 'Temp 2 (°C)', 'in', 'analog')],
-    [{ id: 'poll_interval_ms', label: 'Poll interval (ms)', type: 'int', default: 50, min: 20, max: 1000 }]),
-  ptype('system_monitor', 'System Monitor',
-    'Host telemetry: CPU/memory/temp/throttle/uptime + WiFi link health.', 'builtin',
-    [chan('cpu_usage', 'CPU usage (%)', 'in', 'analog'),
-     chan('cpu_temp',  'CPU temp (°C)', 'in', 'analog'),
-     chan('mem_usage', 'Memory usage (%)', 'in', 'analog'),
-     chan('throttle',  'Throttled', 'in', 'digital_in'),
-     chan('uptime',    'Uptime (s)', 'in', 'analog'),
-     chan('wifi_signal',    'WiFi signal (dBm)', 'in', 'analog'),
-     chan('wifi_retry_pct', 'WiFi tx retry (%)', 'in', 'analog'),
-     chan('wifi_noise',     'WiFi noise (dBm)', 'in', 'analog'),
-     chan('wifi_bitrate',   'WiFi tx bitrate (Mbps)', 'in', 'analog')],
-    [],
-    true),
-]
+export const peripheralCatalog = []
+export const widgetCatalog = []
 
-export const widgetCatalog = [
-  wtype('roboclaw_monitor', 'RoboClaw Motor Monitor',
-    'RoboClaw telemetry: duty, encoder, voltage, current, temp.',
-    [winp('motor', 'Motor Duty', 'analog'),
-     winp('encoder', 'Encoder', 'analog'),
-     winp('voltage', 'Bus Voltage', 'analog'),
-     winp('current', 'Motor Current', 'analog'),
-     winp('temp', 'Temperature', 'analog')]),
-  wtype('battery_monitor', 'FAS100 Power Monitor',
-    'FrSky FAS100 battery telemetry.',
-    [winp('current', 'Current', 'analog'),
-     winp('voltage', 'Voltage', 'analog'),
-     winp('temp1', 'Temp 1', 'analog'),
-     winp('temp2', 'Temp 2', 'analog')]),
-  wtype('single_gauge', 'Single-value Gauge',
-    'One numeric reading with a meter.',
-    [winp('value', 'Value', 'analog')]),
-  wtype('status_led_indicator', 'Status Indicator',
-    'Reflects a digital signal as an on-screen LED.',
-    [winp('state', 'State', 'digital_in')]),
-  wtype('estop_indicator', 'E-Stop Indicator',
-    'Lights up when an e-stop signal goes high.',
-    [winp('triggered', 'Triggered', 'digital_in')]),
-]
-
-export const operatorCatalog = [
-  otype('gain', 'Gain', 'out = value × gain',
-    [oin('value', 'Value')],
-    [{ id: 'gain', label: 'Gain', type: 'float', default: 1.0 }]),
-  otype('scale', 'Scale', 'out = value × factor',
-    [oin('value', 'Value'), oin('factor', 'Factor', 1.0)]),
-  otype('add', 'Add', 'out = a + b', [oin('a', 'A'), oin('b', 'B')]),
-  otype('multiply', 'Multiply', 'out = a × b',
-    [oin('a', 'A', 1.0), oin('b', 'B', 1.0)]),
-  otype('clamp', 'Clamp', 'Clamp value into [min, max].',
-    [oin('value', 'Value'), oin('min', 'Min', -1), oin('max', 'Max', 1)]),
-  otype('map_range', 'Map Range',
-    'Linearly remap value from [in_min, in_max] to [out_min, out_max]. ' +
-    "When 'Clamp input' is checked, values outside the input range are " +
-    'pinned to the nearest endpoint so the output never leaves the output range.',
-    [oin('value', 'Value'),
-     oin('in_min', 'In Min', -1.0), oin('in_max', 'In Max', 1.0),
-     oin('out_min', 'Out Min', 0.0), oin('out_max', 'Out Max', 1.0)],
-    [{ id: 'clamp', label: 'Clamp input to range', type: 'bool', default: true }]),
-  otype('deadband', 'Deadband', 'Pass through if |value| > threshold.',
-    [oin('value', 'Value'), oin('threshold', 'Threshold', 0.05)]),
-  otype('invert', 'Invert', 'out = −value', [oin('value', 'Value')]),
-  otype('select', 'Select Input',
-    'Pick one of two sources. The preferred input wins whenever it has ' +
-    'a non-zero value; otherwise the other input passes through. Common ' +
-    'use: wire a joystick to the preferred pin and an animation to the ' +
-    'other so manual control overrides playback only while the operator ' +
-    'is actively pushing the stick.',
-    [oin('a', 'A'), oin('b', 'B')],
-    [{ id: 'prefer_a', label: 'Prefer A', type: 'bool', default: false }]),
-]
-
-function ptype (id, label, description, pin_kind, channels, params, builtin_only = false) {
-  return { id, label, description, pin_kind, channels, params, builtin_only }
-}
-function chan (id, display, dir, cap) { return { id, display, dir, cap } }
-function wtype (id, label, description, inputs) { return { id, label, description, inputs } }
-function winp (id, display, cap) { return { id, display, cap } }
-function otype (id, label, description, inputs, params = []) {
-  return { id, label, description, inputs, params }
-}
-function oin (id, label, def = 0.0) { return { id, label, default: def } }
+// Populated at mock-server boot from the Python catalog dump (see
+// dev/mock-server.js's loadCatalogsFromPython()). Stays mutable so
+// importers hold live array references — adding to OPERATOR_CATALOG
+// in peripheral_model.py automatically flows here on next mock start.
+export const operatorCatalog = []
 
 // ── Chips, boards, roles ─────────────────────────────────────────────
 

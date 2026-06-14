@@ -28,7 +28,15 @@ typedef struct {
 void pin_control_init(void);
 bool pin_control_set_value(uint8_t gpio, float value);
 bool pin_control_set_pwm(uint8_t gpio, float percent);
-bool pin_control_set_servo(uint8_t gpio, float angle);
+bool pin_control_set_servo(uint8_t gpio, float value);
+
+// Drive the servo on `gpio` directly to a pulse width in microseconds.
+// Bypasses the −1..+1 → pulse mapping and is used for boot-time home
+// and safe-reset. No-ops if `gpio` is not configured as a servo. The
+// runtime "value" recorded for the pin is the back-projected
+// normalized position so the dashboard's last-known reading lines up
+// with what's actually being driven.
+bool pin_control_drive_servo_pulse(uint8_t gpio, uint16_t pulse_us);
 bool pin_control_set_digital(uint8_t gpio, bool state);
 bool pin_control_read_adc(uint8_t gpio, uint16_t* raw_value, float* voltage);
 bool pin_control_read_digital(uint8_t gpio);

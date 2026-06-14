@@ -1,0 +1,96 @@
+/* Console design tokens — 80s LED dot-matrix / backlit-graphic look.
+ *
+ * Scoped under .console-root so the palette and effects only apply
+ * inside Console views, leaving the rest of the operator UI untouched.
+ *
+ * Palette is deliberately narrow: pure black background; three "lit"
+ * colors (red is primary, amber for caution, green for OK) each with
+ * a "dim" companion used for the background grid and unlit segments.
+ * No grays — gray reads as LCD, not LED.
+ */
+
+.console-root {
+  --led-black:     #000000;
+  --led-red:       #ff2840;
+  --led-red-dim:   #5a0e1a;
+  --led-red-glow:  rgba(255, 40, 64, 0.55);
+  --led-amber:     #ff9a1f;
+  --led-amber-dim: #5a3608;
+  --led-amber-glow: rgba(255, 154, 31, 0.55);
+  --led-green:     #2cf04e;
+  --led-green-dim: #0a4e1a;
+  --led-green-glow: rgba(44, 240, 78, 0.55);
+
+  background: var(--led-black);
+  color: var(--led-red);
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  /* A faint dot-matrix grid — tiny dim-red dots on black. Cheap to
+   * render (single repeating radial gradient) and gives every screen
+   * the immediate "this is a panel meter, not a webpage" cue. */
+  background-image:
+    radial-gradient(circle, rgba(255, 40, 64, 0.07) 1px, transparent 1px);
+  background-size: 6px 6px;
+}
+
+/* Glowing LED text — reserved for the very few elements that should
+ * shout (fault headlines, the active status pill). Most surfaces use
+ * the plain variants below so text stays crisp under HMI distance. */
+.console-root .led-text       { color: var(--led-red);   text-shadow: 0 0 6px var(--led-red-glow),   0 0 14px var(--led-red-glow); }
+.console-root .led-text-amber { color: var(--led-amber); text-shadow: 0 0 6px var(--led-amber-glow), 0 0 14px var(--led-amber-glow); }
+.console-root .led-text-green { color: var(--led-green); text-shadow: 0 0 6px var(--led-green-glow), 0 0 14px var(--led-green-glow); }
+
+/* Flat (no-glow) variants — default for labels, readout numbers, and
+ * any text where the glow would hurt legibility. Labels never get the
+ * dim variant; that's reserved for truly "unlit / inactive" states. */
+.console-root .led-text-plain       { color: var(--led-red); }
+.console-root .led-text-amber-plain { color: var(--led-amber); }
+.console-root .led-text-green-plain { color: var(--led-green); }
+
+/* Inactive / unlit state — used only when a thing is intentionally
+ * off (FET disabled, segment unlit). Do NOT use for labels. */
+.console-root .led-text-dim   { color: var(--led-red-dim); }
+
+/* Outline / fill helpers for segmented bars + status pills.
+ *
+ * Border weights are tuned for the 5.5" 1440×2560 kiosk (~533 PPI),
+ * where a 1 px border is ~0.05 mm wide and effectively invisible —
+ * 3 px (~0.14 mm) is the floor for primary outlines; 2 px for the
+ * "unlit / inactive" dim variant so it still reads as quieter. Glow
+ * radii scale proportionally. */
+.console-root .led-outline       { border: 3px solid var(--led-red);   box-shadow: 0 0 8px var(--led-red-glow); }
+.console-root .led-outline-amber { border: 3px solid var(--led-amber); box-shadow: 0 0 8px var(--led-amber-glow); }
+.console-root .led-outline-green { border: 3px solid var(--led-green); box-shadow: 0 0 8px var(--led-green-glow); }
+.console-root .led-outline-dim   { border: 2px solid var(--led-red-dim); }
+
+.console-root .led-fill        { background: var(--led-red);   box-shadow: 0 0 14px var(--led-red-glow); }
+.console-root .led-fill-amber  { background: var(--led-amber); box-shadow: 0 0 14px var(--led-amber-glow); }
+.console-root .led-fill-green  { background: var(--led-green); box-shadow: 0 0 14px var(--led-green-glow); }
+.console-root .led-fill-dim    { background: var(--led-red-dim); }
+
+/* Console buttons — flat outlined boxes that invert on press. The
+ * outline matches the surrounding palette; default is red. */
+.console-root .led-button {
+  appearance: none;
+  background: var(--led-black);
+  color: var(--led-red);
+  border: 3px solid var(--led-red);
+  box-shadow: 0 0 12px var(--led-red-glow), inset 0 0 10px rgba(255, 40, 64, 0.15);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: background 80ms linear, color 80ms linear, box-shadow 80ms linear;
+}
+.console-root .led-button:active,
+.console-root .led-button.active {
+  background: var(--led-red);
+  color: var(--led-black);
+  box-shadow: 0 0 20px var(--led-red-glow);
+}
+.console-root .led-button:focus-visible {
+  outline: 4px solid var(--led-amber);
+  outline-offset: 4px;
+}

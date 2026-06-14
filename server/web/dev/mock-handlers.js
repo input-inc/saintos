@@ -231,6 +231,24 @@ export const managementHandlers = {
     bumpRouting(ctx)
     return ok({ id })
   },
+  add_routing_signal: ({ node_id, name, label = '', position = [480, 40] }, ctx) => {
+    if (!name || !String(name).trim()) return err('Signal name required')
+    const sheet = ensureSheet(node_id)
+    const id = nextId(sheet.signals, 'sig')
+    const node = { id, name: String(name).trim(), label: label || String(name).trim(), position }
+    sheet.signals.push(node)
+    bumpRouting(ctx)
+    return ok({ signal: node })
+  },
+  remove_routing_signal: ({ node_id, signal_id }, ctx) => {
+    const sheet = st.systemRouting.sheets[node_id]
+    if (!sheet) return err('Sheet not found')
+    const before = (sheet.signals || []).length
+    sheet.signals = (sheet.signals || []).filter(n => n.id !== signal_id)
+    if ((sheet.signals || []).length === before) return err('Signal not found')
+    bumpRouting(ctx)
+    return ok({ success: true })
+  },
   add_routing_wire:    ({ node_id, source, sink }, ctx) => {
     const sheet = ensureSheet(node_id)
     // Last-writer-wins on sink — drop any existing wire feeding the same sink.
@@ -495,9 +513,12 @@ function ensureSheet (node_id) {
   let s = st.systemRouting.sheets[node_id]
   if (!s) {
     s = { node_id, inputs: [], ws_inputs: [], outputs: [],
-          operators: [], widgets: [], wires: [] }
+          operators: [], widgets: [], signals: [], wires: [] }
     st.systemRouting.sheets[node_id] = s
   }
+  // Back-fill signals on pre-existing sheets so older mock state
+  // doesn't trip the canvas iterator.
+  if (!Array.isArray(s.signals)) s.signals = []
   return s
 }
 

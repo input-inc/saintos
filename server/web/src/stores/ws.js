@@ -186,8 +186,15 @@ export const useWsStore = defineStore('ws', () => {
     })
   }
 
-  function authenticate (password) {
+  // `creds` is either a plain password string (legacy LoginScreen path)
+  // or an object — `{password}` or `{kiosk_token}` — so kiosk sessions
+  // can authenticate without a human typing anything. See main.js for
+  // the auto-auth-on-?kiosk_token entry.
+  function authenticate (creds) {
     if (!ws) return Promise.reject(new Error('Not connected'))
+    const body = (typeof creds === 'string' || creds == null)
+      ? { password: creds }
+      : creds
     return new Promise((resolve, reject) => {
       const handler = (msg) => {
         off('auth_result', handler)
@@ -195,7 +202,7 @@ export const useWsStore = defineStore('ws', () => {
         else reject(new Error(msg.message || 'Auth failed'))
       }
       on('auth_result', handler)
-      ws.send(JSON.stringify({ type: 'auth', action: 'login', password }))
+      ws.send(JSON.stringify({ type: 'auth', action: 'login', ...body }))
       setTimeout(() => {
         off('auth_result', handler)
         reject(new Error('Auth timeout'))
@@ -232,7 +239,12 @@ export const useWsStore = defineStore('ws', () => {
     connect, disconnect,
     // command surface
     send, management, command, control, router: routerCmd, subscribe, unsubscribe, authenticate,
-    // events
-    on, off,
+    // events. `emit` is exposed primarily for dev/story harnesses
+    // (Histoire mocks) so they can synthesize 'state' frames without
+    // monkey-patching `on/off` — reassigning setup-store methods on
+    // a Pinia proxy is not reliable, and a missed handler registration
+    // is silent. Production code paths never call emit directly; the
+    // WebSocket onMessage handler is the only intended caller.
+    on, off, emit,
   }
 })

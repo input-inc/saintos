@@ -12,6 +12,9 @@
 
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
 import { WebSocketServer } from 'ws'
 
 import * as st from './mock-state.js'
@@ -21,6 +24,48 @@ import {
 import { handleHttp } from './mock-http.js'
 
 const PORT = parseInt(process.env.MOCK_PORT || '8081', 10)
+
+// Pull the live peripheral / widget / operator catalogs from the
+// Python source of truth at boot. Spawning Python once on startup
+// keeps the mock returning the same catalog the real server does
+// without a hand-maintained JS mirror that silently drifts.
+function loadCatalogsFromPython () {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const script = path.resolve(here, '..', '..', 'scripts', 'dump_catalog.py')
+  const py = process.env.SAINT_PYTHON || 'python3'
+  const res = spawnSync(py, [script], {
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+  })
+  if (res.error || res.status !== 0) {
+    const msg = res.error?.message || res.stderr || `exit ${res.status}`
+    console.error(`[mock] failed to load catalog from Python: ${msg}`)
+    console.error(`[mock] tried: ${py} ${script}`)
+    console.error('[mock] export SAINT_PYTHON if python3 is somewhere unusual')
+    process.exit(1)
+  }
+  let data
+  try {
+    data = JSON.parse(res.stdout)
+  } catch (e) {
+    console.error(`[mock] catalog dump returned non-JSON: ${e.message}`)
+    console.error(res.stdout.slice(0, 400))
+    process.exit(1)
+  }
+  // Splice in-place so importers' live references stay valid.
+  st.peripheralCatalog.length = 0
+  st.peripheralCatalog.push(...(data.peripheral_types || []))
+  st.widgetCatalog.length = 0
+  st.widgetCatalog.push(...(data.widget_types || []))
+  st.operatorCatalog.length = 0
+  st.operatorCatalog.push(...(data.operator_types || []))
+  console.log(
+    `[mock] loaded catalog from Python — peripherals=${st.peripheralCatalog.length} ` +
+    `widgets=${st.widgetCatalog.length} operators=${st.operatorCatalog.length}`,
+  )
+}
+
+loadCatalogsFromPython()
 
 // ── HTTP server (landing page + WebSocket upgrade) ───────────────────
 

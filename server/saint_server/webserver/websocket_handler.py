@@ -222,6 +222,10 @@ class WebSocketHandler:
         # Authentication settings (loaded from config)
         self._auth_password: Optional[str] = None
         self._auth_timeout: float = 10.0
+        # Long-lived shared secret used by Console-kiosk Pis to skip
+        # the operator password prompt. Generated in config/__init__
+        # on first server start and persisted in server_config.yaml.
+        self._kiosk_token: Optional[str] = None
         self._load_auth_config()
 
     def _load_auth_config(self):
@@ -231,6 +235,7 @@ class WebSocketHandler:
             config = get_config()
             self._auth_password = config.websocket.password
             self._auth_timeout = config.websocket.auth_timeout
+            self._kiosk_token = config.websocket.kiosk_token
             if self._auth_password:
                 self.log('info', 'WebSocket authentication enabled')
         except Exception as e:
@@ -484,6 +489,7 @@ class WebSocketHandler:
             return
 
         password = message.get('password')
+        kiosk_token = message.get('kiosk_token')
 
         # Convert to string for comparison (handle int passwords from YAML)
         if self._auth_password is not None:
@@ -491,9 +497,22 @@ class WebSocketHandler:
         else:
             auth_pass_str = None
 
-        if auth_pass_str is None or str(password) == auth_pass_str:
+        # Kiosk-token path: a Console-kiosk Pi presents the long-lived
+        # shared secret instead of a password. Accepted only when the
+        # server actually has a token configured AND the submitted one
+        # matches; never falls back to "no token configured = allow all"
+        # so a misconfigured kiosk can't accidentally bypass a real
+        # password gate.
+        kiosk_ok = (
+            kiosk_token is not None
+            and self._kiosk_token is not None
+            and str(kiosk_token) == str(self._kiosk_token)
+        )
+
+        if auth_pass_str is None or str(password) == auth_pass_str or kiosk_ok:
             client.authenticated = True
-            self.log('info', f'Client {client.id} authenticated successfully')
+            via = 'kiosk_token' if kiosk_ok else 'password'
+            self.log('info', f'Client {client.id} authenticated successfully (via {via})')
             await self._send_to_client(client, {
                 "type": "auth_result",
                 "status": "ok",
@@ -1271,6 +1290,29 @@ class WebSocketHandler:
                 label=params.get('label', ''),
                 position=params.get('position'),
             )
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
+        elif action == 'add_routing_signal':
+            node_id = params.get('node_id')
+            name = params.get('name')
+            if not node_id or not name:
+                return {"status": "error", "message": "Missing node_id or name"}
+            result = self.state_manager.add_routing_signal(
+                node_id=node_id,
+                name=name,
+                label=params.get('label', ''),
+                position=params.get('position'),
+            )
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
+        elif action == 'remove_routing_signal':
+            node_id = params.get('node_id')
+            signal_id = params.get('signal_id')
+            if not node_id or not signal_id:
+                return {"status": "error", "message": "Missing node_id or signal_id"}
+            result = self.state_manager.remove_routing_signal(node_id, signal_id)
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
 

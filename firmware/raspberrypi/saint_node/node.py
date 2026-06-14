@@ -37,6 +37,7 @@ from .peripherals.tic import TicDriver
 from .peripherals.pathfinder_bms import PathfinderBMSDriver
 from .peripherals.fas100 import FAS100Driver
 from .peripherals.audio_player import PiAudioPlayerDriver
+from .peripherals.console_display import ConsoleDisplayDriver
 from .pi_model import detect_pi_model
 from . import ble_transport
 
@@ -116,6 +117,11 @@ class SaintNode(Node):
         # entry. libVLC is loaded lazily — a missing system package
         # logs an error but doesn't crash the node.
         self._peripherals.register(PiAudioPlayerDriver)
+        # Console kiosk: configures the Pi as an HDMI dashboard
+        # appliance pointing at a Console view URL on the server.
+        # Not a built-in — operator opts a given Pi in by adopting
+        # the console_display peripheral on its Peripherals tab.
+        self._peripherals.register(ConsoleDisplayDriver)
 
         # Firmware updater
         self._updater = FirmwareUpdater(self.get_logger())

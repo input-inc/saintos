@@ -296,11 +296,8 @@ build_firmware_teensy41() {
         warn "Teensy firmware build failed — leaving existing staged files (run 'brew install binutils' if missing)"
         return
     fi
-    local hex=firmware/teensy41/.pio/build/hardware/firmware.hex
-    if [[ -f "$hex" ]]; then
-        mkdir -p server/resources/firmware/teensy41
-        cp -v "$hex" server/resources/firmware/teensy41/
-    fi
+    # stage_firmware.py (a SCons post-action in platformio.ini) already copies
+    # firmware.hex + saint_node.bin into server/resources/firmware/teensy41/.
 }
 
 build_firmware_raspberrypi() {

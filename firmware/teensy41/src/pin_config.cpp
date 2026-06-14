@@ -13,6 +13,7 @@
 
 extern "C" {
 #include "pin_config.h"
+#include "pin_control_types.h"
 #include "flash_storage.h"
 #include "saint_node.h"
 #include "peripheral_driver.h"
@@ -388,31 +389,25 @@ bool pin_config_apply_json(const char* json, size_t json_len)
 
                     pin_config_set_pwm_params(gpio, freq, 0);
                 } else if (mode == PIN_MODE_SERVO) {
-                    // Parse servo pulse range
-                    uint16_t min_us = PIN_CONFIG_SERVO_MIN_PULSE_US;
-                    uint16_t max_us = PIN_CONFIG_SERVO_MAX_PULSE_US;
+                    // Parse servo extents — start/end/center/home are
+                    // each a uint16 µs pulse width. Missing keys fall
+                    // back to compile-time defaults so a partial
+                    // payload still produces a usable servo.
+                    auto parse_us = [&](const char* key, uint16_t fallback) -> uint16_t {
+                        const char* k = strstr(value_start, key);
+                        if (!k || k >= value_end) return fallback;
+                        k = strchr(k, ':');
+                        if (!k) return fallback;
+                        k++;
+                        while (*k == ' ') k++;
+                        return (uint16_t)atoi(k);
+                    };
+                    uint16_t start_us  = parse_us("\"start_us\"",  PIN_CONFIG_SERVO_START_US);
+                    uint16_t end_us    = parse_us("\"end_us\"",    PIN_CONFIG_SERVO_END_US);
+                    uint16_t center_us = parse_us("\"center_us\"", PIN_CONFIG_SERVO_CENTER_US);
+                    uint16_t home_us   = parse_us("\"home_us\"",   PIN_CONFIG_SERVO_HOME_US);
 
-                    const char* min_str = strstr(value_start, "\"min_pulse_us\"");
-                    if (min_str && min_str < value_end) {
-                        min_str = strchr(min_str, ':');
-                        if (min_str) {
-                            min_str++;
-                            while (*min_str == ' ') min_str++;
-                            min_us = (uint16_t)atoi(min_str);
-                        }
-                    }
-
-                    const char* max_str = strstr(value_start, "\"max_pulse_us\"");
-                    if (max_str && max_str < value_end) {
-                        max_str = strchr(max_str, ':');
-                        if (max_str) {
-                            max_str++;
-                            while (*max_str == ' ') max_str++;
-                            max_us = (uint16_t)atoi(max_str);
-                        }
-                    }
-
-                    pin_config_set_servo_params(gpio, min_us, max_us);
+                    pin_config_set_servo_params(gpio, start_us, end_us, center_us, home_us);
                 } else {
                     // Delegate to peripheral driver for mode-specific params
                     const peripheral_driver_t* drv = peripheral_find_by_mode(mode);
@@ -466,11 +461,18 @@ bool pin_config_save(void)
             storage.pin_config.pins[i].param1 = pin_configs[i].params.pwm.frequency;
             storage.pin_config.pins[i].param2 = pin_configs[i].params.pwm.duty_cycle;
         } else if (pin_configs[i].mode == PIN_MODE_SERVO) {
-            storage.pin_config.pins[i].param1 = pin_configs[i].params.servo.frequency;
-            storage.pin_config.pins[i].param2 = pin_configs[i].params.servo.min_pulse_us;
-            // Pack max_pulse_us into reserved bytes (little-endian)
-            storage.pin_config.pins[i].reserved_pin[0] = (uint8_t)(pin_configs[i].params.servo.max_pulse_us & 0xFF);
-            storage.pin_config.pins[i].reserved_pin[1] = (uint8_t)((pin_configs[i].params.servo.max_pulse_us >> 8) & 0xFF);
+            // Pack the 4×uint16 servo extents into the storage slot's
+            // 8 bytes: param1 holds (start_us in low 16, end_us in
+            // high 16), param2 holds center_us, reserved_pin[0..1]
+            // holds home_us. Frequency is fixed at PIN_CONFIG_SERVO_PWM_FREQ
+            // (50 Hz) so it doesn't need flash bytes.
+            uint32_t start_us  = pin_configs[i].params.servo.start_us;
+            uint32_t end_us    = pin_configs[i].params.servo.end_us;
+            storage.pin_config.pins[i].param1 = (start_us & 0xFFFF) | ((end_us & 0xFFFF) << 16);
+            storage.pin_config.pins[i].param2 = pin_configs[i].params.servo.center_us;
+            uint16_t home_us = pin_configs[i].params.servo.home_us;
+            storage.pin_config.pins[i].reserved_pin[0] = (uint8_t)(home_us & 0xFF);
+            storage.pin_config.pins[i].reserved_pin[1] = (uint8_t)((home_us >> 8) & 0xFF);
         }
     }
 
@@ -524,18 +526,21 @@ bool pin_config_load(void)
                     storage.pin_config.pins[i].param1,
                     storage.pin_config.pins[i].param2);
             } else if (mode == PIN_MODE_SERVO) {
-                uint16_t min_us = storage.pin_config.pins[i].param2;
-                if (min_us == 0) {
-                    // Old format: param2 was duty_cycle (always 0 for servo)
-                    // Use defaults for backward compatibility
-                    min_us = PIN_CONFIG_SERVO_MIN_PULSE_US;
-                }
-                uint16_t max_us = (uint16_t)storage.pin_config.pins[i].reserved_pin[0] |
-                                  ((uint16_t)storage.pin_config.pins[i].reserved_pin[1] << 8);
-                if (max_us == 0) {
-                    max_us = PIN_CONFIG_SERVO_MAX_PULSE_US;
-                }
-                pin_config_set_servo_params(gpio, min_us, max_us);
+                // Inverse of the pack in pin_config_save (see comment
+                // there for the byte layout). Zero values fall back to
+                // compile-time defaults so a fresh-magic blob doesn't
+                // produce a 0-µs pulse.
+                uint32_t packed   = storage.pin_config.pins[i].param1;
+                uint16_t start_us = (uint16_t)(packed & 0xFFFF);
+                uint16_t end_us   = (uint16_t)((packed >> 16) & 0xFFFF);
+                uint16_t center_us = storage.pin_config.pins[i].param2;
+                uint16_t home_us  = (uint16_t)storage.pin_config.pins[i].reserved_pin[0] |
+                                    ((uint16_t)storage.pin_config.pins[i].reserved_pin[1] << 8);
+                if (start_us  == 0) start_us  = PIN_CONFIG_SERVO_START_US;
+                if (end_us    == 0) end_us    = PIN_CONFIG_SERVO_END_US;
+                if (center_us == 0) center_us = PIN_CONFIG_SERVO_CENTER_US;
+                if (home_us   == 0) home_us   = PIN_CONFIG_SERVO_HOME_US;
+                pin_config_set_servo_params(gpio, start_us, end_us, center_us, home_us);
             }
         }
     }
@@ -627,8 +632,10 @@ bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name)
             break;
         case PIN_MODE_SERVO:
             cfg->params.servo.frequency = PIN_CONFIG_SERVO_PWM_FREQ;
-            cfg->params.servo.min_pulse_us = PIN_CONFIG_SERVO_MIN_PULSE_US;
-            cfg->params.servo.max_pulse_us = PIN_CONFIG_SERVO_MAX_PULSE_US;
+            cfg->params.servo.start_us  = PIN_CONFIG_SERVO_START_US;
+            cfg->params.servo.end_us    = PIN_CONFIG_SERVO_END_US;
+            cfg->params.servo.center_us = PIN_CONFIG_SERVO_CENTER_US;
+            cfg->params.servo.home_us   = PIN_CONFIG_SERVO_HOME_US;
             break;
         case PIN_MODE_DIGITAL_IN:
             cfg->params.digital_in.pull_up = false;
@@ -665,15 +672,19 @@ bool pin_config_set_pwm_params(uint8_t gpio, uint32_t frequency, uint16_t duty_c
     return true;
 }
 
-bool pin_config_set_servo_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t max_pulse_us)
+bool pin_config_set_servo_params(uint8_t gpio,
+                                 uint16_t start_us, uint16_t end_us,
+                                 uint16_t center_us, uint16_t home_us)
 {
     pin_config_t* cfg = find_or_create_config(gpio);
     if (!cfg || cfg->mode != PIN_MODE_SERVO) {
         return false;
     }
 
-    cfg->params.servo.min_pulse_us = min_pulse_us;
-    cfg->params.servo.max_pulse_us = max_pulse_us;
+    cfg->params.servo.start_us  = start_us;
+    cfg->params.servo.end_us    = end_us;
+    cfg->params.servo.center_us = center_us;
+    cfg->params.servo.home_us   = home_us;
 
     return true;
 }
@@ -748,7 +759,11 @@ void pin_config_apply_hardware(void)
                 uint32_t servo_freq = cfg->params.servo.frequency;
                 if (servo_freq == 0) servo_freq = PIN_CONFIG_SERVO_PWM_FREQ;
                 analogWriteFrequency(gpio, servo_freq);
-                analogWrite(gpio, 0);
+                // Drive straight to the operator-configured home_us
+                // instead of duty 0 — a zero pulse leaves the servo
+                // momentarily un-driven and free to flop until the
+                // first command arrives.
+                pin_control_drive_servo_pulse(gpio, cfg->params.servo.home_us);
                 break;
             }
 

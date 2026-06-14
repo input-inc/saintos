@@ -91,9 +91,18 @@ class RoutingEvaluator:
         self._widget_values: Dict[Tuple[str, str], float] = {}
         # Per-sheet value snapshot: sheet_node_id → {kind: {id: value}}
         # where `kind` is one of "inputs", "ws_inputs", "operators",
-        # "outputs", "widgets". Refreshed on each _evaluate_sheet pass
-        # and shipped to the UI via _on_values_changed.
+        # "outputs", "widgets", "signals". Refreshed on each
+        # _evaluate_sheet pass and shipped to the UI via
+        # _on_values_changed.
         self._sheet_values: Dict[str, Dict[str, Dict[str, float]]] = {}
+        # Global named-signal table. Cross-sheet floats: when a wire on
+        # sheet A sinks to kind="signal" with parts=[name], the value
+        # lands here under `name`; when a wire on sheet B sources from
+        # kind="signal" with the same name, it reads this. Survives
+        # across ticks (a signal holds its last value until rewritten)
+        # but resets on reconcile() so a structural reload doesn't
+        # carry stale state.
+        self._signals: Dict[str, float] = {}
         # System-wide E-Stop latch mirror. Driven by the websocket
         # handler's `estop` action so the evaluator can suppress
         # peripheral / output sink writes while estop is engaged.
@@ -140,6 +149,20 @@ class RoutingEvaluator:
             to_add = needed - self._subscribed_topics
             to_drop = self._subscribed_topics - needed
             self._subscribed_topics = set(needed)
+            # Drop signal values for names that no longer have any
+            # writer on the graph. Keeps the table from accumulating
+            # ghost entries from deleted sheets / renamed signals.
+            # A signal is "live" if any sheet has a SignalNode by that
+            # name OR any wire sources/sinks reference it.
+            live_names: Set[str] = set()
+            for sheet in routing.sheets.values():
+                for s in getattr(sheet, "signals", []):
+                    if s.name: live_names.add(s.name)
+                for w in sheet.wires:
+                    for ep in (w.source, w.sink):
+                        if ep.kind == "signal" and ep.parts:
+                            live_names.add(ep.parts[0])
+            self._signals = {k: v for k, v in self._signals.items() if k in live_names}
 
         for topic in to_add:
             self._subscribe(topic)
@@ -381,6 +404,22 @@ class RoutingEvaluator:
                       f"eval {op_node.op}({op_id}) inputs={inputs} → {value}")
             return value
 
+        # Pass 0: write to the global signal table from any wire whose
+        # sink is a signal endpoint. Doing this before the output pass
+        # means an Output on the same sheet can also tap a freshly-
+        # written signal via its `out` source — and it means signals
+        # written here are visible to operator chains on OTHER sheets
+        # this tick (sheet iteration order in evaluate() determines
+        # last-writer-wins between conflicting writers).
+        for wire in sheet.wires:
+            if wire.sink.kind != "signal":
+                continue
+            value = self._resolve_source(sheet, wire.source, eval_operator,
+                                         output_cache)
+            if value is None or not wire.sink.parts:
+                continue
+            self._signals[wire.sink.parts[0]] = float(value)
+
         # Pass 1: resolve and dispatch outputs first so output_cache is
         # populated before any peripheral wire tries to tap an output as
         # its source.
@@ -426,6 +465,16 @@ class RoutingEvaluator:
                 self._log("error",
                           f"Operator '{op.id}' eager-eval failed: {e}")
 
+        # Per-sheet signal values — pull only the signals this sheet
+        # actually declares so the snapshot is locally relevant. The
+        # canonical global map lives at self._signals; this is a
+        # projection for the UI.
+        sheet_signal_vals: Dict[str, float] = {}
+        for s in getattr(sheet, "signals", []):
+            v = self._signals.get(s.name)
+            if v is not None:
+                sheet_signal_vals[s.id] = float(v)
+
         # Atomically swap the per-sheet snapshot — operator values come
         # from the memoized cache so even operators that weren't pulled
         # by a sink (orphaned ops) are not surfaced.
@@ -436,6 +485,7 @@ class RoutingEvaluator:
             "outputs":     sheet_output_vals,
             "widgets":     sheet_widget_vals,
             "peripherals": sheet_peripheral_vals,
+            "signals":     sheet_signal_vals,
         }
 
     def _collect_operator_inputs(self, sheet: NodeSheet, op_node: OperatorNode,
@@ -498,6 +548,15 @@ class RoutingEvaluator:
             if not source.parts:
                 return None
             return output_cache.get(source.parts[0])
+        if source.kind == "signal":
+            # Cross-sheet named float. Returns None until SOMETHING has
+            # written this signal (this tick or a prior one); the IF
+            # gate's else branch is the right way to model "until set,
+            # behave as X".
+            if not source.parts:
+                return None
+            v = self._signals.get(source.parts[0])
+            return None if v is None else float(v)
         # peripheral / widget sources are not supported as wire sources today.
         return None
 
@@ -662,6 +721,30 @@ def _apply_operator(node: OperatorNode, inputs: Dict[str, float]) -> float:
         if prefer_a:
             return a if abs(a) > eps else b
         return b if abs(b) > eps else a
+    # ── logic ops ───────────────────────────────────────────────────
+    # Float→boolean coercion via the same 0.5 threshold the catalog
+    # documents; outputs are always 1.0 / 0.0 so chained logic stays
+    # numerically clean and downstream comparisons are exact.
+    if op in ("and", "or", "not", "in_range", "if"):
+        def truthy(x: float) -> bool:
+            return x >= 0.5
+        if op == "and":
+            return 1.0 if truthy(a) and truthy(b) else 0.0
+        if op == "or":
+            return 1.0 if truthy(a) or truthy(b) else 0.0
+        if op == "not":
+            return 1.0 if not truthy(v) else 0.0
+        if op == "in_range":
+            lo = float(inputs.get("min", -1.0))
+            hi = float(inputs.get("max",  1.0))
+            if lo > hi:
+                lo, hi = hi, lo
+            return 1.0 if (lo <= v <= hi) else 0.0
+        if op == "if":
+            cond = float(inputs.get("cond", 0.0))
+            then_v = float(inputs.get("then", 0.0))
+            else_v = float(inputs.get("else", 0.0))
+            return then_v if truthy(cond) else else_v
     return 0.0
 
 

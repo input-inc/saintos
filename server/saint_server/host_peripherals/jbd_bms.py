@@ -201,6 +201,7 @@ def parse_basic_info_response(frame: bytes) -> Optional[Dict[str, float]]:
     protection = u16(16)              # bytes 16-17 (fault bitmask)
     soc     = data[19]                # byte 19, 0-100
     fet     = data[20] if len(data) > 20 else 0     # bit0=chg, bit1=dchg
+    cell_count = data[21] if len(data) > 21 else 0  # series cell count
     ntc_count = data[22] if len(data) > 22 else 0
 
     temps = []
@@ -222,6 +223,7 @@ def parse_basic_info_response(frame: bytes) -> Optional[Dict[str, float]]:
         "soc": float(soc),
         "protection": float(protection),
         "fet_status": float(fet),
+        "cell_count": float(cell_count),
         "temps": temps,
     }
 
@@ -538,6 +540,7 @@ class JbdBleDriver:
         self._state_cb(self.peripheral_id, "cycles",       decoded["cycles"])
         self._state_cb(self.peripheral_id, "protection",   decoded["protection"])
         self._state_cb(self.peripheral_id, "fet_status",   decoded.get("fet_status", 0.0))
+        self._state_cb(self.peripheral_id, "cell_count",   decoded.get("cell_count", 0.0))
         temps = decoded["temps"]
         if len(temps) >= 1:
             self._state_cb(self.peripheral_id, "temp_1", temps[0])

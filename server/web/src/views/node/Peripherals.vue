@@ -4,6 +4,12 @@ import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useChannelHistory } from '@/composables/useChannelHistory'
 import AppModal from '@/components/AppModal.vue'
+import ServoExtentsControl from '@/components/peripherals/ServoExtentsControl.vue'
+
+// Param IDs the servo type stores as a 4-tuple of pulse widths. The
+// modal renders these as a single radial control instead of four
+// independent number inputs.
+const SERVO_EXTENT_PARAM_IDS = new Set(['start_us', 'end_us', 'center_us', 'home_us'])
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -532,8 +538,26 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
              the pin selectors below either appear or stay hidden via
              `pinsVisible`. -->
         <div v-if="modalType?.params?.length" class="space-y-3 pt-2 border-t border-line">
+          <!-- Servo extents: the four pulse-width params (start / end /
+               center / home) collapse into a single radial control so
+               the operator gets a visual picture of the sweep, not a
+               disconnected stack of integer inputs. The control writes
+               back to the same modalParams keys, so the save path is
+               unchanged. -->
+          <div v-if="modalType?.id === 'servo'" class="space-y-1">
+            <label class="block text-xs text-fg-muted">Servo extents</label>
+            <ServoExtentsControl
+              :model-value="{
+                start_us:  modalParams.start_us  ?? 1000,
+                end_us:    modalParams.end_us    ?? 2000,
+                center_us: modalParams.center_us ?? 1500,
+                home_us:   modalParams.home_us   ?? 1500,
+              }"
+              @update:model-value="(v) => Object.assign(modalParams, v)"
+            />
+          </div>
           <template v-for="p in modalType.params" :key="p.id">
-          <div v-if="paramVisible(p)">
+          <div v-if="paramVisible(p) && !(modalType?.id === 'servo' && SERVO_EXTENT_PARAM_IDS.has(p.id))">
             <label class="block text-xs text-fg-muted mb-1">{{ p.label }}</label>
             <!-- Constrained-choice params (catalog `choices: [...]`)
                  render as a dropdown regardless of base `type`. Each

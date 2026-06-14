@@ -196,12 +196,40 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "servo": PeripheralType(
         id="servo", label="Servo (PWM)",
-        description="Hobby servo on a PWM-capable pin.",
+        description=(
+            "Hobby servo on a PWM-capable pin. The operator-facing "
+            "channel `angle` accepts a normalized −1..+1 signal from the "
+            "routing sheet; the servo peripheral itself maps that to a "
+            "pulse width using the four extents below. Start and End "
+            "define what −1 and +1 map to; Center is where 0 lands "
+            "(allowing asymmetric mechanical limits); Home is the "
+            "startup / safe-reset pulse driven before any command "
+            "arrives. All values are pulse-width microseconds at the "
+            "standard 50 Hz servo frame rate."
+        ),
         pin_kind="pwm",
-        channels=[PeripheralChannel("angle", "Angle", "out", "analog")],
+        channels=[PeripheralChannel("angle", "Angle (−1..+1)", "out", "analog")],
         params=[
-            PeripheralTypeParam("min_pulse_us", "Min pulse (µs)", "int",  500, min=100, max=3000),
-            PeripheralTypeParam("max_pulse_us", "Max pulse (µs)", "int", 2500, min=100, max=3000),
+            PeripheralTypeParam(
+                "start_us",  "Start (−1) pulse (µs)",  "int", 1000,
+                min=500, max=2500,
+                help="Pulse width sent when the routed signal is −1."),
+            PeripheralTypeParam(
+                "end_us",    "End (+1) pulse (µs)",    "int", 2000,
+                min=500, max=2500,
+                help="Pulse width sent when the routed signal is +1."),
+            PeripheralTypeParam(
+                "center_us", "Center (0) pulse (µs)",  "int", 1500,
+                min=500, max=2500,
+                help="Pulse width sent when the routed signal is 0. "
+                     "Need not be the midpoint of Start/End — "
+                     "asymmetric mechanical ranges are supported."),
+            PeripheralTypeParam(
+                "home_us",   "Startup / home pulse (µs)", "int", 1500,
+                min=500, max=2500,
+                help="Pulse the servo is driven to immediately after "
+                     "config apply and on safe-reset, before any "
+                     "operator command arrives."),
         ],
     ),
     "pwm": PeripheralType(
@@ -501,6 +529,11 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralChannel("fet_status",   "FET status",     "in", "analog"),
             PeripheralChannel("remain_cap",   "Remaining cap",  "in", "analog"),
             PeripheralChannel("cycles",       "Cycle count",    "in", "analog"),
+            # Number of series cells the BMS reports it has wired.
+            # Drives cell-bar visibility in the BMS card (cells inside
+            # this count are always shown, even at 0 V; cells beyond
+            # are treated as unused slots and hidden).
+            PeripheralChannel("cell_count",   "Cell count",     "in", "analog"),
         ] + [
             # JBD reports up to 16 series cells in register 0x04. For
             # smaller packs (4S, 8S, …) the unused slots stay at 0;
@@ -600,6 +633,61 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
                 "initial_volume", "Initial volume (0–1)", "float", 0.8,
                 min=0.0, max=1.0,
             ),
+        ],
+    ),
+    # Console display — configures a Pi node as an HDMI kiosk pointing
+    # at a Console view URL on this server. The peripheral has no I/O
+    # channels: applying it makes the Pi's saint_node write a Chromium
+    # launch script + autostart entry, then (if running an X/Wayland
+    # session) signal a relaunch. The kiosk URL embeds the server's
+    # kiosk token so the browser auto-authenticates against any
+    # password gate — see WebSocketConfig.kiosk_token.
+    "console_display": PeripheralType(
+        id="console_display", label="Console Display",
+        description=(
+            "Configures this Pi node as an HDMI kiosk that shows one of "
+            "the SAINT.OS Console views (red LED dot-matrix UI). On "
+            "apply, the driver writes a Chromium launch script and an "
+            "autostart desktop entry; on the next login the Pi opens "
+            "the configured view fullscreen with passwordless access. "
+            "Useful for purpose-built console boxes attached to a robot."
+        ),
+        pin_kind="builtin",
+        channels=[],
+        params=[
+            PeripheralTypeParam(
+                "view", "Console view", "string", "battery",
+                choices=[
+                    {"value": "battery", "label": "Battery status (BMS)"},
+                ],
+                help="Which Console view to display. More views can be "
+                     "added without a catalog change once their routes "
+                     "land under /console/<view>/...",
+            ),
+            PeripheralTypeParam(
+                "target_node_id", "Target node ID", "string", "",
+                help="ID of the node whose peripheral feeds this view "
+                     "(e.g. the controller node that owns the BMS)."),
+            PeripheralTypeParam(
+                "target_peripheral_id", "Target peripheral ID", "string", "",
+                help="Peripheral ID on the target node (e.g. the BMS "
+                     "instance label) that the view subscribes to."),
+            PeripheralTypeParam(
+                "server_url", "Server URL", "string", "http://localhost:8080",
+                help="Base URL of the SAINT.OS server the kiosk browser "
+                     "loads. Use the hostname/IP the Pi can resolve — "
+                     "'localhost' only works when the Pi IS the server."),
+            PeripheralTypeParam(
+                "rotation", "Display rotation", "int", 0,
+                choices=[0, 90, 180, 270],
+                help="HDMI display rotation. Applied via xrandr / "
+                     "wlr-randr at kiosk launch."),
+            PeripheralTypeParam(
+                "autostart", "Autostart on login", "bool", True,
+                help="When true, the driver writes ~/.config/autostart/"
+                     "saint-console-kiosk.desktop so Chromium relaunches "
+                     "on every desktop-session login. Disable for manual "
+                     "control."),
         ],
     ),
     "system_monitor": PeripheralType(
@@ -773,6 +861,14 @@ class NodePeripheralConfig:
 #   kind == "output":     parts = [output_id]           (ROS-topic output; valid as sink and tap source)
 #   kind == "peripheral": parts = [node_id, peripheral_id, channel_id]
 #   kind == "widget":     parts = [widget_id, input_id]
+#   kind == "signal":     parts = [signal_name]         (cross-sheet named float; pin "in" sink, "out" source)
+#
+# Signals are first-class named floats that live above the sheet
+# layer — a SignalNode on Sheet A wired to its `in` pin writes a
+# value into the global signal table; a SignalNode on Sheet B with
+# the same name reads that value out of `out`. The evaluator's
+# RoutingEvaluator owns the table (Dict[str, float]); see
+# _evaluate_sheet's pass-0 and _resolve_source.
 
 
 @dataclass
@@ -976,6 +1072,46 @@ class OperatorNode:
 
 
 @dataclass
+class SignalNode:
+    """A named global float that crosses sheet boundaries.
+
+    The same `name` resolves to the same value table entry regardless
+    of which sheet the SignalNode lives on, so the routing graph can
+    span sheets — wire a boolean computed on sheet A into a signal
+    named "shoulder_locked", then on sheet B wire that signal into an
+    IF gate's `cond` to inhibit a downstream servo command.
+
+    Per-sheet placement is purely UI bookkeeping. Two sheets each
+    holding a SignalNode named "foo" reference the same global value;
+    if both have wires writing to it the evaluator's sheet-iteration
+    order determines last-writer-wins for the tick.
+    """
+    id: str
+    name: str
+    label: str = ""
+    position: Tuple[int, int] = (0, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "label": self.label,
+            "position": list(self.position),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "SignalNode":
+        pos = d.get("position") or [0, 0]
+        return cls(
+            id=d["id"],
+            name=str(d.get("name") or "").strip(),
+            label=d.get("label", ""),
+            position=(int(pos[0]) if len(pos) > 0 else 0,
+                      int(pos[1]) if len(pos) > 1 else 0),
+        )
+
+
+@dataclass
 class Wire:
     """One edge on a sheet — a value flowing from source to sink."""
     id: str
@@ -1020,6 +1156,7 @@ class NodeSheet:
     outputs: List["OutputNode"] = field(default_factory=list)
     operators: List[OperatorNode] = field(default_factory=list)
     widgets: List["WidgetInstance"] = field(default_factory=list)
+    signals: List["SignalNode"] = field(default_factory=list)
     wires: List[Wire] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1030,6 +1167,7 @@ class NodeSheet:
             "outputs": [n.to_dict() for n in self.outputs],
             "operators": [n.to_dict() for n in self.operators],
             "widgets": [w.to_dict() for w in self.widgets],
+            "signals": [s.to_dict() for s in self.signals],
             "wires": [w.to_dict() for w in self.wires],
         }
 
@@ -1046,6 +1184,7 @@ class NodeSheet:
             outputs=[OutputNode.from_dict(x) for x in d.get("outputs", [])],
             operators=[OperatorNode.from_dict(x) for x in d.get("operators", [])],
             widgets=[WidgetInstance.from_dict(x) for x in d.get("widgets", [])],
+            signals=[SignalNode.from_dict(x) for x in d.get("signals", [])],
             wires=[Wire.from_dict(x) for x in d.get("wires", [])],
         )
 
@@ -1110,6 +1249,18 @@ class NodeSheet:
             position=position,
         )
         self.operators.append(node)
+        return node
+
+    def add_signal(self, name: str, label: str = "",
+                   position: Tuple[int, int] = (0, 0)) -> "SignalNode":
+        existing = {n.id for n in self.signals}
+        node = SignalNode(
+            id=self._next_id("sig", existing),
+            name=name.strip(),
+            label=label or name.strip(),
+            position=position,
+        )
+        self.signals.append(node)
         return node
 
     def add_widget(self, type_id: str, label: str,
@@ -1192,6 +1343,24 @@ class NodeSheet:
         ]
         return True
 
+    def remove_signal(self, signal_id: str) -> bool:
+        before = len(self.signals)
+        self.signals = [n for n in self.signals if n.id != signal_id]
+        if len(self.signals) == before:
+            return False
+        # Wires reference signals by name (not signal_id), but a delete
+        # of the local SignalNode only severs THIS sheet's view of the
+        # global signal — other sheets' SignalNodes (and their wires)
+        # keep working against the same name. So we only drop wires
+        # whose endpoint name matches this node's name AND whose
+        # endpoint actually lives on this sheet's wires list.
+        gone = next((n for n in self.signals if n.id == signal_id), None)
+        # No-op: the removed signal is no longer in self.signals so we
+        # can't look it up. Instead just leave wires alone; an orphan
+        # wire targeting kind="signal" with a name nothing on this
+        # sheet writes/reads is harmless (resolves to None).
+        return True
+
     def remove_widget(self, widget_id: str) -> bool:
         before = len(self.widgets)
         self.widgets = [w for w in self.widgets if w.id != widget_id]
@@ -1222,6 +1391,9 @@ class NodeSheet:
 
     def find_widget(self, widget_id: str) -> Optional["WidgetInstance"]:
         return next((w for w in self.widgets if w.id == widget_id), None)
+
+    def find_signal(self, signal_id: str) -> Optional["SignalNode"]:
+        return next((n for n in self.signals if n.id == signal_id), None)
 
 
 # ── Operator catalog ──────────────────────────────────────────────────
@@ -1359,6 +1531,53 @@ OPERATOR_CATALOG: Dict[str, OperatorType] = {
         ],
         params=[OperatorParamSpec("prefer_a", "Prefer A", "bool", False)],
     ),
+
+    # ── Logic operators ─────────────────────────────────────────────
+    # All values on the routing graph are floats. The logic ops below
+    # treat any input ≥ 0.5 as true, otherwise false; their outputs are
+    # always 1.0 or 0.0. That keeps boolean values composable with the
+    # numeric operators above (eg. multiply by an AND gate to mask a
+    # signal off, route through a Map Range to scale a 0/1 enable into
+    # whatever the consumer expects).
+    "and": OperatorType(
+        "and", "AND",
+        "out = 1 if both a and b are true (≥ 0.5), else 0.",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "or": OperatorType(
+        "or", "OR",
+        "out = 1 if either a or b is true (≥ 0.5), else 0.",
+        inputs=[OperatorInputSpec("a", "A"), OperatorInputSpec("b", "B")],
+    ),
+    "not": OperatorType(
+        "not", "NOT",
+        "out = 1 if value is false (< 0.5), else 0. Flips a boolean.",
+        inputs=[OperatorInputSpec("value", "Value")],
+    ),
+    "in_range": OperatorType(
+        "in_range", "In Range",
+        "out = 1 when min ≤ value ≤ max, else 0. Useful as the safety "
+        "condition feeding an IF gate — e.g. allow shoulder rotation "
+        "only when elbow is within a safe window.",
+        inputs=[
+            OperatorInputSpec("value", "Value"),
+            OperatorInputSpec("min",   "Min", -1.0),
+            OperatorInputSpec("max",   "Max",  1.0),
+        ],
+    ),
+    "if": OperatorType(
+        "if", "IF",
+        "out = then-value when cond is true (≥ 0.5); else else-value. "
+        "Combined with AND / OR / NOT / In Range this is the gating "
+        "primitive: route the desired servo command into `then`, a safe "
+        "fallback (often 0 or the current position) into `else`, and a "
+        "boolean expression into `cond`.",
+        inputs=[
+            OperatorInputSpec("cond", "Cond"),
+            OperatorInputSpec("then", "Then"),
+            OperatorInputSpec("else", "Else"),
+        ],
+    ),
 }
 
 
@@ -1464,6 +1683,21 @@ DEFAULT_WIDGET_CATALOG: Dict[str, WidgetType] = {
             WidgetInputSpec("voltage", "Bus Voltage",    "analog"),
             WidgetInputSpec("current", "Motor Current",  "analog"),
             WidgetInputSpec("temp",    "Temperature",    "analog"),
+        ],
+    ),
+    "bms_monitor": WidgetType(
+        id="bms_monitor", label="BMS Monitor",
+        description="Pack-level battery summary: SOC bar, voltage / current / "
+                    "temperature, CHG/DSG FET state, and a fault panel that "
+                    "surfaces any asserted protection bits. Lighter than the "
+                    "per-cell BMS card on the node Live tab.",
+        inputs=[
+            WidgetInputSpec("soc",        "State of Charge",  "analog"),
+            WidgetInputSpec("voltage",    "Pack Voltage",     "analog"),
+            WidgetInputSpec("current",    "Pack Current",     "analog"),
+            WidgetInputSpec("temp",       "Temperature",      "analog"),
+            WidgetInputSpec("protection", "Protection Bits",  "analog"),
+            WidgetInputSpec("fet_status", "FET Status",       "analog"),
         ],
     ),
 }

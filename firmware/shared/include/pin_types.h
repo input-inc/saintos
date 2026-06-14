@@ -68,15 +68,29 @@ typedef enum {
 // =============================================================================
 
 #define PIN_CONFIG_MAX_NAME_LEN 32
-#define PIN_CONFIG_VERSION      1
+// v2: servo params changed from (min_pulse_us, max_pulse_us) to the
+//     four-tuple (start_us, end_us, center_us, home_us). The runtime
+//     mapping was also reshaped from "angle 0..180" to a normalized
+//     −1..+1 piecewise-linear interpolation through center_us. v1
+//     saves are rejected on load and the operator re-syncs.
+#define PIN_CONFIG_VERSION      2
 
 // Default PWM settings
 #define PIN_CONFIG_DEFAULT_PWM_FREQ     1000    // 1 kHz
 #define PIN_CONFIG_SERVO_PWM_FREQ       50      // 50 Hz for servos
 
-// Default servo pulse range
-#define PIN_CONFIG_SERVO_MIN_PULSE_US   500     // 0.5ms
-#define PIN_CONFIG_SERVO_MAX_PULSE_US   2500    // 2.5ms
+// Default servo pulse extents. The mechanical envelope of typical
+// hobby servos is [500, 2500] µs; defaults sit a touch inside that
+// so an unconfigured pin doesn't drive the servo into a hard stop.
+#define PIN_CONFIG_SERVO_START_US       1000    // 1.0ms — input −1
+#define PIN_CONFIG_SERVO_END_US         2000    // 2.0ms — input +1
+#define PIN_CONFIG_SERVO_CENTER_US      1500    // 1.5ms — input  0
+#define PIN_CONFIG_SERVO_HOME_US        1500    // 1.5ms — startup / safe-reset
+// Absolute clamp applied inside pin_control_set_servo so a bad config
+// (e.g. start_us=300 from a stale save) can't drive the servo past
+// its mechanical envelope.
+#define PIN_CONFIG_SERVO_MIN_PULSE_US   500     // hard floor
+#define PIN_CONFIG_SERVO_MAX_PULSE_US   2500    // hard ceiling
 
 // =============================================================================
 // Pin Configuration Structure
@@ -93,8 +107,10 @@ typedef struct {
         } pwm;
         struct {
             uint32_t frequency;     // Always 50Hz for servo
-            uint16_t min_pulse_us;  // Default 500 (0.5ms)
-            uint16_t max_pulse_us;  // Default 2500 (2.5ms)
+            uint16_t start_us;      // Pulse driven when input == −1
+            uint16_t end_us;        // Pulse driven when input == +1
+            uint16_t center_us;     // Pulse driven when input ==  0
+            uint16_t home_us;       // Startup / safe-reset pulse
         } servo;
         struct {
             bool pull_up;
@@ -255,7 +271,9 @@ bool pin_config_has_mode(uint8_t mode);
 bool pin_config_set(uint8_t gpio, pin_mode_t mode, const char* logical_name);
 bool pin_config_set_pwm_params(uint8_t gpio, uint32_t frequency, uint16_t duty_cycle);
 bool pin_config_set_digital_in_params(uint8_t gpio, bool pull_up, bool pull_down);
-bool pin_config_set_servo_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t max_pulse_us);
+bool pin_config_set_servo_params(uint8_t gpio,
+                                 uint16_t start_us, uint16_t end_us,
+                                 uint16_t center_us, uint16_t home_us);
 bool pin_config_set_maestro_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t max_pulse_us,
                                     uint16_t neutral_us, uint16_t speed, uint16_t acceleration,
                                     uint16_t home_us);

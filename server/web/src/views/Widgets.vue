@@ -5,6 +5,7 @@ import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useWsTopic } from '@/composables/useWsTopic'
 import RoboClawMonitor from '@/components/widgets/RoboClawMonitor.vue'
 import Fas100Monitor from '@/components/widgets/Fas100Monitor.vue'
+import BMSMonitor from '@/components/widgets/BMSMonitor.vue'
 
 defineProps({ embedded: { type: Boolean, default: false } })
 
@@ -89,6 +90,11 @@ function sourceLabel (route) {
         />
         <Fas100Monitor
           v-else-if="w.type === 'battery_monitor'"
+          :widget="w"
+          :routes="routes"
+        />
+        <BMSMonitor
+          v-else-if="w.type === 'bms_monitor'"
           :widget="w"
           :routes="routes"
         />

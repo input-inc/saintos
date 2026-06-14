@@ -180,6 +180,42 @@ NODE_OFFLINE_GRACE_SECONDS = 3.0
 HOST_CONTROLLER_NODE_ID = "host_controller"
 
 
+def _resolve_server_ip() -> str:
+    """Best-effort: find an operator-useful IP for the host_controller
+    NodeInfo. Prefers the configured internal-network server_ip (the
+    address nodes use to reach us), falls back to the primary
+    non-loopback address bound to any interface, or to the hostname.
+
+    Returns "" when nothing usable is available — the Overview card
+    just shows "—" in that case."""
+    # Try server.yaml's network.internal.server_ip first; that's
+    # what the install script reserves on eth0 for the node net.
+    try:
+        from saint_server.config import get_config
+        cfg = get_config()
+        ip = getattr(getattr(getattr(cfg, "network", None),
+                             "internal", None), "server_ip", "")
+        if ip and ip != "0.0.0.0":
+            return str(ip)
+    except Exception:
+        pass
+    # Then try to figure out what interface has a route to the
+    # outside world. socket.gethostbyname is sometimes pegged at
+    # 127.0.1.1 on Debian, so probe via a UDP connect dance instead.
+    try:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 1))     # no packet actually sent
+            return s.getsockname()[0]
+    except Exception:
+        pass
+    try:
+        import socket
+        return socket.gethostname()
+    except Exception:
+        return ""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Virtual-GPIO → channel translation (transitional)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1828,19 +1864,34 @@ class StateManager:
         node = self.state.adopted_nodes.get(node_id)
         if not node or not node.peripheral_config:
             return None
+        peripherals_out = []
+        for p in node.peripheral_config.peripherals:
+            if p.builtin:
+                continue
+            params = dict(p.params)
+            # console_display: inject the server's kiosk token into the
+            # config push so the Pi driver can build a passwordless
+            # kiosk URL. The operator never types or sees this; it
+            # rides as a private param. None means kiosk auth is
+            # unconfigured (no password gate either, hopefully).
+            if p.type == "console_display":
+                try:
+                    from saint_server.config import get_config
+                    tok = get_config().websocket.kiosk_token
+                    if tok:
+                        params["_kiosk_token"] = tok
+                except Exception:
+                    pass
+            peripherals_out.append({
+                "id": p.id,
+                "type": p.type,
+                "pins": p.pins,
+                "params": params,
+            })
         payload = {
             "action": "configure",
             "version": node.peripheral_config.version,
-            "peripherals": [
-                {
-                    "id": p.id,
-                    "type": p.type,
-                    "pins": p.pins,
-                    "params": p.params,
-                }
-                for p in node.peripheral_config.peripherals
-                if not p.builtin
-            ],
+            "peripherals": peripherals_out,
         }
         return json.dumps(payload)
 
@@ -1974,6 +2025,34 @@ class StateManager:
         self.state.system_routing.bump_version()
         self._save_system_routing()
         return {"success": True, "operator": node.to_dict()}
+
+    def add_routing_signal(self, node_id: str, name: str, label: str = "",
+                           position: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Add a SignalNode on `node_id`'s sheet bound to global signal
+        `name`. Two sheets each holding a SignalNode named "foo" share
+        the same underlying value — that's the cross-sheet point."""
+        if not name or not name.strip():
+            return {"success": False, "message": "Signal name required"}
+        err = self._validate_sheet_owner(node_id)
+        if err:
+            return {"success": False, "message": err}
+        pos = self._coerce_position(position)
+        sheet = self.state.system_routing.get_sheet(node_id)
+        node = sheet.add_signal(name=name, label=label, position=pos)
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True, "signal": node.to_dict()}
+
+    def remove_routing_signal(self, node_id: str, signal_id: str) -> Dict[str, Any]:
+        err = self._validate_sheet_owner(node_id)
+        if err:
+            return {"success": False, "message": err}
+        sheet = self.state.system_routing.get_sheet(node_id)
+        if not sheet.remove_signal(signal_id):
+            return {"success": False, "message": f"Signal '{signal_id}' not found"}
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True}
 
     def add_routing_wire(self, node_id: str, source: Dict[str, Any],
                          sink: Dict[str, Any]) -> Dict[str, Any]:
@@ -2665,6 +2744,12 @@ class StateManager:
         ``(system_monitor, cpu_usage)`` etc. so the dashboard's routing
         engine resolves them by the same peripheral/channel identifiers
         the routing graph uses — no virtual GPIO indirection.
+
+        Also keeps the NodeInfo fields the Overview card reads
+        (``online``, ``state``, ``cpu_temp``, ``uptime_seconds``,
+        ``firmware_version``, ``ip_address``) in sync with the same
+        metrics so the host node's detail page shows the same picture
+        as the System Status dashboard card.
         """
         node = self.state.adopted_nodes.get(HOST_CONTROLLER_NODE_ID)
         if not node:
@@ -2672,7 +2757,16 @@ class StateManager:
         if not node.runtime_state:
             node.runtime_state = NodeRuntimeState(node_id=HOST_CONTROLLER_NODE_ID)
 
+        # Synthetic node — the server IS the host. The YAML loader
+        # initialises every adopted node at online=False/last_seen=0
+        # (correct default for real Pi nodes that may not be on the
+        # net at server start), so without these overwrites the
+        # host_controller's connection dot stays gray and its state
+        # stays "UNKNOWN" forever.
         node.last_seen = time.time()
+        node.online = True
+        node.state = "ACTIVE"
+        node.going_offline_at = None
 
         try:
             cpu_usage = psutil.cpu_percent(interval=None)
@@ -2683,6 +2777,32 @@ class StateManager:
         cpu_temp = _read_cpu_temp()
         throttle = _read_throttle_status()
         uptime_s = float(int(time.time() - self.state.start_time))
+
+        # Mirror the metrics into NodeInfo so list_adopted (which
+        # feeds the Overview card) carries them. Channel-side push
+        # below still happens — that drives the Live tab + routing.
+        node.cpu_usage = float(cpu_usage)
+        node.memory_usage = float(mem_usage)
+        if cpu_temp is not None:
+            node.cpu_temp = float(cpu_temp)
+        node.uptime_seconds = int(uptime_s)
+
+        # Server version + reachable address. Both are stable for the
+        # process lifetime, so backfill only when the YAML-loaded
+        # defaults are still in place. firmware_version here means
+        # the installed saint-os version (NOT a Pi-node firmware
+        # build); the Overview card just calls it "Firmware".
+        if not node.firmware_version or node.firmware_version == "0.0.0":
+            try:
+                v = _read_installed_version_info()
+                if v and v.get("version") and v["version"] != "unknown":
+                    node.firmware_version = v["version"]
+                if v and v.get("built_at"):
+                    node.firmware_build = v["built_at"]
+            except Exception:
+                pass
+        if not node.ip_address or node.ip_address == "127.0.0.1":
+            node.ip_address = _resolve_server_ip()
 
         readings = {
             'cpu_usage': float(cpu_usage),

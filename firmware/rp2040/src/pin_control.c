@@ -207,7 +207,7 @@ bool pin_control_set_pwm(uint8_t gpio, float percent)
     return true;
 }
 
-bool pin_control_set_servo(uint8_t gpio, float angle)
+bool pin_control_set_servo(uint8_t gpio, float value)
 {
     const pin_config_t* cfg = pin_config_get(gpio);
     if (!cfg || cfg->mode != PIN_MODE_SERVO) {
@@ -215,31 +215,79 @@ bool pin_control_set_servo(uint8_t gpio, float angle)
         return false;
     }
 
-    // Clamp angle
-    if (angle < 0.0f) angle = 0.0f;
-    if (angle > 180.0f) angle = 180.0f;
+    // Normalized input −1..+1, piecewise-linear through center_us so
+    // asymmetric mechanical ranges (center not at midpoint of
+    // start/end) map sensibly.
+    if (value < -1.0f) value = -1.0f;
+    if (value >  1.0f) value =  1.0f;
 
-    // Calculate pulse width using per-pin configurable range
-    uint16_t min_us = cfg->params.servo.min_pulse_us;
-    uint16_t max_us = cfg->params.servo.max_pulse_us;
-    float pulse_us = min_us + (angle / 180.0f) * (max_us - min_us);
+    float pulse_us;
+    if (value <= 0.0f) {
+        // [-1, 0]: lerp start → center
+        pulse_us = (float)cfg->params.servo.center_us
+                 + value * ((float)cfg->params.servo.center_us
+                          - (float)cfg->params.servo.start_us);
+    } else {
+        // [0, +1]: lerp center → end
+        pulse_us = (float)cfg->params.servo.center_us
+                 + value * ((float)cfg->params.servo.end_us
+                          - (float)cfg->params.servo.center_us);
+    }
+
+    if (pulse_us < (float)PIN_CONFIG_SERVO_MIN_PULSE_US) pulse_us = PIN_CONFIG_SERVO_MIN_PULSE_US;
+    if (pulse_us > (float)PIN_CONFIG_SERVO_MAX_PULSE_US) pulse_us = PIN_CONFIG_SERVO_MAX_PULSE_US;
+
     float duty_percent = (pulse_us / SERVO_PERIOD_US) * 100.0f;
-
-    // Calculate PWM level
     uint slice = pwm_gpio_to_slice_num(gpio);
     uint channel = pwm_gpio_to_channel(gpio);
     uint32_t wrap = get_pwm_wrap(gpio);
     uint32_t level = (uint32_t)((duty_percent / 100.0f) * wrap);
-
     pwm_set_chan_level(slice, channel, level);
 
-    // Store runtime value (store angle, not duty cycle)
+    // Store the operator-facing normalized value, not the pulse —
+    // matches how the dashboard slider expresses commanded position.
     pin_runtime_value_t* rv = find_or_create_runtime(gpio);
     if (rv) {
-        rv->value = angle;
+        rv->value = value;
         rv->last_updated = to_ms_since_boot(get_absolute_time());
     }
 
+    return true;
+}
+
+bool pin_control_drive_servo_pulse(uint8_t gpio, uint16_t pulse_us)
+{
+    const pin_config_t* cfg = pin_config_get(gpio);
+    if (!cfg || cfg->mode != PIN_MODE_SERVO) return false;
+
+    if (pulse_us < PIN_CONFIG_SERVO_MIN_PULSE_US) pulse_us = PIN_CONFIG_SERVO_MIN_PULSE_US;
+    if (pulse_us > PIN_CONFIG_SERVO_MAX_PULSE_US) pulse_us = PIN_CONFIG_SERVO_MAX_PULSE_US;
+
+    float duty_percent = ((float)pulse_us / SERVO_PERIOD_US) * 100.0f;
+    uint slice = pwm_gpio_to_slice_num(gpio);
+    uint channel = pwm_gpio_to_channel(gpio);
+    uint32_t wrap = get_pwm_wrap(gpio);
+    uint32_t level = (uint32_t)((duty_percent / 100.0f) * wrap);
+    pwm_set_chan_level(slice, channel, level);
+
+    // Best-effort inverse map so the runtime value reflects where the
+    // pulse sits on the −1..+1 axis.
+    float v;
+    uint16_t c = cfg->params.servo.center_us;
+    if (pulse_us == c) {
+        v = 0.0f;
+    } else if (pulse_us < c) {
+        uint16_t s = cfg->params.servo.start_us;
+        v = (s == c) ? 0.0f : ((float)pulse_us - (float)c) / ((float)c - (float)s);
+    } else {
+        uint16_t e = cfg->params.servo.end_us;
+        v = (e == c) ? 0.0f : ((float)pulse_us - (float)c) / ((float)e - (float)c);
+    }
+    pin_runtime_value_t* rv = find_or_create_runtime(gpio);
+    if (rv) {
+        rv->value = v;
+        rv->last_updated = to_ms_since_boot(get_absolute_time());
+    }
     return true;
 }
 
@@ -385,10 +433,12 @@ void pin_control_estop(void)
                 break;
 
             case PIN_MODE_SERVO:
-                // Set servo to center position (90 degrees) for safety
-                // Some servos may be safer at 0, but center is generally safe
-                pin_control_set_servo(cfg->gpio, 90.0f);
-                printf("ESTOP: GPIO %d (Servo) -> 90 deg (center)\n", cfg->gpio);
+                // Safe-reset drives to the operator-configured home_us
+                // (defaults to center_us if unset). Same helper used at
+                // boot-time apply.
+                pin_control_drive_servo_pulse(cfg->gpio, cfg->params.servo.home_us);
+                printf("ESTOP: GPIO %d (Servo) -> %u us (home)\n",
+                       cfg->gpio, (unsigned)cfg->params.servo.home_us);
                 break;
 
             case PIN_MODE_DIGITAL_OUT:

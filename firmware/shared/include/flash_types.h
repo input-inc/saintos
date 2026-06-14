@@ -53,7 +53,12 @@ extern "C" {
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
-#define FLASH_PIN_CONFIG_VERSION      1
+// v2 (2026-06): servo mode's param1/param2/reserved_pin slot now
+//     stores (start_us<<0, end_us<<16) in param1, center_us in
+//     param2, and home_us in reserved_pin[0..1]. Old v1 saves had
+//     (frequency, min_pulse_us, max_pulse_us) and are rejected on
+//     load — operator re-syncs from the Peripherals tab.
+#define FLASH_PIN_CONFIG_VERSION      2
 
 // =============================================================================
 // Pin Configuration Storage Structure

@@ -98,6 +98,11 @@ const graphNodes = computed(() => {
     const pos = positionFor(id, w.position)
     push({ id, kind: 'widget', sheetNodeId: w.id, widget: w, x: pos.x, y: pos.y })
   }
+  for (const n of (s.signals || [])) {
+    const id = `sig::${n.id}`
+    const pos = positionFor(id, n.position)
+    push({ id, kind: 'signal', sheetNodeId: n.id, data: n, x: pos.x, y: pos.y })
+  }
   // Peripheral sinks — only on controller sheets, never on dashboard.
   if (props.node && !props.isDashboard) {
     for (const p of (props.peripherals || [])) {
@@ -112,8 +117,8 @@ const graphNodes = computed(() => {
     }
   }
   // Auto-layout pass for any zero/zero entries.
-  const cols     = { input: 30, ws_input: 30, operator: 320, output: 640, widget: 640, peripheral: 900 }
-  const cursorY  = { input: 30, ws_input: 30, operator: 30, output: 30, widget: 30, peripheral: 30 }
+  const cols     = { input: 30, ws_input: 30, operator: 320, output: 640, widget: 640, peripheral: 900, signal: 480 }
+  const cursorY  = { input: 30, ws_input: 30, operator: 30, output: 30, widget: 30, peripheral: 30, signal: 30 }
   const SPACING  = 140
   for (const g of out) {
     if (g.x === 0 && g.y === 0) {
@@ -221,6 +226,20 @@ function meta (g) {
       outputs: [],
     }
   }
+  if (g.kind === 'signal') {
+    const n = g.data
+    // Signals are bidirectional: one card carries an input pin (write
+    // into the named global) AND an output pin (read from it). Other
+    // sheets that hold a SignalNode with the same name reference the
+    // same value — that's the cross-sheet point.
+    return {
+      title: n.label || n.name,
+      subtitle: `Signal · ${n.name}`,
+      builtin: false, removable: true,
+      inputs:  [{ id: 'in',  label: 'in'  }],
+      outputs: [{ id: 'out', label: 'out' }],
+    }
+  }
   return null
 }
 
@@ -266,6 +285,15 @@ function handleToEndpoint (handle) {
     return { kind: 'peripheral', parts: [rest.slice(0, idx), rest.slice(idx + 2), pinId] }
   }
   if (graphNodeId.startsWith('w::')) return { kind: 'widget', parts: [graphNodeId.slice(3), pinId] }
+  if (graphNodeId.startsWith('sig::')) {
+    // Wire stores the GLOBAL signal name in parts, not the per-sheet
+    // node id — that's how the same signal name on two sheets binds
+    // both wires to the same global value. Look up the SignalNode
+    // here to get its name.
+    const sigId = graphNodeId.slice(5)
+    const node = (props.sheet?.signals || []).find(n => n.id === sigId)
+    return node ? { kind: 'signal', parts: [node.name] } : null
+  }
   return null
 }
 function endpointToHandle (ep, dirHint) {
@@ -276,6 +304,15 @@ function endpointToHandle (ep, dirHint) {
   if (ep.kind === 'operator')   return `op::${ep.parts[0]}/${ep.parts[1] || 'out'}`
   if (ep.kind === 'peripheral') return `p::${ep.parts[0]}::${ep.parts[1]}/${ep.parts[2]}`
   if (ep.kind === 'widget')     return `w::${ep.parts[0]}/${ep.parts[1]}`
+  if (ep.kind === 'signal') {
+    // The wire references a signal by name; this sheet may or may not
+    // hold a local SignalNode for it. Pick the first matching one to
+    // draw against — if none, the wire is "dangling" on this sheet
+    // (still resolves on the server, just doesn't render here).
+    const node = (props.sheet?.signals || []).find(n => n.name === ep.parts[0])
+    if (!node) return null
+    return `sig::${node.id}/${dirHint === 'out' ? 'out' : 'in'}`
+  }
   return null
 }
 
@@ -408,17 +445,27 @@ async function clickWire (id) {
 // ── Sheet-node removal (input / ws_input / operator / output / widget) ─
 async function removeSheetNode (graphNodeId) {
   let sheetNodeId = null
+  let isSignal = false
   if      (graphNodeId.startsWith('in::'))  sheetNodeId = graphNodeId.slice(4)
   else if (graphNodeId.startsWith('ws::'))  sheetNodeId = graphNodeId.slice(4)
   else if (graphNodeId.startsWith('out::')) sheetNodeId = graphNodeId.slice(5)
   else if (graphNodeId.startsWith('op::'))  sheetNodeId = graphNodeId.slice(4)
   else if (graphNodeId.startsWith('w::'))   sheetNodeId = graphNodeId.slice(3)
+  else if (graphNodeId.startsWith('sig::')) { sheetNodeId = graphNodeId.slice(5); isSignal = true }
   if (!sheetNodeId) return
   if (!confirm('Remove this node? Wires touching it will be deleted.')) return
   try {
-    await ws.management('remove_sheet_node', {
-      node_id: props.sheetId, sheet_node_id: sheetNodeId,
-    })
+    if (isSignal) {
+      // remove_sheet_node doesn't know about signals; route through
+      // the dedicated action.
+      await ws.management('remove_routing_signal', {
+        node_id: props.sheetId, signal_id: sheetNodeId,
+      })
+    } else {
+      await ws.management('remove_sheet_node', {
+        node_id: props.sheetId, sheet_node_id: sheetNodeId,
+      })
+    }
   } catch (e) { console.warn('remove_sheet_node failed:', e) }
 }
 
@@ -501,6 +548,11 @@ function pinValueFor (g, pin, dir) {
   }
   if (g.kind === 'peripheral' && dir === 'in') {
     return fmtVal(buckets.peripherals?.[`${g.nodeId}/${g.peripheral.id}/${pin.id}`])
+  }
+  if (g.kind === 'signal') {
+    // Same value reads on both pins — the global signal is what got
+    // written and what gets read this tick.
+    return fmtVal(buckets.signals?.[g.sheetNodeId])
   }
   return ''
 }

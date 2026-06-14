@@ -39,6 +39,24 @@ export const router = createRouter({
     { path: '/terminal',        name: 'terminal',    component: () => import('@/views/Terminal.vue') },
     { path: '/updates',         name: 'updates',     component: () => import('@/views/Updates.vue') },
     { path: '/settings',        name: 'settings',    component: () => import('@/views/Settings.vue') },
+    // Console kiosk views — designed to be loaded by a Pi running
+    // Chromium fullscreen against this server. They render their own
+    // chrome (title bar + bottom buttons via ConsoleScreen) so the
+    // operator-UI shell would just get in the way; route them through
+    // a dedicated layout-free view.
+    { path: '/console/battery/:nodeId/:peripheralId',
+      name: 'console-battery',
+      component: () => import('@/views/ConsoleBattery.vue'),
+      props: true,
+      meta: { chromeless: true } },
+    // Multi-pack overview. The `packs` query param is a JSON-encoded
+    // array of {nodeId, peripheralId, label?} — the console_display
+    // peripheral builds this URL from operator config. Tapping a
+    // pack tile routes to /console/battery/:nodeId/:peripheralId.
+    { path: '/console/batteries',
+      name: 'console-batteries',
+      component: () => import('@/views/ConsoleBatteries.vue'),
+      meta: { chromeless: true } },
     { path: '/:catchAll(.*)',   redirect: '/dashboard' },
   ],
 })

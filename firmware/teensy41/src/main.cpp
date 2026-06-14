@@ -563,6 +563,11 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     // server/config/boards/teensy41/.
     const char* chip_family = "teensy41";
 
+    /* Diag counters embedded in /announce so the LAST announce before
+     * a wedge carries the state that pinpoints which layer froze. /log
+     * only delivers the first entry per boot reliably (see doc); /announce
+     * is the surviving channel. Format mirrors the periodic-status
+     * Serial line in loop() so a grep matches both. */
     int ann_len = snprintf(announcement_buffer, sizeof(announcement_buffer),
         "{"
         "\"node_id\":\"%s\","
@@ -577,6 +582,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"cpu_temp\":%.1f,"
         "\"last_config_save_ok_ms\":%lu,"
         "\"last_config_save_fail_ms\":%lu,"
+        "\"diag\":\"loop=%lu stage=%lu exec=%lu/%lu tx=%lu/%lu rx=%lu/%lu logq=%lu drop=%lu emit=%lu/%lu\","
         "\"peripherals\":{",
         g_node.node_id,
         chip_family,
@@ -592,7 +598,19 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         g_node.uptime_ms / 1000,
         cpu_temp,
         (unsigned long)g_last_config_save_ok_ms,
-        (unsigned long)g_last_config_save_fail_ms
+        (unsigned long)g_last_config_save_fail_ms,
+        (unsigned long)g_loop_iter,
+        (unsigned long)g_loop_stage,
+        (unsigned long)g_executor_spin_entries,
+        (unsigned long)g_executor_spin_exits,
+        (unsigned long)g_transport_write_entries,
+        (unsigned long)g_transport_write_exits,
+        (unsigned long)g_transport_read_entries,
+        (unsigned long)g_transport_read_exits,
+        (unsigned long)g_announce_count,
+        (unsigned long)saint_log_dropped(),
+        (unsigned long)saint_log_emit_ok(),
+        (unsigned long)saint_log_emit_attempts()
     );
 
     // Add peripheral connection status
@@ -894,11 +912,41 @@ static bool check_agent_connection(void)
 // Arduino Entry Points
 // ============================================================================
 
+/* Diagnostic helper for the post-init-hang investigation. Print a
+ * stage marker with Serial.flush() so the line is on the wire BEFORE
+ * the next call runs (USB CDC otherwise batches lines and the host
+ * loses the trailing one when the chip wedges). Also drive the
+ * onboard LED to a unique pattern per stage so an operator with no
+ * USB CDC visibility can still tell visually how far setup() got:
+ * solid = stage 0..3, slow blink (250 ms) for the rest. Watchdog is
+ * fed at every stage to keep this debug path from itself causing a
+ * spurious WDOG reset (setup() does NOT call loop()'s feeder). */
+static void diag_stage(uint8_t stage, const char* label)
+{
+    Serial.printf("[setup-stage %u] %s\n", (unsigned)stage, label);
+    Serial.flush();
+    watchdog_feed();
+    /* LED diag: drive solid HIGH from stage 0; flip on every stage so
+     * a wedge that holds the chip at one stage leaves the LED in a
+     * known state (HIGH on even stages, LOW on odd). pin 13 mode is
+     * set OUTPUT in setup() right after Serial.begin so this works
+     * before led_init() runs. */
+    digitalWrite(LED_PIN, (stage & 1) ? LOW : HIGH);
+}
+
 void setup()
 {
     // Initialize serial
     Serial.begin(115200);
     delay(100);
+
+    /* Drive the onboard LED immediately so an operator with no USB
+     * CDC visibility can see that setup() at least started — LED off
+     * after >1 s means we wedged before this line (e.g. Serial.begin
+     * or the USB CDC init underneath it). diag_stage() flips the pin
+     * per-stage so the final LED state pinpoints how far we got. */
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, HIGH);
 
     // Arm WDOG1 (hardware build only — see watchdog.cpp). Done right
     // after Serial.begin so the "previous reset was watchdog" line on
@@ -908,6 +956,7 @@ void setup()
     // init_micro_ros). 30 s default timeout — plenty for normal init,
     // tight enough that the operator doesn't think the node is dead.
     watchdog_init();
+    diag_stage(0, "watchdog_init done");
 
     Serial.printf("\n\n");
     Serial.printf("****************************************\n");
@@ -921,15 +970,19 @@ void setup()
     Serial.printf("* Mode:    HARDWARE (NativeEthernet)\n");
 #endif
     Serial.printf("****************************************\n\n");
+    diag_stage(1, "banner printed");
 
     // Initialize node state
     node_state_init();
+    diag_stage(2, "node_state_init done");
 
     // Initialize pin configuration
     pin_config_init();
+    diag_stage(3, "pin_config_init done");
 
     // Initialize pin control
     pin_control_init();
+    diag_stage(4, "pin_control_init done");
 
     // Register peripheral drivers BEFORE loading config from flash.
     // pin_config_load() walks the registered-drivers list and calls
@@ -940,36 +993,49 @@ void setup()
     // even after a reboot of a previously-configured node. Matches
     // the order used in firmware/rp2040/src/main.c.
     peripheral_register(maestro_get_peripheral_driver());
+    diag_stage(5, "maestro registered");
     peripheral_register(syren_get_peripheral_driver());
+    diag_stage(6, "syren registered");
     peripheral_register(fas100_get_peripheral_driver());
+    diag_stage(7, "fas100 registered");
     peripheral_register(roboclaw_get_peripheral_driver());
+    diag_stage(8, "roboclaw registered");
     peripheral_register(pathfinder_bms_get_peripheral_driver());
+    diag_stage(9, "pathfinder_bms registered");
     peripheral_register(tic_get_peripheral_driver());
+    diag_stage(10, "tic registered");
     peripheral_register(tmc2208_get_peripheral_driver());
+    diag_stage(11, "tmc2208 registered");
 
     // Load saved pin configuration (also fans out to each driver's
     // load_config callback).
     if (pin_config_load()) {
         Serial.printf("Loaded pin configuration from flash\n");
     }
+    diag_stage(12, "pin_config_load done");
 
     peripheral_init_all();
+    diag_stage(13, "peripheral_init_all done");
 
     // Initialize hardware
     hardware_init();
+    diag_stage(14, "hardware_init done");
 
     // Initialize LED
     led_init();
     led_set_state(NODE_STATE_BOOT);
+    diag_stage(15, "led_init done");
 
     // Get unique ID
     char unique_id[32];
     hardware_get_unique_id(unique_id, sizeof(unique_id));
     snprintf(g_node.node_id, sizeof(g_node.node_id), "teensy41_%s", unique_id);
     Serial.printf("Node ID: %s\n", g_node.node_id);
+    diag_stage(16, "node_id resolved");
 
     // Initialize flash storage
     flash_storage_init();
+    diag_stage(17, "flash_storage_init done");
 
     // Initialize transport
     Serial.printf("Initializing transport: %s\n", TRANSPORT_NAME);
@@ -981,6 +1047,7 @@ void setup()
         led_set_state(NODE_STATE_ERROR);
         return;
     }
+    diag_stage(18, "TRANSPORT_INIT done");
 
 #ifdef SIMULATION
     char uid[16];
@@ -1010,6 +1077,7 @@ void setup()
         led_set_state(NODE_STATE_ERROR);
         return;
     }
+    diag_stage(19, "TRANSPORT_CONNECT done (DHCP bound)");
 
 #ifndef SIMULATION
     TRANSPORT_GET_IP(g_node.static_ip);
@@ -1028,6 +1096,7 @@ void setup()
         return;
     }
 #endif
+    diag_stage(20, "discover_server done");
 
     TRANSPORT_SET_AGENT(g_node.server_ip, g_node.server_port);
 
@@ -1036,6 +1105,7 @@ void setup()
         TRANSPORT_OPEN, TRANSPORT_CLOSE,
         TRANSPORT_WRITE, TRANSPORT_READ
     );
+    diag_stage(21, "transport hooks set, calling init_micro_ros");
 
     if (!init_micro_ros()) {
         Serial.printf("ERROR: micro-ROS init failed!\n");
@@ -1043,6 +1113,7 @@ void setup()
         led_set_state(NODE_STATE_ERROR);
         return;
     }
+    diag_stage(22, "init_micro_ros done");
 
     if (pin_config_has_configured_pins()) {
         node_set_state(NODE_STATE_ACTIVE);
@@ -1054,6 +1125,7 @@ void setup()
         Serial.printf("Node ready. Waiting for adoption...\n");
     }
     Serial.printf("========================================\n");
+    diag_stage(23, "setup() complete, entering loop()");
 
     last_successful_comm = millis();
     agent_connected = true;
@@ -1135,7 +1207,21 @@ void loop()
     // `Serial` is already `Serial1` (see platform.h), so these are
     // redundant — the second line is a harmless mirror in the sim
     // UART log.
-    if (now - last_status_print >= 10000) {
+    //
+    // Cadence dropped from 10 s to 2 s while the post-init-hang is
+    // being tracked: at 10 s we only catch [+10] and [+20] before the
+    // ~+20-30 s wedge window, which doesn't pinpoint *which* iteration
+    // froze. 2 s gives ~10 samples per healthy boot AND the last
+    // sample before silence brackets the wedge to within 2 s. Bump
+    // back to 10 s once root cause lands.
+    //
+    // ALSO mirrored to /log via saint_log_publish — the server journal
+    // captures these across Teensy resets without needing a USB cable,
+    // and the LAST `diag` line before each `reset cause: WDOG1` tells
+    // us which layer (loop/exec/tx/rx) froze. USB CDC re-enumerates on
+    // every WDOG reset, so a host-side `cat /dev/cu.usbmodem...`
+    // catches only the first boot's lines.
+    if (now - last_status_print >= 2000) {
         Serial.printf("[%lu] state: %s, agent: %s | "
                        "loop=%lu exec=%lu/%lu tx=%lu/%lu rx=%lu/%lu\n",
                        now / 1000, node_state_to_string(g_node.state),
@@ -1153,6 +1239,17 @@ void loop()
                        (unsigned long)g_loop_stage,
                        (unsigned long)g_executor_spin_entries,
                        (unsigned long)g_executor_spin_exits);
+        saint_log_publish("info",
+            "diag [%lus] loop=%lu stage=%lu exec=%lu/%lu tx=%lu/%lu rx=%lu/%lu",
+            (unsigned long)(now / 1000),
+            (unsigned long)g_loop_iter,
+            (unsigned long)g_loop_stage,
+            (unsigned long)g_executor_spin_entries,
+            (unsigned long)g_executor_spin_exits,
+            (unsigned long)g_transport_write_entries,
+            (unsigned long)g_transport_write_exits,
+            (unsigned long)g_transport_read_entries,
+            (unsigned long)g_transport_read_exits);
         last_status_print = now;
     }
 

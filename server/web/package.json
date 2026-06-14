@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "mock": "node dev/mock-server.js"
+    "mock": "node dev/mock-server.js",
+    "story": "histoire dev",
+    "story:build": "histoire build"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
@@ -20,9 +22,11 @@
     "vue-router": "^4.4.0"
   },
   "devDependencies": {
+    "@histoire/plugin-vue": "^0.17.17",
     "@tailwindcss/vite": "^4.3.0",
     "@vitejs/plugin-vue": "^5.1.0",
     "autoprefixer": "^10.4.20",
+    "histoire": "^0.17.17",
     "jszip": "^3.10.1",
     "postcss": "^8.4.47",
     "tailwindcss": "^4.3.0",
