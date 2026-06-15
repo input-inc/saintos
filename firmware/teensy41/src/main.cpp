@@ -222,12 +222,14 @@ static void cleanup_micro_ros(void);
 
 static void config_subscription_callback(const void* msgin)
 {
+    g_loop_stage = 30;
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
-    if (!msg || !msg->data.data) return;
+    if (!msg || !msg->data.data) { g_loop_stage = 39; return; }
 
     if (msg->data.size >= sizeof(config_buffer)) {
         Serial.printf("Config message too large: %zu >= %zu, rejecting\n",
                        msg->data.size, sizeof(config_buffer));
+        g_loop_stage = 39;
         return;
     }
 
@@ -289,6 +291,7 @@ static void config_subscription_callback(const void* msgin)
             Serial.printf("State: -> ACTIVE (adopted)\n");
         }
     }
+    g_loop_stage = 38;
 }
 
 static uint32_t extract_version_timestamp(const char* version)
@@ -497,26 +500,30 @@ static void dispatch_action_buffer(const char* data, size_t size)
 
 static void control_subscription_callback(const void* msgin)
 {
+    g_loop_stage = 40;
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
-    if (!msg || !msg->data.data) return;
-    if (msg->data.size >= sizeof(control_buffer)) return;
+    if (!msg || !msg->data.data) { g_loop_stage = 49; return; }
+    if (msg->data.size >= sizeof(control_buffer)) { g_loop_stage = 49; return; }
     control_buffer[msg->data.size] = '\0';
     Serial.printf("Control received: %.*s\n",
                    (int)(msg->data.size < 80 ? msg->data.size : 80),
                    msg->data.data);
     dispatch_action_buffer(msg->data.data, msg->data.size);
+    g_loop_stage = 48;
 }
 
 static void command_subscription_callback(const void* msgin)
 {
+    g_loop_stage = 50;
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
-    if (!msg || !msg->data.data) return;
-    if (msg->data.size >= sizeof(command_buffer)) return;
+    if (!msg || !msg->data.data) { g_loop_stage = 59; return; }
+    if (msg->data.size >= sizeof(command_buffer)) { g_loop_stage = 59; return; }
     command_buffer[msg->data.size] = '\0';
     Serial.printf("Command received: %.*s\n",
                    (int)(msg->data.size < 80 ? msg->data.size : 80),
                    msg->data.data);
     dispatch_action_buffer(msg->data.data, msg->data.size);
+    g_loop_stage = 58;
 }
 
 // ============================================================================
@@ -542,7 +549,9 @@ static void state_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
 {
     (void)last_call_time;
     if (timer && g_node.state == NODE_STATE_ACTIVE) {
+        g_loop_stage = 20;
         publish_state();
+        g_loop_stage = 21;
     }
 }
 
@@ -555,7 +564,15 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         return;
     }
 
+    /* Sub-stage markers — 10-19 = announce callback sub-steps. See the
+     * g_loop_stage block comment for the stage-ID space. The diag in
+     * /announce captures whatever stage was set BEFORE the snprintf, so
+     * the captured S=N tells us the announce-callback substage at the
+     * time of the most recent successful publish. Useful when bisecting
+     * future executor hangs. */
+    g_loop_stage = 10;
     float cpu_temp = hardware_get_cpu_temp();
+    g_loop_stage = 11;
 
     // chip_family lets the server pick the right board YAML to derive
     // pin layout from. Teensy 4.1 uses the NXP iMXRT1062 — we report
@@ -563,11 +580,15 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     // server/config/boards/teensy41/.
     const char* chip_family = "teensy41";
 
-    /* Diag counters embedded in /announce so the LAST announce before
-     * a wedge carries the state that pinpoints which layer froze. /log
-     * only delivers the first entry per boot reliably (see doc); /announce
-     * is the surviving channel. Format mirrors the periodic-status
-     * Serial line in loop() so a grep matches both. */
+    /* /announce must fit in the XRCE-DDS UDP MTU (UXR_CONFIG_UDP_TRANSPORT_MTU,
+     * 512 bytes in the prebuilt libmicroros). An over-MTU payload makes
+     * rcl_publish return RCL_RET_ERROR every call AND jams the output
+     * stream, which then starves /log too — the post-init-hang symptom.
+     * The "d" field is a compact diag string (loop iter, stage, executor
+     * entries/exits, transport tx/rx entries/exits) so the last announce
+     * before each WDOG reset pinpoints which layer wedged — /log only
+     * delivers the first entry per boot reliably, /announce is the
+     * surviving channel. Keep "d" short, drop unused fields if it grows. */
     int ann_len = snprintf(announcement_buffer, sizeof(announcement_buffer),
         "{"
         "\"node_id\":\"%s\","
@@ -576,13 +597,11 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"ip\":\"%d.%d.%d.%d\","
         "\"hw\":\"%s\","
         "\"fw\":\"%s\","
-        "\"fw_build\":\"%s\","
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
         "\"cpu_temp\":%.1f,"
         "\"last_config_save_ok_ms\":%lu,"
-        "\"last_config_save_fail_ms\":%lu,"
-        "\"diag\":\"loop=%lu stage=%lu exec=%lu/%lu tx=%lu/%lu rx=%lu/%lu logq=%lu drop=%lu emit=%lu/%lu\","
+        "\"d\":\"L=%lu S=%lu E=%lu/%lu Tw=%lu/%lu Tr=%lu/%lu\","
         "\"peripherals\":{",
         g_node.node_id,
         chip_family,
@@ -593,12 +612,10 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         g_node.static_ip[2], g_node.static_ip[3],
         HARDWARE_MODEL,
         FIRMWARE_VERSION_FULL,
-        FIRMWARE_BUILD_TIMESTAMP,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
         cpu_temp,
         (unsigned long)g_last_config_save_ok_ms,
-        (unsigned long)g_last_config_save_fail_ms,
         (unsigned long)g_loop_iter,
         (unsigned long)g_loop_stage,
         (unsigned long)g_executor_spin_entries,
@@ -606,11 +623,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         (unsigned long)g_transport_write_entries,
         (unsigned long)g_transport_write_exits,
         (unsigned long)g_transport_read_entries,
-        (unsigned long)g_transport_read_exits,
-        (unsigned long)g_announce_count,
-        (unsigned long)saint_log_dropped(),
-        (unsigned long)saint_log_emit_ok(),
-        (unsigned long)saint_log_emit_attempts()
+        (unsigned long)g_transport_read_exits
     );
 
     // Add peripheral connection status
@@ -632,7 +645,16 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     announcement_msg.data.size = strlen(announcement_buffer);
     announcement_msg.data.capacity = sizeof(announcement_buffer);
 
+    static bool size_logged = false;
+    if (!size_logged) {
+        Serial.printf("Announce JSON size: %u bytes (uxr MTU=512)\n",
+                      (unsigned)announcement_msg.data.size);
+        size_logged = true;
+    }
+
+    g_loop_stage = 12;
     rcl_ret_t ret = rcl_publish(&announcement_pub, &announcement_msg, NULL);
+    g_loop_stage = 13;
     if (ret == RCL_RET_OK) {
         mark_agent_communication();
         // The server creates the per-node /log subscription lazily on
@@ -662,6 +684,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
             last_fail_log_ms = now_ms;
         }
     }
+    g_loop_stage = 14;
 }
 
 // ============================================================================
@@ -1233,12 +1256,15 @@ void loop()
                        (unsigned long)g_transport_write_exits,
                        (unsigned long)g_transport_read_entries,
                        (unsigned long)g_transport_read_exits);
-        Serial1.printf("[%lu] hwuart-alive loop=%lu stage=%lu exec=%lu/%lu\n",
-                       now / 1000,
-                       (unsigned long)g_loop_iter,
-                       (unsigned long)g_loop_stage,
-                       (unsigned long)g_executor_spin_entries,
-                       (unsigned long)g_executor_spin_exits);
+        /* Removed: Serial1.printf("[N] hwuart-alive ...") parallel
+         * heartbeat from hypothesis 4. On this board D0/D1 has no
+         * receiver, so LPUART6's 40-byte TX FIFO fills after the
+         * second print and Serial1.printf blocks indefinitely waiting
+         * for space — that's the post-init-hang root cause, not a
+         * symptom of something deeper. If you ever wire a logic
+         * analyzer to D0 and want the parallel trace back, gate it
+         * on a build flag and call Serial1.write only after
+         * (Serial1.availableForWrite() > N). */
         saint_log_publish("info",
             "diag [%lus] loop=%lu stage=%lu exec=%lu/%lu tx=%lu/%lu rx=%lu/%lu",
             (unsigned long)(now / 1000),
