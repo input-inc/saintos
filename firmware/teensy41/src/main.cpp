@@ -645,13 +645,6 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     announcement_msg.data.size = strlen(announcement_buffer);
     announcement_msg.data.capacity = sizeof(announcement_buffer);
 
-    static bool size_logged = false;
-    if (!size_logged) {
-        Serial.printf("Announce JSON size: %u bytes (uxr MTU=512)\n",
-                      (unsigned)announcement_msg.data.size);
-        size_logged = true;
-    }
-
     g_loop_stage = 12;
     rcl_ret_t ret = rcl_publish(&announcement_pub, &announcement_msg, NULL);
     g_loop_stage = 13;
@@ -946,15 +939,15 @@ static bool check_agent_connection(void)
  * spurious WDOG reset (setup() does NOT call loop()'s feeder). */
 static void diag_stage(uint8_t stage, const char* label)
 {
-    Serial.printf("[setup-stage %u] %s\n", (unsigned)stage, label);
-    Serial.flush();
+    /* Used to Serial.printf("[setup-stage N] %s") + flip the LED for
+     * post-init-hang bisection (resolved in commit 3ceaaa9). Stripped
+     * down to a watchdog feed so setup()'s long-running DHCP retry +
+     * server discovery still get a tick between stages. Re-enable
+     * prints behind a build flag if you need to bisect a new setup()
+     * regression. */
+    (void)stage;
+    (void)label;
     watchdog_feed();
-    /* LED diag: drive solid HIGH from stage 0; flip on every stage so
-     * a wedge that holds the chip at one stage leaves the LED in a
-     * known state (HIGH on even stages, LOW on odd). pin 13 mode is
-     * set OUTPUT in setup() right after Serial.begin so this works
-     * before led_init() runs. */
-    digitalWrite(LED_PIN, (stage & 1) ? LOW : HIGH);
 }
 
 void setup()
@@ -1222,62 +1215,14 @@ void loop()
     }
     g_loop_stage = 5;
 
-    // Periodic status + post-init-hang diagnostic counters. Mirrored
-    // to Serial1 (always the hardware UART on D0/D1) so hypothesis 4
-    // in docs/POST_INIT_HANG.md becomes directly testable on hardware:
-    // if Serial1 keeps printing but Serial (USB CDC) doesn't, the loop
-    // IS running and only the USB path is broken. Under SIMULATION
-    // `Serial` is already `Serial1` (see platform.h), so these are
-    // redundant — the second line is a harmless mirror in the sim
-    // UART log.
-    //
-    // Cadence dropped from 10 s to 2 s while the post-init-hang is
-    // being tracked: at 10 s we only catch [+10] and [+20] before the
-    // ~+20-30 s wedge window, which doesn't pinpoint *which* iteration
-    // froze. 2 s gives ~10 samples per healthy boot AND the last
-    // sample before silence brackets the wedge to within 2 s. Bump
-    // back to 10 s once root cause lands.
-    //
-    // ALSO mirrored to /log via saint_log_publish — the server journal
-    // captures these across Teensy resets without needing a USB cable,
-    // and the LAST `diag` line before each `reset cause: WDOG1` tells
-    // us which layer (loop/exec/tx/rx) froze. USB CDC re-enumerates on
-    // every WDOG reset, so a host-side `cat /dev/cu.usbmodem...`
-    // catches only the first boot's lines.
-    if (now - last_status_print >= 2000) {
-        Serial.printf("[%lu] state: %s, agent: %s | "
-                       "loop=%lu exec=%lu/%lu tx=%lu/%lu rx=%lu/%lu\n",
-                       now / 1000, node_state_to_string(g_node.state),
-                       agent_connected ? "connected" : "disconnected",
-                       (unsigned long)g_loop_iter,
-                       (unsigned long)g_executor_spin_entries,
-                       (unsigned long)g_executor_spin_exits,
-                       (unsigned long)g_transport_write_entries,
-                       (unsigned long)g_transport_write_exits,
-                       (unsigned long)g_transport_read_entries,
-                       (unsigned long)g_transport_read_exits);
-        /* Removed: Serial1.printf("[N] hwuart-alive ...") parallel
-         * heartbeat from hypothesis 4. On this board D0/D1 has no
-         * receiver, so LPUART6's 40-byte TX FIFO fills after the
-         * second print and Serial1.printf blocks indefinitely waiting
-         * for space — that's the post-init-hang root cause, not a
-         * symptom of something deeper. If you ever wire a logic
-         * analyzer to D0 and want the parallel trace back, gate it
-         * on a build flag and call Serial1.write only after
-         * (Serial1.availableForWrite() > N). */
-        saint_log_publish("info",
-            "diag [%lus] loop=%lu stage=%lu exec=%lu/%lu tx=%lu/%lu rx=%lu/%lu",
-            (unsigned long)(now / 1000),
-            (unsigned long)g_loop_iter,
-            (unsigned long)g_loop_stage,
-            (unsigned long)g_executor_spin_entries,
-            (unsigned long)g_executor_spin_exits,
-            (unsigned long)g_transport_write_entries,
-            (unsigned long)g_transport_write_exits,
-            (unsigned long)g_transport_read_entries,
-            (unsigned long)g_transport_read_exits);
-        last_status_print = now;
-    }
+    /* Periodic diag prints (Serial.printf "[N] state ..." + saint_log_publish
+     * "diag ...") used to fire every 2 s while the post-init-hang was
+     * being chased. Now resolved (see commit 3ceaaa9). The compact "d"
+     * field in /announce still carries the counter snapshot on every
+     * announce, so any future wedge investigation has the same data
+     * without spamming /log every two seconds. Re-enable behind a
+     * build flag if you need higher-cadence sampling. */
+    (void)last_status_print;
 
     /* Tried __WFI here for idle heat reduction, claiming the ENET
      * interrupt would wake us on incoming packets. That assumption is
