@@ -49,6 +49,39 @@ static const maestro_transport_ops_t* pick_transport(uint8_t mode)
     }
 }
 
+/* Pick + open a transport for the given mode. Idempotent: if the
+ * requested transport is already bound, returns true without re-
+ * opening. Used by both drv_load (boot-time flash restore, with
+ * storage) and drv_parse_json (fresh dashboard sync, no storage yet)
+ * so a freshly-configured Maestro starts pumping USB / UART within
+ * the same tick the config arrived — without this the operator had
+ * to power-cycle before the transport was ever bound. */
+static bool bind_transport(uint8_t mode, const flash_storage_data_t* storage)
+{
+    const maestro_transport_ops_t* picked = pick_transport(mode);
+    if (!picked) {
+        saint_log_publish("error",
+            "Maestro: no transport for mode=%u on this platform",
+            (unsigned)mode);
+        g_transport = NULL;
+        return false;
+    }
+    if (picked == g_transport) {
+        return true;   /* already bound */
+    }
+    g_transport = picked;
+    if (g_transport->open && !g_transport->open(storage)) {
+        saint_log_publish("error",
+            "Maestro: %s transport open failed",
+            g_transport->name);
+        g_transport = NULL;
+        return false;
+    }
+    saint_log_publish("info",
+        "Maestro: bound %s transport", g_transport->name);
+    return true;
+}
+
 /* Defaults setup, idempotent. Called from both drv_init and drv_load —
  * the peripheral framework orders these as register → load_config →
  * init, so without the idempotent guard maestro_init would clobber
@@ -323,9 +356,7 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
 
     /* Optional "transport":"usb_host"|"uart" — lets the dashboard pick
      * the mode at config time. Falls back to whatever ensure_state_init
-     * defaulted to for this platform. If the chosen mode isn't
-     * supported here, the next drv_load logs an error and the
-     * peripheral stays inert. */
+     * defaulted to for this platform. */
     p = strstr(json_start, "\"transport\"");
     if (p && p < json_end) {
         p = strchr(p, ':');
@@ -340,6 +371,16 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
             }
         }
     }
+    /* Bind + open the transport right now. Previously this only ran
+     * inside drv_load (boot-time flash restore), so a fresh sync from
+     * the dashboard left g_transport NULL until the next reboot —
+     * maestro_update() would no-op and on USB host platforms
+     * myusb.Task() would never tick, so the Maestro never enumerated
+     * (no LEDs, no movement, no live polling). Storage is NULL here
+     * because the parse path runs before drv_save; UART transports
+     * fall back to compile-time default pins until the next reboot
+     * picks up the just-saved pair. */
+    (void)bind_transport((uint8_t)g_transport_mode, NULL);
 
     config->params.maestro.min_pulse_us  = min_p;
     config->params.maestro.max_pulse_us  = max_p;
@@ -425,29 +466,10 @@ static bool drv_load(const void* storage)
     /* Bind transport based on the saved mode. transport_mode is zero-
      * default → USB host, which preserves existing Teensy behavior on
      * upgrade. Platforms that can't supply the requested transport
-     * return NULL from maestro_get_transport_* and we stay inert
-     * (logged once at load time). */
+     * leave the driver inert (bind_transport logs once). */
     g_transport_mode = s->maestro_config.transport_mode;
-    g_transport = pick_transport((uint8_t)g_transport_mode);
-    if (!g_transport) {
-        saint_log_publish("error",
-            "Maestro: no transport for mode=%u on this platform",
-            (unsigned)g_transport_mode);
-        return true;  /* not an error worth aborting flash_load */
-    }
-
-    if (g_transport->open) {
-        if (!g_transport->open(s)) {
-            saint_log_publish("error",
-                "Maestro: %s transport open failed",
-                g_transport->name);
-            g_transport = NULL;
-            return true;
-        }
-    }
-    saint_log_publish("info",
-        "Maestro: bound %s transport", g_transport->name);
-    return true;
+    (void)bind_transport((uint8_t)g_transport_mode, s);
+    return true;  /* failures already logged; don't abort flash load */
 }
 
 static const peripheral_driver_t maestro_peripheral = {
