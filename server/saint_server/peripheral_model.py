@@ -326,7 +326,9 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
         id="maestro", label="Pololu Maestro",
         description=(
             "Pololu Maestro USB / TTL servo controller. Pick the channel "
-            "count to match your hardware: 6 (Micro), 12 / 18 / 24 (Mini)."
+            "count to match your hardware (6 Micro, 12 / 18 / 24 Mini) "
+            "and the transport — UART for TTL serial, or USB Host for "
+            "MCUs with native USB host support (Teensy 4.1)."
         ),
         pin_kind="uart",
         channels=[
@@ -334,6 +336,29 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             for i in range(_MAESTRO_MAX_CHANNELS)
         ],
         params=[
+            # Transport first — gates which sub-params and pin pickers
+            # are relevant. UART is the default to preserve the
+            # behavior pre-USB-Host configs expect. The Peripherals
+            # modal's `pinsVisible` computed hides the UART pair
+            # picker automatically when transport != "uart"; see
+            # the same pattern on the BMS catalog entry. Firmware
+            # parses these string values directly — keep "uart" /
+            # "usb_host" in sync with maestro_driver.c parse_json_params.
+            PeripheralTypeParam(
+                "transport", "Transport", "string", "uart",
+                choices=[
+                    {"value": "uart",     "label": "UART (TTL serial)"},
+                    {"value": "usb_host", "label": "USB Host (Teensy 4.1 native USB)"},
+                ],
+                help=(
+                    "UART speaks the Pololu compact / Pololu / Mini-SSC "
+                    "protocols over a TTL serial pair (pick the pins "
+                    "below). USB Host uses the MCU's native USB Host "
+                    "port to drive the Maestro's USB connector directly — "
+                    "supported on the Teensy 4.1 only. No pin pair is "
+                    "needed in USB Host mode."
+                ),
+            ),
             PeripheralTypeParam(
                 "channel_count", "Channel count", "int", 6,
                 choices=[
@@ -360,6 +385,10 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
                     {"value": 115200, "label": "115200 bps (auto-detect max)"},
                     {"value": 200000, "label": "200000 bps (fixed-baud max)"},
                 ],
+                # Baud is meaningless on USB Host — the connection is a
+                # USB CDC pipe, not a UART. Hide it so the operator
+                # doesn't think they need to set it.
+                visible_when={"transport": "uart"},
                 help=(
                     "Must match the rate configured in the Maestro Control "
                     "Center. The Maestro's auto-detect mode locks onto the "
