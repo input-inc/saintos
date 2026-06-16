@@ -10,6 +10,7 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
+import AppModal from '@/components/AppModal.vue'
 
 const props = defineProps({
   sheetId:       { type: String, required: true },
@@ -516,6 +517,86 @@ async function setOperatorParam (opId, param, value) {
   } catch (e) { console.warn('update_sheet_node failed:', e) }
 }
 
+// ── Inline node edit (rename labels, retarget topics, etc.) ──────────
+//
+// One modal handles every editable kind. The fields shown vary by
+// kind (a SignalNode exposes `name`; an Input exposes topic/field
+// or joint depending on its kind; an Output exposes topic/field;
+// everything else just exposes label). Saves go through
+// update_sheet_node — the server-side handler is permissive about
+// extra keys, so we just dispatch whatever fields the form mutated.
+//
+// Peripheral nodes intentionally have no edit affordance: the
+// peripheral's own state lives on the node's Peripherals tab, not
+// on the routing sheet.
+const editModal = ref({ open: false, sheetNodeId: '', kind: '', fields: {}, error: '' })
+
+function nodeIsEditable (g) {
+  return g && g.kind && g.kind !== 'peripheral'
+}
+
+function openEditNode (g) {
+  if (!nodeIsEditable(g)) return
+  const d = g.data || g.widget || {}
+  const fields = { label: d.label || '' }
+  if (g.kind === 'input') {
+    // Distinguish topic vs urdf_joint InputNodes — they expose
+    // different fields downstream.
+    fields.kind  = d.kind || 'topic'
+    fields.topic = d.topic || ''
+    fields.field = d.field || ''
+    fields.joint = d.joint || ''
+  } else if (g.kind === 'output') {
+    fields.topic = d.topic || ''
+    fields.field = d.field || ''
+  } else if (g.kind === 'signal') {
+    // Renaming a signal rebinds it to a different (or new) global
+    // value — wires keyed by the old name stop resolving until
+    // rewired. Surfaced to the operator via the help line in the
+    // modal so this isn't a surprise.
+    fields.name = d.name || ''
+  }
+  editModal.value = {
+    open: true, sheetNodeId: g.sheetNodeId, kind: g.kind, fields, error: '',
+  }
+}
+
+async function saveEditNode () {
+  const m = editModal.value
+  m.error = ''
+  // Only ship keys that were actually populated AND that the server
+  // accepts for this kind. Empty strings are valid (clearing a
+  // field), so we don't filter falsy; we just match against the
+  // server's accept list per kind.
+  const keyMap = {
+    input:    ['label', 'kind', 'topic', 'field', 'joint'],
+    ws_input: ['label'],
+    output:   ['label', 'topic', 'field'],
+    operator: ['label'],
+    widget:   ['label'],
+    signal:   ['label', 'name'],
+  }
+  const allowed = keyMap[m.kind] || ['label']
+  const payload = { node_id: props.sheetId, sheet_node_id: m.sheetNodeId }
+  for (const k of allowed) {
+    if (m.fields[k] !== undefined) payload[k] = m.fields[k]
+  }
+  if (m.kind === 'signal' && !(payload.name || '').trim()) {
+    m.error = 'Signal name cannot be empty'
+    return
+  }
+  try {
+    const r = await ws.management('update_sheet_node', payload)
+    if (r && r.success === false) {
+      m.error = r.message || 'Save failed'
+      return
+    }
+    editModal.value.open = false
+  } catch (e) {
+    m.error = e.message || String(e)
+  }
+}
+
 // ── Auto-layout (this sheet only) ────────────────────────────────────
 function autoLayout () {
   const prefix = `${props.sheetId}:`
@@ -595,12 +676,24 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
             <div class="truncate">{{ meta(g)?.title }}</div>
             <div class="routing-node-kind truncate">{{ meta(g)?.subtitle }}</div>
           </div>
-          <button
-            v-if="meta(g)?.removable"
-            class="text-fg-strong hover:text-rose-400 text-base leading-none ml-1"
-            title="Remove from sheet"
-            @click.stop="removeSheetNode(g.id)"
-          >✕</button>
+          <div class="flex items-center gap-1 ml-1">
+            <!-- Edit (rename / retarget / etc.) is offered for every
+                 sheet-owned node kind. Peripherals have no edit
+                 affordance — their state belongs on the node's
+                 Peripherals tab, not the routing sheet. -->
+            <button
+              v-if="nodeIsEditable(g)"
+              class="text-fg-muted hover:text-cyan-300 text-sm leading-none"
+              title="Edit this node"
+              @click.stop="openEditNode(g)"
+            >✎</button>
+            <button
+              v-if="meta(g)?.removable"
+              class="text-fg-strong hover:text-rose-400 text-base leading-none"
+              title="Remove from sheet"
+              @click.stop="removeSheetNode(g.id)"
+            >✕</button>
+          </div>
         </div>
         <div class="routing-node-body">
           <div
@@ -680,6 +773,84 @@ watch(() => props.sheetId, () => { connecting.value = null; dragging.value = nul
         </div>
       </div>
     </template>
+
+    <!-- Per-node edit modal. Field set varies by kind; everything
+         routes through update_sheet_node on the server. -->
+    <AppModal
+      v-if="editModal.open"
+      :title="`Edit ${editModal.kind} · ${editModal.sheetNodeId}`"
+      @close="editModal.open = false"
+    >
+      <div v-if="editModal.error" class="mb-3 p-2 rounded bg-red-500/20 border border-red-500/40 text-sm text-red-300">
+        {{ editModal.error }}
+      </div>
+
+      <div class="space-y-3">
+        <!-- Label is shared across every editable kind. -->
+        <div>
+          <label class="block text-sm font-medium text-fg mb-1">Label</label>
+          <input v-model="editModal.fields.label" type="text" class="input-field w-full" placeholder="Leave blank to fall back to ID / topic" />
+        </div>
+
+        <!-- Signal: editable name binds to a different global value. -->
+        <template v-if="editModal.kind === 'signal'">
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">Signal name</label>
+            <input v-model="editModal.fields.name" type="text" class="input-field w-full font-mono" placeholder="shoulder_safe" />
+            <p class="text-xs text-fg-faint mt-1">
+              Renaming rebinds this node to a different (or new) global signal.
+              Wires keyed by the old name stop resolving until rewired; other
+              sheets holding a SignalNode by the new name will then share the
+              same value with this one.
+            </p>
+          </div>
+        </template>
+
+        <!-- Output: ROS topic + field. -->
+        <template v-else-if="editModal.kind === 'output'">
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">ROS topic</label>
+            <input v-model="editModal.fields.topic" type="text" class="input-field w-full font-mono" placeholder="/saint/foo" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">Field</label>
+            <input v-model="editModal.fields.field" type="text" class="input-field w-full font-mono" placeholder="value" />
+          </div>
+        </template>
+
+        <!-- Input: branches on kind (topic vs urdf_joint). -->
+        <template v-else-if="editModal.kind === 'input'">
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">Input kind</label>
+            <select v-model="editModal.fields.kind" class="input-field w-full">
+              <option value="topic">ROS topic</option>
+              <option value="urdf_joint">URDF joint (animation)</option>
+            </select>
+          </div>
+          <template v-if="editModal.fields.kind === 'urdf_joint'">
+            <div>
+              <label class="block text-sm font-medium text-fg mb-1">URDF joint</label>
+              <input v-model="editModal.fields.joint" type="text" class="input-field w-full font-mono" placeholder="shoulder_pan_joint" />
+            </div>
+          </template>
+          <template v-else>
+            <div>
+              <label class="block text-sm font-medium text-fg mb-1">ROS topic</label>
+              <input v-model="editModal.fields.topic" type="text" class="input-field w-full font-mono" placeholder="/joy" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-fg mb-1">Field</label>
+              <input v-model="editModal.fields.field" type="text" class="input-field w-full font-mono" placeholder="axes[0]" />
+            </div>
+          </template>
+        </template>
+      </div>
+
+      <template #actions>
+        <button class="btn-secondary" @click="editModal.open = false">Cancel</button>
+        <button class="btn-primary" @click="saveEditNode">Save</button>
+      </template>
+    </AppModal>
   </div>
 </template>
 

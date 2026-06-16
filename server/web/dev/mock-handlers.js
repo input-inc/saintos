@@ -273,7 +273,7 @@ export const managementHandlers = {
     if (!sheet) return err('Sheet not found')
     const target = findSheetNode(sheet, sheet_node_id)
     if (!target) return err('Sheet node not found')
-    for (const k of ['label', 'params', 'defaults', 'position', 'topic', 'field', 'kind', 'joint']) {
+    for (const k of ['label', 'params', 'defaults', 'position', 'topic', 'field', 'kind', 'joint', 'name']) {
       if (changes[k] !== undefined) target[k] = changes[k]
     }
     bumpRouting(ctx)
@@ -530,7 +530,8 @@ function nextId (arr, prefix) {
 }
 
 function findSheetNode (sheet, id) {
-  for (const list of ['inputs', 'ws_inputs', 'outputs', 'operators', 'widgets']) {
+  for (const list of ['inputs', 'ws_inputs', 'outputs', 'operators', 'widgets', 'signals']) {
+    if (!Array.isArray(sheet[list])) continue
     const found = sheet[list].find(x => x.id === id)
     if (found) return found
   }

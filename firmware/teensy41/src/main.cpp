@@ -196,9 +196,35 @@ extern volatile uint32_t g_transport_read_entries;
 extern volatile uint32_t g_transport_read_exits;
 extern volatile uint32_t g_transport_write_entries;
 extern volatile uint32_t g_transport_write_exits;
+extern volatile uint32_t g_transport_read_data;     // poll calls that pulled bytes
 } // extern "C"
 
-#define STATE_PUBLISH_INTERVAL_MS 100
+/* Subscription callback fire counters — Maestro USB-host polling is
+ * suspected of starving the executor; the announce diag reports these
+ * so we can see whether config/control/command/state callbacks ever
+ * fire at all. Each callback bumps its counter at the very top, BEFORE
+ * any Serial.printf, so it can't be masked by a wedged USB CDC. */
+static volatile uint32_t g_cb_cfg = 0;
+static volatile uint32_t g_cb_ctl = 0;
+static volatile uint32_t g_cb_cmd = 0;
+static volatile uint32_t g_cb_state = 0;
+/* Peripheral-update worst-case wall-clock in ms across all loop iters.
+ * If myusb.Task() (USB host poll) is the wedge, this climbs high
+ * (50–150 ms vs the loop's nominal 10 ms iter). */
+static volatile uint32_t g_periph_update_max_ms = 0;
+
+/* /state JSON for a fully-configured Teensy (19+ pins, including
+ * 16 Maestro servo channels) is ~1200 bytes — 2.3× over the 512-byte
+ * uxr UDP MTU. Every 10 Hz publish wedges in rmw retry logic for
+ * tens of ms, starves rclc_executor_spin_some's transport_read, and
+ * inbound /config /control /command frames pile up in NativeEthernet's
+ * UDP RX buffer faster than the chip drains them — the OTA-failing
+ * symptom we chased today.
+ *
+ * Temporary fix: drop to 1 Hz. Real fix is paged state publishes
+ * (split per-pin or per-peripheral into separate sub-MTU frames) so
+ * we can return to 10 Hz without poisoning the executor. */
+#define STATE_PUBLISH_INTERVAL_MS 1000
 
 // Connection monitoring
 #define CONNECTION_CHECK_INTERVAL_MS 5000
@@ -222,6 +248,7 @@ static void cleanup_micro_ros(void);
 
 static void config_subscription_callback(const void* msgin)
 {
+    g_cb_cfg++;
     g_loop_stage = 30;
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
     if (!msg || !msg->data.data) { g_loop_stage = 39; return; }
@@ -500,6 +527,7 @@ static void dispatch_action_buffer(const char* data, size_t size)
 
 static void control_subscription_callback(const void* msgin)
 {
+    g_cb_ctl++;
     g_loop_stage = 40;
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
     if (!msg || !msg->data.data) { g_loop_stage = 49; return; }
@@ -514,6 +542,7 @@ static void control_subscription_callback(const void* msgin)
 
 static void command_subscription_callback(const void* msgin)
 {
+    g_cb_cmd++;
     g_loop_stage = 50;
     const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
     if (!msg || !msg->data.data) { g_loop_stage = 59; return; }
@@ -530,6 +559,8 @@ static void command_subscription_callback(const void* msgin)
 // Publishing
 // ============================================================================
 
+static volatile uint32_t g_state_publish_fail = 0;
+
 static void publish_state(void)
 {
     pin_control_update_state();
@@ -542,13 +573,21 @@ static void publish_state(void)
     state_msg.data.size = (size_t)len;
     state_msg.data.capacity = sizeof(state_buffer);
 
-    rcl_publish(&state_pub, &state_msg, NULL);
+    static bool state_size_logged = false;
+    if (!state_size_logged) {
+        Serial.printf("State JSON size: %d bytes (uxr MTU=512)\n", len);
+        state_size_logged = true;
+    }
+
+    rcl_ret_t ret = rcl_publish(&state_pub, &state_msg, NULL);
+    if (ret != RCL_RET_OK) g_state_publish_fail++;
 }
 
 static void state_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
 {
     (void)last_call_time;
     if (timer && g_node.state == NODE_STATE_ACTIVE) {
+        g_cb_state++;
         g_loop_stage = 20;
         publish_state();
         g_loop_stage = 21;
@@ -599,9 +638,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"fw\":\"%s\","
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
-        "\"cpu_temp\":%.1f,"
         "\"last_config_save_ok_ms\":%lu,"
-        "\"d\":\"L=%lu S=%lu E=%lu/%lu Tw=%lu/%lu Tr=%lu/%lu\","
+        "\"d\":\"L=%lu S=%lu E=%lu/%lu Tw=%lu/%lu Tr=%lu/%lu Td=%lu cb=%lu/%lu/%lu/%lu pdt=%lu\","
         "\"peripherals\":{",
         g_node.node_id,
         chip_family,
@@ -614,7 +652,6 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         FIRMWARE_VERSION_FULL,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
-        cpu_temp,
         (unsigned long)g_last_config_save_ok_ms,
         (unsigned long)g_loop_iter,
         (unsigned long)g_loop_stage,
@@ -623,7 +660,13 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         (unsigned long)g_transport_write_entries,
         (unsigned long)g_transport_write_exits,
         (unsigned long)g_transport_read_entries,
-        (unsigned long)g_transport_read_exits
+        (unsigned long)g_transport_read_exits,
+        (unsigned long)g_transport_read_data,
+        (unsigned long)g_cb_cfg,
+        (unsigned long)g_cb_ctl,
+        (unsigned long)g_cb_cmd,
+        (unsigned long)g_cb_state,
+        (unsigned long)g_periph_update_max_ms
     );
 
     // Add peripheral connection status
@@ -645,6 +688,12 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     announcement_msg.data.size = strlen(announcement_buffer);
     announcement_msg.data.capacity = sizeof(announcement_buffer);
 
+    static bool size_logged = false;
+    if (!size_logged) {
+        Serial.printf("Announce JSON size: %u bytes (uxr MTU=512)\n",
+                      (unsigned)announcement_msg.data.size);
+        size_logged = true;
+    }
     g_loop_stage = 12;
     rcl_ret_t ret = rcl_publish(&announcement_pub, &announcement_msg, NULL);
     g_loop_stage = 13;
@@ -1176,8 +1225,13 @@ void loop()
     led_update();
     g_loop_stage = 1;
 
-    // Poll peripheral drivers (Maestro USB host, SyRen, etc.)
+    // Poll peripheral drivers (Maestro USB host, SyRen, etc.). Time
+    // the call — Maestro's myusb.Task() is the suspect for slow loop
+    // iterations starving the executor's transport_read poll.
+    uint32_t periph_t0 = millis();
     peripheral_update_all();
+    uint32_t periph_dt = millis() - periph_t0;
+    if (periph_dt > g_periph_update_max_ms) g_periph_update_max_ms = periph_dt;
     g_loop_stage = 2;
 
     // Error state - just blink LED

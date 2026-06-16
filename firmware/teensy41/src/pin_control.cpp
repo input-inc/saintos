@@ -553,9 +553,57 @@ static bool apply_set_channel(const char* json)
         return apply_neopixel_channel(channel_id, value);
     }
 
-    Serial.printf("set_channel: peripheral '%s' (type '%s') not routable yet\n",
-                   peripheral_id, peripheral_type);
-    return false;
+    /* Pin-config walk: find the smallest GPIO whose logical_name
+     * matches peripheral_id — that's the base channel slot for the
+     * peripheral. Multi-channel peripherals (Maestro's 24 servos,
+     * RoboClaw's motor/encoder/voltage/etc) live as one pin_config
+     * entry PER channel on Teensy, with the same logical_name; the
+     * channel_id suffix tells us which slot to write. Matches the
+     * RP2040 implementation. */
+    uint8_t count = 0;
+    const pin_config_t* configs = pin_config_get_all(&count);
+    int base_gpio = -1;
+    pin_mode_t mode = PIN_MODE_UNCONFIGURED;
+    for (uint8_t i = 0; i < count; i++) {
+        if (configs[i].mode == PIN_MODE_UNCONFIGURED) continue;
+        if (strcmp(configs[i].logical_name, peripheral_id) != 0) continue;
+        if (base_gpio < 0 || configs[i].gpio < base_gpio) {
+            base_gpio = configs[i].gpio;
+            mode = configs[i].mode;
+        }
+    }
+    if (base_gpio < 0) {
+        Serial.printf("set_channel: peripheral '%s' (type '%s') not in pin_config\n",
+                       peripheral_id, peripheral_type);
+        return false;
+    }
+
+    /* channel_id → offset. For Maestro (24 channels) and other
+     * multi-channel peripherals the server uses "chN" — strip the
+     * prefix and parse the integer. Single-channel peripherals (PWM,
+     * SERVO, DIGITAL_OUT) ignore the channel id and use offset 0. */
+    int offset = 0;
+    if (mode == PIN_MODE_MAESTRO_SERVO) {
+        const char* digits = channel_id;
+        if (digits[0] == 'c' && digits[1] == 'h') digits += 2;
+        if (*digits < '0' || *digits > '9') {
+            Serial.printf("set_channel: Maestro channel '%s' is not 'chN'\n",
+                           channel_id);
+            return false;
+        }
+        offset = atoi(digits);
+    } else if (mode == PIN_MODE_PWM || mode == PIN_MODE_SERVO
+            || mode == PIN_MODE_DIGITAL_OUT) {
+        offset = 0;
+    } else {
+        Serial.printf("set_channel: mode %d not yet routable on Teensy "
+                       "(peripheral=%s channel=%s)\n",
+                       (int)mode, peripheral_id, channel_id);
+        return false;
+    }
+
+    uint8_t target_gpio = (uint8_t)(base_gpio + offset);
+    return pin_control_set_value(target_gpio, value);
 }
 
 bool pin_control_apply_json(const char* json, size_t json_len)

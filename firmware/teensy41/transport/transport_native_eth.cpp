@@ -50,6 +50,12 @@ extern volatile uint32_t g_transport_read_entries;
 extern volatile uint32_t g_transport_read_exits;
 extern volatile uint32_t g_transport_write_entries;
 extern volatile uint32_t g_transport_write_exits;
+/* Number of transport_read calls that actually pulled bytes (vs. timed
+ * out empty). High `read_entries` with low `read_data` means the chip
+ * is polling but no UDP frames are arriving in its buffer — points at
+ * a NativeEthernet/FNET RX problem (buffer full, packet dropped at the
+ * NIC, etc.) rather than a callback-dispatch issue. */
+volatile uint32_t g_transport_read_data = 0;
 
 extern "C" {
 
@@ -240,6 +246,7 @@ size_t transport_native_eth_read(
             size_t read_bytes = udp.read(buf, to_read);
             *err = 0;
             g_transport_read_exits++;
+            g_transport_read_data++;
             return read_bytes;
         }
         /* Tried __WFI here as a heat optimization, betting on the ENET

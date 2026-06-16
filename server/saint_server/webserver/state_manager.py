@@ -39,6 +39,7 @@ from saint_server.peripheral_model import (
     PeripheralInstance,
     PeripheralType,
     RouteEndpoint,
+    SignalNode,
     SystemRouting,
     WidgetInstance,
     WidgetType,
@@ -2072,13 +2073,20 @@ class StateManager:
 
     def update_sheet_node(self, node_id: str, sheet_node_id: str,
                           **changes) -> Dict[str, Any]:
-        """Mutate one sheet node in place (Input / Output / Operator / Widget).
+        """Mutate one sheet node in place.
 
         Supported keys depend on the node kind:
-          - any node:        position, label
-          - OperatorNode:    params, defaults
-          - InputNode/OutputNode: topic, field
-          - WidgetInstance:  params
+          - any node:               position, label
+          - OperatorNode:           params, defaults
+          - InputNode/OutputNode:   topic, field
+          - InputNode (only):       kind, joint
+          - WidgetInstance:         params
+          - SignalNode:             name  (renames the global signal
+                                    this node binds to — other sheets
+                                    holding a SignalNode by the SAME
+                                    new name then share its value;
+                                    wires keyed by the OLD name stop
+                                    resolving until rewired)
         """
         err = self._validate_sheet_owner(node_id)
         if err:
@@ -2088,7 +2096,8 @@ class StateManager:
                   or sheet.find_ws_input(sheet_node_id)
                   or sheet.find_output(sheet_node_id)
                   or sheet.find_operator(sheet_node_id)
-                  or sheet.find_widget(sheet_node_id))
+                  or sheet.find_widget(sheet_node_id)
+                  or sheet.find_signal(sheet_node_id))
         if target is None:
             return {"success": False, "message": f"Sheet node '{sheet_node_id}' not found"}
         for k, v in changes.items():
@@ -2108,6 +2117,8 @@ class StateManager:
                 target.kind = v
             elif k == "joint" and isinstance(target, InputNode) and isinstance(v, str):
                 target.joint = v
+            elif k == "name" and isinstance(target, SignalNode) and isinstance(v, str):
+                target.name = v.strip()
         self.state.system_routing.bump_version()
         self._save_system_routing()
         return {"success": True}
