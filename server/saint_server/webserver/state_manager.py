@@ -230,6 +230,11 @@ def _resolve_server_ip() -> str:
 # emits channel-addressed data directly, _firmware_channel_id() can
 # return None for every mode and this table can be deleted.
 #
+# Retirement plan: docs/PERIPHERAL_FIRST_MIGRATION.md. Adding a NEW
+# channel to a driver in this table is a hazard — read the doc's
+# "hazards" section first (the slabs are contiguous and silently
+# collide).
+#
 # Keys: the `mode` string the firmware emits in pin_state pin entries.
 # Values: (virtual_gpio_base, {firmware_channel_index: catalog_channel_id})
 # A firmware channel that doesn't map to any operator-visible catalog

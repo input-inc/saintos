@@ -143,9 +143,17 @@ bool pin_control_set_value(uint8_t gpio, float value)
         {
             // Dispatch to peripheral driver
             const peripheral_driver_t* drv = peripheral_find_by_mode(cfg->mode);
+            Serial.printf("pin_control_set_value: GPIO %d mode %s -> drv=%s set_value=%p\n",
+                          gpio, pin_mode_to_string(cfg->mode),
+                          drv ? drv->name : "<null>",
+                          drv ? (void*)drv->set_value : NULL);
             if (drv && drv->set_value) {
                 uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
+                Serial.printf("pin_control_set_value: drv=%s ch=%u value=%.3f\n",
+                              drv->name, (unsigned)ch, value);
                 bool ok = drv->set_value(ch, value);
+                Serial.printf("pin_control_set_value: drv->set_value returned %s\n",
+                              ok ? "true" : "false");
 
                 // Store runtime value
                 pin_runtime_value_t* rv = find_or_create_runtime(gpio);
@@ -577,6 +585,8 @@ static bool apply_set_channel(const char* json)
                        peripheral_id, peripheral_type);
         return false;
     }
+    Serial.printf("set_channel: %s/%s = %.3f -> base_gpio=%d mode=%d\n",
+                  peripheral_id, channel_id, value, base_gpio, (int)mode);
 
     /* channel_id → offset. For Maestro (24 channels) and other
      * multi-channel peripherals the server uses "chN" — strip the
@@ -603,7 +613,11 @@ static bool apply_set_channel(const char* json)
     }
 
     uint8_t target_gpio = (uint8_t)(base_gpio + offset);
-    return pin_control_set_value(target_gpio, value);
+    Serial.printf("set_channel: dispatching to GPIO %u (offset=%d)\n",
+                  (unsigned)target_gpio, offset);
+    bool ok = pin_control_set_value(target_gpio, value);
+    Serial.printf("set_channel: pin_control_set_value -> %s\n", ok ? "OK" : "FAIL");
+    return ok;
 }
 
 bool pin_control_apply_json(const char* json, size_t json_len)

@@ -56,6 +56,14 @@ extern volatile uint32_t g_transport_write_exits;
  * a NativeEthernet/FNET RX problem (buffer full, packet dropped at the
  * NIC, etc.) rather than a callback-dispatch issue. */
 volatile uint32_t g_transport_read_data = 0;
+/* millis() of the most recent transport_read that pulled bytes. Used
+ * by check_agent_connection as the actual agent-liveness signal —
+ * we can't trust write success on NativeEthernet (udp.endPacket()
+ * always returns OK even when the agent is gone), so we use RX
+ * heartbeat presence instead. Server reboot → no more heartbeats → no
+ * RX → check_agent_connection trips → re-init micro-ROS → fresh
+ * session lands on the now-back-up agent. */
+volatile uint32_t g_transport_last_rx_ms = 0;
 
 extern "C" {
 
@@ -247,6 +255,7 @@ size_t transport_native_eth_read(
             *err = 0;
             g_transport_read_exits++;
             g_transport_read_data++;
+            g_transport_last_rx_ms = millis();
             return read_bytes;
         }
         /* Tried __WFI here as a heat optimization, betting on the ENET

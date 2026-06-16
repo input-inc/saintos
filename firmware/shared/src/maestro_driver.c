@@ -277,7 +277,39 @@ static bool drv_set_value(uint8_t channel, float value)
     if (channel >= MAESTRO_MAX_CHANNELS) return false;
     const maestro_channel_config_t* cfg = maestro_get_channel_config(channel);
     if (!cfg) return false;
-    return maestro_set_target(channel, maestro_angle_to_target(value, cfg));
+
+    /* Normalized input −1..+1, piecewise-linear through neutral so
+     * asymmetric mechanical ranges (neutral not at midpoint of
+     * min/max) map sensibly. Matches the wire shape pin_control's
+     * native-servo path uses (firmware/teensy41/src/pin_control.cpp
+     * :pin_control_set_servo) so the dashboard slider sends the
+     * same scale regardless of whether the channel is a Teensy PWM
+     * pin or a Maestro USB-host channel.
+     *
+     * Previous version treated `value` as an angle in degrees
+     * (0..180) — at a slider value of 0.5 that pegs to ~0.5° which
+     * maps to ~min_pulse_us; the servo always sat at min regardless
+     * of slider position, which we mistook for working motion. */
+    if (value < -1.0f) value = -1.0f;
+    if (value >  1.0f) value =  1.0f;
+
+    float center = (float)(cfg->neutral_us ? cfg->neutral_us
+                          : ((cfg->min_pulse_us + cfg->max_pulse_us) / 2));
+    float pulse_us;
+    if (value <= 0.0f) {
+        // [-1, 0]: lerp min → center
+        pulse_us = center + value * (center - (float)cfg->min_pulse_us);
+    } else {
+        // [0, +1]: lerp center → max
+        pulse_us = center + value * ((float)cfg->max_pulse_us - center);
+    }
+
+    /* Clamp to the channel's calibrated mechanical envelope so a
+     * miscomputed value can't drive past the configured limits. */
+    if (pulse_us < (float)cfg->min_pulse_us) pulse_us = (float)cfg->min_pulse_us;
+    if (pulse_us > (float)cfg->max_pulse_us) pulse_us = (float)cfg->max_pulse_us;
+
+    return maestro_set_target(channel, (uint16_t)(pulse_us * 4.0f));
 }
 
 static bool drv_get_value(uint8_t channel, float* value)

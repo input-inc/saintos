@@ -680,7 +680,8 @@ static bool apply_set_channel(const char* json)
     // which is the last vestige of virtual-GPIO addressing inside the
     // firmware. Eliminating it requires drivers to expose a per-
     // instance lookup keyed by peripheral_id (instance name) instead
-    // of by GPIO offset — bigger refactor, separate change.
+    // of by GPIO offset — bigger refactor, separate change. Plan:
+    // docs/PERIPHERAL_FIRST_MIGRATION.md (Phase 3).
     uint8_t target_gpio = (uint8_t)(base_gpio + offset);
     // Per-tick line: with the Tier-1 DifferentialDrive heartbeat
     // resending 0 every 500 ms, every adopted channel emits 2 of

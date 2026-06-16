@@ -197,6 +197,7 @@ extern volatile uint32_t g_transport_read_exits;
 extern volatile uint32_t g_transport_write_entries;
 extern volatile uint32_t g_transport_write_exits;
 extern volatile uint32_t g_transport_read_data;     // poll calls that pulled bytes
+extern volatile uint32_t g_transport_last_rx_ms;    // millis() of last RX with data
 } // extern "C"
 
 /* Subscription callback fire counters — Maestro USB-host polling is
@@ -227,14 +228,32 @@ static volatile uint32_t g_periph_update_max_ms = 0;
 #define STATE_PUBLISH_INTERVAL_MS 1000
 
 // Connection monitoring
-#define CONNECTION_CHECK_INTERVAL_MS 5000
-#define CONNECTION_TIMEOUT_MS        15000
-#define MAX_RECONNECT_ATTEMPTS       10
+/* Connection monitoring — mirror of RP2040's parameters/algorithm in
+ * firmware/rp2040/src/main.c so the two platforms behave identically
+ * under server outage. The intent is to lift this whole block into
+ * shared code; for now the structure matches so a future refactor is
+ * mechanical. The only platform-specific bit is the liveness signal:
+ * RP2040 trusts udp.write success (W5500 NACK propagates), Teensy
+ * cannot (NativeEthernet udp.endPacket always returns OK) so it
+ * tracks last-RX-with-data instead. */
+#define CONNECTION_CHECK_INTERVAL_MS 5000   // Check every 5 seconds
+/* NOTE: Teensy uses 45 s vs RP2040's 15 s because our liveness signal
+ * differs. RP2040 trusts TX success (W5500 propagates link failure),
+ * so last_successful_comm updates every announce (1 Hz) and stays
+ * fresh under normal operation. Teensy uses RX-with-data
+ * (g_transport_last_rx_ms) because NativeEthernet's udp.endPacket
+ * always returns OK — and in steady state we only see a few agent
+ * frames per ~10 s, so a 15 s window false-tripped constantly. 45 s
+ * still recovers from a real server reboot well under a minute. */
+#define CONNECTION_TIMEOUT_MS        45000
+#define MAX_RECONNECT_ATTEMPTS       10     // Max consecutive failures before error state
+#define ERROR_RECOVERY_DELAY_MS      30000  // Stay in ERROR for 30s, then try again
 
-static uint32_t last_successful_comm = 0;
+static uint32_t last_successful_comm = 0;   // legacy — TX-based, not trustworthy on NativeEthernet
 static uint32_t last_connection_check = 0;
 static uint32_t reconnect_attempts = 0;
 static bool agent_connected = false;
+static uint32_t error_entered_at = 0;        // When we entered NODE_STATE_ERROR (0 = not in error)
 
 // Forward declarations
 static void mark_agent_communication(void);
@@ -639,7 +658,6 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
         "\"last_config_save_ok_ms\":%lu,"
-        "\"d\":\"L=%lu S=%lu E=%lu/%lu Tw=%lu/%lu Tr=%lu/%lu Td=%lu cb=%lu/%lu/%lu/%lu pdt=%lu\","
         "\"peripherals\":{",
         g_node.node_id,
         chip_family,
@@ -652,21 +670,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         FIRMWARE_VERSION_FULL,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
-        (unsigned long)g_last_config_save_ok_ms,
-        (unsigned long)g_loop_iter,
-        (unsigned long)g_loop_stage,
-        (unsigned long)g_executor_spin_entries,
-        (unsigned long)g_executor_spin_exits,
-        (unsigned long)g_transport_write_entries,
-        (unsigned long)g_transport_write_exits,
-        (unsigned long)g_transport_read_entries,
-        (unsigned long)g_transport_read_exits,
-        (unsigned long)g_transport_read_data,
-        (unsigned long)g_cb_cfg,
-        (unsigned long)g_cb_ctl,
-        (unsigned long)g_cb_cmd,
-        (unsigned long)g_cb_state,
-        (unsigned long)g_periph_update_max_ms
+        (unsigned long)g_last_config_save_ok_ms
     );
 
     // Add peripheral connection status
@@ -851,6 +855,12 @@ static bool init_micro_ros(void)
         control_subscription_callback, ON_NEW_DATA);
 
     Serial.printf("micro-ROS initialized successfully\n");
+    /* Seed the RX-liveness timestamp so check_agent_connection's
+     * timeout has a known reference even if the agent immediately
+     * dies before sending us anything else. Session establish always
+     * does a round trip, so a successful init implies we received
+     * recently. */
+    g_transport_last_rx_ms = millis();
     return true;
 }
 
@@ -918,27 +928,56 @@ static bool check_agent_connection(void)
 {
     uint32_t now = millis();
 
+    /* Recovery path: if we're in ERROR state, wait ERROR_RECOVERY_DELAY_MS
+     * and then reset the reconnect counter to try again. Without this
+     * the node sits in ERROR forever after any transient agent
+     * disruption — a `systemctl restart saint-os` on the Pi would
+     * permanently brick the chip until power-cycle. Mirrors RP2040's
+     * recovery path in firmware/rp2040/src/main.c. */
+    if (g_node.state == NODE_STATE_ERROR) {
+        if (error_entered_at == 0) {
+            error_entered_at = now;
+        }
+        if ((uint32_t)(now - error_entered_at) < ERROR_RECOVERY_DELAY_MS) {
+            return false;
+        }
+        Serial.printf("Recovering from ERROR state — retrying agent connection\n");
+        reconnect_attempts = 0;
+        error_entered_at = 0;
+        /* Drop back to UNADOPTED so announces resume (they're gated
+         * to UNADOPTED/ACTIVE; the server will re-confirm adoption
+         * from its persisted config). */
+        node_set_state(NODE_STATE_UNADOPTED);
+        led_set_state(NODE_STATE_UNADOPTED);
+    }
+
+    // Only check periodically
     if (now - last_connection_check < CONNECTION_CHECK_INTERVAL_MS) {
         return agent_connected;
     }
     last_connection_check = now;
 
     if (!TRANSPORT_CONNECTED()) {
+        Serial.printf("Transport disconnected\n");
         agent_connected = false;
     }
 
-    /* Previously gated agent liveness on a periodic
-     * rmw_uros_ping_agent (true round-trip) to catch the
-     * NativeEthernet-UDP-returns-OK-after-server-restart case. The
-     * ping IS the right answer architecturally, but in this build of
-     * micro_ros_platformio the ping path hung the main loop after
-     * post-reconnect init — no `[N] state:` status print, no
-     * announces, while the agent's session looked alive. Until we
-     * root-cause that, fall back to the last_successful_comm
-     * timeout heuristic: dist installs will reconnect within the
-     * usual 15 s instead of the ~2 s the ping enabled. */
-    if (agent_connected && last_successful_comm > 0) {
-        if (now - last_successful_comm > CONNECTION_TIMEOUT_MS) {
+    /* RX-based liveness — DO NOT trust TX success on NativeEthernet.
+     * udp.endPacket() returns true even when the agent is gone (the
+     * Pi's stack happily ACKs the ARP, the gateway drops the UDP).
+     * Tracking the last actual RX (g_transport_last_rx_ms, set inside
+     * transport_native_eth_read when udp.parsePacket() returns >0)
+     * catches a server reboot within ~CONNECTION_TIMEOUT_MS — the
+     * agent's XRCE heartbeat stream stops, the chip's read polls go
+     * empty, and this branch trips into the reconnect path below.
+     *
+     * RP2040 uses last_successful_comm (TX-based) for the same purpose
+     * — its W5500 stack propagates true link status so TX is a valid
+     * signal there. See firmware/rp2040/src/main.c. */
+    if (agent_connected && g_transport_last_rx_ms > 0) {
+        if ((uint32_t)(now - g_transport_last_rx_ms) > CONNECTION_TIMEOUT_MS) {
+            Serial.printf("Agent silent: no RX for %lu ms\n",
+                          (unsigned long)(now - g_transport_last_rx_ms));
             agent_connected = false;
         }
     }
@@ -947,25 +986,50 @@ static bool check_agent_connection(void)
         reconnect_attempts++;
 
         if (reconnect_attempts > MAX_RECONNECT_ATTEMPTS) {
+            // Too many failures — drop into ERROR. The recovery path
+            // at the top of this function pulls us back out after
+            // ERROR_RECOVERY_DELAY_MS so we keep trying forever.
+            Serial.printf("Max reconnect attempts exceeded (%d), entering ERROR state\n",
+                          MAX_RECONNECT_ATTEMPTS);
             node_set_state(NODE_STATE_ERROR);
             led_set_state(NODE_STATE_ERROR);
+            error_entered_at = now;
             return false;
         }
 
+        Serial.printf("Reconnect attempt %u/%d...\n",
+                       (unsigned)reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
         led_set_state(NODE_STATE_CONNECTING);
-        delay(RECONNECT_DELAY_MS);
 
-        if (!TRANSPORT_CONNECTED()) {
-            if (!TRANSPORT_CONNECT()) return false;
+        // Wait before reconnect, feeding the watchdog so the wait
+        // itself doesn't trip the 30 s WDOG1.
+        for (uint32_t slept = 0; slept < RECONNECT_DELAY_MS; slept += 200) {
+            watchdog_feed();
+            delay(200);
         }
 
+        if (!TRANSPORT_CONNECTED()) {
+            if (!TRANSPORT_CONNECT()) {
+                Serial.printf("Transport reconnect failed\n");
+                return false;
+            }
+        }
+
+        Serial.printf("Reinitializing micro-ROS...\n");
         cleanup_micro_ros();
+        watchdog_feed();
         delay(500);
 
-        if (!init_micro_ros()) return false;
+        if (!init_micro_ros()) {
+            Serial.printf("micro-ROS reinitialization failed\n");
+            return false;
+        }
 
+        Serial.printf("Reconnected to agent after %u attempts\n",
+                       (unsigned)reconnect_attempts);
         agent_connected = true;
         last_successful_comm = now;
+        g_transport_last_rx_ms = now;
         reconnect_attempts = 0;
         led_set_state(g_node.state);
     }
