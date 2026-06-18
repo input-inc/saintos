@@ -160,6 +160,166 @@ def visible_maestro_channels(peripheral) -> int:
     return n
 
 
+# Per-channel config schema lives in params["channels"] as a list of
+# dicts (length == channel_count). Keeping it in params keeps the
+# storage layer simple — no schema migration, no new top-level
+# PeripheralInstance field — and lets the existing
+# `save_node_peripheral` WebSocket carry channel edits without a new
+# message type. The downside is the channels list isn't described by
+# PeripheralTypeParam, so validation lives here instead of the generic
+# param validator. See _maestro_normalize_channels below.
+#
+# Field names match the firmware-side maestro_channel_config_t
+# (firmware/shared/include/maestro_driver.h) and the Python Pi driver
+# (firmware/raspberrypi/saint_node/peripherals/maestro.py) so the
+# server-to-firmware push needs no key translation. The "speed" and
+# "acceleration" fields are conceptually *defaults* applied on Pose
+# transitions only — see TODO in maestro_driver.c — but stored under
+# the bare firmware names.
+_MAESTRO_CHANNEL_KEYS = (
+    "label", "min_pulse_us", "max_pulse_us", "neutral_us", "home_us",
+    "speed", "acceleration",
+)
+
+
+def _maestro_default_channel(idx: int, peripheral_params: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a single default channel entry, sourcing min/max/neutral
+    from the peripheral-level Advanced fallbacks so a brand-new Maestro
+    inherits whatever the operator set in the main edit modal."""
+    min_pulse_us = int(peripheral_params.get("min_pulse_us", 1000))
+    max_pulse_us = int(peripheral_params.get("max_pulse_us", 2000))
+    # Guard against operator-flipped order; the UI clamps but be safe.
+    if min_pulse_us > max_pulse_us:
+        min_pulse_us, max_pulse_us = max_pulse_us, min_pulse_us
+    neutral_us = (min_pulse_us + max_pulse_us) // 2
+    return {
+        "label": f"Ch {idx}",
+        "min_pulse_us": min_pulse_us,
+        "max_pulse_us": max_pulse_us,
+        "neutral_us": neutral_us,
+        # home_us defaults to neutral; operator can change in the
+        # channel-edit modal. Conceptually distinct from the Maestro
+        # EEPROM HomeMode/HOME — see docs/MAESTRO_BRINGUP.md. 0 here
+        # is the firmware sentinel for "unconfigured, skip auto-home"
+        # (see maestro_apply_home_positions); we default to neutral so
+        # configured channels do auto-home.
+        "home_us": neutral_us,
+        # 0 = unlimited. Only applied on Pose transitions (deferred to
+        # Pose editor work); animation input snaps at full speed.
+        "speed": 0,
+        "acceleration": 0,
+    }
+
+
+def _maestro_sanitize_channel(
+    raw: Dict[str, Any], idx: int, peripheral_params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Clamp + sanitize one channel dict from operator/firmware input.
+    Unknown keys are stripped; missing keys fall back to defaults. The
+    pulse-width fields are clamped to [64, 3200] to match the
+    peripheral-level Advanced params' range."""
+    default = _maestro_default_channel(idx, peripheral_params)
+    out: Dict[str, Any] = {}
+    label = raw.get("label", default["label"])
+    out["label"] = str(label)[:32] if label else default["label"]
+    for key in ("min_pulse_us", "max_pulse_us", "neutral_us", "home_us"):
+        try:
+            v = int(raw.get(key, default[key]))
+        except (TypeError, ValueError):
+            v = default[key]
+        out[key] = max(64, min(3200, v))
+    # Defense in depth: keep min ≤ max even if operator typed them in
+    # the wrong order; UI clamps too but server should be the source
+    # of truth.
+    if out["min_pulse_us"] > out["max_pulse_us"]:
+        out["min_pulse_us"], out["max_pulse_us"] = out["max_pulse_us"], out["min_pulse_us"]
+    # Clamp neutral / home into the per-channel range so a runtime
+    # SET_TARGET = home_us never triggers the Maestro's MIN/MAX clamp.
+    out["neutral_us"] = max(out["min_pulse_us"], min(out["max_pulse_us"], out["neutral_us"]))
+    out["home_us"]    = max(out["min_pulse_us"], min(out["max_pulse_us"], out["home_us"]))
+    try:
+        out["speed"] = max(0, min(65_535, int(raw.get("speed", 0))))
+    except (TypeError, ValueError):
+        out["speed"] = 0
+    try:
+        out["acceleration"] = max(0, min(255, int(raw.get("acceleration", 0))))
+    except (TypeError, ValueError):
+        out["acceleration"] = 0
+    return out
+
+
+def maestro_normalize_channels(params: Dict[str, Any]) -> None:
+    """Ensure params["channels"] is a list whose length matches
+    params["channel_count"], with sanitized entries throughout.
+
+    Called from state_manager.upsert_node_peripheral right after the
+    PeripheralInstance is built — so saving a Maestro with no channels
+    array (legacy configs, or a fresh add) populates defaults, and an
+    operator who changed channel_count from 6 → 24 gets the extra 18
+    channels filled in. Modifies the dict in-place.
+    """
+    count = int(params.get("channel_count", 6) or 6)
+    if count not in (6, 12, 18, 24):
+        count = 6
+    raw_channels = params.get("channels")
+    if not isinstance(raw_channels, list):
+        raw_channels = []
+    normalized: List[Dict[str, Any]] = []
+    for i in range(count):
+        src = raw_channels[i] if i < len(raw_channels) and isinstance(raw_channels[i], dict) else {}
+        normalized.append(_maestro_sanitize_channel(src, i, params))
+    params["channels"] = normalized
+
+
+def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of `params` where every channel that exactly
+    matches its default gets replaced with an empty `{}`. The full
+    Maestro 24-channel config serializes to ~3500 bytes if every
+    channel is emitted in full — past both the firmware's
+    config_buffer AND the XRCE-DDS UDP MTU fragmentation budget
+    (4 × 512 ≈ 2K reassembly cap with default RMW_UXRCE_MAX_HISTORY).
+    The receiving Teensy crashes when the reassembled message
+    overruns those caps.
+
+    Trick: a channel that's identical to what
+    `_maestro_default_channel(idx, params)` would produce can be
+    emitted as `{}` on the wire. The firmware parser walks the
+    channels array by brace-counting; an empty `{}` still occupies
+    the channel's slot, and the per-channel field lookups find
+    nothing → channel inherits peripheral-level defaults (which is
+    exactly what "all default" means anyway).
+
+    Typical Maestro just-added (24 defaulted channels): drops from
+    ~3500 → ~600 bytes. Operator with 3 customized channels: ~1000
+    bytes. Operator with all 24 customized: still ~3500 — at that
+    point bump config_buffer / rebuild libmicroros with larger
+    history.
+
+    Pure function: does not mutate `params`. Returns a new dict
+    with the same keys; `channels` is a fresh list of either {} or
+    the full channel dict.
+    """
+    if "channels" not in params or not isinstance(params["channels"], list):
+        return dict(params)
+    out = dict(params)
+    slim: List[Dict[str, Any]] = []
+    for i, ch in enumerate(params["channels"]):
+        if not isinstance(ch, dict):
+            slim.append({})
+            continue
+        default = _maestro_default_channel(i, params)
+        # All known keys present AND equal → slim to {}. Use the
+        # default's keys as the comparison basis so unknown extra
+        # keys on `ch` (operator-injected, shouldn't normally exist
+        # after normalization) still get sent on the wire.
+        if all(ch.get(k) == default[k] for k in _MAESTRO_CHANNEL_KEYS):
+            slim.append({})
+        else:
+            slim.append(dict(ch))
+    out["channels"] = slim
+    return out
+
+
 # Default catalog. Mirrors the firmware's runtime drivers + adds generic
 # single-pin peripherals (Button, LED, AnalogInput, Servo) plus built-in
 # board peripherals (NeoPixel).
@@ -347,16 +507,23 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralTypeParam(
                 "transport", "Transport", "string", "uart",
                 choices=[
-                    {"value": "uart",     "label": "UART (TTL serial)"},
-                    {"value": "usb_host", "label": "USB Host (Teensy 4.1 native USB)"},
+                    {"value": "uart",       "label": "UART (TTL serial)"},
+                    {"value": "usb_cdc",    "label": "USB CDC (Compact Protocol)"},
+                    {"value": "usb_vendor", "label": "USB Vendor (full features incl. EEPROM read)"},
+                    # Legacy alias — older saves wrote "usb_host" before
+                    # the rename to usb_cdc. Kept so existing configs
+                    # still load; new UIs won't surface it.
+                    {"value": "usb_host", "label": "USB Host (legacy — same as USB CDC)"},
                 ],
                 help=(
-                    "UART speaks the Pololu compact / Pololu / Mini-SSC "
-                    "protocols over a TTL serial pair (pick the pins "
-                    "below). USB Host uses the MCU's native USB Host "
-                    "port to drive the Maestro's USB connector directly — "
-                    "supported on the Teensy 4.1 only. No pin pair is "
-                    "needed in USB Host mode."
+                    "UART speaks Pololu protocols over a TTL serial pair "
+                    "(pick the pins below). USB CDC sends Compact Protocol "
+                    "over the Maestro's CDC ACM endpoint — requires the "
+                    "Maestro's Serial Mode = 'USB Dual Port' in MCC. USB "
+                    "Vendor uses EP0 control transfers, works in any "
+                    "Maestro Serial Mode, and supports reading per-channel "
+                    "settings back from the Maestro's EEPROM. No pin pair "
+                    "is needed for any USB transport."
                 ),
             ),
             PeripheralTypeParam(

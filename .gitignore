@@ -34,7 +34,9 @@ lib64/
 
 # Local-builder scratch dirs (scripts/build-local-dist.sh)
 /_debs/
+_rpi_debs_trixie/
 /_ros2/
+/_ros2_trixie_build/
 /_ros2_src/
 /_fw/
 # Host-runnable test binaries + macOS debug bundles. Built by each

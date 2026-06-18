@@ -121,9 +121,17 @@ static const maestro_transport_ops_t uart_ops = {
 static bool usb_available  = true;
 static bool uart_available = true;
 
-const maestro_transport_ops_t* maestro_get_transport_usb_host(void)
+const maestro_transport_ops_t* maestro_get_transport_usb_cdc(void)
 {
     return usb_available ? &usb_ops : NULL;
+}
+const maestro_transport_ops_t* maestro_get_transport_usb_vendor(void)
+{
+    return NULL;  /* not exercised by shared tests */
+}
+const maestro_transport_ops_t* maestro_get_transport_usb_host(void)
+{
+    return maestro_get_transport_usb_cdc();  /* legacy alias */
 }
 const maestro_transport_ops_t* maestro_get_transport_uart(void)
 {
@@ -184,7 +192,7 @@ static void reset_all(void)
 /* Bind a transport explicitly without going through a full flash
  * struct (some tests want to drive write/read directly without
  * exercising drv_load's branching). */
-static void bind_transport(const maestro_transport_ops_t* ops)
+static void force_bind_transport(const maestro_transport_ops_t* ops)
 {
     g_transport = ops;
 }
@@ -196,7 +204,7 @@ static void case_compact_protocol_bytes(void)
     printf("case_compact_protocol_bytes\n");
     reset_all();
     maestro_init();
-    bind_transport(&uart_ops);
+    force_bind_transport(&uart_ops);
 
     /* Set target — channel 3, 6000 quarter-µs (= 1500µs neutral). The
      * Pololu spec splits the 14-bit value into two 7-bit halves: low7
@@ -247,7 +255,7 @@ static void case_channel_config_roundtrip(void)
     printf("case_channel_config_roundtrip\n");
     reset_all();
     maestro_init();
-    bind_transport(&uart_ops);
+    force_bind_transport(&uart_ops);
 
     maestro_channel_config_t cfg = {
         .min_pulse_us = 1000,
@@ -268,8 +276,13 @@ static void case_channel_config_roundtrip(void)
     EXPECT(got->acceleration == 10,           "acceleration round-trip");
     EXPECT(got->home_us      == 1500,         "home_us round-trip");
 
-    /* Speed + acceleration also get pushed to the device on connect. */
-    EXPECT(bus_len >= 8, "set_channel_config pushed speed+accel commands");
+    /* Speed + acceleration are stored as the channel's default (only
+     * applied on Pose transitions) — they are NOT pushed to the
+     * device on config save. Animation/control input snaps to target
+     * at full speed; deliberate change in Phase 1 of the Maestro
+     * per-channel-config work. See TODO comment in
+     * firmware/shared/src/maestro_driver.c::maestro_set_channel_config. */
+    EXPECT(bus_len == 0, "set_channel_config does NOT push speed/accel on config save");
 }
 
 static void case_save_load_roundtrip(void)
@@ -277,7 +290,7 @@ static void case_save_load_roundtrip(void)
     printf("case_save_load_roundtrip\n");
     reset_all();
     maestro_init();
-    bind_transport(&uart_ops);
+    force_bind_transport(&uart_ops);
     g_transport_mode = FLASH_MAESTRO_TRANSPORT_UART;
 
     maestro_channel_config_t cfg = {
@@ -306,7 +319,7 @@ static void case_save_load_roundtrip(void)
 
     /* Now fresh state, load, verify it came back. */
     reset_all();
-    bind_transport(NULL);
+    force_bind_transport(NULL);
     /* Bypass init so load runs against an "uninitialized" module —
      * the bug we're guarding against here is load-before-init
      * clobbering. */
@@ -378,6 +391,187 @@ static void case_parse_json_transport(void)
            "parse_json(usb_host) returned true");
     EXPECT(g_transport_mode == FLASH_MAESTRO_TRANSPORT_USB_HOST,
            "transport=usb_host parsed");
+}
+
+static void case_parse_json_per_channel(void)
+{
+    /* Per-channel override path: when the incoming JSON has a
+     * "channels" array, the driver should pick out the N-th entry
+     * (where N is derived from pcfg->gpio - MAESTRO_VIRTUAL_GPIO_BASE)
+     * and use those values instead of the peripheral-level defaults.
+     * Mirrors what apply_one_peripheral does on the host side: same
+     * JSON, different pcfg per channel. */
+    printf("case_parse_json_per_channel\n");
+    reset_all();
+    maestro_init();
+
+    /* JSON with peripheral-level defaults AND a channels array.
+     * Channel 0 overrides home_us to 1100, channel 2 overrides
+     * min_pulse_us to 1200, channel 1 leaves everything default. */
+    const char* json =
+        "{\"min_pulse_us\":1000,\"max_pulse_us\":2000,\"home_us\":1500,"
+         "\"channels\":["
+            "{\"label\":\"a\",\"home_us\":1100,\"min_pulse_us\":1000,\"max_pulse_us\":2000},"
+            "{\"label\":\"b\"},"
+            "{\"label\":\"c\",\"min_pulse_us\":1200,\"home_us\":1500}"
+         "]}";
+
+    pin_config_t pc;
+
+    /* Channel 0: expect home_us=1100 from the channels override. */
+    memset(&pc, 0, sizeof(pc));
+    pc.gpio = MAESTRO_VIRTUAL_GPIO_BASE + 0;
+    EXPECT(maestro_peripheral.parse_json_params(json, json + strlen(json), &pc),
+           "parse(ch0): returned true");
+    EXPECT(pc.params.maestro.home_us == 1100,
+           "parse(ch0): channels[0].home_us overrides peripheral default");
+    EXPECT(pc.params.maestro.min_pulse_us == 1000,
+           "parse(ch0): min_pulse_us also from channels[0]");
+
+    /* Channel 1: channels[1] is empty so peripheral defaults apply. */
+    memset(&pc, 0, sizeof(pc));
+    pc.gpio = MAESTRO_VIRTUAL_GPIO_BASE + 1;
+    EXPECT(maestro_peripheral.parse_json_params(json, json + strlen(json), &pc),
+           "parse(ch1): returned true");
+    EXPECT(pc.params.maestro.home_us == 1500,
+           "parse(ch1): empty channels[1] → peripheral home_us applies");
+    EXPECT(pc.params.maestro.min_pulse_us == 1000,
+           "parse(ch1): empty channels[1] → peripheral min_pulse_us applies");
+
+    /* Channel 2: min_pulse_us from channels[2]. */
+    memset(&pc, 0, sizeof(pc));
+    pc.gpio = MAESTRO_VIRTUAL_GPIO_BASE + 2;
+    EXPECT(maestro_peripheral.parse_json_params(json, json + strlen(json), &pc),
+           "parse(ch2): returned true");
+    EXPECT(pc.params.maestro.min_pulse_us == 1200,
+           "parse(ch2): channels[2].min_pulse_us overrides peripheral default");
+
+    /* Missing channels[] array → peripheral defaults for any channel. */
+    const char* json_no_arr = "{\"min_pulse_us\":900,\"home_us\":1400}";
+    memset(&pc, 0, sizeof(pc));
+    pc.gpio = MAESTRO_VIRTUAL_GPIO_BASE + 0;
+    EXPECT(maestro_peripheral.parse_json_params(json_no_arr, json_no_arr + strlen(json_no_arr), &pc),
+           "parse(no channels[]): returned true");
+    EXPECT(pc.params.maestro.min_pulse_us == 900,
+           "parse(no channels[]): peripheral min_pulse_us applies");
+    EXPECT(pc.params.maestro.home_us == 1400,
+           "parse(no channels[]): peripheral home_us applies");
+}
+
+static void case_parse_json_full_maestro_payload(void)
+{
+    /* Regression test: with the new params["channels"] array, a full
+     * 24-channel Maestro peripheral serializes to ~3500 bytes — well
+     * past the firmware's 2048-byte config_buffer (and waaay past the
+     * 512-byte XRCE-DDS MTU, which forces fragmentation). The crash
+     * the operator sees happens at the rmw_microxrcedds reception
+     * layer when the reassembled message overruns config_msg.data
+     * capacity. The parser layer itself should be safe regardless.
+     *
+     * This test builds a realistic full payload and confirms:
+     *   - Parser doesn't crash
+     *   - Per-channel parsing scales to 24 entries
+     *   - Picking any given channel from the array works
+     *
+     * The buffer-size fix lives in firmware/teensy41/src/main.cpp
+     * and firmware/rp2040/src/main.c (config_buffer + capacity bumps).
+     * See docs/MAESTRO_BRINGUP.md for the wire-size constraints. */
+    printf("case_parse_json_full_maestro_payload\n");
+    reset_all();
+    maestro_init();
+
+    /* Build a 24-channel payload mirroring what the server emits. */
+    char json[8192];
+    int n = snprintf(json, sizeof(json),
+        "{\"min_pulse_us\":1000,\"max_pulse_us\":2000,"
+         "\"channel_count\":24,\"channels\":[");
+    for (int ch = 0; ch < 24; ch++) {
+        n += snprintf(json + n, sizeof(json) - n,
+            "%s{\"label\":\"Ch %d\",\"min_pulse_us\":%d,\"max_pulse_us\":%d,"
+             "\"neutral_us\":1500,\"home_us\":%d,\"speed\":0,\"acceleration\":0}",
+            ch ? "," : "",
+            ch,
+            1000 + ch * 5,        /* sneak ch index in via min so we can verify */
+            1800 + ch * 5,
+            1400 + ch * 10);      /* and via home */
+    }
+    n += snprintf(json + n, sizeof(json) - n, "]}");
+
+    /* The payload should be larger than the current 2048-byte
+     * config_buffer — that's the actual bug.  We don't fail the test
+     * on size (since the parser itself is fine), but log it for
+     * humans reading the output. */
+    printf("  payload size = %d bytes (config_buffer was 2048)\n", n);
+    EXPECT(n > 2048, "payload exceeds legacy 2048-byte config_buffer");
+
+    pin_config_t pc;
+    /* Probe a few channels — verifies the per-channel array walk
+     * doesn't trip on the large input. */
+    const int probes[] = {0, 7, 15, 23};
+    for (size_t i = 0; i < sizeof(probes)/sizeof(probes[0]); i++) {
+        int probe = probes[i];
+        memset(&pc, 0, sizeof(pc));
+        pc.gpio = MAESTRO_VIRTUAL_GPIO_BASE + probe;
+        EXPECT(maestro_peripheral.parse_json_params(json, json + n, &pc),
+               "parse(full payload): returned true");
+        uint16_t expected_min  = (uint16_t)(1000 + probe * 5);
+        uint16_t expected_max  = (uint16_t)(1800 + probe * 5);
+        uint16_t expected_home = (uint16_t)(1400 + probe * 10);
+        EXPECT(pc.params.maestro.min_pulse_us == expected_min,
+               "parse(full payload, ch N): min_pulse_us matches");
+        EXPECT(pc.params.maestro.max_pulse_us == expected_max,
+               "parse(full payload, ch N): max_pulse_us matches");
+        EXPECT(pc.params.maestro.home_us == expected_home,
+               "parse(full payload, ch N): home_us matches");
+    }
+}
+
+static void case_parse_json_truncated(void)
+{
+    /* Regression test: simulate what happens when the wire payload is
+     * truncated mid-array (the legacy bug: buffer-too-small + null-
+     * terminate-at-capacity-boundary mid-JSON). The parser must NOT
+     * crash, must NOT walk past json_end, and may silently fall back
+     * to peripheral-level defaults.
+     *
+     * This test won't catch the rmw-layer crash that's the actual
+     * operator-visible symptom (that's a buffer overrun deeper in
+     * micro-ROS), but it does prove the parser is safe to call on
+     * any truncation point. */
+    printf("case_parse_json_truncated\n");
+    reset_all();
+    maestro_init();
+
+    char json[2048];
+    int n = snprintf(json, sizeof(json),
+        "{\"min_pulse_us\":1234,\"home_us\":1567,\"channels\":[");
+    for (int ch = 0; ch < 24; ch++) {
+        n += snprintf(json + n, sizeof(json) - n,
+            "%s{\"label\":\"Ch %d\",\"min_pulse_us\":%d,\"max_pulse_us\":%d,"
+             "\"neutral_us\":1500,\"home_us\":1500,\"speed\":0,\"acceleration\":0}",
+            ch ? "," : "",
+            ch, 1000 + ch, 2000 + ch);
+        if (n > 1800) break;  /* truncate before we'd close the array */
+    }
+    /* Note: deliberately NO closing "]}" — simulates wire truncation. */
+    json[n] = '\0';
+    EXPECT(n > 1500, "truncated test set up payload large enough to matter");
+
+    pin_config_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.gpio = MAESTRO_VIRTUAL_GPIO_BASE + 0;
+    /* Survive without crashing. ASan / UBSan would catch out-of-bound
+     * reads here if they happened. */
+    bool ok = maestro_peripheral.parse_json_params(json, json + n, &pc);
+    EXPECT(ok, "parse(truncated): returned without crashing");
+
+    /* If the parser COULDN'T find a complete channels[0] entry it
+     * falls back to peripheral-level. Either outcome is acceptable;
+     * what matters is no memory corruption. */
+    bool fell_back = (pc.params.maestro.min_pulse_us == 1234);
+    bool used_ch0  = (pc.params.maestro.min_pulse_us == 1000);
+    EXPECT(fell_back || used_ch0,
+           "parse(truncated): produced a reasonable value (either peripheral default or ch0 override)");
 }
 
 static void case_default_transport_pick(void)
@@ -471,6 +665,9 @@ int main(void)
 {
     case_compact_protocol_bytes();
     case_channel_config_roundtrip();
+    case_parse_json_per_channel();
+    case_parse_json_full_maestro_payload();
+    case_parse_json_truncated();
     case_save_load_roundtrip();
     case_load_then_init_no_clobber();
     case_parse_json_transport();

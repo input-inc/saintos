@@ -45,6 +45,8 @@ from saint_server.peripheral_model import (
     WidgetType,
     Wire,
     detect_pin_conflicts,
+    maestro_normalize_channels,
+    maestro_slim_channels_for_wire,
 )
 from saint_server.board_config import BoardConfigManager, derive_capabilities
 
@@ -471,14 +473,17 @@ class NodeRuntimeState:
             self.pins[gpio].desired_value = value
 
     def update_from_firmware(self, pins_data: List[Dict[str, Any]]) -> List[Tuple[str, str, float]]:
-        """Update actual values from firmware feedback.
+        """Update actual values from firmware feedback (legacy GPIO path).
 
-        The firmware still publishes its peripheral channels on
+        The firmware still publishes some peripheral channels on
         ``virtual GPIO`` slots (a transitional artifact of the
-        peripheral-first refactor). We translate them here into the
-        peripheral-first ``channels`` view that the routing graph
-        and the UI consume. Once the firmware grows a channel-
-        addressed publisher, this translation goes away.
+        peripheral-first refactor — see
+        ``docs/PERIPHERAL_FIRST_MIGRATION.md``). We translate them
+        here into the peripheral-first ``channels`` view that the
+        routing graph and the UI consume. The channel-addressed
+        emission path (``update_channels_from_firmware`` below) is
+        the destination — once every driver migrates, this method
+        only handles real GPIOs (PWM / ADC / digital_io).
 
         Returns the list of (peripheral_id, channel_id, value) tuples
         that were resolved on this call — the caller uses this to feed
@@ -521,6 +526,41 @@ class NodeRuntimeState:
                 channel_updates.append((peripheral_id, channel_id, fvalue))
 
         return channel_updates
+
+    def update_channels_from_firmware(
+            self, channels_data: List[Dict[str, Any]],
+    ) -> List[Tuple[str, str, float]]:
+        """Direct ingest of channel-addressed firmware state.
+
+        Firmware drivers that have migrated under the peripheral-first
+        plan emit a `channels` array alongside the legacy `pins`
+        array, with shape `[{peripheral_id, channel_id, value}, ...]`.
+        Each entry lands straight in NodeRuntimeState.channels — no
+        slab math, no `_FIRMWARE_CHANNEL_MAP` lookup. Drivers can
+        emit through this path on a per-channel basis, so partial
+        migrations are allowed (servo positions via pins[], diagnostic
+        channels via channels[]) while individual drivers move over.
+        See docs/PERIPHERAL_FIRST_MIGRATION.md.
+
+        Returns the resolved tuples for the logger, mirroring
+        update_from_firmware.
+        """
+        now = time.time()
+        self.last_feedback = now
+        out: List[Tuple[str, str, float]] = []
+        for entry in channels_data or ():
+            peripheral_id = entry.get('peripheral_id') or entry.get('peripheral')
+            channel_id    = entry.get('channel_id')    or entry.get('channel')
+            value         = entry.get('value')
+            if not peripheral_id or not channel_id or value is None:
+                continue
+            try:
+                fvalue = float(value)
+            except (TypeError, ValueError):
+                continue
+            self.set_channel(peripheral_id, channel_id, fvalue)
+            out.append((peripheral_id, channel_id, fvalue))
+        return out
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -1780,6 +1820,14 @@ class StateManager:
                 log_enabled=log_enabled,
             )
 
+        # Maestro: ensure params["channels"] exists and matches
+        # channel_count. Fresh adds get default per-channel entries
+        # sourced from the peripheral-level Advanced fields; existing
+        # entries are sanitized + clamped. See _maestro_sanitize_channel
+        # in peripheral_model.py.
+        if peripheral.type == "maestro":
+            maestro_normalize_channels(peripheral.params)
+
         # Validate pin assignments don't conflict (call out to peripheral_model)
         node.peripheral_config.upsert(peripheral)
         conflicts = detect_pin_conflicts(
@@ -1888,6 +1936,18 @@ class StateManager:
                         params["_kiosk_token"] = tok
                 except Exception:
                     pass
+            # Maestro: slim default-equal channel entries down to {}
+            # on the wire so the full 24-channel array doesn't blow the
+            # firmware's config_buffer (2048-4096) or the XRCE-DDS
+            # fragmentation budget (UDP MTU 512 × MAX_HISTORY 4 ≈ 2 KB
+            # reassembly). The firmware parser brace-counts the array,
+            # so an empty {} still occupies the channel's slot and
+            # falls back to peripheral-level defaults — exactly the
+            # behavior "all default" means. See peripheral_model
+            # maestro_slim_channels_for_wire and
+            # docs/MAESTRO_BRINGUP.md for the wire-size analysis.
+            if p.type == "maestro":
+                params = maestro_slim_channels_for_wire(params)
             peripherals_out.append({
                 "id": p.id,
                 "type": p.type,
@@ -2987,13 +3047,22 @@ class StateManager:
         runtime_state.pins[gpio].desired_value = value
         return True
 
-    def update_pin_actual(self, node_id: str, pins_data: List[Dict[str, Any]]) -> bool:
+    def update_pin_actual(self, node_id: str,
+                          pins_data: List[Dict[str, Any]],
+                          channels_data: Optional[List[Dict[str, Any]]] = None) -> bool:
         """
         Update actual pin values from firmware feedback.
 
         Args:
             node_id: The node ID
-            pins_data: List of pin data from firmware
+            pins_data: legacy GPIO-keyed entries from the firmware
+                state JSON (translated to channels via
+                `_FIRMWARE_CHANNEL_MAP`).
+            channels_data: peripheral-first records from the new
+                `channels[]` field (direct `{peripheral_id, channel_id,
+                value}` ingest). Optional; firmware drivers that
+                haven't migrated yet emit nothing here. See
+                docs/PERIPHERAL_FIRST_MIGRATION.md.
 
         Returns:
             True if update successful
@@ -3003,6 +3072,9 @@ class StateManager:
             return False
 
         channel_updates = runtime_state.update_from_firmware(pins_data)
+        if channels_data:
+            channel_updates.extend(
+                runtime_state.update_channels_from_firmware(channels_data))
 
         # Hand the resolved channel values to the optional logger.
         # record() short-circuits cheaply when the peripheral isn't

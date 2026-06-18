@@ -69,6 +69,29 @@ void maestro_set_channel_config(uint8_t channel,
                                  const maestro_channel_config_t* config);
 const maestro_channel_config_t* maestro_get_channel_config(uint8_t channel);
 
+/* Read a channel's config from the Maestro EEPROM via vendor
+ * GET_PARAMETER (0x81). Populates `out` with min/max/neutral/speed/
+ * accel/home sourced from the chip rather than from RAM.
+ *
+ * Only available when the active transport implements ctrl_xfer
+ * (usb_vendor on the Teensy when task #17 lands; pyusb on the Pi
+ * side). Returns false on UART / USB CDC transports — those carriers
+ * cannot issue EP0 control transfers at all, and the Maestro's
+ * Compact Protocol has no equivalent. Returns false on any vendor
+ * read error (timeout, STALL, channel out of range).
+ *
+ * Used by the channel-edit UI: when the operator opens the channel
+ * modal, the server-side defaults come from this readback if the
+ * transport supports it, falling back to the peripheral-level
+ * Advanced settings otherwise. See docs/MAESTRO_BRINGUP.md.
+ *
+ * Per-channel param IDs from Pololu's Usc_protocol.cs uscParameter
+ * enum: SERVO0_HOME = 30, with 9-byte stride per channel
+ * (HOME 2B, MIN 1B, MAX 1B, NEUTRAL 2B, RANGE 1B, SPEED 1B, ACCEL 1B).
+ * MIN/MAX are stored × 1/64 of qus; we convert to µs in `out`. */
+bool maestro_read_channel_config_from_device(uint8_t channel,
+                                              maestro_channel_config_t* out);
+
 /* Convert a 0-180° angle to a quarter-µs target for set_target,
  * applying the channel's calibrated min/max pulse range. */
 uint16_t maestro_angle_to_target(float angle,

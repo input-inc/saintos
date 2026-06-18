@@ -159,8 +159,19 @@ const maestro_transport_ops_t* maestro_get_transport_uart(void)
     return &uart_ops;
 }
 
-/* USB host transport not available on RP2040 — see file header. */
-const maestro_transport_ops_t* maestro_get_transport_usb_host(void)
+/* USB host transports not available on RP2040 — see file header. The
+ * RP2040 doesn't have a USB host controller; only the Pico W gen-2
+ * does (PIO-based), and we don't support it from this driver. */
+const maestro_transport_ops_t* maestro_get_transport_usb_cdc(void)
 {
     return NULL;
+}
+const maestro_transport_ops_t* maestro_get_transport_usb_vendor(void)
+{
+    return NULL;
+}
+/* Legacy alias for older driver code paths. */
+const maestro_transport_ops_t* maestro_get_transport_usb_host(void)
+{
+    return maestro_get_transport_usb_cdc();
 }

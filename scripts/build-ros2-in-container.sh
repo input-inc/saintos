@@ -62,7 +62,7 @@ apt-get install -y --no-install-recommends \
     liblog4cxx-dev \
     liblttng-ust-dev \
     liblz4-dev \
-    libpcre3-dev \
+    libpcre2-dev \
     libsqlite3-dev \
     libssl-dev \
     libtinyxml-dev \

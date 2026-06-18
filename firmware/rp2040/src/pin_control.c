@@ -838,6 +838,25 @@ int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node
     if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
     written += ret;
 
+    // Peripheral-first channel-addressed records (Phase 1 of
+    // docs/PERIPHERAL_FIRST_MIGRATION.md). Drivers that have
+    // migrated populate a parallel "channels":[...] array of
+    // {peripheral_id, channel_id, value} objects, dispatched
+    // through peripheral_state_emit_all_channels. Drivers still
+    // on the GPIO-keyed path emit nothing here. The array is
+    // unconditionally rendered so the JSON shape stays stable
+    // even when no driver has migrated yet.
+    ret = snprintf(buffer + written, buffer_size - written, ",\"channels\":[");
+    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+    written += ret;
+    int ch_n = peripheral_state_emit_all_channels(
+        buffer + written, buffer_size - (size_t)written);
+    if (ch_n < 0) return -1;
+    written += ch_n;
+    ret = snprintf(buffer + written, buffer_size - written, "]");
+    if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+    written += ret;
+
     // Per-peripheral health block. Diagnostic-only — surfaces the
     // internal state of drivers whose pins are configured so the
     // dashboard can show "polling but no response" vs "never polled"

@@ -132,6 +132,50 @@ uint8_t peripheral_get_count(void)
     return driver_count;
 }
 
+// =============================================================================
+// Channel-addressed state emission (peripheral-first migration; Phase 1)
+// =============================================================================
+//
+// Each migrated driver implements `state_emit_channels(buf, cap, first)`
+// to append zero-or-more `{"peripheral_id":..,"channel_id":..,"value":..}`
+// records to a shared `channels[]` array in the outbound state JSON.
+// The helpers below let drivers stay decoupled from the array bookkeeping:
+// they just call peripheral_state_append_channel() per record, and the
+// `first` flag handed in (shared across every driver this tick) tracks
+// whether to prefix a comma.
+//
+// See docs/PERIPHERAL_FIRST_MIGRATION.md for the broader plan; this is
+// the entry point Phase 1 (per-driver migration) hooks into.
+
+int peripheral_state_append_channel(char* buf, size_t cap, bool* first,
+                                    const char* peripheral_id,
+                                    const char* channel_id,
+                                    float value)
+{
+    if (!buf || !first || !peripheral_id || !channel_id) return -1;
+    int n = snprintf(buf, cap,
+                     "%s{\"peripheral_id\":\"%s\",\"channel_id\":\"%s\",\"value\":%.4f}",
+                     *first ? "" : ",",
+                     peripheral_id, channel_id, (double)value);
+    if (n < 0 || (size_t)n >= cap) return -1;
+    *first = false;
+    return n;
+}
+
+int peripheral_state_emit_all_channels(char* buf, size_t cap)
+{
+    if (!buf) return -1;
+    bool first = true;
+    int total = 0;
+    for (uint8_t i = 0; i < driver_count; i++) {
+        if (!drivers[i] || !drivers[i]->state_emit_channels) continue;
+        int n = drivers[i]->state_emit_channels(buf + total, cap - (size_t)total, &first);
+        if (n < 0) return -1;
+        total += n;
+    }
+    return total;
+}
+
 const peripheral_driver_t* peripheral_get(uint8_t index)
 {
     if (index >= driver_count) return NULL;

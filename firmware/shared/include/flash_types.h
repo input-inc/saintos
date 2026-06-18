@@ -84,12 +84,18 @@ typedef struct __attribute__((packed)) {
 
 #define FLASH_MAESTRO_MAX_CHANNELS 24
 
-/* transport_mode values: 0 = USB host (zero-default for backward
- * compat with older Teensy saves), 1 = UART. serial_port is only
- * meaningful in UART mode and indexes the platform's UART instance
- * (0-1 on RP2040, 1-8 on Teensy hardware Serial). */
-#define FLASH_MAESTRO_TRANSPORT_USB_HOST 0
-#define FLASH_MAESTRO_TRANSPORT_UART     1
+/* transport_mode values: 0 = USB CDC (was named USB_HOST in earlier
+ * saves; zero-default for backward compat), 1 = UART, 2 = USB Vendor
+ * (EP0 control transfers, enables EEPROM readback — Teensy USBHost_t36
+ * + Pi pyusb). serial_port is only meaningful in UART mode and
+ * indexes the platform's UART instance (0-1 on RP2040, 1-8 on Teensy
+ * hardware Serial). See firmware/shared/include/maestro_transport.h
+ * for the ops table and per-platform registry. */
+#define FLASH_MAESTRO_TRANSPORT_USB_CDC     0
+#define FLASH_MAESTRO_TRANSPORT_UART        1
+#define FLASH_MAESTRO_TRANSPORT_USB_VENDOR  2
+/* Legacy alias — existing flash saves and source still use USB_HOST. */
+#define FLASH_MAESTRO_TRANSPORT_USB_HOST    FLASH_MAESTRO_TRANSPORT_USB_CDC
 
 typedef struct __attribute__((packed)) {
     uint8_t channel_count;

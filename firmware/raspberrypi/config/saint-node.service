@@ -9,15 +9,28 @@ Type=simple
 User=root
 Group=root
 
-# Environment for ROS2
-Environment="ROS_DOMAIN_ID=0"
-Environment="RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
+# ROS2 environment. Must match the server's saint-os.service
+# (packaging/saint-os.service) so DDS discovery works between them.
+Environment=ROS_DOMAIN_ID=0
+Environment=RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# Force FastDDS to UDPv4. The server enforces the same — without it
+# mismatched transport config can break discovery between hosts in
+# ways that read as "node is silent" rather than "node can't reach
+# server" (memory: project_fastdds_cross_user_shm). UDPv4 is also
+# the right choice for cross-machine traffic regardless.
+Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+Environment=PYTHONUNBUFFERED=1
 
-# Source ROS2 setup before running
-ExecStartPre=/bin/bash -c "source /opt/ros/jazzy/setup.bash || source /opt/ros/humble/setup.bash"
-
-# Run the node
-ExecStart=/usr/bin/python3 -m saint_node.node
+# Source ROS2 + exec in a single shell so the sourced env actually
+# reaches the Python process. Using ExecStartPre to source loses
+# the env at the subshell boundary — the saint_node process would
+# then come up without rclpy on PYTHONPATH and silently fail to
+# announce itself, leaving the node invisible in the server UI.
+# @ROS_SETUP@ is substituted by scripts/install.sh with the
+# absolute path to setup.bash (either /opt/ros/<distro>/setup.bash
+# for apt installs, or /opt/ros/<distro>/install/setup.bash for
+# bundled-tree installs).
+ExecStart=/bin/bash -lc 'source @ROS_SETUP@ && exec python3 -m saint_node.node'
 
 # Restart on failure
 Restart=on-failure

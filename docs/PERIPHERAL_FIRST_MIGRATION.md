@@ -9,10 +9,14 @@ holdover from the original pin-config-keyed model. This doc tracks
 the plan to retire those slabs in favour of named channel records on
 both directions of the wire.
 
-Status as of 2026-06-15: **inbound migrated, outbound still GPIO-
-indexed.** Held until the next stable Maestro driver baseline lands
-(parallel work in another session); this doc is the queued
-checklist for picking it up.
+Status as of 2026-06-15: **inbound migrated, outbound infrastructure
+ready (Phase 1a), no driver migrated yet (Phase 1b queued).** Both
+firmware platforms now publish a `channels[]` array alongside the
+legacy `pins[]` array; the server ingests both sides through
+`update_pin_actual(node_id, pins_data, channels_data)`. Drivers
+remain on the GPIO-keyed path until each one opts in by implementing
+`state_emit_channels` on its `peripheral_driver_t`. Held on Maestro
+specifically until the parallel stable-baseline work lands.
 
 ## Why this matters
 
@@ -171,6 +175,22 @@ emit list — no global range bookkeeping.
   internal cache. Channel-addressed emission can still read from it
   via `find_runtime(gpio)` — the conversion happens at emit time, not
   at storage time.
+
+## Tests
+
+* **Server** — `server/test/test_channel_addressed_state.py` pins
+  the new ingest path (`update_channels_from_firmware`,
+  `update_pin_actual`'s `channels_data` kwarg, dual-ingest
+  coexistence, malformed-input resilience).
+* **Firmware** — `firmware/shared/tests/test_peripheral_state_emit.c`
+  covers `peripheral_state_append_channel` (formatting, comma
+  management, overflow) and `peripheral_state_emit_all_channels`
+  (driver iteration, NULL-callback skip, multi-driver shared
+  array).
+
+Each driver migration should extend both files with the per-driver
+emit assertions (a fixture that registers the driver and verifies
+its expected channel records appear in the emitted JSON).
 
 ## Verification checklist (per driver)
 

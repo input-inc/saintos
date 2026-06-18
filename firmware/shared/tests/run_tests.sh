@@ -36,6 +36,7 @@ TEST_BINARIES=(
     "test_saint_log"
     "test_maestro_driver"
     "test_ota_streamer"
+    "test_peripheral_state_emit"
 )
 
 overall_rc=0

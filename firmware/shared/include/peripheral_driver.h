@@ -70,6 +70,20 @@ typedef struct peripheral_driver {
     // Flash persistence
     bool (*save_config)(void* storage);
     bool (*load_config)(const void* storage);
+
+    // Peripheral-first state emission (optional). Append zero or
+    // more channel-addressed records to `buf` as JSON objects of
+    // the form {"peripheral_id":"...","channel_id":"...","value":<num>}.
+    // The framework supplies a `first` flag so multiple drivers can
+    // emit into the same shared `channels[]` array without colliding
+    // on commas: each call to `peripheral_state_append_channel`
+    // either consumes the slot (prepending a comma when *first is
+    // false) or sets *first = false on first emit. Returns total
+    // bytes written, or -1 on overflow. NULL means "this driver
+    // hasn't migrated to peripheral-first state yet — its readings
+    // still flow through the legacy GPIO-keyed pins[] array."
+    // See docs/PERIPHERAL_FIRST_MIGRATION.md.
+    int (*state_emit_channels)(char* buf, size_t cap, bool* first);
 } peripheral_driver_t;
 
 // =============================================================================
@@ -87,6 +101,23 @@ void peripheral_clear_estop_all(void);
 const peripheral_driver_t* peripheral_find_by_gpio(uint16_t gpio);
 const peripheral_driver_t* peripheral_find_by_mode(pin_mode_t mode);
 const peripheral_driver_t* peripheral_find_by_mode_string(const char* mode_str);
+
+// Helper that drivers' state_emit_channels callbacks use to append
+// one channel record to the shared buffer. Handles the leading
+// comma (skipped on the first record across the whole channels[]
+// array, set automatically afterwards). Returns bytes written, or
+// -1 on overflow. Implemented in peripheral_manager.cpp.
+int peripheral_state_append_channel(char* buf, size_t cap, bool* first,
+                                    const char* peripheral_id,
+                                    const char* channel_id,
+                                    float value);
+
+// Emit every registered driver's channel-addressed state into the
+// caller's buffer. Called from per-platform pin_control_state_to_json
+// after the legacy pins[] array. Returns bytes written, or -1 on
+// overflow. The caller is responsible for the surrounding
+// "channels":[ ... ] brackets.
+int peripheral_state_emit_all_channels(char* buf, size_t cap);
 uint8_t peripheral_gpio_to_channel(const peripheral_driver_t* drv, uint16_t gpio);
 bool peripheral_is_virtual_gpio(uint16_t gpio);
 

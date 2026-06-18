@@ -36,12 +36,19 @@ peripherals to specific pins from the SAINT.OS server's
 
 ## 2. Prerequisites
 
-On a fresh Raspberry Pi OS Bookworm (64-bit) install:
+The installer is **self-contained when the bundle includes a
+`deps/` directory** (Pi-side .debs + ROS2 packages). With the bundle,
+a fresh Pi needs no internet at install time — `install.sh` wires up
+a local file:// apt source and `apt-get install`s ROS 2 Kilted and
+every Pi-side runtime dep from there. Without the bundle the
+installer falls back to the upstream OSRF apt source (online).
 
-1. **ROS 2 Jazzy** (preferred) or **Humble**.
-   - Jazzy: <https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html>
-   - Humble: <https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html>
-   - The installer detects whichever is present under `/opt/ros/`.
+On a fresh Raspberry Pi OS (Bookworm or Trixie, 64-bit) install:
+
+1. **ROS 2 Kilted** — bundled in `deps/` when the firmware zip was
+   built with the offline payload (see §3.1 below). Otherwise the
+   installer fetches it from `packages.ros.org` via the
+   `ros2-apt-source` package (requires internet).
 
 2. **Static or DHCP-stable IP** on the network the SAINT.OS server
    is on. The server discovers nodes over UDP multicast; nodes need
@@ -58,30 +65,64 @@ On a fresh Raspberry Pi OS Bookworm (64-bit) install:
 
 ## 3. Install
 
+### 3.1. Build the offline bundle (recommended)
+
+Pi nodes typically live on the robot's internal network with no
+internet route. The firmware packager can include every .deb the
+installer needs — ROS 2 Kilted + its transitive deps + the Pi-side
+runtime packages (gpiod, vlc, alsa-utils, etc.) — so `install.sh`
+satisfies everything from a local file:// apt source.
+
+On the dev machine (Docker required, ~250 MB of .debs cached):
+
 ```bash
-git clone <your fork URL> SaintOS
-cd SaintOS/firmware/raspberrypi/scripts
+# Build the deb cache for the target Pi's Debian release:
+firmware/raspberrypi/scripts/bundle-debs.sh
+#   defaults: ARCH=arm64  DEBIAN_RELEASE=trixie  ROS_DISTRO=kilted
+#   override via env vars; cache lands in <repo>/_rpi_debs/
+
+# Re-package the firmware zip — it now includes deps/ and (if
+# present) ros2_install/:
+firmware/raspberrypi/scripts/package.sh
+```
+
+The resulting `firmware/raspberrypi/dist/saint_firmware_raspberrypi_*.zip`
+is offline-capable: ship it to the Pi over USB, scp, the OTA flow,
+or whatever, and `sudo ./install.sh` works without internet.
+
+### 3.2. Run the installer
+
+```bash
+# On the Pi, after extracting the zip:
+cd saint_firmware_raspberrypi_<version>/scripts
 sudo ./install.sh
 ```
 
 The script:
 
 1. Verifies it's running on a Pi (warns otherwise but continues).
-2. `apt install`s system dependencies: `python3-pip python3-venv
-   python3-gpiod libgpiod2 vlc-bin libvlc-dev python3-vlc alsa-utils`.
-3. Finds ROS 2 under `/opt/ros/jazzy` or `/opt/ros/humble`.
-4. `pip install`s `pyyaml gpiod` (uses `--break-system-packages`
-   per Bookworm's PEP 668 stance).
-5. Copies `saint_node/` to `/opt/saint-node/` and symlinks it into
+2. If `../deps/` is bundled, wires it up as a local file:// apt
+   source (cleaned up on exit). Otherwise uses online apt.
+3. `apt install`s system dependencies — gpiod stack, vlc stack,
+   alsa-utils. Package names are picked per Debian release
+   (`libgpiod3` on Trixie, `libgpiod2` on Bookworm).
+4. Installs ROS 2 Kilted:
+   - If `../ros2_install/` is bundled, rsyncs it to
+     `/opt/ros/kilted/install/` (matches the server installer's
+     layout — `setup.bash` has absolute build-time paths embedded).
+   - Otherwise `apt install ros-kilted-ros-base` from the local
+     deps repo (if bundled) or from `packages.ros.org` (online).
+5. `pip install`s `pyyaml gpiod` (uses `--break-system-packages`
+   per the Debian PEP-668 stance).
+6. Copies `saint_node/` to `/opt/saint-node/` and symlinks it into
    Python's site-packages so `python3 -m saint_node.node` works.
-6. Creates:
+7. Creates:
    - `/etc/saint-node/`           — node identity + per-node config
    - `/var/lib/saint-os/audio/`   — audio library folder (drop
      `.wav`/`.mp3`/`.flac` here for the audio_player peripheral)
-7. Installs `saint-node.service` under `/etc/systemd/system/`,
-   substitutes the ROS setup path it found in step 3, and reloads
-   systemd.
-8. Adds a udev rule (`/etc/udev/rules.d/99-saint-gpio.rules`) so the
+8. Renders `saint-node.service` from the `@ROS_DISTRO@`-templated
+   unit file (mirrors `packaging/install.sh`) and reloads systemd.
+9. Adds a udev rule (`/etc/udev/rules.d/99-saint-gpio.rules`) so the
    `gpio` group can drive `gpiochip*`.
 
 ## 4. Start the service

@@ -40,10 +40,13 @@ static maestro_channel_config_t g_channel_configs[MAESTRO_MAX_CHANNELS];
 static const maestro_transport_ops_t* pick_transport(uint8_t mode)
 {
     switch (mode) {
-        case FLASH_MAESTRO_TRANSPORT_USB_HOST:
-            return maestro_get_transport_usb_host();
+        case FLASH_MAESTRO_TRANSPORT_USB_CDC:
+            /* Was USB_HOST in older flash saves — same numeric value. */
+            return maestro_get_transport_usb_cdc();
         case FLASH_MAESTRO_TRANSPORT_UART:
             return maestro_get_transport_uart();
+        case FLASH_MAESTRO_TRANSPORT_USB_VENDOR:
+            return maestro_get_transport_usb_vendor();
         default:
             return NULL;
     }
@@ -97,13 +100,18 @@ static void ensure_state_init(void)
         g_channel_configs[i].acceleration = 0;
         g_channel_configs[i].home_us      = 0;
     }
-    /* Pick a sensible default transport for *this* platform: USB host
-     * if the platform provides it (Teensy), otherwise UART (RP2040).
+    /* Pick a sensible default transport for *this* platform:
+     *   - USB vendor first if available (full feature set incl. EEPROM
+     *     readback) — Teensy with usb_vendor implementation
+     *   - else USB CDC if available — Teensy fallback
+     *   - else UART — RP2040 and any UART-only platform
      * Without this a fresh RP2040 device would save transport_mode=0
-     * (USB host) and then refuse to talk on next boot — get_transport
+     * (USB CDC) and then refuse to talk on next boot — get_transport
      * returns NULL on platforms that can't host USB. */
-    if (maestro_get_transport_usb_host() != NULL) {
-        g_transport_mode = FLASH_MAESTRO_TRANSPORT_USB_HOST;
+    if (maestro_get_transport_usb_vendor() != NULL) {
+        g_transport_mode = FLASH_MAESTRO_TRANSPORT_USB_VENDOR;
+    } else if (maestro_get_transport_usb_cdc() != NULL) {
+        g_transport_mode = FLASH_MAESTRO_TRANSPORT_USB_CDC;
     } else if (maestro_get_transport_uart() != NULL) {
         g_transport_mode = FLASH_MAESTRO_TRANSPORT_UART;
     }
@@ -125,6 +133,12 @@ void maestro_init(void)
     }
 }
 
+/* Forward declaration — definition is below maestro_set_channel_config
+ * because it depends on g_channel_configs which is configured via
+ * set_channel_config. The connect/reconnect hot-plug branches below
+ * call this, so it needs a prototype here. */
+static void maestro_apply_home_positions(void);
+
 void maestro_update(void)
 {
     if (!g_initialized || !g_transport) return;
@@ -136,11 +150,22 @@ void maestro_update(void)
             saint_log_publish("info",
                 "Maestro: device connected via %s", g_transport->name);
             (void)maestro_get_errors();  /* clear stale error flags */
+            /* Send each channel to its configured home position so a
+             * freshly-connected (or re-connected) Maestro lands at
+             * known positions instead of holding whatever it had
+             * last. SaintOS-side home, not the Maestro EEPROM HOME —
+             * see comment on maestro_apply_home_positions. */
+            maestro_apply_home_positions();
         } else if (!now && g_was_connected) {
             saint_log_publish("warn",
                 "Maestro: device disconnected (%s)", g_transport->name);
         }
         g_was_connected = now;
+    } else if (g_transport->is_connected && g_transport->is_connected() && !g_was_connected) {
+        /* UART transport: no hot-plug signal. Apply home once on the
+         * first observed-connected tick after init. */
+        maestro_apply_home_positions();
+        g_was_connected = true;
     }
 }
 
@@ -167,6 +192,23 @@ static bool tx_bytes(const uint8_t* buf, size_t len)
 bool maestro_set_target(uint8_t channel, uint16_t quarter_us)
 {
     if (channel >= MAESTRO_MAX_CHANNELS) return false;
+
+    /* Software-side range clamp: the Maestro firmware also enforces
+     * the EEPROM MIN/MAX for the channel, but we keep our own
+     * per-channel min_pulse_us / max_pulse_us as the source of truth.
+     * Operators set these in the channel-edit modal; they may be
+     * tighter than the Maestro's EEPROM range (e.g. to keep a servo
+     * away from a mechanical end stop). Clamp here so a stale
+     * animation input or a runaway operator slider can't drive the
+     * channel past its safe range. quarter_us is in 0.25-us units;
+     * configs are in µs, so multiply by 4 to compare. */
+    const maestro_channel_config_t* cfg = &g_channel_configs[channel];
+    uint16_t min_qus = (uint16_t)(cfg->min_pulse_us * 4u);
+    uint16_t max_qus = (uint16_t)(cfg->max_pulse_us * 4u);
+    if (min_qus > max_qus) { uint16_t t = min_qus; min_qus = max_qus; max_qus = t; }
+    if (quarter_us < min_qus) quarter_us = min_qus;
+    if (quarter_us > max_qus) quarter_us = max_qus;
+
     uint8_t cmd[4] = {
         0x84,
         channel,
@@ -237,13 +279,108 @@ void maestro_set_channel_config(uint8_t channel,
     if (channel >= MAESTRO_MAX_CHANNELS || !config) return;
     g_channel_configs[channel] = *config;
 
-    /* Push speed/accel limits to the device whenever they're non-zero
-     * AND the link is up. Pulse-range fields are software-only (we
-     * only multiply them into set_target on output). */
-    if (maestro_is_connected()) {
-        if (config->speed > 0)        maestro_set_speed(channel, config->speed);
-        if (config->acceleration > 0) maestro_set_acceleration(channel, config->acceleration);
+    /* Speed/accel are stored as the channel's *default* (used on Pose
+     * transitions) — they're NOT pushed to the device on config save.
+     * Animation/control input snaps to the target value at full speed,
+     * so we want the device's runtime limits to stay at 0 (unlimited)
+     * unless a Pose deliberately sets them.
+     *
+     * TODO(Pose-editor): when the Pose system is built, a Pose-play
+     * path should call maestro_set_speed(channel, config->speed) and
+     * maestro_set_acceleration(channel, config->acceleration) BEFORE
+     * its maestro_set_target, then reset them to 0 after the transition
+     * settles (or before the next animation input frame). See task #14
+     * in docs/MAESTRO_BRINGUP.md. */
+}
+
+/* Send each configured channel to its home_us position via Set Target.
+ * Called from maestro_update on the disconnected → connected
+ * transition so a freshly-connected Maestro lands at known positions
+ * instead of wherever it last was. home_us is the SaintOS-side home
+ * (not the Maestro EEPROM HomeMode/HOME) — the EEPROM HomeMode is
+ * still required to be `Goto` with a non-zero HOME for PWM to come
+ * up at all (see docs/MAESTRO_BRINGUP.md root cause). */
+static void maestro_apply_home_positions(void)
+{
+    for (uint8_t ch = 0; ch < MAESTRO_MAX_CHANNELS; ch++) {
+        uint16_t home_us = g_channel_configs[ch].home_us;
+        if (home_us == 0) continue;  /* 0 = "unconfigured", skip */
+        (void)maestro_set_target(ch, (uint16_t)(home_us * 4u));
     }
+}
+
+/* Pololu uscParameter IDs from
+ * https://github.com/pololu/pololu-usb-sdk Maestro/Usc/Usc_protocol.cs.
+ * SERVO0_HOME = 30; each channel adds 9 to the base param ID.
+ *   offset 0..1 = HOME       (2 bytes, qus)
+ *   offset 2    = MIN        (1 byte; stored ÷64, so multiply by 64 for qus)
+ *   offset 3    = MAX        (1 byte; same scaling as MIN)
+ *   offset 4..5 = NEUTRAL    (2 bytes, qus)
+ *   offset 6    = RANGE      (1 byte; stored ÷127)
+ *   offset 7    = SPEED      (1 byte exponential — see Pololu's
+ *                             normalSpeedToExponentialSpeed; for EEPROM
+ *                             readback we keep the raw byte and trust
+ *                             the operator to interpret)
+ *   offset 8    = ACCELERATION (1 byte) */
+#define MAESTRO_PARAM_SERVO0_BASE   30
+#define MAESTRO_PARAM_PER_CHANNEL    9
+
+bool maestro_read_channel_config_from_device(uint8_t channel,
+                                              maestro_channel_config_t* out)
+{
+    if (channel >= MAESTRO_MAX_CHANNELS || !out) return false;
+    if (!g_transport || !g_transport->ctrl_xfer) {
+        /* Transport doesn't support vendor control transfers (UART /
+         * USB CDC). Caller falls back to RAM defaults. */
+        return false;
+    }
+    if (!g_transport->is_connected || !g_transport->is_connected()) {
+        return false;
+    }
+
+    const uint16_t base = MAESTRO_PARAM_SERVO0_BASE + channel * MAESTRO_PARAM_PER_CHANNEL;
+    uint8_t buf[2];
+    int n;
+
+    /* HOME — 2-byte read at offset 0/1 */
+    n = g_transport->ctrl_xfer(0xC0, 0x81, 0, base + 0, buf, 2, 500);
+    if (n != 2) return false;
+    uint16_t home_qus = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+
+    /* MIN — 1-byte, stored ÷64 (so byte × 64 = qus, × 16 = µs) */
+    n = g_transport->ctrl_xfer(0xC0, 0x81, 0, base + 2, buf, 1, 500);
+    if (n != 1) return false;
+    uint8_t min_byte = buf[0];
+
+    /* MAX */
+    n = g_transport->ctrl_xfer(0xC0, 0x81, 0, base + 3, buf, 1, 500);
+    if (n != 1) return false;
+    uint8_t max_byte = buf[0];
+
+    /* NEUTRAL — 2 bytes at offset 4/5 */
+    n = g_transport->ctrl_xfer(0xC0, 0x81, 0, base + 4, buf, 2, 500);
+    if (n != 2) return false;
+    uint16_t neutral_qus = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+
+    /* SPEED — 1 byte at offset 7. EEPROM stores in Pololu exponential
+     * format; we keep the raw value, callers convert as needed. */
+    n = g_transport->ctrl_xfer(0xC0, 0x81, 0, base + 7, buf, 1, 500);
+    if (n != 1) return false;
+    uint8_t speed_byte = buf[0];
+
+    /* ACCELERATION — 1 byte at offset 8 */
+    n = g_transport->ctrl_xfer(0xC0, 0x81, 0, base + 8, buf, 1, 500);
+    if (n != 1) return false;
+    uint8_t accel_byte = buf[0];
+
+    /* qus → µs: divide by 4. MIN/MAX bytes × 64 = qus → × 16 = µs. */
+    out->home_us      = (uint16_t)(home_qus / 4);
+    out->min_pulse_us = (uint16_t)(min_byte * 16);
+    out->max_pulse_us = (uint16_t)(max_byte * 16);
+    out->neutral_us   = (uint16_t)(neutral_qus / 4);
+    out->speed        = (uint16_t)speed_byte;
+    out->acceleration = (uint16_t)accel_byte;
+    return true;
 }
 
 const maestro_channel_config_t* maestro_get_channel_config(uint8_t channel)
@@ -386,9 +523,84 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
     MAESTRO_PARSE_U16("home_us",      home);
     #undef MAESTRO_PARSE_U16
 
-    /* Optional "transport":"usb_host"|"uart" — lets the dashboard pick
-     * the mode at config time. Falls back to whatever ensure_state_init
-     * defaulted to for this platform. */
+    /* Per-channel override: walk the "channels" array (if present)
+     * and find the entry matching THIS channel's index. Each channel
+     * has its own min/max/neutral/home/speed/acceleration that
+     * overrides the peripheral-level defaults parsed above.
+     *
+     * parse_json_params is called once per channel by
+     * apply_one_peripheral with the same peripheral-object JSON range
+     * but a different `config` (pin_config_t.gpio is set to
+     * virtual_gpio_base + channel). We recover the channel index from
+     * the gpio so we know which array entry to look at.
+     *
+     * Schema mirrors maestro_channel_config_t — see
+     * server/saint_server/peripheral_model.py
+     * _maestro_default_channel. */
+    if (config->gpio >= MAESTRO_VIRTUAL_GPIO_BASE
+        && config->gpio < (MAESTRO_VIRTUAL_GPIO_BASE + MAESTRO_MAX_CHANNELS)) {
+        uint8_t channel = (uint8_t)(config->gpio - MAESTRO_VIRTUAL_GPIO_BASE);
+        const char* channels_key = strstr(json_start, "\"channels\"");
+        if (channels_key && channels_key < json_end) {
+            const char* arr_open = strchr(channels_key, '[');
+            if (arr_open && arr_open < json_end) {
+                /* Scan for the channel-th sibling object inside this
+                 * array. Track brace depth so nested objects don't
+                 * inflate the index. depth==1 means we're directly
+                 * inside the channels array; depth>1 means we're inside
+                 * one of its entry objects. */
+                int idx = 0;
+                int depth = 0;
+                const char* obj_s = NULL;
+                const char* obj_e = NULL;
+                for (const char* q = arr_open + 1; q < json_end; q++) {
+                    if (*q == '{') {
+                        if (depth == 0 && idx == channel) obj_s = q;
+                        depth++;
+                    } else if (*q == '}') {
+                        depth--;
+                        if (depth == 0) {
+                            if (idx == channel) { obj_e = q + 1; break; }
+                            idx++;
+                        }
+                    } else if (*q == ']' && depth == 0) {
+                        break;  /* end of channels array */
+                    }
+                }
+                if (obj_s && obj_e) {
+                    /* Same lookups as the peripheral-level pass but
+                     * scoped to this channel's object. Each found
+                     * key wins over the peripheral default. */
+                    #define MAESTRO_PARSE_CH_U16(key, into)                       \
+                        do {                                                       \
+                            const char* k = strstr(obj_s, "\"" key "\"");          \
+                            if (k && k < obj_e) {                                  \
+                                k = strchr(k, ':');                                \
+                                if (k && k < obj_e) {                              \
+                                    k++; while (*k == ' ') k++;                    \
+                                    into = (uint16_t)atoi(k);                      \
+                                }                                                  \
+                            }                                                      \
+                        } while (0)
+                    MAESTRO_PARSE_CH_U16("min_pulse_us", min_p);
+                    MAESTRO_PARSE_CH_U16("max_pulse_us", max_p);
+                    MAESTRO_PARSE_CH_U16("neutral_us",   neut);
+                    MAESTRO_PARSE_CH_U16("speed",        spd);
+                    MAESTRO_PARSE_CH_U16("acceleration", acc);
+                    MAESTRO_PARSE_CH_U16("home_us",      home);
+                    #undef MAESTRO_PARSE_CH_U16
+                }
+            }
+        }
+    }
+
+    /* Optional "transport":"uart"|"usb_cdc"|"usb_vendor"|"usb_host" —
+     * lets the dashboard pick the mode at config time. Falls back to
+     * whatever ensure_state_init defaulted to for this platform.
+     * "usb_host" is the legacy string (= "usb_cdc"); bare "usb" also
+     * maps to CDC for forward compat with older dashboards that
+     * shipped only the umbrella name. Match longest prefix first so
+     * "usb_vendor" doesn't get caught by the "usb" suffix. */
     p = strstr(json_start, "\"transport\"");
     if (p && p < json_end) {
         p = strchr(p, ':');
@@ -397,9 +609,12 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
             while (*p == ' ' || *p == '"') p++;
             if (strncmp(p, "uart", 4) == 0) {
                 g_transport_mode = FLASH_MAESTRO_TRANSPORT_UART;
-            } else if (strncmp(p, "usb_host", 8) == 0 ||
-                       strncmp(p, "usb", 3)      == 0) {
-                g_transport_mode = FLASH_MAESTRO_TRANSPORT_USB_HOST;
+            } else if (strncmp(p, "usb_vendor", 10) == 0) {
+                g_transport_mode = FLASH_MAESTRO_TRANSPORT_USB_VENDOR;
+            } else if (strncmp(p, "usb_cdc",  7) == 0 ||
+                       strncmp(p, "usb_host", 8) == 0 ||
+                       strncmp(p, "usb",      3) == 0) {
+                g_transport_mode = FLASH_MAESTRO_TRANSPORT_USB_CDC;
             }
         }
     }
@@ -462,17 +677,18 @@ static bool drv_load(const void* storage)
 
     /* Detect "no Maestro ever saved on this node." drv_save always
      * writes channel_count = MAESTRO_MAX_CHANNELS and transport_mode in
-     * [0, 1]; a saved record never has channel_count == 0 or 0xFF and
-     * never has transport_mode > FLASH_MAESTRO_TRANSPORT_UART. Reading
-     * any of those means the maestro_config bytes are either zero-
-     * initialized (never written) or erased flash (0xFF) — typical when
-     * the operator has no Maestro hardware on this node. Bail before
-     * we try to bind a transport, which would otherwise log a spurious
-     * "no transport for mode=255" error on every boot. */
+     * [0, 2]; a saved record never has channel_count == 0 or 0xFF and
+     * never has transport_mode > FLASH_MAESTRO_TRANSPORT_USB_VENDOR.
+     * Reading any of those means the maestro_config bytes are either
+     * zero-initialized (never written) or erased flash (0xFF) —
+     * typical when the operator has no Maestro hardware on this
+     * node. Bail before we try to bind a transport, which would
+     * otherwise log a spurious "no transport for mode=255" error on
+     * every boot. */
     const uint8_t saved_cc = s->maestro_config.channel_count;
     const uint8_t saved_tm = s->maestro_config.transport_mode;
     if (saved_cc == 0 || saved_cc == 0xFF
-        || saved_tm > FLASH_MAESTRO_TRANSPORT_UART) {
+        || saved_tm > FLASH_MAESTRO_TRANSPORT_USB_VENDOR) {
         return true;
     }
 

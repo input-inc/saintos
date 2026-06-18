@@ -1069,9 +1069,15 @@ class SaintServerNode(Node):
             import json
             data = json.loads(msg.data)
             pins_data = data.get('pins', [])
+            # Peripheral-first state path (transitional — see
+            # docs/PERIPHERAL_FIRST_MIGRATION.md). Drivers that have
+            # migrated emit channel records here as
+            # [{peripheral_id, channel_id, value}, ...]; unmigrated
+            # drivers send nothing here and still publish via pins[].
+            channels_data = data.get('channels', [])
 
             # Update state manager
-            self.state_manager.update_pin_actual(node_id, pins_data)
+            self.state_manager.update_pin_actual(node_id, pins_data, channels_data)
 
             # Broadcast to WebSocket clients
             self._broadcast_pin_state(node_id)

@@ -67,15 +67,18 @@ int main(void)
 {
     printf("test_maestro_driver (RP2040 UART transport smoke)\n");
 
-    /* The transport-lookup contract — these two function names are
-     * what shared/src/maestro_driver.c::pick_transport calls. A bad
-     * link would leave one or both unresolved; a returns-the-wrong-
-     * thing implementation would silently route bytes nowhere. */
+    /* The transport-lookup contract — these function names are what
+     * shared/src/maestro_driver.c::pick_transport calls. A bad link
+     * would leave one or more unresolved; a returns-the-wrong-thing
+     * implementation would silently route bytes nowhere. */
     const maestro_transport_ops_t* uart = maestro_get_transport_uart();
     EXPECT(uart != NULL, "maestro_get_transport_uart != NULL");
 
-    const maestro_transport_ops_t* usb  = maestro_get_transport_usb_host();
-    EXPECT(usb == NULL,  "maestro_get_transport_usb_host == NULL (RP2040 cannot host USB)");
+    /* RP2040 has no USB host controller, so both CDC and vendor (and
+     * the legacy usb_host alias) must return NULL. */
+    EXPECT(maestro_get_transport_usb_cdc()    == NULL, "usb_cdc == NULL (RP2040 cannot host USB)");
+    EXPECT(maestro_get_transport_usb_vendor() == NULL, "usb_vendor == NULL (RP2040 cannot host USB)");
+    EXPECT(maestro_get_transport_usb_host()   == NULL, "usb_host alias == NULL (RP2040)");
 
     if (!uart) {
         printf("\ntest_maestro_driver: %d failure(s) (uart transport missing)\n",

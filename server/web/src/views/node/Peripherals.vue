@@ -11,6 +11,16 @@ import ServoExtentsControl from '@/components/peripherals/ServoExtentsControl.vu
 // independent number inputs.
 const SERVO_EXTENT_PARAM_IDS = new Set(['start_us', 'end_us', 'center_us', 'home_us'])
 
+// Maestro: peripheral-level params that act as fallback defaults when
+// a per-channel value isn't set. The channel-edit modal exposes these
+// fields per-channel; the operator rarely needs to touch the
+// instance-level defaults, so hide them in a collapsible "Advanced"
+// section to declutter the main edit modal. See task #12 / Phase 1
+// in docs/MAESTRO_BRINGUP.md.
+const MAESTRO_ADVANCED_PARAM_IDS = new Set([
+  'min_pulse_us', 'max_pulse_us', 'idle_value', 'speed_limit', 'accel_limit',
+])
+
 const props = defineProps({
   nodeId: { type: String, required: true },
   node:   { type: Object, default: null },
@@ -33,6 +43,37 @@ const modalLabel = ref('')
 const modalPins = ref({})             // {gpio:N} | {uart_tx,uart_rx}
 const modalParams = ref({})           // { paramId: value }
 const modalError = ref('')
+
+// Channel-edit modal (separate from the peripheral edit modal so the
+// operator can iterate on a single channel without re-opening the
+// parent peripheral modal). Only used by Maestro today; other
+// peripheral types' channels are not per-channel-configurable.
+//
+// Save flow: the channel draft is patched into the peripheral's
+// `params.channels[idx]` and the whole peripheral is re-saved via
+// the existing `save_node_peripheral` WS path — no new server
+// endpoint. The server's maestro_normalize_channels then sanitizes
+// the incoming entry (clamp min/max, snap home into range, etc.)
+// before persisting.
+const channelModalOpen = ref(false)
+const channelModalPeripheralId = ref(null)
+const channelModalIdx = ref(0)
+const channelModalDraft = ref({})  // { label, min_us, max_us, center_us, home_us, default_speed, default_accel }
+const channelModalError = ref('')
+
+// Whether the peripheral edit modal's "Advanced" section is expanded.
+// Reset to closed on each modal open. Only meaningful for types that
+// declare advanced params (Maestro today).
+const advancedOpen = ref(false)
+
+// Predicate: is this param part of the type's Advanced (collapsible)
+// section, or the main always-visible block? Maestro's
+// peripheral-level pulse/speed defaults are advanced. Other types
+// have no advanced params today — predicate returns false for them.
+function paramAdvanced (typeId, paramId) {
+  if (typeId === 'maestro') return MAESTRO_ADVANCED_PARAM_IDS.has(paramId)
+  return false
+}
 
 async function loadAll () {
   try {
@@ -147,6 +188,7 @@ function openAdd () {
   modalPins.value = {}
   modalParams.value = {}
   modalError.value = ''
+  advancedOpen.value = false
   applyDefaults()
   modalOpen.value = true
 }
@@ -158,6 +200,7 @@ function openEdit (p) {
   modalPins.value = { ...p.pins }
   modalParams.value = { ...p.params }
   modalError.value = ''
+  advancedOpen.value = false
   modalOpen.value = true
 }
 function applyDefaults () {
@@ -370,6 +413,101 @@ function visibleChannelsOf (p) {
   return all
 }
 
+// True if a channel chip should be clickable to open the channel-edit
+// modal. Only Maestro channels are per-channel configurable today.
+function channelEditable (peripheral) {
+  return peripheral?.type === 'maestro'
+}
+
+// The label to display on a channel chip. For Maestro, prefer the
+// operator-set label from params.channels[idx].label; otherwise fall
+// back to the catalog channel's id ("ch0", "ch1", ...).
+function channelDisplayLabel (peripheral, channelIdx, catalogChannel) {
+  if (peripheral.type === 'maestro') {
+    const ch = peripheral.params?.channels?.[channelIdx]
+    const label = ch?.label
+    if (label && String(label).trim().length) return label
+  }
+  return catalogChannel.id
+}
+
+function openChannelEdit (peripheral, channelIdx) {
+  if (!channelEditable(peripheral)) return
+  const channels = peripheral.params?.channels || []
+  const existing = channels[channelIdx] || {}
+  // Default any missing fields from the peripheral-level Advanced
+  // params (or hard-coded fallbacks). The server normalizer would
+  // populate these anyway on next save, but pre-filling here means
+  // the modal opens with the same values it'll save with. Field names
+  // match firmware-side maestro_channel_config_t — see comment in
+  // peripheral_model._MAESTRO_CHANNEL_KEYS.
+  const minPulseUs = Number(existing.min_pulse_us ?? peripheral.params?.min_pulse_us ?? 1000)
+  const maxPulseUs = Number(existing.max_pulse_us ?? peripheral.params?.max_pulse_us ?? 2000)
+  const neutralUs  = Number(existing.neutral_us   ?? Math.floor((minPulseUs + maxPulseUs) / 2))
+  const homeUs     = Number(existing.home_us      ?? neutralUs)
+  channelModalDraft.value = {
+    label:        existing.label ?? `Ch ${channelIdx}`,
+    min_pulse_us: minPulseUs,
+    max_pulse_us: maxPulseUs,
+    neutral_us:   neutralUs,
+    home_us:      homeUs,
+    speed:        Number(existing.speed ?? 0),
+    acceleration: Number(existing.acceleration ?? 0),
+  }
+  channelModalPeripheralId.value = peripheral.id
+  channelModalIdx.value = channelIdx
+  channelModalError.value = ''
+  channelModalOpen.value = true
+}
+
+async function saveChannelEdit () {
+  channelModalError.value = ''
+  const peripheral = peripherals.value.find(p => p.id === channelModalPeripheralId.value)
+  if (!peripheral) {
+    channelModalError.value = 'Peripheral not found'
+    return
+  }
+  // Deep-clone the channels array so the patched copy is what's
+  // sent — Vue's reactivity would otherwise mutate the local
+  // peripheral view before the server confirms.
+  const channelCount = Number(peripheral.params?.channel_count) || 6
+  const channels = []
+  for (let i = 0; i < channelCount; i++) {
+    channels.push({ ...(peripheral.params?.channels?.[i] || {}) })
+  }
+  // Coerce numerics — input fields hand back strings.
+  channels[channelModalIdx.value] = {
+    label:        String(channelModalDraft.value.label ?? '').slice(0, 32) || `Ch ${channelModalIdx.value}`,
+    min_pulse_us: Math.max(64, Math.min(3200, Number(channelModalDraft.value.min_pulse_us) || 1000)),
+    max_pulse_us: Math.max(64, Math.min(3200, Number(channelModalDraft.value.max_pulse_us) || 2000)),
+    neutral_us:   Number(channelModalDraft.value.neutral_us) || 1500,
+    home_us:      Number(channelModalDraft.value.home_us)    || 1500,
+    speed:        Math.max(0, Math.min(65535, Number(channelModalDraft.value.speed) || 0)),
+    acceleration: Math.max(0, Math.min(255,   Number(channelModalDraft.value.acceleration) || 0)),
+  }
+  const updated = {
+    id:    peripheral.id,
+    type:  peripheral.type,
+    label: peripheral.label,
+    pins:  { ...peripheral.pins },
+    params: { ...peripheral.params, channels },
+  }
+  try {
+    const r = await ws.management('save_node_peripheral', {
+      node_id: props.nodeId,
+      peripheral: updated,
+    })
+    if (r?.success === false) {
+      channelModalError.value = r.message || 'Save failed'
+      return
+    }
+    channelModalOpen.value = false
+    loadAll()
+  } catch (e) {
+    channelModalError.value = e.message || String(e)
+  }
+}
+
 function readableChannelsOf (p) {
   return visibleChannelsOf(p).filter(c => c.dir === 'in')
 }
@@ -494,19 +632,25 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
         </div>
 
         <div v-if="visibleChannelsOf(p).length" class="mt-3 pt-3 border-t border-line/50">
-          <div class="text-xs uppercase tracking-wide text-fg-faint mb-1">Channels</div>
+          <div class="flex items-baseline justify-between mb-1">
+            <div class="text-xs uppercase tracking-wide text-fg-faint">Channels</div>
+            <div v-if="channelEditable(p)" class="text-[10px] text-fg-faint italic">Click to edit</div>
+          </div>
           <div class="flex flex-wrap gap-1">
-            <span
-              v-for="ch in visibleChannelsOf(p)"
+            <component
+              v-for="(ch, idx) in visibleChannelsOf(p)"
               :key="ch.id"
+              :is="channelEditable(p) ? 'button' : 'span'"
               :class="['px-2 py-0.5 text-xs rounded font-mono',
                        ch.dir === 'in'
                          ? 'bg-cyan-900/30 text-cyan-300'
-                         : 'bg-amber-900/30 text-amber-300']"
-              :title="`${ch.display} (${ch.dir})`"
+                         : 'bg-amber-900/30 text-amber-300',
+                       channelEditable(p) ? 'hover:bg-amber-900/50 cursor-pointer' : '']"
+              :title="`${ch.display} (${ch.dir})${channelEditable(p) ? ' — click to edit' : ''}`"
+              @click="channelEditable(p) && openChannelEdit(p, idx)"
             >
-              {{ ch.id }} {{ ch.dir === 'in' ? '↑' : '↓' }}
-            </span>
+              {{ channelDisplayLabel(p, idx, ch) }} {{ ch.dir === 'in' ? '↑' : '↓' }}
+            </component>
           </div>
         </div>
       </div>
@@ -557,7 +701,9 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
             />
           </div>
           <template v-for="p in modalType.params" :key="p.id">
-          <div v-if="paramVisible(p) && !(modalType?.id === 'servo' && SERVO_EXTENT_PARAM_IDS.has(p.id))">
+          <div v-if="paramVisible(p)
+                     && !(modalType?.id === 'servo' && SERVO_EXTENT_PARAM_IDS.has(p.id))
+                     && !paramAdvanced(modalType?.id, p.id)">
             <label class="block text-xs text-fg-muted mb-1">{{ p.label }}</label>
             <!-- Constrained-choice params (catalog `choices: [...]`)
                  render as a dropdown regardless of base `type`. Each
@@ -655,6 +801,43 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
             </div>
           </div>
           </template>
+
+          <!-- Advanced settings for Maestro: peripheral-level fallback
+               defaults that new channels inherit when no per-channel
+               override is set. Operators rarely touch these once a
+               peripheral is configured, so they live in a collapsible
+               panel to keep the main modal focused on transport /
+               channel-count. Per-channel values are set by clicking
+               a channel chip in the Channels block on the peripheral
+               card. -->
+          <div v-if="modalType?.params?.some(p => paramAdvanced(modalType?.id, p.id))"
+               class="pt-3 mt-3 border-t border-line">
+            <button type="button"
+                    class="flex items-center gap-1 text-xs uppercase tracking-wide text-fg-muted hover:text-fg"
+                    @click="advancedOpen = !advancedOpen">
+              <span class="material-icons icon-sm">{{ advancedOpen ? 'expand_more' : 'chevron_right' }}</span>
+              Advanced settings
+            </button>
+            <p v-if="!advancedOpen" class="text-[11px] text-fg-faint mt-1">
+              Peripheral-level defaults — new channels inherit these. Click a channel chip on the card to edit per-channel values.
+            </p>
+            <div v-if="advancedOpen" class="space-y-3 mt-3">
+              <template v-for="p in modalType.params" :key="`adv-${p.id}`">
+                <div v-if="paramVisible(p) && paramAdvanced(modalType?.id, p.id)">
+                  <label class="block text-xs text-fg-muted mb-1">{{ p.label }}</label>
+                  <input
+                    type="number"
+                    :step="p.type === 'int' ? '1' : '0.01'"
+                    :min="p.min" :max="p.max"
+                    :value="modalParams[p.id]"
+                    @input="(e) => modalParams[p.id] = (p.type === 'int' ? parseInt : parseFloat)(e.target.value) || 0"
+                    class="input-field w-full"
+                  />
+                  <p v-if="p.help" class="text-[11px] text-fg-faint mt-1 leading-snug">{{ p.help }}</p>
+                </div>
+              </template>
+            </div>
+          </div>
         </div>
 
         <!-- Pin selectors live below the params block — Transport sits
@@ -706,6 +889,69 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
       <template #actions>
         <button class="btn-secondary" @click="modalOpen = false">Cancel</button>
         <button class="btn-primary" @click="saveModal">{{ modalMode === 'add' ? 'Add' : 'Save' }}</button>
+      </template>
+    </AppModal>
+
+    <!-- Channel-edit modal: small, focused dialog for one Maestro channel.
+         Reuses ServoExtentsControl for the {min,max,center,home} radial
+         picker (mapping min_us/max_us → start_us/end_us in the binding
+         so the underlying control stays generic). Default speed/accel
+         are number inputs; the runtime-apply hook (apply on Pose
+         transitions, zero on animation input) is deferred to the Pose
+         editor work — see TODO in maestro_driver. -->
+    <AppModal v-if="channelModalOpen" title="Edit channel" @close="channelModalOpen = false">
+      <div v-if="channelModalError" class="mb-3 p-2 rounded bg-red-500/20 border border-red-500/40 text-sm text-red-300">{{ channelModalError }}</div>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-fg mb-1">Label</label>
+          <input v-model="channelModalDraft.label" type="text" maxlength="32" class="input-field w-full" placeholder="e.g. Pan, Tilt, Left Arm" />
+        </div>
+
+        <div class="space-y-1">
+          <label class="block text-xs text-fg-muted">Extents</label>
+          <ServoExtentsControl
+            :model-value="{
+              start_us:  channelModalDraft.min_pulse_us,
+              end_us:    channelModalDraft.max_pulse_us,
+              center_us: channelModalDraft.neutral_us,
+              home_us:   channelModalDraft.home_us,
+            }"
+            @update:model-value="(v) => {
+              channelModalDraft.min_pulse_us = v.start_us
+              channelModalDraft.max_pulse_us = v.end_us
+              channelModalDraft.neutral_us   = v.center_us
+              channelModalDraft.home_us      = v.home_us
+            }"
+          />
+          <p class="text-xs text-fg-faint">
+            Min/max are the pulse-width limits this channel can be commanded to.
+            Neutral is the position commanded at the center of the input range.
+            Home is the position sent on driver init (when the Maestro first connects).
+          </p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3 pt-2 border-t border-line">
+          <div>
+            <label class="block text-xs text-fg-muted mb-1">Default speed</label>
+            <input v-model.number="channelModalDraft.speed" type="number" min="0" max="65535" class="input-field w-full" />
+            <p class="text-xs text-fg-faint mt-1">0 = unlimited. Quarter-µs per 10 ms (Maestro native).</p>
+          </div>
+          <div>
+            <label class="block text-xs text-fg-muted mb-1">Default acceleration</label>
+            <input v-model.number="channelModalDraft.acceleration" type="number" min="0" max="255" class="input-field w-full" />
+            <p class="text-xs text-fg-faint mt-1">0 = unlimited. Maestro native units.</p>
+          </div>
+          <div class="col-span-2 text-xs text-fg-faint italic">
+            Default speed/accel are applied on Pose transitions only. Real-time
+            animation/control input snaps to the target value at full speed.
+          </div>
+        </div>
+      </div>
+
+      <template #actions>
+        <button class="btn-secondary" @click="channelModalOpen = false">Cancel</button>
+        <button class="btn-primary" @click="saveChannelEdit">Save</button>
       </template>
     </AppModal>
   </div>
