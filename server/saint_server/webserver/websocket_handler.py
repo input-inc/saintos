@@ -153,8 +153,10 @@ class WebSocketHandler:
         # — empty string if unknown. Firmware uses it to route writes for
         # peripherals that don't live in pin_config (the built-in status
         # NeoPixel is the canonical case).
-        self._send_channel_callback: Optional[
-            Callable[[str, str, str, float, str], None]] = None
+        # (node_id, peripheral_id, channel_id, value, peripheral_type,
+        #  raw_us=None) — raw_us carries the live extent-dial preview's
+        #  absolute microseconds (Maestro), independent of `value`.
+        self._send_channel_callback: Optional[Callable[..., None]] = None
 
         # Callback for sending out-of-band peripheral commands. These
         # carry structured args (filenames, text blobs) that don't fit
@@ -254,9 +256,12 @@ class WebSocketHandler:
         self._send_control_callback = callback
 
     def set_send_channel_callback(
-            self, callback: Callable[[str, str, str, float, str], None]):
+            self, callback: Callable[..., None]):
         """Set callback for channel-addressed control.
-        Takes (node_id, peripheral_id, channel_id, value, peripheral_type)."""
+        Takes (node_id, peripheral_id, channel_id, value, peripheral_type,
+        raw_us=None). raw_us is the live extent-dial preview's absolute
+        microseconds (Maestro); when set, the firmware jogs to that pulse
+        and ignores value."""
         self._send_channel_callback = callback
 
     def set_send_peripheral_command_callback(
@@ -953,11 +958,23 @@ class WebSocketHandler:
             if not node_id:
                 return {"status": "error", "message": "Missing node_id"}
 
+            # Log at the WS layer BEFORE we invoke the callback, then
+            # again per-node via state_manager.log_node_event so the
+            # event appears in the node's own activity panel. This
+            # narrates the first step of the chain (UI → WS) so
+            # operators chasing a non-working restart can see whether
+            # the click even reached the server.
+            self.log('info', f'restart_node received from client {client.id} for node {node_id}')
+            self.state_manager.log_node_event(
+                node_id, 'Restart command received from UI', 'info')
+
             if self._restart_node_callback:
                 self._restart_node_callback(node_id)
                 await self.broadcast_activity(f'Restart command sent to node {node_id}', 'info')
                 return {"status": "ok", "data": {"message": "Restart command sent"}}
             else:
+                self.log('error',
+                    'restart_node: callback not configured — server-side ROS bridge not initialised?')
                 return {"status": "error", "message": "Restart callback not configured"}
 
         elif action == 'identify_node':
@@ -1887,15 +1904,28 @@ class WebSocketHandler:
             peripheral_id = params.get('peripheral_id')
             channel_id = params.get('channel_id')
             value = params.get('value')
+            # Optional absolute-µs jog for the live extent-dial preview
+            # (Maestro). When present the firmware drives straight to
+            # this pulse, ignoring `value`; `value` then becomes optional.
+            raw_us = params.get('us')
 
-            if not node_id or not peripheral_id or not channel_id or value is None:
+            if not node_id or not peripheral_id or not channel_id \
+                    or (value is None and raw_us is None):
                 return {"status": "error",
-                        "message": "Missing node_id, peripheral_id, channel_id, or value"}
+                        "message": "Missing node_id, peripheral_id, channel_id, or value/us"}
 
-            try:
-                value = float(value)
-            except (ValueError, TypeError):
-                return {"status": "error", "message": "Invalid value type"}
+            if value is not None:
+                try:
+                    value = float(value)
+                except (ValueError, TypeError):
+                    return {"status": "error", "message": "Invalid value type"}
+            if raw_us is not None:
+                try:
+                    raw_us = int(raw_us)
+                except (ValueError, TypeError):
+                    return {"status": "error", "message": "Invalid us type"}
+                # Server-side absolute safety clamp (firmware clamps too).
+                raw_us = max(250, min(2750, raw_us))
 
             target = self.state_manager.lookup_channel(
                 node_id, peripheral_id, channel_id)
@@ -1906,14 +1936,17 @@ class WebSocketHandler:
                 return {"status": "error",
                         "message": f"Channel {peripheral_id}/{channel_id} is not writable"}
 
+            detail = f'{raw_us}us' if raw_us is not None else f'{value:.3f}'
             throttle_key = (node_id, peripheral_id, channel_id)
             now = time.time() * 1000
             last_send = self._control_throttle.get(throttle_key, 0)
-            is_neutral = is_neutral_value(value)
+            # A preview jog is never "neutral" — it should rate-limit like
+            # any continuous drag, not bypass the throttle.
+            is_neutral = raw_us is None and is_neutral_value(value)
 
             if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
                 self.log('debug', f'[Control] THROTTLED {node_id} '
-                                  f'{peripheral_id}/{channel_id}: {value:.3f}')
+                                  f'{peripheral_id}/{channel_id}: {detail}')
                 return {"status": "ok", "data": {"throttled": True}}
 
             if self._send_channel_callback:
@@ -1923,17 +1956,18 @@ class WebSocketHandler:
                 # operator-chosen instance id.
                 peripheral_type = target.get("peripheral_type", "")
                 self._send_channel_callback(node_id, peripheral_id, channel_id,
-                                            value, peripheral_type)
+                                            value if value is not None else 0.0,
+                                            peripheral_type, raw_us=raw_us)
                 self._control_throttle[throttle_key] = now
                 bypass_note = ' [STOP]' if is_neutral else ''
                 self.log('info', f'[Control] SENT{bypass_note} {node_id} '
-                                 f'{peripheral_id}/{channel_id}: {value:.3f}')
+                                 f'{peripheral_id}/{channel_id}: {detail}')
             else:
                 return {"status": "error",
                         "message": "Channel-addressed control not wired to firmware"}
 
             return {"status": "ok",
-                    "data": {"throttled": False, "value": value}}
+                    "data": {"throttled": False, "value": value, "us": raw_us}}
 
         elif action == 'get_runtime_state':
             node_id = params.get('node_id')

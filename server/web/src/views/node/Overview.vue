@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { useNodesStore } from '@/stores/nodes'
 import { useDisplayStore } from '@/stores/display'
 import FirmwareUpdateModal from '@/components/FirmwareUpdateModal.vue'
+import FirmwareUpdateProgress from '@/components/FirmwareUpdateProgress.vue'
 import NodeEditModal from '@/components/NodeEditModal.vue'
 
 const props = defineProps({
@@ -79,6 +80,11 @@ function formatLastSeen (ts) {
             </button>
           </div>
           <span class="text-xs text-fg-faint block">{{ node?.firmware_build ? `Built: ${node.firmware_build}` : '' }}</span>
+          <!-- OTA progress strip — renders only while an update is
+               in flight for this node. Driven by the firmwareUpdates
+               store (subscribes to update_progress/<node_id> on the
+               WS broadcast that bridges the node's ROS publication). -->
+          <FirmwareUpdateProgress :node-id="nodeId" variant="panel" />
         </div>
         <div class="stat-item">
           <span class="stat-label">Bootloader</span>

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useWsStore } from '@/stores/ws'
+import { useFirmwareUpdatesStore } from '@/stores/firmwareUpdates'
 import AppModal from './AppModal.vue'
 
 const props = defineProps({
@@ -11,6 +12,7 @@ const props = defineProps({
 const emit = defineEmits(['close', 'updated'])
 
 const ws = useWsStore()
+const firmwareUpdates = useFirmwareUpdatesStore()
 
 const builds = ref({ simulation: null, hardware: null })
 const loading = ref(true)
@@ -28,8 +30,10 @@ const chip = computed(() => (props.node?.chip_family || '').toLowerCase())
 const hwModel = computed(() => (props.node?.hardware_model || '').toLowerCase())
 const isRpi = computed(() =>
   chip.value.includes('rpi') || chip.value.includes('pi5') ||
+  chip.value.includes('raspberry') ||
   hwModel.value.includes('rpi') || hwModel.value.includes('raspberry')
 )
+const isTeensy = computed(() => chip.value.includes('teensy'))
 const showSim = computed(() => !isRpi.value)
 const showHw  = computed(() => true)
 
@@ -45,9 +49,25 @@ async function load () {
   error.value = ''
   try {
     const r = await ws.management('get_firmware_builds', {})
+    // Route the "hardware" slot to the chip-family-specific build.
+    // The server's get_all_firmware_builds returns every chip's info
+    // in one payload (simulation, hardware [RP2040 .uf2/.bin],
+    // teensy41 [.hex/.bin], raspberrypi [.zip]) — without this
+    // routing, a Pi node was offered the RP2040 hardware build
+    // (e.g. "1.2.0-1781755077") as an "update" because it's what
+    // .hardware always pointed at. The chip-family check here mirrors
+    // what websocket_handler.force_firmware_update does on the server
+    // side so the modal and the actual OTA agree on which build is
+    // being installed.
+    let hardware = r?.hardware || null
+    if (isRpi.value) {
+      hardware = r?.raspberrypi || null
+    } else if (isTeensy.value) {
+      hardware = r?.teensy41 || null
+    }
     builds.value = {
       simulation: r?.simulation || null,
-      hardware:   r?.hardware || null,
+      hardware,
     }
   } catch (e) {
     error.value = e.message || String(e)
@@ -66,6 +86,11 @@ async function send (buildType) {
   sendingType.value = buildType
   error.value = ''
   success.value = ''
+  // Start tracking BEFORE we issue the command so we don't miss the
+  // first progress frame on fast nodes. The store owns the per-node
+  // progress state and survives this modal closing — the operator
+  // sees updates in the node card / overview status card.
+  firmwareUpdates.start(props.nodeId)
   try {
     const r = await ws.management('force_firmware_update', {
       node_id:    props.nodeId,
@@ -74,10 +99,12 @@ async function send (buildType) {
     })
     success.value = r?.message || `Firmware update initiated (${buildType})`
     emit('updated')
-    // Brief confirmation, then auto-close.
+    // Brief confirmation, then auto-close. Progress continues to render
+    // in the node card / overview status card via the store.
     setTimeout(() => emit('close'), 1200)
   } catch (e) {
     error.value = e.message || String(e)
+    firmwareUpdates.cancel(props.nodeId)
   } finally {
     sending.value = false
     sendingType.value = null
@@ -99,7 +126,7 @@ async function send (buildType) {
 
     <div v-if="sending" class="mb-4">
       <div class="flex items-center justify-between text-xs text-fg-muted mb-1">
-        <span>Uploading {{ sendingType }} build…</span>
+        <span>Sending {{ sendingType }} update…</span>
       </div>
       <div class="w-full h-1.5 bg-surface rounded-full overflow-hidden">
         <div class="h-full bg-cyan-500 animate-pulse" style="width: 100%"></div>

@@ -77,7 +77,10 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
     Load server configuration from YAML file.
 
     Args:
-        config_path: Path to config file (default: server_config.yaml in this directory)
+        config_path: Path to config file. If None, resolved via
+            get_config_path() — which honors SAINT_CONFIG_DIR (set by
+            the systemd unit to /etc/saint-os) and falls back to the
+            in-package default for dev builds.
 
     Returns:
         ServerConfig instance
@@ -85,7 +88,27 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
     global _config
 
     if config_path is None:
-        config_path = os.path.join(os.path.dirname(__file__), 'server_config.yaml')
+        config_path = get_config_path()
+
+    # First-run seeding: if SAINT_CONFIG_DIR points at /etc/saint-os
+    # but that file doesn't exist yet (e.g. a fresh install where
+    # packaging/install.sh seeded it but then something deleted it,
+    # or a non-standard install where the seeding step was skipped),
+    # copy the in-package default into place so we have a writable
+    # target for the auto-generated kiosk_token below. Without this,
+    # save_config() would try to write the in-package YAML (read-only
+    # for the saint service user) and the token would never persist.
+    if not os.path.exists(config_path):
+        pkg_default = os.path.join(os.path.dirname(__file__), 'server_config.yaml')
+        if pkg_default != config_path and os.path.exists(pkg_default):
+            try:
+                os.makedirs(os.path.dirname(config_path), exist_ok=True)
+                import shutil as _shutil
+                _shutil.copy2(pkg_default, config_path)
+            except OSError:
+                # Best-effort — load_config below still works with a
+                # missing path (config stays at defaults).
+                pass
 
     config = ServerConfig()
 
@@ -133,15 +156,26 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
     # have a stable shared secret to authenticate with — without
     # forcing the operator to set one by hand. We persist immediately
     # so the next read sees the same value; rotateable later.
+    #
+    # The persist used to silently swallow exceptions. That hid a real
+    # bug: when config_path resolved to the in-package YAML (owned by
+    # root, under /opt/saint-os/install/), the write threw PermissionError
+    # every run, the token never made it to disk, and every restart
+    # rolled a new in-memory token — Pi kiosks could never authenticate
+    # across restarts. With get_config_path() now honoring
+    # SAINT_CONFIG_DIR (/etc/saint-os/), the save should succeed; log
+    # the failure path explicitly so the next time it breaks we see it
+    # in journalctl instead of guessing.
     if config.websocket.kiosk_token is None:
         import secrets
         config.websocket.kiosk_token = secrets.token_urlsafe(32)
         _config = config
-        try:
-            save_config(config)
-        except Exception:
-            # Non-fatal: the token still lives in memory for this run.
-            pass
+        if not save_config(config):
+            import logging as _logging
+            _logging.getLogger('saint_server.config').error(
+                "Auto-generated kiosk_token but FAILED to persist to %s — "
+                "kiosks won't authenticate across server restarts. Check "
+                "write permission on the config directory.", config_path)
 
     _config = config
     return config
@@ -160,7 +194,28 @@ def get_config() -> ServerConfig:
 
 
 def get_config_path() -> str:
-    """Get the path to the config file."""
+    """Get the path to the config file.
+
+    Resolution order:
+
+    1. ``SAINT_CONFIG_DIR`` env var (the systemd unit sets this to
+       /etc/saint-os under a normal install). The file is then
+       ``$SAINT_CONFIG_DIR/server_config.yaml``. This is the writable
+       runtime path operators edit and the place auto-generated values
+       (e.g. kiosk_token) need to land for them to survive a restart.
+    2. The in-package YAML — `os.path.dirname(__file__) + /server_config.yaml`.
+       This is the seed copy that ships in the dist tarball; on a fresh
+       install packaging/install.sh seeds it into /etc/saint-os. It's
+       also what dev / unit-test runs read from (no env var, no
+       /etc/saint-os).
+
+    Previously this always returned (2), which silently broke
+    auto-token persistence under a real install because (2) is
+    read-only after install. Honoring SAINT_CONFIG_DIR fixes that.
+    """
+    config_dir = os.environ.get('SAINT_CONFIG_DIR')
+    if config_dir:
+        return os.path.join(config_dir, 'server_config.yaml')
     return os.path.join(os.path.dirname(__file__), 'server_config.yaml')
 
 
@@ -213,6 +268,11 @@ def save_config(config: Optional[ServerConfig] = None) -> bool:
         data['network']['websocket_port'] = config.network.websocket_port
 
     try:
+        # Make sure the dir exists. /etc/saint-os should always be there
+        # under a normal install (packaging/install.sh creates it) but
+        # not in dev / test runs where get_config_path() picks the
+        # in-package path.
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
         with open(config_path, 'w') as f:
             # Add header comment
             f.write("# SAINT.OS Server Configuration\n")
@@ -221,7 +281,14 @@ def save_config(config: Optional[ServerConfig] = None) -> bool:
             f.write("# Restart the server after making changes.\n\n")
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
         return True
-    except Exception:
+    except OSError as e:
+        # Log the path + errno so an operator chasing "my kiosk_token
+        # isn't persisting" sees the cause instead of a silent return.
+        # OSError covers PermissionError, IsADirectoryError, FileNotFound,
+        # plus the rare disk-full case.
+        import logging as _logging
+        _logging.getLogger('saint_server.config').error(
+            "save_config: failed to write %s: %s", config_path, e)
         return False
 
 

@@ -25,6 +25,20 @@ const statusBadge = computed(() => {
 })
 
 function commit (channelId, value) { emit('commit', { channelId, value }) }
+
+// Show the operator's per-channel name (set in the channel-edit modal,
+// stored in params.channels[idx].label) instead of the generic catalog
+// id. Mirrors channelDisplayLabel in views/node/Peripherals.vue. Falls
+// back to the catalog display/id for channels with no custom label.
+function channelLabel (ch) {
+  const m = /^ch(\d+)$/.exec(ch.id)
+  if (m) {
+    const entry = props.peripheral.params?.channels?.[Number(m[1])]
+    const label = entry?.label
+    if (label && String(label).trim().length) return label
+  }
+  return ch.display || ch.id
+}
 </script>
 
 <template>
@@ -50,7 +64,7 @@ function commit (channelId, value) { emit('commit', { channelId, value }) }
       <template v-for="ch in writable" :key="ch.id">
         <component
           :is="{ slider: ChannelSlider, toggle: ChannelToggle, color: ChannelColor }[specFor(peripheral.type, ch).kind] || 'div'"
-          :label="ch.display || ch.id"
+          :label="channelLabel(ch)"
           :spec="specFor(peripheral.type, ch)"
           :model-value="channelValues[ch.id]"
           @commit="v => commit(ch.id, v)"

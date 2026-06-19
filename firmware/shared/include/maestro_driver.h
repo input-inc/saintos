@@ -30,6 +30,12 @@ extern "C" {
 #define MAESTRO_DEFAULT_MAX_PULSE   2000
 #define MAESTRO_DEFAULT_NEUTRAL     1500
 
+/* Hard absolute safety window for maestro_set_target_preview — wider
+ * than a typical servo's calibrated range (so dial-in can reach the
+ * real limits) but tight enough to protect against a runaway value. */
+#define MAESTRO_PREVIEW_MIN_US      400
+#define MAESTRO_PREVIEW_MAX_US      2600
+
 /* Default UART baud rate when transport_mode == UART. The Maestro
  * auto-detects baud in compact-protocol mode, so any common rate works;
  * 9600 is the factory default and what the Pololu Control Center
@@ -57,11 +63,33 @@ uint8_t maestro_get_channel_count(void);
 /* ── Compact-protocol commands ───────────────────────────────────── */
 
 bool     maestro_set_target(uint8_t channel, uint16_t quarter_us);
+
+/* Drive a channel to an absolute pulse width (microseconds) for the
+ * dashboard's live extent-dial preview. Unlike maestro_set_target this
+ * does NOT apply the per-channel software min/max clamp — the operator
+ * is deliberately exploring pulses outside the (not-yet-saved)
+ * configured range to find the servo's mechanical limits. It clamps
+ * only to a hard absolute safety window (MAESTRO_PREVIEW_MIN/MAX_US) so
+ * a fat-fingered value can't peg a servo far past any plausible travel.
+ * Not persisted and not the runtime control path — purely a "go here so
+ * I can see it" jog. */
+bool     maestro_set_target_preview(uint8_t channel, uint16_t us);
 bool     maestro_set_speed(uint8_t channel, uint16_t speed);
 bool     maestro_set_acceleration(uint8_t channel, uint16_t accel);
 uint16_t maestro_get_position(uint8_t channel);
 uint16_t maestro_get_errors(void);
 void     maestro_go_home(void);
+
+/* Stop any currently running user script on the Maestro. Pololu
+ * Maestros sometimes auto-start a default script on power-on (the
+ * 2-blink amber Status LED is the Pololu-documented indicator); a
+ * running script overrides channel targets, so our SET_TARGET
+ * commands have no visible effect until the script is stopped.
+ * Always called on driver connect — see maestro_apply_home_positions
+ * in shared/src/maestro_driver.c. Implemented as the single-byte
+ * Compact Protocol opcode 0xA4 over the active transport — works
+ * over USB CDC, UART TTL, and (when task #17 lands) USB vendor. */
+bool     maestro_stop_script(void);
 
 /* ── Channel config ──────────────────────────────────────────────── */
 
@@ -91,6 +119,30 @@ const maestro_channel_config_t* maestro_get_channel_config(uint8_t channel);
  * MIN/MAX are stored × 1/64 of qus; we convert to µs in `out`. */
 bool maestro_read_channel_config_from_device(uint8_t channel,
                                               maestro_channel_config_t* out);
+
+/* Provision a channel's Maestro EEPROM to match its SaintOS config via
+ * vendor SET_PARAMETER (0x82): channel Mode = Servo, MIN/MAX, NEUTRAL,
+ * and HomeMode = Goto at home_us. This is the one-time chip setup that
+ * used to require Maestro Control Center — Pololu's MCC writes every
+ * setting through this same vendor request with no separate EEPROM
+ * commit step (verified against pololu-usb-sdk Usc.cs
+ * setRawParameterNoChecks), so the parameters ARE the persistent
+ * config. The byte count is encoded in the high byte of wIndex exactly
+ * as MCC does.
+ *
+ * Only functional on a transport that implements ctrl_xfer (usb_vendor
+ * on Teensy; pyusb on the Pi). Returns the number of EEPROM parameters
+ * actually written (0 if the chip already matches — the writes are
+ * diff-checked to avoid EEPROM wear), or < 0 if the transport can't do
+ * control transfers or isn't connected.
+ *
+ * maestro_provision_all_channels() provisions every channel whose
+ * home_us > 0 (an explicit "enable at startup" intent; channels left
+ * at home_us == 0 are not touched), then issues REINITIALIZE so the
+ * init parameters (channel mode, HOME) take effect without a power
+ * cycle. See docs/MAESTRO_BRINGUP.md. */
+int maestro_provision_channel(uint8_t channel);
+int maestro_provision_all_channels(void);
 
 /* Convert a 0-180° angle to a quarter-µs target for set_target,
  * applying the channel's calibrated min/max pulse range. */

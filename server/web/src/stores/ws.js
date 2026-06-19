@@ -84,11 +84,10 @@ export const useWsStore = defineStore('ws', () => {
   }
 
   function handleReady () {
-    if (hadSession) {
-      console.log('Reconnected after session — reloading for fresh server code.')
-      setTimeout(() => location.reload(), 100)
-      return
-    }
+    // Reload-on-reconnect is handled earlier in the 'connected'
+    // handler (so the user logs into the fresh bundle ONCE, not twice
+    // — see the comment there). By the time handleReady runs in a
+    // post-reload flow, hadSession is already false (fresh module).
     hadSession = true
     emit('ready')
   }
@@ -122,6 +121,29 @@ export const useWsStore = defineStore('ws', () => {
 
     // Server hello — sets serverName / clientId and tells us whether auth is needed.
     if (msg.type === 'connected') {
+      // If we had a working session in this page-load before, this is
+      // a RECONNECT after the WS dropped. Most often that means the
+      // server restarted (install of a new build, manual systemctl
+      // restart, deploy). Reload here so the user logs into the FRESH
+      // JS bundle once — the previous flow reloaded inside
+      // handleReady() AFTER the user had already re-auth'd, which
+      // forced them to type the password a second time on the
+      // reloaded page. Doing it now means:
+      //   - browser fetches the new index.html + asset hashes
+      //   - LoginScreen on the fresh page pre-fills the password
+      //     from localStorage (saint_ws_settings) so it's one click
+      //     to get back in
+      // Note: a transient network blip with no server change still
+      // triggers this reload. It's wasteful but not broken — one
+      // click later they're back in. Adding a server-side version
+      // field to the hello would let us skip the reload when the
+      // build hash hasn't changed; defer that until it actually
+      // bites.
+      if (hadSession) {
+        console.log('Reconnected after session — reloading for fresh server code.')
+        setTimeout(() => location.reload(), 100)
+        return
+      }
       serverName.value   = msg.server_name
       clientId.value     = msg.client_id
       authRequired.value = !!msg.auth_required

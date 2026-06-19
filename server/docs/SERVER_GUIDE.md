@@ -156,7 +156,7 @@ supported node types are:
 |---|---|---|
 | `rp2040` | `saint_node.uf2` (initial flash) and `saint_node_combined.uf2` (initial + OTA bootloader for the first install) | Raspberry Pi Pico W |
 | `teensy41` | `firmware.hex` | Teensy 4.1 |
-| `raspberrypi` | `saint_firmware_raspberrypi_<ver>.zip` | Raspberry Pi 5 acting as a peripheral node (not the server) |
+| `raspberrypi` | `saint_firmware_raspberrypi_<ver>.tar.zst` | Raspberry Pi 3 / 4 / 5 acting as a peripheral node (not the server). Pi OS Bookworm or Trixie. |
 
 The web UI surfaces them on the **Firmware** page with one-click
 download buttons.
@@ -201,14 +201,38 @@ fine.
 5. Plug into the internal Ethernet bus — the node appears in
    **Unadopted Nodes**.
 
-### Bringing up an RPi 5 peripheral node
+### Bringing up a Raspberry Pi peripheral node
 
-For a Pi-5 used as a peripheral (analog heartbeat + audio + display
-sink rather than the server), download
-`saint_firmware_raspberrypi_<ver>.zip`, unzip it on the target Pi, and run
-the install script inside. It registers itself with the upstream
-SAINT.OS server via mDNS. See `firmware/raspberrypi/` for details
-on the script and systemd unit it installs.
+Pi 3 / Pi 4 / Pi 5 nodes run the **saint-node** firmware — a ROS 2
+node that handles GPIO, audio playback, the console kiosk display,
+and BLE-attached BMSes. Pi model is auto-detected at startup.
+
+**Quick recipe** (the firmware zip is self-contained — no internet
+required on the Pi at install time):
+
+```bash
+# On the Pi, after scp'ing the bundle:
+cd /tmp
+tar -xaf saint_firmware_raspberrypi_<ver>.tar.zst   # -xaf auto-detects .zst
+cd saint_firmware_raspberrypi_<ver>/scripts
+sudo ./install.sh
+```
+
+The installer detects the Pi's Debian release (Bookworm or Trixie),
+installs the matching ROS 2 Kilted runtime from the bundle, sets up
+the systemd unit, and starts the service. Within a few seconds the
+node should appear in the server's **Unadopted Nodes** panel.
+
+**Full walkthrough** — supported hardware, the offline-bundle build
+workflow, OTA flow, troubleshooting, and uninstall — is bundled inside
+the firmware zip at `docs/INSTALL.md`, and also lives in the repo at
+[`firmware/raspberrypi/docs/INSTALL.md`](../../firmware/raspberrypi/docs/INSTALL.md).
+Short orientation: [`firmware/raspberrypi/README.md`](../../firmware/raspberrypi/README.md).
+
+> The Pi-node firmware is distinct from the SAINT.OS server itself.
+> A Pi running the server *can* also run saint-node (they're
+> independent systemd services); the node will adopt itself like any
+> other Pi on the network.
 
 ---
 

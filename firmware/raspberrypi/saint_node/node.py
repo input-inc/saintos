@@ -14,6 +14,7 @@ supported Pi without operator configuration.
 """
 
 import json
+import os
 import time
 import socket
 import hashlib
@@ -93,6 +94,24 @@ class SaintNode(Node):
         self._last_announce = 0.0
         self._last_state_publish = 0.0
 
+        # Capture the firmware-build timestamp ONCE at startup so every
+        # announce reports the same value. Previously the announce path
+        # called time.gmtime() inline, which made fw_build the wall-clock
+        # time of the announce — it ticked forward by one second per
+        # broadcast and made the operator UI's "Built: …" line look like
+        # an ever-fresh build. We use the mtime of saint_node/__init__.py
+        # because OTA updates rewrite that file (and copytree preserves
+        # the source mtime so install.sh and OTA agree on what "build
+        # time" means for a given firmware drop).
+        from . import __file__ as _pkg_init
+        try:
+            self._fw_build = time.strftime(
+                '%Y-%m-%dT%H:%M:%SZ', time.gmtime(os.path.getmtime(_pkg_init)))
+        except OSError:
+            # Couldn't stat — fall back to process-start so it's at least
+            # stable for the lifetime of this run.
+            self._fw_build = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
         # Configuration manager
         self._config = ConfigManager(self._node_id, self.get_logger())
         self._config.load()
@@ -151,6 +170,16 @@ class SaintNode(Node):
             durability=DurabilityPolicy.VOLATILE,
             depth=1
         )
+        # /log: BEST_EFFORT with depth=20 to match the server's LOG_QOS
+        # (server_node.py LOG_QOS). RELIABLE here used to wedge the
+        # micro-XRCE-DDS writer on RP2040/Teensy after a 4+ line burst;
+        # the Pi doesn't have that constraint but matching keeps QoS-
+        # incompatibility headaches off the table.
+        self._qos_log = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=20
+        )
 
         # Publishers
         self._pub_announce = self.create_publisher(
@@ -161,6 +190,15 @@ class SaintNode(Node):
             String, f'/saint/nodes/{self._node_id}/state', self._qos_reliable)
         self._pub_update_progress = self.create_publisher(
             String, f'/saint/nodes/{self._node_id}/update_progress', self._qos_reliable)
+        # /log: forwards arbitrary {level, text, uptime_ms, peripheral?}
+        # frames to the server. Without this publisher, only RP2040 /
+        # Teensy micro-ROS nodes show up in the server-side activity
+        # log; the Pi was silent because get_logger().info() only writes
+        # to the local journal. server_node._on_node_log reads this
+        # topic and forwards via state_manager.log_node_event to the
+        # operator's activity feed.
+        self._pub_log = self.create_publisher(
+            String, f'/saint/nodes/{self._node_id}/log', self._qos_log)
         # Async scan results (BLE BMS discovery). Operator-triggered,
         # one frame per scan completion. Reliable QoS so a dropped
         # packet doesn't strand the UI's progress spinner.
@@ -255,7 +293,20 @@ class SaintNode(Node):
             return '0.0.0.0'
 
     def _apply_saved_config(self):
-        """Apply saved pin configuration."""
+        """Apply saved pin + peripheral configuration on boot.
+
+        Two layers — legacy GPIO pin configs (pre-peripheral-first
+        addressing era), then peripherals. Peripheral replay is the
+        important one: PeripheralManager state is purely in-memory,
+        so without it every Pi reboot would silently come up with
+        zero peripherals attached and the operator would have to
+        re-sync from the UI to recover console_display, audio_player,
+        Maestro, etc. The server only auto-re-pushes when we announce
+        UNADOPTED (see _maybe_reconcile_adopted_unadopted), and we
+        already claim ACTIVE on boot — so without local replay the
+        peripherals never come back.
+        """
+        # Layer 1: legacy GPIO pin configs.
         pin_configs = self._config.get_pin_configs()
         for gpio, config in pin_configs.items():
             try:
@@ -267,6 +318,23 @@ class SaintNode(Node):
                 )
             except Exception as e:
                 self.get_logger().error(f'Failed to configure GPIO {gpio}: {e}')
+
+        # Layer 2: peripherals (peripheral-first addressing).
+        peripherals = self._config.get_peripherals()
+        if peripherals:
+            try:
+                self._peripherals.apply_peripherals(peripherals)
+                # Use the journal (not _publish_log) here — this runs
+                # in __init__ before DDS discovery completes, so the
+                # /log publisher's subscriber may not be matched yet
+                # and the message would drop (BEST_EFFORT QoS). Still
+                # captured in journalctl -u saint-node either way.
+                self.get_logger().info(
+                    f'Replayed {len(peripherals)} saved peripheral(s) '
+                    f'from {self._config._config_path}')
+            except Exception as e:
+                self.get_logger().error(
+                    f'Failed to replay saved peripherals: {e}')
 
     def _main_loop(self):
         """Main processing loop (10 Hz)."""
@@ -289,6 +357,46 @@ class SaintNode(Node):
                 self._publish_state()
                 self._last_state_publish = now
 
+    def _publish_log(self, level: str, text: str, peripheral: str = '') -> None:
+        """Publish a log frame to the server's per-node /log topic.
+
+        Mirrors the firmware-side format expected by server_node._on_node_log:
+        {"level": "info|warn|error", "text": "...", "uptime_ms": N,
+         "peripheral": optional}. Also writes to the local journal via
+        rclpy's logger so a Pi without ROS connectivity still has the
+        line on disk for post-mortem (journalctl -u saint-node).
+
+        Use this for operator-visible state transitions (firmware update
+        started/finished, restart received, config applied) — NOT for
+        every internal tick. /log topic uses BEST_EFFORT and a UDP
+        path so a burst of 100 lines/sec will silently drop frames.
+        """
+        # Local journal first — guaranteed durable even if ROS is down.
+        lvl_fn = {
+            'error': self.get_logger().error,
+            'warn':  self.get_logger().warn,
+            'warning': self.get_logger().warn,
+            'info':  self.get_logger().info,
+            'debug': self.get_logger().debug,
+        }.get(level, self.get_logger().info)
+        lvl_fn(text)
+        # Then the ROS-side broadcast.
+        try:
+            payload = {
+                'level': level if level in ('info', 'warn', 'error') else 'info',
+                'text': text,
+                'uptime_ms': int((time.time() - self._start_time) * 1000),
+            }
+            if peripheral:
+                payload['peripheral'] = peripheral
+            msg = String()
+            msg.data = json.dumps(payload)
+            self._pub_log.publish(msg)
+        except Exception:
+            # Don't let a /log publish failure crash the caller —
+            # the journal line above is the durable record.
+            pass
+
     def _publish_announcement(self):
         """Publish node announcement message."""
         from . import __version__
@@ -300,7 +408,7 @@ class SaintNode(Node):
             'hw': self.HW_TYPE,
             'chip_family': self.CHIP_FAMILY,
             'fw': __version__,
-            'fw_build': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'fw_build': self._fw_build,
             'state': self._state.value,
             'uptime': int(time.time() - self._start_time),
             'role': self._config.get_role() or 'none',
@@ -370,11 +478,38 @@ class SaintNode(Node):
                 # legacy "pins" format. Server emits one or the other,
                 # not both.
                 if 'peripherals' in data:
-                    self._peripherals.apply_peripherals(
-                        data.get('peripherals', []))
+                    peripherals = data.get('peripherals', []) or []
+                    self._peripherals.apply_peripherals(peripherals)
                     self._state = NodeState.ACTIVE
-                    self.get_logger().info(
-                        'Configuration applied (peripherals), now ACTIVE')
+                    # Persist the peripherals to /etc/saint-node/config.yaml
+                    # so we can replay them on next boot without waiting
+                    # for the server to re-push. Includes any private
+                    # params the state_manager injected (e.g.
+                    # _kiosk_token for console_display) — replay is
+                    # byte-for-byte what the server told us.
+                    self._config.set_peripherals(peripherals)
+                    save_ok = self._config.save()
+                    # Two log lines, intentionally:
+                    #   1. "Config applied" — operator-friendly summary
+                    #      ("here's what we did").
+                    #   2. "Config saved to disk" / "Config save failed"
+                    #      — the sync-ACK marker the server's
+                    #      _maybe_handle_sync_ack pattern-matches to
+                    #      flip peripheral_sync_status. The RP2040 /
+                    #      Teensy firmware emits "Config saved to flash"
+                    #      after pin_config_save(); the Pi's equivalent
+                    #      is the YAML save, mirrored with "to disk".
+                    #      The "success" marker is gated on the save
+                    #      actually succeeding — a config that lives
+                    #      only in RAM would be lost on next reboot
+                    #      and shouldn't read as synced.
+                    self._publish_log('info',
+                        f'Config applied: {len(peripherals)} peripheral(s) — '
+                        f'now ACTIVE')
+                    if save_ok:
+                        self._publish_log('info', 'Config saved to disk')
+                    else:
+                        self._publish_log('error', 'Config save failed')
                 else:
                     self._handle_configure(data)
 
@@ -496,7 +631,11 @@ class SaintNode(Node):
             elif action == 'factory_reset':
                 self._handle_factory_reset()
 
-            elif action == 'reboot':
+            elif action == 'reboot' or action == 'restart':
+                # The server's "Restart Node" UI sends action="restart"
+                # (server_node.send_restart_command); accept both names
+                # so future renames in either direction don't silently
+                # break this command.
                 self._handle_reboot()
 
             elif action == 'firmware_update':
@@ -616,15 +755,39 @@ class SaintNode(Node):
         self._peripherals.clear_estop()
 
     def _handle_reboot(self):
-        """Handle reboot request."""
-        self.get_logger().warn('Reboot requested')
+        """Handle reboot request from server (action 'reboot' or
+        'restart'). Logs an explicit "Reboot requested" line so an
+        operator chasing "Pi didn't reboot when I clicked Restart"
+        can confirm the message at least reached the handler:
+            journalctl -u saint-node -n 100 | grep -i reboot
+        If the line is absent, the control message never arrived
+        (server-side dispatch / WS bridge problem). If present but
+        no actual reboot, the systemctl/reboot binaries didn't fire.
+        """
+        self._publish_log('warn', 'Reboot requested — shutting down GPIO and rebooting')
 
         # Clean shutdown
         self._gpio.cleanup()
 
-        # Request system reboot (requires sudo privileges)
+        # saint-node.service runs as User=root so neither `sudo` nor
+        # special caps are needed. Try systemctl first (clean teardown
+        # of other units); fall back to /sbin/reboot if that fails
+        # (e.g. a minimal image where systemctl reboot needs a polkit
+        # rule that's missing, or a logind socket that's not running).
         import subprocess
-        subprocess.run(['sudo', 'reboot'], check=False)
+        try:
+            r = subprocess.run(['systemctl', 'reboot'],
+                               check=False, capture_output=True,
+                               text=True, timeout=5)
+            if r.returncode != 0:
+                self.get_logger().error(
+                    f'systemctl reboot failed (rc={r.returncode}): '
+                    f'{(r.stderr or "").strip()} — falling back to /sbin/reboot')
+                subprocess.run(['/sbin/reboot'], check=False)
+        except (OSError, subprocess.SubprocessError) as e:
+            self.get_logger().error(
+                f'systemctl reboot raised: {e} — falling back to /sbin/reboot')
+            subprocess.run(['/sbin/reboot'], check=False)
 
     def _handle_check_update(self, data: Dict[str, Any]):
         """Handle update check request."""
@@ -653,11 +816,12 @@ class SaintNode(Node):
         version = data.get('version')
 
         if not url:
-            self.get_logger().error('firmware_update missing url')
+            self._publish_log('error', 'firmware_update missing url')
             self._publish_update_result(False, 'Missing update URL')
             return
 
-        self.get_logger().info(f'Firmware update requested: {url}')
+        self._publish_log('info',
+            f'Firmware update requested: v{version or "?"} from {url}')
 
         # Set state to updating
         previous_state = self._state
@@ -676,7 +840,15 @@ class SaintNode(Node):
         update_thread.start()
 
     def _on_update_progress(self, stage: str, percent: int):
-        """Callback for update progress."""
+        """Callback for update progress.
+
+        Publishes two things per call:
+          1. A frame on /update_progress for the UI's progress bar.
+          2. ON STAGE TRANSITION ONLY, a /log line so the server-side
+             activity feed gets a narrative ("Downloading…",
+             "Verifying checksum…", "Installing…") without being
+             flooded by per-percent ticks during the long download.
+        """
         msg_data = {
             'node_id': self._node_id,
             'stage': stage,
@@ -688,8 +860,30 @@ class SaintNode(Node):
         msg.data = json.dumps(msg_data)
         self._pub_update_progress.publish(msg)
 
+        # Emit a /log line only when the stage NAME changes — otherwise
+        # a 1000-line "downloading 47%, 48%…" burst would saturate the
+        # activity feed and (because /log is BEST_EFFORT) drop frames
+        # the operator actually cares about (start/end transitions).
+        if stage != getattr(self, '_last_update_stage', None):
+            self._last_update_stage = stage
+            STAGE_TEXT = {
+                'downloading': 'Downloading firmware',
+                'verifying':   'Verifying checksum',
+                'extracting':  'Extracting package',
+                'validating':  'Validating package contents',
+                'backup':      'Backing up previous firmware',
+                'installing':  'Installing new firmware',
+                'restarting':  'Restarting saint-node service',
+            }
+            self._publish_log('info',
+                f'Firmware update: {STAGE_TEXT.get(stage, stage)}')
+
     def _publish_update_result(self, success: bool, message: str):
-        """Publish update result."""
+        """Publish update result on both /update_progress and /log so
+        the UI's progress bar AND the server's activity feed see it.
+        Called only on FAILURE — success path doesn't reach here
+        because the service restart kills us before we'd publish.
+        """
         msg_data = {
             'node_id': self._node_id,
             'status': 'complete' if success else 'failed',
@@ -700,6 +894,10 @@ class SaintNode(Node):
         msg = String()
         msg.data = json.dumps(msg_data)
         self._pub_update_progress.publish(msg)
+
+        self._publish_log(
+            'info' if success else 'error',
+            f'Firmware update {"complete" if success else "failed"}: {message}')
 
     def cleanup(self):
         """Clean up resources on shutdown."""

@@ -526,6 +526,44 @@ static void case_parse_json_full_maestro_payload(void)
     }
 }
 
+static void case_transport_fallback_when_unavailable(void)
+{
+    /* Regression test: operator-saved transport=usb_vendor on a Teensy
+     * (where task #17's vendor implementation is deferred → getter
+     * returns NULL) must fall back to usb_cdc and bind successfully —
+     * not log "no transport for mode=2" 24 times per config push.
+     *
+     * Symptom this guards: "Maestro: no transport for mode=2 on this
+     * platform" spammed every config sync; user reported 2026-06-17.
+     *
+     * The shared test harness has usb_available / uart_available
+     * toggles plus a NULL maestro_get_transport_usb_vendor — exactly
+     * the Teensy-without-task-#17 shape. */
+    printf("case_transport_fallback_when_unavailable\n");
+    reset_all();
+    usb_available  = true;   /* usb_cdc is provided */
+    uart_available = true;
+    maestro_init();
+
+    /* Pretend the operator saved usb_vendor. parse_json sets the mode
+     * and calls bind_transport, which should fall back to usb_cdc. */
+    pin_config_t pc;
+    memset(&pc, 0, sizeof(pc));
+    const char* json = "{\"transport\":\"usb_vendor\"}";
+    EXPECT(maestro_peripheral.parse_json_params(json, json + strlen(json), &pc),
+           "fallback: parse_json returns true");
+    EXPECT(g_transport != NULL,
+           "fallback: g_transport bound (didn't leave NULL)");
+    if (g_transport) {
+        EXPECT(g_transport == &usb_ops,
+               "fallback: bound to the usb_cdc transport");
+    }
+    /* Saved preference stays as usb_vendor — the next firmware that
+     * implements it will pick it up automatically. */
+    EXPECT(g_transport_mode == FLASH_MAESTRO_TRANSPORT_USB_VENDOR,
+           "fallback: g_transport_mode preserves usb_vendor preference");
+}
+
 static void case_parse_json_truncated(void)
 {
     /* Regression test: simulate what happens when the wire payload is
@@ -618,14 +656,39 @@ static void case_load_unsupported_transport(void)
     storage.maestro_config.transport_mode = FLASH_MAESTRO_TRANSPORT_USB_HOST;
     storage.maestro_config.channels[0].min_pulse_us = 1500;
 
-    /* load_config should not crash, should return true, and should
-     * leave g_transport as NULL (inert) — channel state still loads. */
+    /* load_config should not crash and should return true. Behavior
+     * around g_transport changed 2026-06-17: bind_transport now falls
+     * back to the next available transport (was: left g_transport
+     * NULL). On a usb-unavailable platform with uart available, the
+     * fallback ladder lands on uart. Channel data still loads. */
     EXPECT(maestro_peripheral.load_config(&storage),
            "load_config returned true even with unsupported mode");
-    EXPECT(g_transport == NULL,
-           "transport NULL when platform can't supply the mode");
+    EXPECT(g_transport == &uart_ops,
+           "fell back to uart transport (was: NULL)");
     EXPECT(maestro_get_channel_config(0)->min_pulse_us == 1500,
            "channel data still loaded");
+}
+
+static void case_load_truly_no_transport_available(void)
+{
+    /* If NEITHER usb nor uart is provided by the platform (no real
+     * platform looks like this, but the test should still pin the
+     * behavior), bind_transport leaves g_transport NULL and the
+     * driver is inert. */
+    printf("case_load_truly_no_transport_available\n");
+    reset_all();
+    usb_available  = false;
+    uart_available = false;
+
+    flash_storage_data_t storage;
+    memset(&storage, 0, sizeof(storage));
+    storage.maestro_config.channel_count  = MAESTRO_MAX_CHANNELS;
+    storage.maestro_config.transport_mode = FLASH_MAESTRO_TRANSPORT_USB_VENDOR;
+
+    EXPECT(maestro_peripheral.load_config(&storage),
+           "load_config returned true even with NO transport available");
+    EXPECT(g_transport == NULL,
+           "g_transport NULL when fallback ladder finds nothing");
 }
 
 /* Erased / never-saved flash slot — drv_load must NOT bind a
@@ -668,11 +731,13 @@ int main(void)
     case_parse_json_per_channel();
     case_parse_json_full_maestro_payload();
     case_parse_json_truncated();
+    case_transport_fallback_when_unavailable();
     case_save_load_roundtrip();
     case_load_then_init_no_clobber();
     case_parse_json_transport();
     case_default_transport_pick();
     case_load_unsupported_transport();
+    case_load_truly_no_transport_available();
     case_load_no_record();
 
     if (fail_count) {

@@ -133,6 +133,7 @@ static const char* ota_fail_reason_str(uint8_t reason)
 #include <rclc/executor.h>
 
 #include <rmw_microros/rmw_microros.h>
+#include <rmw/qos_profiles.h>   /* rmw_qos_profile_sensor_data (control QoS base) */
 
 // Standard message types (available in prebuilt libmicroros)
 #include <std_msgs/msg/string.h>
@@ -234,7 +235,14 @@ static std_msgs__msg__String announcement_msg;
 static char announcement_buffer[1024];
 
 static std_msgs__msg__String config_msg;
-static char config_buffer[2048];        // Buffer for incoming config
+/* 4096 (was 2048) — same rationale as firmware/teensy41/src/main.cpp:
+ * a full 24-channel Maestro config can serialize to ~3500 bytes.
+ * Server-side maestro_slim_channels_for_wire keeps a typical payload
+ * well under 1 KB by emitting `{}` for default-equal channels, but
+ * a maxed-out customization still needs room for the full size.
+ * Stays under the XRCE-DDS reassembly cap (UDP MTU 512 ×
+ * RMW_UXRCE_MAX_HISTORY 4 ≈ 2 KB) only by relying on slimming. */
+static char config_buffer[4096];        // Buffer for incoming config
 
 static std_msgs__msg__String control_msg;
 static char control_buffer[512];        // Buffer for incoming control commands
@@ -672,12 +680,21 @@ static void dispatch_action_buffer(const char* data, size_t size)
 
     // Check for restart command
     if (strstr(data, "\"action\":\"restart\"") ||
-        strstr(data, "\"action\": \"restart\"")) {
+        strstr(data, "\"action\": \"restart\"") ||
+        strstr(data, "\"action\":\"reboot\"") ||
+        strstr(data, "\"action\": \"reboot\"")) {
         printf("\n");
         printf("====================================\n");
         printf("RESTART REQUESTED\n");
         printf("====================================\n");
         printf("Rebooting in 500ms...\n");
+
+        // Mirror to /log so the operator activity feed shows this.
+        // Accept both 'restart' (current server-side name) and 'reboot'
+        // (legacy alias) so a future rename can't silently break the
+        // command across nodes.
+        saint_log_publish("warn",
+            "Restart requested — rebooting via watchdog");
 
         sleep_ms(500);
 
@@ -697,6 +714,8 @@ static void dispatch_action_buffer(const char* data, size_t size)
         printf("IDENTIFY REQUESTED\n");
         printf("====================================\n");
 
+        saint_log_publish("info", "Identify requested — flashing onboard LED");
+
         // Flash LED to help locate this node
         led_identify(5);  // 5 flash sequences
 
@@ -713,6 +732,7 @@ static void dispatch_action_buffer(const char* data, size_t size)
         printf("====================================\n");
         printf("EMERGENCY STOP ACTIVATED\n");
         printf("====================================\n");
+        saint_log_publish("warn", "Estop activated");
         pin_control_estop();
         printf("====================================\n\n");
         return;
@@ -729,6 +749,7 @@ static void dispatch_action_buffer(const char* data, size_t size)
         printf("====================================\n");
         printf("EMERGENCY STOP RELEASED\n");
         printf("====================================\n");
+        saint_log_publish("info", "Estop released");
         pin_control_clear_estop();
         printf("====================================\n\n");
         return;
@@ -1089,14 +1110,22 @@ static bool init_micro_ros(void)
     // QoS to match the server-side publisher and avoid the deadstick-
     // queues-behind-stale-values pathology: with RELIABLE + KEEP_LAST(10)
     // a single lost UDP packet stalls the queue while DDS retransmits,
-    // and the return-to-zero ends up sitting at queue position 10. Must
-    // match the publisher's QoS (BEST_EFFORT + KEEP_LAST(1)) or DDS
-    // won't even establish the connection.
-    ret = rclc_subscription_init_best_effort(
+    // and the return-to-zero ends up sitting at queue position 10.
+    //
+    // Use KEEP_LAST(1) explicitly. rclc_subscription_init_best_effort
+    // would install rmw_qos_profile_sensor_data, which is KEEP_LAST(5) —
+    // so a fast stream queues up to 5 samples and the executor (one take
+    // per spin) chases stale setpoints one-at-a-time, the laggy/not-
+    // smooth motion symptom. Depth 1 keeps only the freshest sample,
+    // matching the server's CONTROL_QOS (BEST_EFFORT, depth=1).
+    rmw_qos_profile_t control_qos = rmw_qos_profile_sensor_data;  /* BEST_EFFORT, KEEP_LAST, VOLATILE */
+    control_qos.depth = 1;
+    ret = rclc_subscription_init(
         &control_sub,
         &ros_node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-        control_topic
+        control_topic,
+        &control_qos
     );
     if (ret != RCL_RET_OK) {
         printf("Failed to create control subscription: %d\n", ret);

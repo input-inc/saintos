@@ -9,6 +9,12 @@ import { computed, ref } from 'vue'
 //   end    — pulse driven when the routed signal is +1
 //   home   — pulse driven at startup / safe-reset
 //
+// Each handle rides its OWN concentric ring so the dots never overlap,
+// even when two values coincide (home defaults to neutral == center,
+// so those two collided constantly on a single-ring layout). Labels
+// sit at the end of a radial leader line drawn through each handle, so
+// they read clearly instead of stacking on top of one another.
+//
 // The component is presentation-only — it edits a v-model'd object of
 // shape {start_us, end_us, center_us, home_us}. Numeric inputs sit
 // under the dial so an operator can type exact pulse widths instead
@@ -25,16 +31,21 @@ const props = defineProps({
   minPulseUs: { type: Number, default: 500  },
   maxPulseUs: { type: Number, default: 2500 },
 })
-const emit = defineEmits(['update:modelValue'])
+// 'preview' fires with the absolute µs of the handle being moved so a
+// parent can jog the real servo there for live dial-in (see the
+// channel-edit modal in views/node/Peripherals.vue). Harmless to ignore
+// where no live channel is bound (the peripheral-level defaults editor).
+const emit = defineEmits(['update:modelValue', 'preview'])
 
 // SVG geometry. The arc spans 180° (from 180° on the left, through
-// 270° at the top, to 360°/0° on the right) — i.e. the upper half
-// of a circle. The handle x-axis runs left=min_pulse → right=max_pulse.
+// 90° at the top, to 0° on the right) — the upper half of a circle.
+// The handle x-axis runs left=min_pulse → right=max_pulse.
 const W = 320          // viewBox width
-const H = 180          // viewBox height (extra space for the readouts)
+const H = 184          // viewBox height (room for the outer labels)
 const CX = W / 2
 const CY = 150         // arc center (handles sit on the upper half)
-const R  = 120
+const R  = 104         // outer arc radius (start/end + backdrop)
+const LABEL_GAP = 16   // radial distance from a handle out to its label
 
 function usToAngleDeg (us) {
   const lo = props.minPulseUs
@@ -50,16 +61,19 @@ function angleDegToUs (deg) {
   const t = 1 - (clamped / 180)
   return Math.round(lo + t * (hi - lo))
 }
-function polar (us) {
+function polarAt (us, radius) {
   const rad = (usToAngleDeg(us) * Math.PI) / 180
-  return { x: CX + R * Math.cos(rad), y: CY - R * Math.sin(rad) }
+  return { x: CX + radius * Math.cos(rad), y: CY - radius * Math.sin(rad) }
 }
 
+// `ring` is the radius each handle rides on. start/end stay on the
+// outer arc (they bound the highlighted sweep); center and home drop
+// to inner rings so they can never sit under start/end or each other.
 const HANDLES = [
-  { key: 'start_us',  label: 'Start',  color: '#f43f5e' },  // rose
-  { key: 'end_us',    label: 'End',    color: '#22d3ee' },  // cyan
-  { key: 'center_us', label: 'Center', color: '#a78bfa' },  // violet
-  { key: 'home_us',   label: 'Home',   color: '#f59e0b' },  // amber
+  { key: 'start_us',  label: 'Start',  color: '#f43f5e', ring: R      },  // rose
+  { key: 'end_us',    label: 'End',    color: '#22d3ee', ring: R      },  // cyan
+  { key: 'center_us', label: 'Center', color: '#a78bfa', ring: R - 24 },  // violet
+  { key: 'home_us',   label: 'Home',   color: '#f59e0b', ring: R - 44 },  // amber
 ]
 
 const svgRef = ref(null)
@@ -67,6 +81,7 @@ const dragging = ref(null)   // 'start_us' | 'end_us' | 'center_us' | 'home_us'
 
 function update (key, us) {
   emit('update:modelValue', { ...props.modelValue, [key]: us })
+  emit('preview', us)
 }
 
 function pointerToUs (evt) {
@@ -80,10 +95,15 @@ function pointerToUs (evt) {
   const local = pt.matrixTransform(ctm.inverse())
   const dx = local.x - CX
   const dy = CY - local.y    // SVG y grows down; flip so up is +
-  // atan2 returns (-π, π]; clamp to upper half (0..π) for the 180° arc.
+  // The handles live on the upper 180° semicircle. atan2 returns
+  // (-π, π]; on the upper half that's the [0, π] we want. When the
+  // pointer drops BELOW the horizontal axis (dy < 0 → rad < 0), atan2
+  // wraps toward the opposite end of the arc — which made a handle
+  // "jump to the other side" chasing the mouse. Instead, clamp to
+  // whichever end the pointer is nearest: left → 180° (min), right →
+  // 0° (max), so the handle just parks at the edge it left.
   let rad = Math.atan2(dy, dx)
-  if (rad < 0) rad = 0
-  if (rad > Math.PI) rad = Math.PI
+  if (rad < 0) rad = (dx < 0) ? Math.PI : 0
   const deg = (rad * 180) / Math.PI
   return angleDegToUs(deg)
 }
@@ -111,30 +131,31 @@ function onNumericInput (key, e) {
   update(key, clamped)
 }
 
-const positions = computed(() => {
-  const out = {}
-  for (const h of HANDLES) {
+// Per-handle geometry: the dot (on its ring), the label point (one
+// LABEL_GAP further out along the same ray), and a text-anchor chosen
+// from which side of the dial the label lands on.
+const handleViews = computed(() =>
+  HANDLES.map(h => {
     const us = props.modelValue?.[h.key]
-    if (typeof us === 'number') out[h.key] = polar(us)
-  }
-  return out
-})
+    if (typeof us !== 'number') return null
+    const dot      = polarAt(us, h.ring)
+    const labelPos = polarAt(us, h.ring + LABEL_GAP)
+    const anchor = labelPos.x < CX - 6 ? 'end' : labelPos.x > CX + 6 ? 'start' : 'middle'
+    return { ...h, dot, labelPos, anchor }
+  }).filter(Boolean)
+)
 
 // Highlight arc from start_us → end_us so the operator can see the
-// active sweep at a glance. The arc respects whichever direction the
-// operator has chosen (start can be left or right of end on the dial,
-// since servos can mount reversed).
+// active sweep at a glance. Respects whichever direction the operator
+// chose (start can be left or right of end — servos mount reversed).
 const sweepPath = computed(() => {
-  const s = positions.value.start_us
-  const e = positions.value.end_us
-  if (!s || !e) return ''
-  // Both points lie on the upper semicircle; the sweep is always less
-  // than 180° so largeArcFlag is 0. Sweep direction (sweepFlag) depends
-  // on which side of the dial start is on relative to end.
-  const startAngle = usToAngleDeg(props.modelValue.start_us)
-  const endAngle   = usToAngleDeg(props.modelValue.end_us)
-  const sweepFlag  = startAngle > endAngle ? 1 : 0
-  return `M ${s.x.toFixed(2)} ${s.y.toFixed(2)} A ${R} ${R} 0 0 ${sweepFlag} ${e.x.toFixed(2)} ${e.y.toFixed(2)}`
+  const s = props.modelValue?.start_us
+  const e = props.modelValue?.end_us
+  if (typeof s !== 'number' || typeof e !== 'number') return ''
+  const sp = polarAt(s, R)
+  const ep = polarAt(e, R)
+  const sweepFlag = usToAngleDeg(s) > usToAngleDeg(e) ? 1 : 0
+  return `M ${sp.x.toFixed(2)} ${sp.y.toFixed(2)} A ${R} ${R} 0 0 ${sweepFlag} ${ep.x.toFixed(2)} ${ep.y.toFixed(2)}`
 })
 </script>
 
@@ -165,28 +186,26 @@ const sweepPath = computed(() => {
         stroke-width="6"
         stroke-linecap="round"
       />
-      <!-- Tick at center bottom + dead-center line for visual symmetry. -->
+      <!-- Tick at center top + label for visual symmetry. -->
       <line :x1="CX" :y1="CY - R - 4" :x2="CX" :y2="CY - R + 8"
             stroke="rgba(148,163,184,0.55)" stroke-width="1.5" />
       <text :x="CX" :y="CY - R - 8" text-anchor="middle"
             class="fill-fg-faint" font-size="10">midpoint</text>
 
-      <!-- Handles -->
-      <g v-for="h in HANDLES" :key="h.key">
+      <!-- Handles: each on its own ring, with a radial leader line out
+           to its label so labels never stack. -->
+      <g v-for="h in handleViews" :key="h.key">
         <line
-          v-if="positions[h.key]"
           :x1="CX" :y1="CY"
-          :x2="positions[h.key].x" :y2="positions[h.key].y"
+          :x2="h.labelPos.x" :y2="h.labelPos.y"
           :stroke="h.color"
           stroke-width="1.5"
           stroke-dasharray="3 3"
-          opacity="0.6"
+          opacity="0.55"
         />
         <circle
-          v-if="positions[h.key]"
-          :cx="positions[h.key].x"
-          :cy="positions[h.key].y"
-          r="10"
+          :cx="h.dot.x" :cy="h.dot.y"
+          r="9"
           :fill="h.color"
           stroke="white"
           stroke-width="2"
@@ -194,12 +213,10 @@ const sweepPath = computed(() => {
           @pointerdown="onDown(h.key, $event)"
         />
         <text
-          v-if="positions[h.key]"
-          :x="positions[h.key].x"
-          :y="positions[h.key].y - 16"
-          text-anchor="middle"
+          :x="h.labelPos.x" :y="h.labelPos.y - 2"
+          :text-anchor="h.anchor"
           class="fill-fg-strong pointer-events-none"
-          font-size="11"
+          font-size="10"
           font-weight="600"
         >{{ h.label }}</text>
       </g>

@@ -86,14 +86,23 @@ firmware/raspberrypi/scripts/bundle-debs.sh
 firmware/raspberrypi/scripts/package.sh
 ```
 
-The resulting `firmware/raspberrypi/dist/saint_firmware_raspberrypi_*.zip`
+The resulting `firmware/raspberrypi/dist/saint_firmware_raspberrypi_*.tar.zst`
 is offline-capable: ship it to the Pi over USB, scp, the OTA flow,
 or whatever, and `sudo ./install.sh` works without internet.
+
+> Compression format note: the bundle uses **zstd** (`.tar.zst`),
+> matching the main server dist. ~16 % smaller than the previous
+> `.zip` and decompresses faster on the Pi. Pi OS Bookworm and
+> Trixie both ship a `tar` linked against libzstd by default, so
+> `tar -xaf` Just Works. If you're extracting on a stripped-down
+> image without libzstd in tar, `apt-get install zstd` first.
 
 ### 3.2. Run the installer
 
 ```bash
-# On the Pi, after extracting the zip:
+# On the Pi, after scp'ing the bundle:
+cd /tmp
+tar -xaf saint_firmware_raspberrypi_<version>.tar.zst   # -xaf auto-detects .zst
 cd saint_firmware_raspberrypi_<version>/scripts
 sudo ./install.sh
 ```

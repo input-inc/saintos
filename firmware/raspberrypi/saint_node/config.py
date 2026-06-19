@@ -110,6 +110,16 @@ class ConfigManager:
             'display_name': '',
             'adopted': False,
             'pins': {},
+            # Last peripheral config the server pushed to us. Persisted
+            # so we can replay it on boot — otherwise every reboot
+            # wipes the running peripheral state (Pi-side state is
+            # purely in-memory in PeripheralManager) and we'd have no
+            # console_display URL written, no GPIO peripherals
+            # configured, etc., until the server happens to re-push.
+            # The server only auto-re-pushes when we announce UNADOPTED;
+            # without local replay an adopted-but-rebooted Pi
+            # silently runs with zero peripherals.
+            'peripherals': [],
             'network': {
                 'agent_host': '192.168.1.1',
                 'agent_port': 8888,
@@ -162,6 +172,28 @@ class ConfigManager:
     def set_network_config(self, config: Dict[str, Any]):
         """Set network configuration."""
         self._config['network'] = config
+
+    def get_peripherals(self) -> list:
+        """Get the persisted peripherals list.
+
+        Returns the list of {id, type, pins, params, ...} entries the
+        Pi last received from the server. Empty list when nothing has
+        been pushed yet (fresh adoption, first-ever boot, or after
+        factory_reset).
+        """
+        return self._config.get('peripherals', []) or []
+
+    def set_peripherals(self, peripherals: list):
+        """Replace the persisted peripherals list.
+
+        Called from node.py's configure handler after the
+        PeripheralManager successfully applies a fresh config push.
+        Carries the full peripheral entries verbatim, including the
+        private `_kiosk_token` param the server's state_manager
+        injects — that's intentional so the Pi can replay the kiosk
+        URL on next boot without requiring the server to re-push.
+        """
+        self._config['peripherals'] = list(peripherals) if peripherals else []
 
     def factory_reset(self):
         """Reset to factory defaults."""

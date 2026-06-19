@@ -20,6 +20,18 @@ const overrides = {
 export function specFor (peripheralType, channel) {
   const key = `${peripheralType}/${channel.id}`
   if (overrides[key]) return overrides[key]
+  // Maestro servo channels are bipolar: the firmware maps the routed
+  // signal −1 → min pulse, 0 → neutral, +1 → max pulse (see
+  // drv_set_value in firmware/shared/src/maestro_driver.c). The 24
+  // channels share one catalog entry with per-channel ids (chN), so
+  // key off the type rather than enumerating every channel. Centered
+  // on 0 so the slider rests at neutral and can reach both sides of
+  // the servo's travel.
+  if (peripheralType === 'maestro') {
+    return { kind: 'slider', min: -1, max: 1, step: 0.01, neutral: 0,
+             format: v => `${(v * 100).toFixed(0)}%`,
+             hint: '−100% min · 0 center · +100% max' }
+  }
   if (channel.cap === 'digital_out') return { kind: 'toggle' }
   if (channel.cap === 'rgb')         return { kind: 'color', unsupported: true, note: 'No firmware control path yet.' }
   return { kind: 'slider', min: 0, max: 1, step: 0.01, neutral: 0, format: v => v.toFixed(2) }

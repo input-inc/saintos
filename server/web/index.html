@@ -4,9 +4,62 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SAINT.OS</title>
+    <!--
+      Inline splash. Renders instantly while the SPA bundle downloads
+      and Vue hydrates — without it the user stares at a blank dark
+      page for ~500-2000 ms on cold loads. The SPA's createApp().mount('#app')
+      atomically replaces #app's children, which deletes the splash
+      from the DOM as the first view paints.
+
+      Image asset:  server/web/public/opensaint.png
+      The build pipeline (scripts/build-local-dist.sh) syncs this from
+      the canonical source at firmware/raspberrypi/assets/opensaint.png
+      so the Pi boot splash and the SPA splash share one logo. Vite
+      copies /public/* into dist/ as-is, so /opensaint.png resolves
+      whether you're hitting Vite dev (`npm run dev`) or the built
+      bundle the server ships.
+
+      If opensaint.png is absent the <img> 404s silently and the text
+      + pulse remain — still a respectable splash, just unbranded.
+
+      All styles are inlined so the splash doesn't depend on the
+      stylesheet bundle (which loads later). Red-on-black mirrors the
+      console kiosk's LED-dot-matrix theme so the boot-to-kiosk
+      transition reads as one continuous SAINT.OS experience.
+    -->
+    <style>
+      #saint-splash {
+        position: fixed; inset: 0; z-index: 9999;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        background: #000;
+        color: #ff3030;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+        letter-spacing: 0.18em;
+      }
+      #saint-splash img { max-width: 60vw; max-height: 50vh; object-fit: contain; }
+      #saint-splash .saint-splash-text {
+        margin-top: 1.5rem; font-size: 1.25rem; font-weight: 600;
+        text-transform: uppercase;
+      }
+      #saint-splash .saint-splash-pulse {
+        margin-top: 1rem; width: 6rem; height: 2px; background: #ff3030;
+        opacity: 0.4; animation: saint-splash-pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes saint-splash-pulse {
+        0%, 100% { opacity: 0.2; transform: scaleX(0.6); }
+        50%      { opacity: 1.0; transform: scaleX(1.0); }
+      }
+    </style>
   </head>
   <body class="bg-slate-900 text-slate-100 font-sans min-h-screen">
-    <div id="app"></div>
+    <div id="app">
+      <div id="saint-splash">
+        <img src="/opensaint.png" alt="" onerror="this.style.display='none'" />
+        <div class="saint-splash-text">SAINT.OS</div>
+        <div class="saint-splash-pulse"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useNodesStore } from '@/stores/nodes'
 import { useWsStore } from '@/stores/ws'
 import AdoptModal from '@/components/AdoptModal.vue'
+import FirmwareUpdateProgress from '@/components/FirmwareUpdateProgress.vue'
 
 const ws = useWsStore()
 const nodes = useNodesStore()
@@ -130,6 +131,11 @@ const updatable = computed(() => nodes.all.filter(isUpdatable).length)
             >↑ {{ n.server_firmware_version }}</span>
           </div>
         </div>
+        <!-- Inline OTA progress while an update is running for this
+             node. Generic across chip families — any node whose
+             firmware update flow publishes on update_progress/<id>
+             surfaces here. card variant uses the compact strip. -->
+        <FirmwareUpdateProgress :node-id="n.node_id" variant="card" />
       </RouterLink>
     </div>
 

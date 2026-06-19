@@ -45,12 +45,21 @@ from .base import PeripheralDriver
 CONSOLE_DISPLAY_VIRTUAL_GPIO_BASE = 500
 CONSOLE_DISPLAY_CHANNEL_COUNT     = 0    # truly no channels
 
-# Filesystem locations under $HOME. Kept here so tests can monkey-patch
-# them without touching the operator's real config dir.
-KIOSK_DIR_REL       = ".config/saint/console-kiosk"
-LAUNCH_SCRIPT_REL   = KIOSK_DIR_REL + "/launch.sh"
-URL_STATE_REL       = KIOSK_DIR_REL + "/url"
-AUTOSTART_REL       = ".config/autostart/saint-console-kiosk.desktop"
+# System-wide filesystem locations. The saint-node service runs as
+# root (see firmware/raspberrypi/config/saint-node.service), but the
+# desktop auto-login session that launches Chromium runs as the
+# regular Pi user (pi / hackman / etc.). Writing kiosk files to
+# /root/.config/* (the natural `~` expansion under root) is invisible
+# to that session — autostart never fires. Use /etc/xdg/autostart/
+# (XDG-spec system-wide autostart) and /etc/saint-node/console-kiosk/
+# so any desktop user picks them up at session start.
+#
+# The constants are read by tests via monkey-patching, so keep the
+# names stable.
+KIOSK_DIR           = "/etc/saint-node/console-kiosk"
+LAUNCH_SCRIPT_PATH  = KIOSK_DIR + "/launch.sh"
+URL_STATE_PATH      = KIOSK_DIR + "/url"
+AUTOSTART_PATH      = "/etc/xdg/autostart/saint-console-kiosk.desktop"
 
 
 class ConsoleDisplayDriver(PeripheralDriver):
@@ -76,39 +85,51 @@ class ConsoleDisplayDriver(PeripheralDriver):
 
         url = build_kiosk_url(inst.params)
         if url is None:
+            # build_kiosk_url only returns None for the per-pack
+            # "battery" view when target_* params are missing. The
+            # default "batteries" overview view requires no targeting,
+            # so a fresh adoption with defaults still produces a URL.
             self._log("warn",
-                f"console_display#{instance_id}: missing required params; "
-                f"skipping kiosk file write")
+                f"console_display#{instance_id}: per-pack 'battery' "
+                f"view selected but target_node_id/target_peripheral_id "
+                f"are empty — skipping kiosk file write")
             inst.connected = False
             return False
 
         try:
-            home = Path(os.path.expanduser("~"))
-            kiosk_dir = home / KIOSK_DIR_REL
-            kiosk_dir.mkdir(parents=True, exist_ok=True)
+            launch_path = Path(LAUNCH_SCRIPT_PATH)
+            url_path    = Path(URL_STATE_PATH)
+            autostart_path = Path(AUTOSTART_PATH)
 
-            launch_path = home / LAUNCH_SCRIPT_REL
-            launch_path.write_text(self._render_launch_script(url, inst.params))
-            launch_path.chmod(launch_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            launch_path.parent.mkdir(parents=True, exist_ok=True)
+            launch_path.write_text(self._render_launch_script(inst.params))
+            # World-readable + executable so the desktop user's session
+            # (running as pi / hackman / whoever auto-logs in) can run
+            # it from /etc/xdg/autostart's Exec= line.
+            launch_path.chmod(0o755)
 
-            url_path = home / URL_STATE_REL
             url_path.write_text(url + "\n")
+            # World-readable so the launch script (running as the
+            # desktop user) can read the URL written by the saint-node
+            # service (running as root).
+            url_path.chmod(0o644)
 
-            autostart_path = home / AUTOSTART_REL
             if inst.params.get("autostart", True):
                 autostart_path.parent.mkdir(parents=True, exist_ok=True)
                 autostart_path.write_text(self._render_autostart_desktop(launch_path))
+                autostart_path.chmod(0o644)
             else:
                 # If autostart was previously enabled but the operator
                 # turned it off, remove the entry so the kiosk doesn't
-                # silently keep coming back.
+                # silently keep coming back on next desktop login.
                 if autostart_path.exists():
                     try: autostart_path.unlink()
                     except OSError: pass
 
             self._log("info",
                 f"console_display#{instance_id}: wrote {launch_path} "
-                f"(autostart={'on' if inst.params.get('autostart', True) else 'off'})")
+                f"+ {autostart_path if inst.params.get('autostart', True) else '(autostart off)'} "
+                f"URL={url}")
         except OSError as e:
             self._log("error",
                 f"console_display#{instance_id}: failed to write kiosk "
@@ -118,8 +139,9 @@ class ConsoleDisplayDriver(PeripheralDriver):
 
         # Relaunch any already-running Chromium kiosk so the operator
         # doesn't have to log out / log back in to pick up a new URL
-        # or rotation. Best-effort; failure here doesn't roll back the
-        # filesystem write.
+        # or rotation. Best-effort across users; if Chromium isn't
+        # running yet (typical first-adoption case), the autostart
+        # entry handles it on next desktop login.
         self._relaunch_kiosk(launch_path)
 
         inst.connected = True
@@ -135,7 +157,7 @@ class ConsoleDisplayDriver(PeripheralDriver):
 
     # ── Rendering helpers ─────────────────────────────────────────
 
-    def _render_launch_script(self, url: str, params: Dict[str, Any]) -> str:
+    def _render_launch_script(self, params: Dict[str, Any]) -> str:
         rotation = int(params.get("rotation", 0) or 0)
         # Chromium flag list — kiosk-mode best practice for an HDMI
         # appliance. --kiosk hides chrome, --noerrdialogs suppresses
@@ -164,12 +186,21 @@ class ConsoleDisplayDriver(PeripheralDriver):
                 f'xrandr --output "$(xrandr | awk \'/ connected/ {{print $1; exit}}\')" --rotate {xrandr_dir} 2>/dev/null || true\n'
                 f'wlr-randr --output "$(wlr-randr | awk \'/^[^ ]/ {{print $1; exit}}\')" --transform {rotation} 2>/dev/null || true\n'
             )
+        # Read URL from the state file at launch time (NOT baked into
+        # the script). This lets the saint-node service update the
+        # URL by rewriting the state file alone — no script rewrite,
+        # no rights drama between root and the desktop user.
+        url_file_q = shlex.quote(URL_STATE_PATH)
         return (
             "#!/usr/bin/env bash\n"
             "# AUTO-GENERATED by saint_node console_display driver — do not edit by hand.\n"
             "# Re-applies on every peripheral sync from the SAINT.OS server.\n"
             "set -u\n"
-            f"URL={shlex.quote(url)}\n"
+            f"URL=$(cat {url_file_q} 2>/dev/null | head -1)\n"
+            "if [ -z \"$URL\" ]; then\n"
+            f"    echo \"saint-console-kiosk: no URL in {URL_STATE_PATH}\" >&2\n"
+            "    exit 1\n"
+            "fi\n"
             f"{rotation_block}"
             "for B in chromium-browser chromium google-chrome chrome; do\n"
             "    if command -v \"$B\" >/dev/null 2>&1; then\n"
@@ -194,16 +225,27 @@ class ConsoleDisplayDriver(PeripheralDriver):
     # ── Hot relaunch ──────────────────────────────────────────────
 
     def _relaunch_kiosk(self, launch_path: Path) -> None:
-        """Kill any running Chromium kiosk owned by this user, then
-        respawn via the new launch script. No-op if no Chromium is
-        running (operator hasn't logged into the desktop yet — the
-        autostart entry will handle it on next login).
+        """Best-effort: kill any running Chromium kiosk so the desktop
+        user's session can respawn it with the new URL. No-op if no
+        Chromium is running yet (typical first-adoption case — the
+        autostart entry handles it on next desktop session start).
+
+        We don't try to start Chromium ourselves: the saint-node service
+        runs as root with no X/Wayland display, while Chromium needs the
+        desktop user's DISPLAY/DBUS context. The kill-only path lets
+        whatever already-running session manager (gdm, lightdm,
+        labwc, etc.) respawn from /etc/xdg/autostart on its own
+        cadence. If the session never auto-respawns, the user can
+        log out + back in once to pick up the new URL.
         """
         if not shutil.which("pgrep"):
             return
+        # Search ALL users — saint-node runs as root but Chromium runs
+        # under the desktop user. No -u filter; just match anything
+        # with --kiosk in its argv.
         try:
             res = subprocess.run(
-                ["pgrep", "-u", str(os.getuid()), "-f", "--kiosk"],
+                ["pgrep", "-f", "--kiosk"],
                 check=False, capture_output=True, text=True, timeout=3)
         except (OSError, subprocess.SubprocessError):
             return
@@ -211,18 +253,10 @@ class ConsoleDisplayDriver(PeripheralDriver):
         for pid in pids:
             try: os.kill(pid, signal.SIGTERM)
             except OSError: pass
-        if not pids:
-            # Operator may not be logged into the desktop yet — that's
-            # the normal first-boot case. Autostart entry handles it.
-            return
-        # Give Chromium a moment to tear down, then respawn detached.
-        try:
-            subprocess.Popen(
-                ["bash", str(launch_path)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
-        except OSError as e:
-            self._log("warn", f"console_display: respawn failed: {e}")
+        if pids:
+            self._log("info",
+                f"console_display: signalled {len(pids)} existing kiosk "
+                f"chromium process(es); session will respawn via autostart")
 
 
 # ── Pure helpers (testable without filesystem) ────────────────────
@@ -230,10 +264,15 @@ class ConsoleDisplayDriver(PeripheralDriver):
 def build_kiosk_url(params: Dict[str, Any]) -> Optional[str]:
     """Construct the kiosk URL the Pi browser should load.
 
-    Returns None if any required field is missing — the driver
-    surfaces a warn and skips the write. Otherwise produces something
-    like:
+    Returns None if a required field is missing for the chosen view.
+    For the default "batteries" overview only `server_url` is needed;
+    the view auto-discovers all BMS peripherals from the server.
+    For the per-pack "battery" view both `target_node_id` and
+    `target_peripheral_id` are required (otherwise the URL can't
+    route to a specific pack).
 
+    Examples:
+        http://saint.local:8080/#/console/batteries?kiosk_token=...
         http://saint.local:8080/#/console/battery/controller-1/bms-1?kiosk_token=...
 
     The token is sourced from the private `_kiosk_token` param the
@@ -241,14 +280,34 @@ def build_kiosk_url(params: Dict[str, Any]) -> Optional[str]:
     UI never shows it.
     """
     server_url = (params.get("server_url") or "").strip().rstrip("/")
-    view = (params.get("view") or "").strip()
-    node_id = (params.get("target_node_id") or "").strip()
-    peripheral_id = (params.get("target_peripheral_id") or "").strip()
-    if not server_url or not view or not node_id or not peripheral_id:
+    if not server_url:
         return None
-    path = f"#/console/{view}/{quote(node_id, safe='')}/{quote(peripheral_id, safe='')}"
+    # Default view: the multi-pack overview. The operator can opt into
+    # the per-pack detail view by setting view="battery" + the target
+    # IDs, but for "just show me batteries" — the common case — the
+    # overview handles it without operator config.
+    view = (params.get("view") or "batteries").strip()
+
+    if view == "battery":
+        node_id = (params.get("target_node_id") or "").strip()
+        peripheral_id = (params.get("target_peripheral_id") or "").strip()
+        if not node_id or not peripheral_id:
+            return None
+        hash_part = f"#/console/battery/{quote(node_id, safe='')}/{quote(peripheral_id, safe='')}"
+    else:
+        # batteries overview — no per-pack targeting. The Vue view
+        # discovers adopted BMSes via the management WS.
+        hash_part = "#/console/batteries"
+
+    # Place ?kiosk_token=... BEFORE the # fragment so it lands in
+    # window.location.search (which is everything between ? and #).
+    # If we put it after the #, the token ends up inside the hash and
+    # main.js's URLSearchParams(window.location.search) returns null,
+    # and the kiosk falls through to the LoginScreen. Vue Router's
+    # in-hash query parsing handles in-hash queries independently of
+    # this outer query, so the two coexist without conflict.
     token = params.get("_kiosk_token")
     query = ""
     if token:
         query = "?kiosk_token=" + quote(str(token), safe="")
-    return f"{server_url}/{path}{query}"
+    return f"{server_url}/{query}{hash_part}"

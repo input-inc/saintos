@@ -308,14 +308,19 @@ def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
             slim.append({})
             continue
         default = _maestro_default_channel(i, params)
-        # All known keys present AND equal → slim to {}. Use the
-        # default's keys as the comparison basis so unknown extra
-        # keys on `ch` (operator-injected, shouldn't normally exist
-        # after normalization) still get sent on the wire.
-        if all(ch.get(k) == default[k] for k in _MAESTRO_CHANNEL_KEYS):
-            slim.append({})
-        else:
-            slim.append(dict(ch))
+        # Per-field diff: emit only the fields that differ from the
+        # default. A channel where every field matches default
+        # becomes `{}` (just a placeholder for parser index counting).
+        # A channel with one customized home_us becomes
+        # `{"home_us": <val>}`. This keeps even worst-case payloads
+        # under the XRCE-DDS reassembly cap. The firmware parser
+        # falls back to peripheral-level defaults for any field not
+        # present in the channel object.
+        diff: Dict[str, Any] = {}
+        for k in _MAESTRO_CHANNEL_KEYS:
+            if ch.get(k) != default[k]:
+                diff[k] = ch.get(k)
+        slim.append(diff)
     out["channels"] = slim
     return out
 
@@ -852,22 +857,27 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
         channels=[],
         params=[
             PeripheralTypeParam(
-                "view", "Console view", "string", "battery",
+                "view", "Console view", "string", "batteries",
                 choices=[
-                    {"value": "battery", "label": "Battery status (BMS)"},
+                    {"value": "batteries", "label": "Batteries overview (all packs)"},
+                    {"value": "battery",   "label": "Single battery (requires target IDs)"},
                 ],
-                help="Which Console view to display. More views can be "
-                     "added without a catalog change once their routes "
-                     "land under /console/<view>/...",
+                help="Which Console view to display. 'Batteries overview' "
+                     "auto-discovers every adopted BMS — no targeting "
+                     "needed. 'Single battery' zooms into one pack and "
+                     "requires the target node + peripheral IDs below.",
             ),
             PeripheralTypeParam(
                 "target_node_id", "Target node ID", "string", "",
-                help="ID of the node whose peripheral feeds this view "
-                     "(e.g. the controller node that owns the BMS)."),
+                help="(Only used when view = Single battery.) ID of the "
+                     "node whose peripheral feeds this view, e.g. the "
+                     "controller node that owns the BMS. Leave blank "
+                     "for the overview view."),
             PeripheralTypeParam(
                 "target_peripheral_id", "Target peripheral ID", "string", "",
-                help="Peripheral ID on the target node (e.g. the BMS "
-                     "instance label) that the view subscribes to."),
+                help="(Only used when view = Single battery.) Peripheral "
+                     "ID on the target node, e.g. the BMS instance "
+                     "label. Leave blank for the overview view."),
             PeripheralTypeParam(
                 "server_url", "Server URL", "string", "http://localhost:8080",
                 help="Base URL of the SAINT.OS server the kiosk browser "

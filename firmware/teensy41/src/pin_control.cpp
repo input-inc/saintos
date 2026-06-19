@@ -15,6 +15,7 @@ extern "C" {
 #include "pin_control.h"
 #include "pin_config.h"
 #include "peripheral_driver.h"
+#include "maestro_driver.h"   // maestro_set_target_preview (live extent-dial jog)
 #include "saint_types.h"   // led_set_override_color / led_set_override_brightness / led_clear_override
 }
 
@@ -538,13 +539,39 @@ static bool apply_set_channel(const char* json)
     peripheral_type[0] = '\0';
     extract_str_field(json, "\"type\"", peripheral_type, sizeof(peripheral_type));
 
+    /* Optional absolute-microseconds jog ("us"): the dashboard's live
+     * extent-dial preview drives the servo to a raw pulse so the
+     * operator can dial in start/end/center/home visually. It bypasses
+     * the normalized value→pulse mapping and the per-channel software
+     * clamp (Maestro only — routed to maestro_set_target_preview below).
+     * When "us" is present, "value" is optional. */
+    long preview_us = -1;
+    const char* us_str = strstr(json, "\"us\"");
+    if (us_str) {
+        us_str = strchr(us_str, ':');
+        if (us_str) {
+            us_str++;
+            while (*us_str == ' ') us_str++;
+            preview_us = atol(us_str);
+        }
+    }
+
+    float value = 0.0f;
+    bool has_value = false;
     const char* value_str = strstr(json, "\"value\"");
-    if (!value_str) return false;
-    value_str = strchr(value_str, ':');
-    if (!value_str) return false;
-    value_str++;
-    while (*value_str == ' ') value_str++;
-    float value = (float)atof(value_str);
+    if (value_str) {
+        value_str = strchr(value_str, ':');
+        if (value_str) {
+            value_str++;
+            while (*value_str == ' ') value_str++;
+            value = (float)atof(value_str);
+            has_value = true;
+        }
+    }
+    if (!has_value && preview_us < 0) {
+        Serial.printf("set_channel: missing both 'value' and 'us'\n");
+        return false;
+    }
 
     /* On-board LED routes — both `neopixel` (RGB) and `mono_led`
      * (single-color, channels = state + brightness) end up in the
@@ -610,6 +637,16 @@ static bool apply_set_channel(const char* json)
                        "(peripheral=%s channel=%s)\n",
                        (int)mode, peripheral_id, channel_id);
         return false;
+    }
+
+    /* Live extent-dial jog: drive the Maestro channel to an absolute
+     * pulse, bypassing the normalized mapping + per-channel clamp. */
+    if (preview_us >= 0 && mode == PIN_MODE_MAESTRO_SERVO) {
+        Serial.printf("set_channel: Maestro ch %d live jog -> %ld us (preview)\n",
+                      offset, preview_us);
+        bool ok = maestro_set_target_preview((uint8_t)offset, (uint16_t)preview_us);
+        Serial.printf("set_channel: preview jog -> %s\n", ok ? "OK" : "FAIL");
+        return ok;
     }
 
     uint8_t target_gpio = (uint8_t)(base_gpio + offset);

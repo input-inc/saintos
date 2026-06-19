@@ -31,7 +31,27 @@ _ws.connect()
 // doesn't sit at LoginScreen waiting for human input. The server only
 // accepts the token if it matches WebSocketConfig.kiosk_token — see
 // _handle_auth_login in websocket_handler.py.
-const kioskToken = new URLSearchParams(window.location.search).get('kiosk_token')
+//
+// Scan BOTH the outer ?query (window.location.search) AND inside the
+// hash fragment (window.location.hash), because Vue Router uses
+// hash-mode routing — depending on which side of the '#' the URL
+// builder put the token, it lives in one place or the other. Older
+// builders put it inside the hash; current ones put it before. Tolerate
+// both so a Pi running an old console_display.py still auto-auths.
+function extractKioskToken () {
+  // 1. Outer query string: http://server/?kiosk_token=...#/route
+  const outer = new URLSearchParams(window.location.search).get('kiosk_token')
+  if (outer) return outer
+  // 2. In-hash query: http://server/#/route?kiosk_token=...
+  const hash = window.location.hash || ''
+  const qIdx = hash.indexOf('?')
+  if (qIdx >= 0) {
+    const inner = new URLSearchParams(hash.slice(qIdx + 1)).get('kiosk_token')
+    if (inner) return inner
+  }
+  return null
+}
+const kioskToken = extractKioskToken()
 if (kioskToken) {
   _ws.on('auth_required', () => {
     _ws.authenticate({ kiosk_token: kioskToken }).catch(() => {})

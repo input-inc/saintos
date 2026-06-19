@@ -1190,7 +1190,6 @@ class StateManager:
     def get_adopted_nodes(self) -> List[Dict[str, Any]]:
         """Get list of adopted nodes."""
         result = []
-        server_fw = self.get_server_firmware_info()
 
         for node in self.state.adopted_nodes.values():
             # Host controller isn't an RP2040/Teensy firmware target —
@@ -1200,8 +1199,28 @@ class StateManager:
                     "available": False,
                     "message": "Host controller — runs from the server install",
                 }
+                # Use the server's own build info on the host controller —
+                # it's running from the install and there's no per-chip
+                # firmware bundle for it.
+                server_fw = self.get_server_firmware_info()
             else:
                 fw_update_info = self.is_firmware_update_available(node.node_id)
+                # Resolve the SERVER-SIDE firmware info using the node's
+                # chip family, NOT the global RP2040 walker. This used
+                # to be a single get_server_firmware_info() call hoisted
+                # above the loop, which meant every node's
+                # server_firmware_version was the RP2040 build — Pi
+                # nodes on the Nodes-view page got tagged with the
+                # RP2040 version pill like "1.2.0-<unix_ts>", and
+                # Teensy nodes the same. Now each node sees its own
+                # chip-family's staged build. Mirrors the dispatch in
+                # is_firmware_update_available so the two fields stay
+                # in sync.
+                chip = (node.chip_family or '').lower() or None
+                if chip and chip in ('rp2040', 'teensy41', 'raspberrypi'):
+                    server_fw = self.get_firmware_info_for_type(chip)
+                else:
+                    server_fw = self.get_server_firmware_info()
 
             node_data = {
                 "node_id": node.node_id,
@@ -1959,7 +1978,26 @@ class StateManager:
             "version": node.peripheral_config.version,
             "peripherals": peripherals_out,
         }
-        return json.dumps(payload)
+        out = json.dumps(payload)
+        # Budget guard: alert at the source if a config push approaches
+        # the firmware's reassembly cap. UXR_CONFIG_UDP_TRANSPORT_MTU is
+        # 512, RMW_UXRCE_MAX_HISTORY is 4 → reassembly cap ≈ 2048 bytes.
+        # The firmware's config_buffer is 4096; getting close to that
+        # means we're also close to the XRCE cap (which is the harder
+        # limit). The wire-size regression test in
+        # server/test/test_maestro_wire_size_budget.py catches CI
+        # regressions ahead of time; this runtime log catches
+        # operator-set values that pushed past the test's coverage.
+        XRCE_REASSEMBLY_CAP = 2048
+        if len(out) > XRCE_REASSEMBLY_CAP:
+            self._log_activity(
+                f"Config push for {node_id} is {len(out)} bytes "
+                f"(over the ~{XRCE_REASSEMBLY_CAP}-byte XRCE-DDS reassembly cap; "
+                f"firmware may crash on receive). See docs/MAESTRO_BRINGUP.md "
+                f"wire-size section.",
+                "warning", node_id=node_id,
+            )
+        return out
 
     def _generate_peripheral_id(self, node: NodeInfo, type_id: str) -> str:
         config = node.peripheral_config or NodePeripheralConfig()
@@ -3577,7 +3615,13 @@ class StateManager:
         # isn't reported yet (older firmware) — there the RP2040
         # build is the only thing we can compare against.
         chip = (node.chip_family or '').lower() or None
-        if chip and chip in ('rp2040', 'teensy41'):
+        if chip and chip in ('rp2040', 'teensy41', 'raspberrypi'):
+            # Compare each chip family against ITS OWN staged firmware.
+            # Without 'raspberrypi' in this list, a Pi node falls through
+            # to get_server_firmware_info() — which walks the RP2040
+            # build tree, so the Pi's 1.1.0 gets compared against an
+            # RP2040 build's 0.5.0 and the UI shows a bogus "Update
+            # available" badge on a Pi that's already current.
             server_fw = self.get_firmware_info_for_type(chip)
         else:
             server_fw = self.get_server_firmware_info()

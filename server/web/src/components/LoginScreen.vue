@@ -9,11 +9,25 @@ const error = ref('')
 const connecting = ref(false)
 
 onMounted(() => {
+  let restoredPassword = false
   try {
     const s = JSON.parse(localStorage.getItem('saint_ws_settings') || '{}')
     if (s.host) host.value = s.host
-    if (s.password) password.value = s.password
+    if (s.password) {
+      password.value = s.password
+      restoredPassword = true
+    }
   } catch (_) {}
+  // If the user opted into "remember me" by previously submitting the
+  // form (which is what writes saint_ws_settings), auto-attempt the
+  // login. Makes the post-server-restart flow zero-click: WS drops →
+  // ws.js reloads the page → LoginScreen mounts → submits itself →
+  // user lands back where they were. If auto-auth fails (password
+  // changed server-side, etc.), the error surfaces via submit()'s
+  // catch and the operator can correct it manually.
+  if (restoredPassword) {
+    submit()
+  }
 })
 
 async function submit () {

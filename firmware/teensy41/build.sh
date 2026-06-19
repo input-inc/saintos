@@ -29,14 +29,40 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# PlatformIO compiles the out-of-tree shared sources (../../shared/src/*,
+# pulled in via build_src_filter) into a single build/shared/ object
+# directory that is NOT namespaced per environment. Both `simulation`
+# (-DSIMULATION) and `hardware` read/write the SAME object files, and
+# PlatformIO only recompiles when the *source* is newer than the object
+# — it can't tell the build flags changed. So a hardware build that runs
+# after a simulation build silently links the SIMULATION-compiled
+# shared objects.
+#
+# That is not cosmetic: with -DSIMULATION the shared code does
+# `#define Serial Serial1` (platform.h) and takes other `#ifdef
+# SIMULATION` branches (flash/transport). The Serial1 case alone bricks
+# hardware — the first shared-code PLATFORM_PRINTF (registering the
+# Maestro driver) writes to the unwired LPUART6, fills its TX FIFO, and
+# blocks forever, so the node watchdog-loops at boot.
+#
+# Force the shared objects to rebuild with the target env's flags by
+# clearing build/shared before every build. The shared tree is small
+# (~10 s) — cheap insurance against a bug that builds clean and bricks
+# on hardware.
+clean_shared_objects() {
+    rm -rf build/shared
+}
+
 build_sim() {
     echo -e "${YELLOW}Building SIMULATION firmware (Teensy 4.1)...${NC}"
+    clean_shared_objects
     pio run -e simulation
     echo -e "${GREEN}Simulation build complete${NC}"
 }
 
 build_hw() {
     echo -e "${YELLOW}Building HARDWARE firmware (Teensy 4.1)...${NC}"
+    clean_shared_objects
     pio run -e hardware
     echo -e "${GREEN}Hardware build complete: build/hardware/firmware.hex${NC}"
     echo -e "${GREEN}OTA artifact staged: server/resources/firmware/teensy41/saint_node.bin${NC}"

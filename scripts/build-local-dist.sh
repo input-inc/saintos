@@ -303,15 +303,73 @@ build_firmware_teensy41() {
 build_firmware_raspberrypi() {
     local pkg=firmware/raspberrypi/scripts/package.sh
     if [[ ! -x "$pkg" ]]; then
-        warn "Pi5 package script missing — skipping"
+        warn "Pi package script missing — skipping"
         return
     fi
-    log "Packaging Pi5 firmware"
-    ( cd firmware/raspberrypi/scripts && ./package.sh "${VERSION}" ) \
-        || { warn "Pi5 firmware package failed — leaving existing staged files"; return; }
+
+    # Refresh the per-release Pi .deb caches before packaging. bundle-debs.sh
+    # is idempotent — a fresh sentinel hash means it no-ops in seconds.
+    # Without this step, a stale _rpi_debs_<rel>/ from before we added a
+    # runtime lib (libconsole-bridge1.0, liblttng-ust1, …) silently ships
+    # into the bundle and the Pi service fails at startup with a missing
+    # .so. Each release that has a ROS tree gets its matching deb cache.
+    local debs=firmware/raspberrypi/scripts/bundle-debs.sh
+    local rel
+    for rel in bookworm trixie; do
+        if [[ -d "_ros2/opt/ros/${ROS_DISTRO}/install" && "$rel" = "bookworm" ]] \
+        || [[ -d "_ros2_${rel}/opt/ros/${ROS_DISTRO}/install" ]]; then
+            log "Refreshing Pi .deb cache (${rel})"
+            DEBIAN_RELEASE="$rel" "$debs" \
+                || warn "bundle-debs.sh ${rel} failed — package may use stale cache"
+        fi
+    done
+
+    # Prefer the multi-target bundle when both bookworm (_ros2/) and
+    # trixie (_ros2_trixie/) source trees are present. install.sh on
+    # the Pi detects /etc/os-release and picks the right half at
+    # install time, so a single zip serves every Pi regardless of OS.
+    # The resulting filename is saint_firmware_raspberrypi_<v>.zip —
+    # unsuffixed, OTA-server compatible.
+    local have_bookworm=0 have_trixie=0
+    [[ -d "_ros2/opt/ros/${ROS_DISTRO}/install" ]]        && have_bookworm=1
+    [[ -d "_ros2_trixie/opt/ros/${ROS_DISTRO}/install" ]] && have_trixie=1
+
+    # Don't pass ${VERSION} to package.sh: that's the SERVER bundle's
+    # version (derived from server/VERSION + git SHA), which has no
+    # bearing on the Pi firmware's own version
+    # (firmware/raspberrypi/saint_node/__init__.py:__version__).
+    # Letting package.sh fall back to its default makes info.json's
+    # latest_version match what the Pi actually announces, so the
+    # "Update available" badge on the operator UI stays accurate.
+    if (( have_bookworm && have_trixie )); then
+        log "Packaging Pi firmware (multi-target: bookworm + trixie)"
+        ( cd firmware/raspberrypi/scripts && ./package.sh --multi-target ) \
+            || warn "Pi firmware multi-target package failed — leaving existing staged files"
+    elif (( have_bookworm )); then
+        log "Packaging Pi firmware (bookworm only)"
+        ( cd firmware/raspberrypi/scripts && ./package.sh ) \
+            || warn "Pi firmware bookworm package failed — leaving existing staged files"
+    elif (( have_trixie )); then
+        log "Packaging Pi firmware (trixie only)"
+        ( cd firmware/raspberrypi/scripts && ./package.sh --target-release trixie ) \
+            || warn "Pi firmware trixie package failed — leaving existing staged files"
+    else
+        warn "No ROS2 install tree found for Pi (need _ros2/ or _ros2_trixie/) — skipping Pi bundle"
+        return
+    fi
+
     if [[ -d firmware/raspberrypi/dist ]]; then
         mkdir -p server/resources/firmware/raspberrypi
-        cp -rv firmware/raspberrypi/dist/. server/resources/firmware/raspberrypi/
+        # rsync --delete keeps server/resources/firmware/raspberrypi/
+        # in lockstep with firmware/raspberrypi/dist/. Without --delete
+        # this dir accumulates every zip from every build — pre-rename
+        # saint_firmware_rpi5_*.zip artifacts, intermediate version
+        # strings, single-target shapes — and then balloons the
+        # server's dist tarball because the tarball includes this
+        # whole tree.
+        rsync -av --delete \
+            firmware/raspberrypi/dist/ \
+            server/resources/firmware/raspberrypi/
     fi
 }
 
@@ -478,6 +536,22 @@ if (( SKIP_WEB_BUILD )); then
 else
     command -v node >/dev/null || die "node is required (or pass --skip-web-build)"
     command -v npm  >/dev/null || die "npm is required (or pass --skip-web-build)"
+
+    # Sync the canonical brand asset into server/web/public/ so the
+    # SPA splash (index.html → /opensaint.png) and the Pi boot
+    # splash (Plymouth theme → opensaint.png) share one source of
+    # truth. Without this copy, server/web/public/opensaint.png would
+    # be perpetually stale relative to the firmware-side asset, and
+    # we'd be back to "maintain two PNGs in two places".
+    local_brand_src=firmware/raspberrypi/assets/opensaint.png
+    local_brand_dst=server/web/public/opensaint.png
+    if [[ -f "$local_brand_src" ]]; then
+        log "Syncing brand asset → ${local_brand_dst}"
+        cp "$local_brand_src" "$local_brand_dst"
+    else
+        warn "${local_brand_src} missing — SPA splash will fall back to text-only."
+    fi
+
     log "Building web/dist via Vite"
     ( cd server/web
       # Use `npm ci` when a lockfile exists for reproducible installs;

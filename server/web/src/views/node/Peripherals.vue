@@ -61,6 +61,31 @@ const channelModalIdx = ref(0)
 const channelModalDraft = ref({})  // { label, min_us, max_us, center_us, home_us, default_speed, default_accel }
 const channelModalError = ref('')
 
+// Live extent-dial preview: while the operator drags a handle in the
+// channel modal, jog the real servo to that absolute pulse so they can
+// dial in start/end/center/home by eye. Sends the `us` field on the
+// existing set_channel_value path (server + firmware clamp to a safe
+// window). Leading+trailing throttle at ~20 Hz so a fast drag doesn't
+// flood the control topic but the final resting position always lands.
+let _previewLast = 0
+let _previewTimer = null
+function previewChannelUs (us) {
+  const fire = (pulse) => {
+    _previewLast = Date.now()
+    ws.control('set_channel_value', {
+      node_id: props.nodeId,
+      peripheral_id: channelModalPeripheralId.value,
+      channel_id: `ch${channelModalIdx.value}`,
+      us: Math.round(pulse),
+    }).catch(() => {})
+  }
+  const now = Date.now()
+  const wait = 50 - (now - _previewLast)
+  clearTimeout(_previewTimer)
+  if (wait <= 0) fire(us)
+  else _previewTimer = setTimeout(() => fire(us), wait)
+}
+
 // Whether the peripheral edit modal's "Advanced" section is expanded.
 // Reset to closed on each modal open. Only meaningful for types that
 // declare advanced params (Maestro today).
@@ -923,6 +948,7 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
               channelModalDraft.neutral_us   = v.center_us
               channelModalDraft.home_us      = v.home_us
             }"
+            @preview="previewChannelUs"
           />
           <p class="text-xs text-fg-faint">
             Min/max are the pulse-width limits this channel can be commanded to.

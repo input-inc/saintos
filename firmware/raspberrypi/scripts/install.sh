@@ -67,16 +67,41 @@ fi
 # Both directories are optional. Without them the installer falls back to
 # online apt + ros-apt-source (the prior behaviour).
 # ---------------------------------------------------------------------------
+# Detect this Pi's Debian release codename. Used to pick the right
+# bundled ROS2 install tree + deb cache when the firmware bundle is
+# multi-target (carries both bookworm and trixie payloads).
+PI_RELEASE=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
+if [ -z "$PI_RELEASE" ]; then
+    echo -e "${YELLOW}Warning: /etc/os-release lacks VERSION_CODENAME — assuming bookworm.${NC}"
+    PI_RELEASE="bookworm"
+fi
+echo "Pi Debian release: ${PI_RELEASE}"
+
+# Pick the right deps/ dir from the bundle. Multi-target bundles ship
+# deps/<release>/ subdirs; legacy single-target bundles ship a flat
+# deps/. Same logic applies to ros2_install/ further down.
+resolve_bundle_subdir() {
+    local subkey="$1"   # "deps" or "ros2_install"
+    local base="$SCRIPT_DIR/../${subkey}"
+    if [ -d "${base}/${PI_RELEASE}" ]; then
+        echo "${base}/${PI_RELEASE}"
+        return 0
+    fi
+    if [ -d "$base" ]; then
+        echo "$base"
+        return 0
+    fi
+    return 1
+}
+
 LOCAL_APT_LIST="/etc/apt/sources.list.d/saint-rpi-local.list"
 LOCAL_APT_CONF="/etc/apt/apt.conf.d/00saint-rpi-install"
 LOCAL_REPO_ENABLED=0
 APT_UPDATE_OPTS=()
 
 setup_local_apt_repo() {
-    local deps_dir="$SCRIPT_DIR/../deps"
-    if [ ! -d "$deps_dir" ]; then
-        return
-    fi
+    local deps_dir
+    deps_dir=$(resolve_bundle_subdir deps) || return
     if ! ls "$deps_dir"/*.deb >/dev/null 2>&1; then
         return
     fi
@@ -388,36 +413,49 @@ if ROS_SETUP=$(_find_ros_setup); then
     fi
 fi
 
-if [ -z "${ROS_SETUP:-}" ] && [ -d "$SCRIPT_DIR/../ros2_install" ]; then
-    # Offline path — bundled ROS2 install tree present.
-    # Mirrors packaging/install.sh's behaviour: rsync into
-    # /opt/ros/<distro>/install/ (the path the build embedded into
-    # setup.bash's absolute references).
-    if ! _ros_install_python_ok "$SCRIPT_DIR/../ros2_install"; then
-        echo -e "${YELLOW}Skipping bundled ros2_install/ and falling through to apt.${NC}"
-        # Don't set ROS_SETUP; the apt branch below picks up the slack.
-    else
-        ROS_PARENT="/opt/ros/${ROS_DISTRO}"
-        ROS_PREFIX="${ROS_PARENT}/install"
-        echo -e "Installing ROS2 ${GREEN}${ROS_DISTRO}${NC} from bundled tree…"
-        # If a previous install left ROS_PARENT in the apt (flat) layout
-        # (setup.bash directly under /opt/ros/<distro>/), wipe before
-        # syncing so the install/ subdir takes over cleanly. Mirrors
-        # the server installer's migration.
-        if [ -f "${ROS_PARENT}/setup.bash" ] && [ ! -d "$ROS_PREFIX" ]; then
-            echo "Older ROS2 layout under ${ROS_PARENT} — wiping before sync"
-            rm -rf "$ROS_PARENT"
+if [ -z "${ROS_SETUP:-}" ]; then
+    # Bundled tree: resolve release-specific subdir first
+    # (ros2_install/<release>/ from multi-target bundles), then the
+    # flat ros2_install/ from legacy single-target bundles. Whichever
+    # exists must have the right Python ABI for this host — install
+    # bombed out earlier if not.
+    bundled_ros2=""
+    if [ -d "$SCRIPT_DIR/../ros2_install/${PI_RELEASE}" ]; then
+        bundled_ros2="$SCRIPT_DIR/../ros2_install/${PI_RELEASE}"
+        echo "Multi-target bundle: using ros2_install/${PI_RELEASE}/ for this Pi"
+    elif [ -d "$SCRIPT_DIR/../ros2_install" ] && [ -f "$SCRIPT_DIR/../ros2_install/setup.bash" ]; then
+        bundled_ros2="$SCRIPT_DIR/../ros2_install"
+    fi
+
+    if [ -n "$bundled_ros2" ]; then
+        # Mirrors packaging/install.sh's behaviour: rsync into
+        # /opt/ros/<distro>/install/ (the path the build embedded into
+        # setup.bash's absolute references).
+        if ! _ros_install_python_ok "$bundled_ros2"; then
+            echo -e "${YELLOW}Skipping bundled ros2_install/ and falling through to apt.${NC}"
+            # Don't set ROS_SETUP; the apt branch below picks up the slack.
+        else
+            ROS_PARENT="/opt/ros/${ROS_DISTRO}"
+            ROS_PREFIX="${ROS_PARENT}/install"
+            echo -e "Installing ROS2 ${GREEN}${ROS_DISTRO}${NC} from bundled tree…"
+            # If a previous install left ROS_PARENT in the apt (flat) layout
+            # (setup.bash directly under /opt/ros/<distro>/), wipe before
+            # syncing so the install/ subdir takes over cleanly.
+            if [ -f "${ROS_PARENT}/setup.bash" ] && [ ! -d "$ROS_PREFIX" ]; then
+                echo "Older ROS2 layout under ${ROS_PARENT} — wiping before sync"
+                rm -rf "$ROS_PARENT"
+            fi
+            install -d "$ROS_PREFIX"
+            rsync -a --delete "$bundled_ros2/" "$ROS_PREFIX/" \
+                || { echo -e "${RED}Failed to copy bundled ROS2 tree${NC}"; exit 1; }
+            if [ ! -f "$ROS_PREFIX/setup.bash" ]; then
+                echo -e "${RED}Bundled ros2 tree at ${bundled_ros2} has no setup.bash${NC}"
+                echo -e "${YELLOW}Make sure the bundle contains the install/ subtree directly,"
+                echo -e "not a wrapping directory. The packager copies _ros2*/opt/ros/<distro>/install/ verbatim.${NC}"
+                exit 1
+            fi
+            ROS_SETUP="$ROS_PREFIX/setup.bash"
         fi
-        install -d "$ROS_PREFIX"
-        rsync -a --delete "$SCRIPT_DIR/../ros2_install/" "$ROS_PREFIX/" \
-            || { echo -e "${RED}Failed to copy bundled ROS2 tree${NC}"; exit 1; }
-        if [ ! -f "$ROS_PREFIX/setup.bash" ]; then
-            echo -e "${RED}Bundled ros2_install/ doesn't have setup.bash at ${ROS_PREFIX}/setup.bash${NC}"
-            echo -e "${YELLOW}Make sure ros2_install/ in the firmware zip contains the install/ subtree directly,"
-            echo -e "not a wrapping directory. The packager copies _ros2/opt/ros/<distro>/install/ verbatim.${NC}"
-            exit 1
-        fi
-        ROS_SETUP="$ROS_PREFIX/setup.bash"
     fi
 fi
 
@@ -581,6 +619,45 @@ EOF
 
 udevadm control --reload-rules
 udevadm trigger
+
+echo ""
+echo "Step 8: Installing SAINT.OS Plymouth boot splash (optional)..."
+# The bundled theme lives at $SCRIPT_DIR/../assets/plymouth/saint-os/.
+# We only install it when (a) the theme dir is present in the bundle
+# AND (b) splash.png is non-empty — otherwise plymouth-set-default-theme
+# leaves the screen blank during boot. Plymouth itself needs to be
+# present too (apt package: plymouth); skip with a warning rather than
+# failing the whole installer if the operator didn't preinstall it.
+PLYMOUTH_THEME_SRC="$SCRIPT_DIR/../assets/plymouth/saint-os"
+PLYMOUTH_THEME_DST="/usr/share/plymouth/themes/saint-os"
+# Logo file: opensaint.png — bundled by package.sh from
+# firmware/raspberrypi/assets/opensaint.png (the canonical brand asset
+# that also drives the SPA splash). The Plymouth script references it
+# by that exact filename.
+if [ -d "$PLYMOUTH_THEME_SRC" ] \
+   && [ -s "$PLYMOUTH_THEME_SRC/opensaint.png" ] \
+   && command -v plymouth-set-default-theme >/dev/null 2>&1; then
+    echo "Installing SAINT.OS Plymouth theme → ${PLYMOUTH_THEME_DST}"
+    mkdir -p "$PLYMOUTH_THEME_DST"
+    cp -a "$PLYMOUTH_THEME_SRC/." "$PLYMOUTH_THEME_DST/"
+    # -R rebuilds the initramfs so the theme also covers the very
+    # early boot phase (before systemd takes over). Without -R the
+    # splash only kicks in mid-boot, which defeats the point.
+    if plymouth-set-default-theme -R saint-os; then
+        echo -e "${GREEN}SAINT.OS boot splash enabled.${NC}"
+        echo "  (Reboot to see it. To revert: sudo plymouth-set-default-theme -R pix)"
+    else
+        echo -e "${YELLOW}plymouth-set-default-theme failed — splash files copied"
+        echo -e "but the active theme wasn't changed. Run manually if you want it on.${NC}"
+    fi
+elif [ -d "$PLYMOUTH_THEME_SRC" ] && [ ! -s "$PLYMOUTH_THEME_SRC/opensaint.png" ]; then
+    echo -e "${YELLOW}Skipping Plymouth theme — assets/plymouth/saint-os/opensaint.png is missing"
+    echo -e "or empty. Add a PNG at firmware/raspberrypi/assets/opensaint.png and"
+    echo -e "re-package to enable the SAINT.OS boot splash.${NC}"
+elif [ -d "$PLYMOUTH_THEME_SRC" ]; then
+    echo -e "${YELLOW}Skipping Plymouth theme — plymouth-set-default-theme not found."
+    echo -e "Install plymouth + plymouth-themes apt packages first.${NC}"
+fi
 
 echo ""
 echo -e "${GREEN}========================================${NC}"

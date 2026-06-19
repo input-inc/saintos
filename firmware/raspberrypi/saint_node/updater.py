@@ -32,11 +32,18 @@ from . import __version__
 class FirmwareUpdater:
     """Handles firmware self-updates for Raspberry Pi nodes."""
 
-    # Where the firmware is installed
-    DEFAULT_INSTALL_DIR = Path("/opt/saint/firmware/raspberrypi")
+    # Where the firmware is installed. MUST match what scripts/install.sh
+    # used (/opt/saint-node/saint_node/) — that path is the symlink
+    # target in Python's site-packages, so anything else means OTA
+    # writes to a path Python never imports from. Before today's fix
+    # the updater used /opt/saint/firmware/raspberrypi/ which the
+    # symlink didn't point at, so updates appeared to succeed but the
+    # running code never changed.
+    DEFAULT_INSTALL_DIR = Path("/opt/saint-node")
 
-    # Backup directory for rollback
-    BACKUP_DIR = Path("/opt/saint/firmware/raspberrypi.backup")
+    # Backup directory for rollback. Sibling of the install dir so the
+    # rollback path is a simple swap.
+    BACKUP_DIR = Path("/opt/saint-node.backup")
 
     # Staging directory for new firmware
     STAGING_DIR = Path("/tmp/saint_firmware_staging")
@@ -122,10 +129,15 @@ class FirmwareUpdater:
             # Create staging directory
             self.STAGING_DIR.mkdir(parents=True, exist_ok=True)
 
-            # Determine filename from URL
+            # Determine filename from URL. Accept every format
+            # extract_update() knows how to handle. The 'firmware_update'
+            # default with .tar.zst extension matches what package.sh
+            # emits today — older servers serving .zip / .tar.gz still
+            # work because extract_update() dispatches on the suffix
+            # rather than assuming one format.
             filename = url.split('/')[-1]
-            if not filename.endswith(('.zip', '.tar.gz', '.tgz')):
-                filename = "firmware_update.zip"
+            if not filename.endswith(('.zip', '.tar.gz', '.tgz', '.tar.zst', '.tzst')):
+                filename = "firmware_update.tar.zst"
 
             download_path = self.STAGING_DIR / filename
 
@@ -184,13 +196,37 @@ class FirmwareUpdater:
                 shutil.rmtree(extract_dir)
             extract_dir.mkdir(parents=True)
 
-            # Extract based on file type
+            # Extract based on file type. Three formats accepted so
+            # an old server pushing a .zip to a new Pi (or vice versa)
+            # still works.
+            #
+            # .tar.zst — current packager output. Python's stdlib
+            # tarfile didn't get native zstd support until 3.14;
+            # 3.13 (Trixie's default) needs an external decompressor.
+            # We shell out to `tar --zstd` rather than pip-install
+            # zstandard so the OTA path doesn't depend on a python
+            # package that the install bundle's deb cache may not
+            # carry. `tar` ships with libzstd on Bookworm / Trixie
+            # so --zstd works without a separate zstd binary, but if
+            # libzstd isn't linked in tar falls back to spawning the
+            # `zstd` CLI which IS in our bundle-debs RUNTIME_DEB_LIST.
             if package_path.suffix == '.zip':
                 with zipfile.ZipFile(package_path, 'r') as zf:
                     zf.extractall(extract_dir)
             elif package_path.name.endswith(('.tar.gz', '.tgz')):
                 with tarfile.open(package_path, 'r:gz') as tf:
                     tf.extractall(extract_dir)
+            elif package_path.name.endswith(('.tar.zst', '.tzst')):
+                import subprocess
+                proc = subprocess.run(
+                    ['tar', '--zstd', '-xf', str(package_path),
+                     '-C', str(extract_dir)],
+                    capture_output=True, text=True)
+                if proc.returncode != 0:
+                    self._log("error",
+                        f"tar --zstd extract failed (rc={proc.returncode}): "
+                        f"{proc.stderr.strip()}")
+                    return None
             else:
                 self._log("error", f"Unsupported package format: {package_path.suffix}")
                 return None
@@ -391,10 +427,14 @@ class FirmwareUpdater:
             )
 
             if result.returncode == 0:
-                # Service is running, restart it
+                # Service is running, restart it. saint-node.service
+                # runs as User=root so no `sudo` prefix is needed (and
+                # minimal images may not ship sudo at all). --no-block
+                # so we don't wait on the systemd reply that will never
+                # come — restart kills this very process before reply.
                 self._log("info", f"Restarting {self.SERVICE_NAME}")
                 subprocess.run(
-                    ["sudo", "systemctl", "restart", self.SERVICE_NAME],
+                    ["systemctl", "restart", "--no-block", self.SERVICE_NAME],
                     check=True
                 )
                 self._report_progress("restarting", 100)

@@ -37,6 +37,7 @@ extern "C" {
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 #include <rmw_microros/rmw_microros.h>
+#include <rmw/qos_profiles.h>   // rmw_qos_profile_sensor_data (control QoS base)
 #include <std_msgs/msg/string.h>
 #include <std_msgs/msg/int32.h>
 
@@ -118,7 +119,19 @@ static volatile uint32_t g_last_config_save_ok_ms = 0;
 static volatile uint32_t g_last_config_save_fail_ms = 0;
 
 static std_msgs__msg__String config_msg;
-static char config_buffer[2048];
+/* 4096 (was 2048). A full 24-channel Maestro peripheral serializes
+ * to ~3500 bytes when every channel is emitted in full. Server-side
+ * maestro_slim_channels_for_wire collapses default-equal channels
+ * to `{}` and drops a typical payload to <1 KB, but an operator
+ * who customizes every channel on a maxed-out Maestro still needs
+ * room for the full ~3500 bytes. 4096 gives that with margin.
+ *
+ * Note that this buffer alone isn't enough — the XRCE-DDS UDP MTU
+ * (UXR_CONFIG_UDP_TRANSPORT_MTU = 512) and RMW_UXRCE_MAX_HISTORY
+ * (4) together cap the reassembled message at ~2 KB. Beyond that
+ * the libmicroros build needs MAX_HISTORY bumped (rebuild required).
+ * The slim-channels strategy keeps us safely below that ceiling. */
+static char config_buffer[4096];
 
 static std_msgs__msg__String control_msg;
 static char control_buffer[512];
@@ -386,13 +399,31 @@ static void handle_firmware_update(const char* json, size_t len)
     Serial.printf("  Server:  %s\n", new_version);
     Serial.printf("  Force:   %s\n", force_update ? "YES" : "NO");
 
+    // Mirror to /log so the server-side activity feed shows this. The
+    // Serial.printf above only reaches the USB CDC console (useful for
+    // hands-on dev but invisible in the operator UI). Matches the
+    // RP2040 firmware's logging cadence — see firmware/rp2040/src/main.c
+    // handle_firmware_update.
+    saint_log_publish("info",
+        "OTA: firmware_update received (current=%s server=%s force=%s)",
+        FIRMWARE_VERSION_FULL, new_version, force_update ? "YES" : "NO");
+
     if (!force_update) {
         uint32_t current_ts = FIRMWARE_BUILD_UNIX;
         uint32_t server_ts = extract_version_timestamp(new_version);
         if (server_ts == 0 || server_ts <= current_ts) {
             Serial.printf("Firmware is already up to date.\n====================================\n\n");
+            saint_log_publish("info",
+                "OTA: already up to date (current=%lu server=%lu) — aborting "
+                "(use force to override)",
+                (unsigned long)current_ts, (unsigned long)server_ts);
             return;
         }
+        saint_log_publish("info",
+            "OTA: server has newer build (current=%lu server=%lu), proceeding",
+            (unsigned long)current_ts, (unsigned long)server_ts);
+    } else {
+        saint_log_publish("info", "OTA: force update — skipping version check");
     }
 
     /* Parse the OTA image metadata. Size + CRC32 are required for the
@@ -417,18 +448,29 @@ static void handle_firmware_update(const char* json, size_t len)
 
 #ifdef SIMULATION
     Serial.printf("Simulation: halt — node manager restarts with new ELF\n====================================\n\n");
+    saint_log_publish("info",
+        "OTA: simulation — halting; node_manager restarts with new ELF");
     delay(500);
     while (1) { yield(); }
 #else
     if (img_size > 0 && img_crc != 0) {
         Serial.printf("Performing in-app OTA (size=%lu crc=0x%08lx)\n",
                        (unsigned long)img_size, (unsigned long)img_crc);
+        saint_log_publish("info",
+            "OTA: performing in-app FlashTxx update (size=%lu crc=0x%08lx) — "
+            "chip will reboot on success; further status appears after next boot",
+            (unsigned long)img_size, (unsigned long)img_crc);
         saint_ota_result_t r = saint_ota_perform(img_size, img_crc);
         Serial.printf("OTA returned %d — staying on existing firmware\n", (int)r);
+        saint_log_publish("error",
+            "OTA: FlashTxx returned %d — staying on existing firmware", (int)r);
         return;
     }
     Serial.printf("Update message lacks size/crc32 — bare restart (no OTA)\n");
     Serial.printf("====================================\n\n");
+    saint_log_publish("warn",
+        "OTA: control message lacks size/crc32 — bare restart (no OTA). "
+        "Rebuild the server firmware package so it includes the raw .bin.");
     delay(500);
     SCB_AIRCR = 0x05FA0004;
     while (1) { }
@@ -468,8 +510,16 @@ static void dispatch_action_buffer(const char* data, size_t size)
     }
 
     if (strstr(data, "\"action\":\"restart\"") ||
-        strstr(data, "\"action\": \"restart\"")) {
+        strstr(data, "\"action\": \"restart\"") ||
+        strstr(data, "\"action\":\"reboot\"") ||
+        strstr(data, "\"action\": \"reboot\"")) {
         Serial.printf("Restart requested\n");
+        // Mirror to /log so the operator-side activity feed shows this.
+        // Accept both 'restart' (what the server's send_restart_command
+        // emits today) and 'reboot' (legacy name some flows still send)
+        // so a future server-side rename can't silently break it.
+        saint_log_publish("warn",
+            "Restart requested — rebooting via SCB_AIRCR");
         delay(500);
 #ifdef SIMULATION
         while (1) { yield(); }
@@ -481,6 +531,7 @@ static void dispatch_action_buffer(const char* data, size_t size)
 
     if (strstr(data, "\"action\":\"identify\"") ||
         strstr(data, "\"action\": \"identify\"")) {
+        saint_log_publish("info", "Identify requested — flashing onboard LED");
         led_identify(5);
         return;
     }
@@ -537,9 +588,16 @@ static void dispatch_action_buffer(const char* data, size_t size)
 
     if (strstr(data, "\"action\":\"estop\"") ||
         strstr(data, "\"action\": \"estop\"")) {
+        saint_log_publish("warn", "Estop activated");
         pin_control_estop();
         return;
     }
+    // NOTE: Teensy has no clear_estop action handler today because
+    // firmware/teensy41/src/pin_control.cpp doesn't implement
+    // pin_control_clear_estop. RP2040 does. This is a feature-parity
+    // gap, not a logging gap — flagged here so the next person looking
+    // at the dispatcher knows it's intentional. Tracked separately
+    // from the logging-alignment work.
 
     pin_control_apply_json(data, size);
 }
@@ -778,10 +836,26 @@ static bool init_micro_ros(void)
     // control publisher — see firmware/rp2040/src/main.c for the
     // rationale (deadstick must not queue behind unacknowledged
     // reliable retransmissions).
+    //
+    // KEEP_LAST depth 1 (NOT the depth-5 rmw_qos_profile_sensor_data
+    // that rclc_subscription_init_best_effort would install). The
+    // control stream — track motors AND Maestro servos, both routed
+    // through this one subscription — must be strictly newest-wins: a
+    // fast slider/joystick drag can otherwise queue up to 5 samples,
+    // and the rclc executor consumes only ONE per loop iteration, so
+    // the actuator chases stale setpoints one-at-a-time instead of
+    // jumping to the freshest. That backlog is the "laggy / not-smooth"
+    // motion, made worse because each command hops controller→agent→
+    // node. Depth 1 drops every sample but the latest before the
+    // executor ever sees it, matching the server's CONTROL_QOS
+    // (BEST_EFFORT, depth=1). The final resting value is always the
+    // newest sample, so nothing meaningful is lost.
     snprintf(topic, sizeof(topic), "/saint/nodes/%s/control", g_node.node_id);
     for (char* p = topic; *p; p++) { if (*p == '-' || *p == ':') *p = '_'; }
-    ret = rclc_subscription_init_best_effort(&control_sub, &ros_node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic);
+    rmw_qos_profile_t control_qos = rmw_qos_profile_sensor_data;  // BEST_EFFORT, KEEP_LAST, VOLATILE
+    control_qos.depth = 1;
+    ret = rclc_subscription_init(&control_sub, &ros_node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), topic, &control_qos);
     if (ret != RCL_RET_OK) return false;
     control_msg.data.data = control_buffer;
     control_msg.data.size = 0;

@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=SAINT.OS
+Description=SAINT.OS boot splash — fullscreen logo over a dark background.
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/saint-os
+ScriptFile=/usr/share/plymouth/themes/saint-os/saint-os.script

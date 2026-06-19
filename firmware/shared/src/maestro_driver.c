@@ -32,6 +32,13 @@ static bool     g_initialized   = false;
 static bool     g_was_connected = false;
 static uint32_t g_transport_mode = FLASH_MAESTRO_TRANSPORT_USB_HOST;
 
+/* Set when a live config sync changes channel config (maestro_set_channel_config).
+ * maestro_update() re-provisions the chip's EEPROM + REINITIALIZEs on the
+ * next tick if the device is already connected, so a Sync from the
+ * dashboard takes full effect (e.g. a widened MIN/MAX range) without the
+ * operator power-cycling the Maestro. Cleared by the provisioning paths. */
+static bool     g_config_dirty  = false;
+
 static maestro_channel_config_t g_channel_configs[MAESTRO_MAX_CHANNELS];
 
 /* Resolve a transport ops table for the given flash mode. Returns NULL
@@ -58,20 +65,56 @@ static const maestro_transport_ops_t* pick_transport(uint8_t mode)
  * storage) and drv_parse_json (fresh dashboard sync, no storage yet)
  * so a freshly-configured Maestro starts pumping USB / UART within
  * the same tick the config arrived — without this the operator had
- * to power-cycle before the transport was ever bound. */
+ * to power-cycle before the transport was ever bound.
+ *
+ * If the requested mode isn't implemented on this platform (e.g.
+ * `usb_vendor` on the Teensy until task #17 lands), fall back to
+ * usb_cdc → uart in order. Operator's saved preference stays
+ * untouched so a future firmware that implements the requested mode
+ * picks it up automatically. The fallback log fires only on state
+ * change — drv_parse_json calls this once per channel and would
+ * otherwise spam 24 log lines per config push. */
 static bool bind_transport(uint8_t mode, const flash_storage_data_t* storage)
 {
     const maestro_transport_ops_t* picked = pick_transport(mode);
+    uint8_t effective_mode = mode;
+    bool fell_back = false;
+
     if (!picked) {
-        saint_log_publish("error",
-            "Maestro: no transport for mode=%u on this platform",
-            (unsigned)mode);
+        /* Fallback ladder: try the next-best transports this platform
+         * actually provides. usb_cdc first (most natural mapping for a
+         * Maestro on a USB host port); uart as a last resort. */
+        static const uint8_t fallbacks[] = {
+            FLASH_MAESTRO_TRANSPORT_USB_CDC,
+            FLASH_MAESTRO_TRANSPORT_UART,
+        };
+        for (size_t i = 0; i < sizeof(fallbacks)/sizeof(fallbacks[0]); i++) {
+            if (fallbacks[i] == mode) continue;       /* already failed */
+            picked = pick_transport(fallbacks[i]);
+            if (picked) {
+                effective_mode = fallbacks[i];
+                fell_back = true;
+                break;
+            }
+        }
+    }
+
+    if (!picked) {
+        /* Only log on transition into the "no transport" state —
+         * subsequent calls (per-channel parse) shouldn't re-spam. */
+        if (g_transport != NULL || g_transport_mode != mode) {
+            saint_log_publish("error",
+                "Maestro: no transport for mode=%u on this platform",
+                (unsigned)mode);
+        }
         g_transport = NULL;
         return false;
     }
+
     if (picked == g_transport) {
-        return true;   /* already bound */
+        return true;   /* already bound to this transport (incl. fallback) */
     }
+
     g_transport = picked;
     if (g_transport->open && !g_transport->open(storage)) {
         saint_log_publish("error",
@@ -80,8 +123,16 @@ static bool bind_transport(uint8_t mode, const flash_storage_data_t* storage)
         g_transport = NULL;
         return false;
     }
-    saint_log_publish("info",
-        "Maestro: bound %s transport", g_transport->name);
+    if (fell_back) {
+        saint_log_publish("info",
+            "Maestro: requested mode=%u unavailable on this platform; "
+            "bound %s as fallback (saved preference preserved)",
+            (unsigned)mode, g_transport->name);
+    } else {
+        saint_log_publish("info",
+            "Maestro: bound %s transport", g_transport->name);
+    }
+    (void)effective_mode;
     return true;
 }
 
@@ -167,6 +218,20 @@ void maestro_update(void)
         maestro_apply_home_positions();
         g_was_connected = true;
     }
+
+    /* Live config sync re-provision: a dashboard Sync that changed the
+     * channel config (e.g. a wider MIN/MAX) updated g_channel_configs,
+     * but the chip's EEPROM still holds the old values until we rewrite
+     * them. When already connected (so the connect-hook provisioning
+     * above won't fire), push the new params to EEPROM and REINITIALIZE
+     * here so everything is set up the moment the operator hits Sync —
+     * no power-cycle. Diff-checked + vendor-only, so it's a no-op on
+     * CDC/UART or when nothing actually changed. */
+    if (g_config_dirty && g_transport->ctrl_xfer
+        && g_transport->is_connected && g_transport->is_connected()) {
+        (void)maestro_provision_all_channels();
+        g_config_dirty = false;
+    }
 }
 
 bool maestro_is_connected(void)
@@ -209,6 +274,27 @@ bool maestro_set_target(uint8_t channel, uint16_t quarter_us)
     if (quarter_us < min_qus) quarter_us = min_qus;
     if (quarter_us > max_qus) quarter_us = max_qus;
 
+    uint8_t cmd[4] = {
+        0x84,
+        channel,
+        (uint8_t)(quarter_us & 0x7F),
+        (uint8_t)((quarter_us >> 7) & 0x7F),
+    };
+    return tx_bytes(cmd, sizeof(cmd));
+}
+
+bool maestro_set_target_preview(uint8_t channel, uint16_t us)
+{
+    if (channel >= MAESTRO_MAX_CHANNELS) return false;
+
+    /* Hard absolute safety clamp only — intentionally NOT the
+     * per-channel min/max (see header). The dashboard sends pulses the
+     * operator is dialing toward, which may be outside the saved
+     * envelope. */
+    if (us < MAESTRO_PREVIEW_MIN_US) us = MAESTRO_PREVIEW_MIN_US;
+    if (us > MAESTRO_PREVIEW_MAX_US) us = MAESTRO_PREVIEW_MAX_US;
+
+    uint16_t quarter_us = (uint16_t)(us * 4u);
     uint8_t cmd[4] = {
         0x84,
         channel,
@@ -271,6 +357,21 @@ void maestro_go_home(void)
     (void)tx_bytes(&cmd, 1);
 }
 
+bool maestro_stop_script(void)
+{
+    /* Compact Protocol Stop Script. Pololu Maestro User's Guide
+     * documents this as a single 0xA4 byte over the active byte-
+     * stream transport (CDC or UART). Stops execution of any user
+     * script that might be auto-running and overriding our channel
+     * targets — the symptom is the amber LED's 2-blink heartbeat
+     * pattern, which Pololu documents as "device operational, script
+     * running." We call this from the connect hook unconditionally
+     * because we never WANT a Maestro-side script running (SaintOS
+     * drives channels directly from the dashboard / animations). */
+    uint8_t cmd = 0xA4;
+    return tx_bytes(&cmd, 1);
+}
+
 /* ── Channel config ──────────────────────────────────────────────── */
 
 void maestro_set_channel_config(uint8_t channel,
@@ -278,6 +379,12 @@ void maestro_set_channel_config(uint8_t channel,
 {
     if (channel >= MAESTRO_MAX_CHANNELS || !config) return;
     g_channel_configs[channel] = *config;
+
+    /* Mark for EEPROM re-provision on the next update tick (live config
+     * sync — see g_config_dirty). Only this live-apply path sets it;
+     * drv_load (boot flash restore) assigns g_channel_configs directly,
+     * so boot leaves provisioning to the connect hook. */
+    g_config_dirty = true;
 
     /* Speed/accel are stored as the channel's *default* (used on Pose
      * transitions) — they're NOT pushed to the device on config save.
@@ -293,20 +400,76 @@ void maestro_set_channel_config(uint8_t channel,
      * in docs/MAESTRO_BRINGUP.md. */
 }
 
-/* Send each configured channel to its home_us position via Set Target.
- * Called from maestro_update on the disconnected → connected
- * transition so a freshly-connected Maestro lands at known positions
- * instead of wherever it last was. home_us is the SaintOS-side home
- * (not the Maestro EEPROM HomeMode/HOME) — the EEPROM HomeMode is
- * still required to be `Goto` with a non-zero HOME for PWM to come
- * up at all (see docs/MAESTRO_BRINGUP.md root cause). */
+/* On connect:
+ *   1. Probe the byte-stream path with Get Errors. If the Maestro
+ *      answers (any value, even 0x0000), Compact Protocol commands
+ *      are being parsed by the command interpreter — Serial Mode is
+ *      correct (USB Dual Port or USB Chained). If we get no
+ *      response, the bytes are going somewhere else (most commonly
+ *      Serial Mode = UART, where CDC bytes route straight to the
+ *      TTL pins instead of the interpreter). Log either way.
+ *   2. Stop any auto-running Maestro-side user script (otherwise the
+ *      script overrides our SET_TARGET commands and channels stay
+ *      stuck at script-controlled positions — see
+ *      maestro_stop_script docstring). The 2-blink amber Status LED
+ *      is the symptom of this.
+ *   3. Send each configured channel to its home_us position via Set
+ *      Target so the freshly-connected Maestro lands at known
+ *      positions instead of wherever it last was. home_us is the
+ *      SaintOS-side home (not the Maestro EEPROM HomeMode/HOME) —
+ *      the EEPROM HomeMode is still required to be `Goto` with a
+ *      non-zero HOME for PWM to come up at all (see
+ *      docs/MAESTRO_BRINGUP.md root cause). */
 static void maestro_apply_home_positions(void)
 {
+    /* Probe: round-trip Get Errors. 0xFFFF is the maestro_get_errors
+     * sentinel for "no bytes back within 10 ms" — that's the
+     * Serial-Mode-is-UART symptom, not a real Maestro error register. */
+    uint16_t probe = maestro_get_errors();
+    if (probe == 0xFFFF) {
+        saint_log_publish("warn",
+            "Maestro: connect probe — no response to Get Errors. "
+            "CDC bytes aren't reaching the command interpreter. "
+            "Check Maestro Serial Mode = USB Dual Port (must NOT be UART).");
+    } else {
+        saint_log_publish("info",
+            "Maestro: connect probe ok — Get Errors returned 0x%04x; "
+            "Compact Protocol path is live.",
+            (unsigned)probe);
+    }
+
+    saint_log_publish("info",
+        "Maestro: sending Stop Script (Compact 0xA4) to clear any "
+        "running user script that would override SET_TARGET");
+    (void)maestro_stop_script();
+
+    /* If the active transport can issue vendor parameter writes
+     * (usb_vendor), bring each configured channel's EEPROM in line with
+     * its SaintOS config — Mode = Servo, MIN/MAX, NEUTRAL, and
+     * HomeMode = Goto — so the channel comes up enabled at its home
+     * position on every power-up without any Maestro Control Center
+     * step. Diff-checked, so steady-state connects do reads only and
+     * don't wear the EEPROM. No-ops on CDC/UART (ctrl_xfer == NULL):
+     * those carriers physically can't write parameters, so provisioning
+     * there still requires MCC. */
+    if (g_transport->ctrl_xfer) {
+        (void)maestro_provision_all_channels();
+    }
+    /* Connect-hook provisioning just brought EEPROM in line with the
+     * current config, so a pending live-sync re-provision would be
+     * redundant — clear the flag. */
+    g_config_dirty = false;
+
+    uint8_t homed = 0;
     for (uint8_t ch = 0; ch < MAESTRO_MAX_CHANNELS; ch++) {
         uint16_t home_us = g_channel_configs[ch].home_us;
         if (home_us == 0) continue;  /* 0 = "unconfigured", skip */
         (void)maestro_set_target(ch, (uint16_t)(home_us * 4u));
+        homed++;
     }
+    saint_log_publish("info",
+        "Maestro: applied home positions to %u channel%s",
+        (unsigned)homed, homed == 1 ? "" : "s");
 }
 
 /* Pololu uscParameter IDs from
@@ -324,6 +487,24 @@ static void maestro_apply_home_positions(void)
  *   offset 8    = ACCELERATION (1 byte) */
 #define MAESTRO_PARAM_SERVO0_BASE   30
 #define MAESTRO_PARAM_PER_CHANNEL    9
+
+/* Per-servo-block offsets (added to the channel base). */
+#define MAESTRO_PARAM_OFF_HOME       0   /* 2 bytes, qus (0=Off,1=Ignore,else Goto) */
+#define MAESTRO_PARAM_OFF_MIN        2   /* 1 byte, stored ÷64 qus (= µs/16)        */
+#define MAESTRO_PARAM_OFF_MAX        3   /* 1 byte, same scaling as MIN             */
+#define MAESTRO_PARAM_OFF_NEUTRAL    4   /* 2 bytes, qus                            */
+
+/* Channel modes are packed 2 bits/channel into CHANNEL_MODES_0_3 (12)
+ * .. CHANNEL_MODES_20_23 (17): param = 12 + channel/4, shift =
+ * (channel%4)*2 (Pololu Usc.cs: (byte[ch>>2] >> ((ch&3)<<1)) & 3).
+ * ChannelMode.Servo == 0. */
+#define MAESTRO_PARAM_CHANNEL_MODES_BASE  12
+#define MAESTRO_CHANNEL_MODE_SERVO         0
+
+/* Pololu vendor (EP0) request codes — protocol.h `enum uscRequest`. */
+#define MAESTRO_REQ_GET_PARAMETER   0x81
+#define MAESTRO_REQ_SET_PARAMETER   0x82
+#define MAESTRO_REQ_REINITIALIZE    0x90
 
 bool maestro_read_channel_config_from_device(uint8_t channel,
                                               maestro_channel_config_t* out)
@@ -381,6 +562,133 @@ bool maestro_read_channel_config_from_device(uint8_t channel,
     out->speed        = (uint16_t)speed_byte;
     out->acceleration = (uint16_t)accel_byte;
     return true;
+}
+
+/* ── EEPROM provisioning via vendor SET_PARAMETER ─────────────────────
+ *
+ * Raw GET/SET of a single uscParameter. SET encodes the byte count in
+ * the high byte of wIndex with the value in wValue and a zero-length
+ * data stage — the exact wire format Pololu's MCC uses
+ * (Usc.cs setRawParameterNoChecks). There is no separate "commit to
+ * EEPROM" step in the Maestro protocol: SET_PARAMETER *is* the
+ * persistence. */
+static bool maestro_get_param(uint16_t param, uint8_t nbytes, uint16_t* out)
+{
+    if (!g_transport || !g_transport->ctrl_xfer || !out) return false;
+    if (nbytes != 1 && nbytes != 2) return false;
+    uint8_t buf[2] = { 0, 0 };
+    int n = g_transport->ctrl_xfer(0xC0, MAESTRO_REQ_GET_PARAMETER,
+                                   0, param, buf, nbytes, 500);
+    if (n != (int)nbytes) return false;
+    *out = (nbytes == 2) ? (uint16_t)(buf[0] | (buf[1] << 8))
+                         : (uint16_t)buf[0];
+    return true;
+}
+
+static bool maestro_set_param(uint16_t param, uint16_t value, uint8_t nbytes)
+{
+    if (!g_transport || !g_transport->ctrl_xfer) return false;
+    uint16_t windex = (uint16_t)(((uint16_t)nbytes << 8) | param);
+    /* Zero-length data stage: value rides in wValue, byte count in the
+     * wIndex high byte (Usc.cs setRawParameterNoChecks). */
+    int n = g_transport->ctrl_xfer(0x40, MAESTRO_REQ_SET_PARAMETER,
+                                   value, windex, NULL, 0, 500);
+    return n >= 0;
+}
+
+/* Write one parameter only if the chip's current value differs, so we
+ * never burn an EEPROM write cycle re-storing a value that's already
+ * correct. Counts the write into *writes. A failed read is treated as
+ * "can't confirm" and skips the write (conservative — avoids blind
+ * writes when the transport is flaky). */
+static void maestro_provision_param(uint16_t param, uint16_t desired,
+                                     uint8_t nbytes, int* writes)
+{
+    uint16_t cur;
+    if (!maestro_get_param(param, nbytes, &cur)) return;
+    if (cur == desired) return;
+    if (maestro_set_param(param, desired, nbytes)) (*writes)++;
+}
+
+int maestro_provision_channel(uint8_t channel)
+{
+    if (channel >= MAESTRO_MAX_CHANNELS) return -1;
+    if (!g_transport || !g_transport->ctrl_xfer) return -1;
+    if (!g_transport->is_connected || !g_transport->is_connected()) return -1;
+
+    const maestro_channel_config_t* cfg = &g_channel_configs[channel];
+    const uint16_t base = MAESTRO_PARAM_SERVO0_BASE
+                        + channel * MAESTRO_PARAM_PER_CHANNEL;
+    int writes = 0;
+
+    /* 1. Channel Mode = Servo. Modes are 2 bits/channel packed into a
+     * shared byte, so read-modify-write to avoid disturbing the other
+     * three channels in the group. Servo == 0 → clear the channel's
+     * two bits. */
+    {
+        uint16_t mode_param = (uint16_t)(MAESTRO_PARAM_CHANNEL_MODES_BASE
+                                         + (channel / 4));
+        uint8_t  shift = (uint8_t)((channel % 4) * 2);
+        uint16_t cur;
+        if (maestro_get_param(mode_param, 1, &cur)) {
+            uint16_t want = (uint16_t)(cur & ~(0x03u << shift))
+                          | ((uint16_t)MAESTRO_CHANNEL_MODE_SERVO << shift);
+            if (want != cur && maestro_set_param(mode_param, want, 1)) writes++;
+        }
+    }
+
+    /* 2. MIN / MAX — 1 byte each, stored as qus÷64 (= µs/16). */
+    uint16_t min_byte = (uint16_t)(cfg->min_pulse_us / 16);
+    uint16_t max_byte = (uint16_t)(cfg->max_pulse_us / 16);
+    if (min_byte > 255) min_byte = 255;
+    if (max_byte > 255) max_byte = 255;
+    maestro_provision_param(base + MAESTRO_PARAM_OFF_MIN, min_byte, 1, &writes);
+    maestro_provision_param(base + MAESTRO_PARAM_OFF_MAX, max_byte, 1, &writes);
+
+    /* 3. NEUTRAL — 2 bytes, quarter-µs. */
+    maestro_provision_param(base + MAESTRO_PARAM_OFF_NEUTRAL,
+                            (uint16_t)(cfg->neutral_us * 4), 2, &writes);
+
+    /* 4. HOME = HomeMode.Goto at home_us (in qus). HOME doubles as the
+     * mode selector: 0 = Off (channel disabled at startup — the exact
+     * state that left us chasing "no PWM"), 1 = Ignore, anything else
+     * = Goto <position>. Callers only provision channels with
+     * home_us > 0, so this always lands as a Goto. */
+    maestro_provision_param(base + MAESTRO_PARAM_OFF_HOME,
+                            (uint16_t)(cfg->home_us * 4), 2, &writes);
+
+    return writes;
+}
+
+int maestro_provision_all_channels(void)
+{
+    if (!g_transport || !g_transport->ctrl_xfer) return -1;
+    if (!g_transport->is_connected || !g_transport->is_connected()) return -1;
+
+    int total = 0;
+    uint8_t channels = 0;
+    for (uint8_t ch = 0; ch < MAESTRO_MAX_CHANNELS; ch++) {
+        /* home_us == 0 means "unconfigured / don't auto-enable" — leave
+         * that channel's EEPROM exactly as the operator left it (it may
+         * be an Input/Output channel we must not clobber). */
+        if (g_channel_configs[ch].home_us == 0) continue;
+        int w = maestro_provision_channel(ch);
+        if (w > 0) { total += w; channels++; }
+    }
+
+    if (total > 0) {
+        /* Channel Mode and HOME are init parameters; REINITIALIZE makes
+         * the freshly-written EEPROM take effect (and re-homes each
+         * channel to its new Goto position) without a power cycle. */
+        (void)g_transport->ctrl_xfer(0x40, MAESTRO_REQ_REINITIALIZE,
+                                     0, 0, NULL, 0, 500);
+        saint_log_publish("info",
+            "Maestro: provisioned %u channel%s (%d EEPROM param%s written), "
+            "REINITIALIZE sent",
+            (unsigned)channels, channels == 1 ? "" : "s",
+            total, total == 1 ? "" : "s");
+    }
+    return total;
 }
 
 const maestro_channel_config_t* maestro_get_channel_config(uint8_t channel)

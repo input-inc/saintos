@@ -295,6 +295,7 @@ class SaintServerNode(Node):
         self._node_state_subs: Dict[str, Any] = {}   # node_id -> state subscription
         self._node_log_subs: Dict[str, Any] = {}     # node_id -> log subscription
         self._node_ble_scan_subs: Dict[str, Any] = {}  # node_id -> ble_scan_results subscription
+        self._node_update_progress_subs: Dict[str, Any] = {}  # node_id -> update_progress subscription
 
         # Sync-ACK signal carried in /announce. Maps node_id to the most
         # recent value of last_config_save_{ok,fail}_ms we've already
@@ -864,6 +865,42 @@ class SaintServerNode(Node):
         topic = f'ble_scan_results/{node_id}'
         self._broadcast_ws_state(topic, data)
 
+    def _ensure_node_update_progress_subscriber(self, node_id: str):
+        """Subscribe to /saint/nodes/<id>/update_progress and forward each
+        frame to WebSocket clients as `update_progress/<node_id>`. The
+        Pi-side updater publishes a frame per stage transition during
+        an OTA: {stage: 'downloading'|'verifying'|'extracting'|...,
+        percent: 0..100, status: 'in_progress'|'complete'|'failed',
+        message?: str}. Without this subscription the Pi's progress
+        publications fall on a deaf server and the UI's update modal
+        has no way to render the long Pi download as anything but a
+        spinning ball."""
+        if node_id in self._node_update_progress_subs:
+            return
+        sanitized_id = self._sanitize_topic_name(node_id)
+        topic = f'/saint/nodes/{sanitized_id}/update_progress'
+
+        def callback(msg: String):
+            self._on_node_update_progress(node_id, msg)
+
+        sub = self.create_subscription(
+            String, topic, callback, TELEMETRY_QOS,
+            callback_group=self.callback_group,
+        )
+        self._node_update_progress_subs[node_id] = sub
+        self.get_logger().info(f'Subscribed to update_progress: {topic}')
+
+    def _on_node_update_progress(self, node_id: str, msg: String):
+        """Forward an update-progress frame to WebSocket subscribers."""
+        try:
+            data = json.loads(msg.data)
+        except Exception:
+            self.get_logger().warning(
+                f'update_progress: invalid JSON from {node_id}: {msg.data!r}')
+            return
+        topic = f'update_progress/{node_id}'
+        self._broadcast_ws_state(topic, data)
+
     def send_ble_scan_command(self, node_id: str, duration_s: float = 8.0,
                               filter_jbd: bool = True,
                               request_id: str = "") -> None:
@@ -1055,11 +1092,25 @@ class SaintServerNode(Node):
     def _maybe_handle_sync_ack(self, node_id: str, text: str) -> None:
         """If the firmware reported it finished applying + saving config,
         flip the node's sync_status to ``synced`` and broadcast the
-        update so the UI's "Sync to Node" pill updates."""
-        if "Config saved to flash" in text:
+        update so the UI's "Sync to Node" pill updates.
+
+        Recognized ack markers across firmware targets:
+          * "Config saved to flash"  — RP2040 / Teensy (pin_config_save)
+          * "Config saved to disk"   — Pi node (YAML save under /etc/)
+
+        Both indicate "I received the config push, applied it, AND
+        durably persisted it." Without that durable signal we can't
+        safely call sync 'complete' — a node that applied in memory
+        but failed its persist would lose the config on reboot.
+
+        Failure markers mirror the success ones across targets.
+        """
+        if "Config saved to flash" in text or "Config saved to disk" in text:
             self.state_manager.mark_node_synced(node_id, success=True)
             self._broadcast_sync_status(node_id)
-        elif "Config apply failed" in text or "Flash save failed" in text:
+        elif ("Config apply failed" in text
+              or "Flash save failed" in text
+              or "Config save failed" in text):
             self.state_manager.mark_node_synced(node_id, success=False)
             self._broadcast_sync_status(node_id)
 
@@ -1121,7 +1172,8 @@ class SaintServerNode(Node):
 
     def send_channel_command(self, node_id: str, peripheral_id: str,
                              channel_id: str, value: float,
-                             peripheral_type: str = ""):
+                             peripheral_type: str = "",
+                             raw_us: Optional[int] = None):
         """Send channel-addressed control to a node via ROS2.
 
         Operator-visible names go on the wire — the firmware does its
@@ -1148,6 +1200,14 @@ class SaintServerNode(Node):
         }
         if peripheral_type:
             control_data["type"] = peripheral_type
+        # Live extent-dial preview: absolute microseconds. The firmware
+        # drives the Maestro channel straight to this pulse (bypassing
+        # the normalized value→pulse map + per-channel clamp) so the
+        # operator can dial in start/end/center/home visually. Not a
+        # persisted write — `value` is ignored firmware-side when `us`
+        # is present on a Maestro channel.
+        if raw_us is not None:
+            control_data["us"] = int(raw_us)
 
         msg = String()
         msg.data = json.dumps(control_data)
@@ -1328,6 +1388,12 @@ class SaintServerNode(Node):
         hw_type = node_info.get('hw', '') if node_info else ''
 
         pub = self._ensure_node_command_publisher(node_id)
+        # Subscribe to the node's update_progress topic BEFORE pushing
+        # the firmware_update command. Pi OTAs are slow (minutes) and
+        # users need a live progress bar; without this subscription the
+        # Pi's progress publications go unheard and the modal can only
+        # render a vacuous spinner.
+        self._ensure_node_update_progress_subscriber(node_id)
 
         if 'Raspberry Pi' in hw_type or 'raspberrypi' in hw_type.lower():
             # Raspberry Pi node (any generation) — server stages a
@@ -1855,10 +1921,11 @@ class SaintServerNode(Node):
                     lambda node_id, gpio, value: self.send_control_command(node_id, gpio, value)
                 )
                 self.web_server.ws_handler.set_send_channel_callback(
-                    lambda node_id, peripheral_id, channel_id, value, peripheral_type:
+                    lambda node_id, peripheral_id, channel_id, value, peripheral_type, raw_us=None:
                         self.send_channel_command(node_id, peripheral_id,
                                                   channel_id, value,
-                                                  peripheral_type)
+                                                  peripheral_type,
+                                                  raw_us=raw_us)
                 )
                 self.web_server.ws_handler.set_send_peripheral_command_callback(
                     lambda node_id, peripheral_id, command, args:
