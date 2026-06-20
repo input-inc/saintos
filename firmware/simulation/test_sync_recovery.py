@@ -774,6 +774,60 @@ async def run_test(ws_url: str, password: str,
                  ok=False)
             failures += 1
 
+        # ── Phase 4b: set_channel control write (hop 5) ──────────────
+        # Exercises the streaming /control → peripheral path end-to-end:
+        # the server's `set_channel_value` publishes
+        #   {"action":"set_channel","peripheral":...,"channel":...,"value":...}
+        # on /saint/nodes/<id>/control; the firmware's control callback
+        # runs apply_set_channel, which now decodes via the SHARED parser
+        # (firmware/shared/src/control_message.c) before routing. We drive
+        # the onboard NeoPixel — a builtin seeded at adoption on every
+        # board, so it's guaranteed present — and confirm the firmware
+        # logged the override, which proves the shared parse extracted
+        # peripheral/channel/value correctly and the dispatch fired.
+        # (This is the runtime gate the earlier e2e lacked: phases 1-6
+        # cover adopt/sync/command/OTA/reset but never a set_channel.)
+        _say("phase 4b", "issuing set_channel (onboard NeoPixel brightness)")
+        sc_uart_log = SCRIPT_DIR / "logs" / f"{sim_node_id}.uart.log"
+        sc_offset = (sc_uart_log.stat().st_size
+                     if sc_uart_log.exists() else 0)
+        sc_resp = await client.request("set_channel_value", {
+            "node_id": target_node_id,
+            "peripheral_id": "onboard_neopixel",
+            "channel_id": "brightness",
+            "value": 0.5,
+        }, msg_type="control")
+        if sc_resp.get("status") != "ok":
+            _say("phase 4b",
+                 f"server rejected set_channel_value: "
+                 f"{sc_resp.get('message') or '(no msg)'}",
+                 ok=False)
+            failures += 1
+        else:
+            sc_deadline = time.monotonic() + SYNC_WAIT_S
+            sc_seen = False
+            while time.monotonic() < sc_deadline:
+                if sc_uart_log.exists():
+                    with open(sc_uart_log, "rb") as f:
+                        f.seek(sc_offset)
+                        # The neopixel branch of apply_set_channel logs
+                        # "NeoPixel: brightness override = <8bit> (<float>)"
+                        # — its presence proves the shared parse + routing
+                        # ran on the just-published message.
+                        if b"NeoPixel: brightness override" in f.read():
+                            sc_seen = True
+                            break
+                await asyncio.sleep(0.5)
+            if sc_seen:
+                _say("phase 4b",
+                     "firmware parsed + applied set_channel (shared parser OK)")
+            else:
+                _say("phase 4b",
+                     f"firmware never logged the NeoPixel override within "
+                     f"{SYNC_WAIT_S}s — set_channel parse/dispatch may be broken",
+                     ok=False)
+                failures += 1
+
         # ── Phase 5: OTA update flow ─────────────────────────────────
         # Issues firmware_update via the /command path. The server's
         # force_firmware_update assembles the payload (version + size
@@ -811,7 +865,14 @@ async def run_test(ws_url: str, password: str,
                 if ota_uart_log.exists():
                     with open(ota_uart_log, "rb") as f:
                         f.seek(ota_offset)
-                        if b"FIRMWARE UPDATE REQUESTED" in f.read():
+                        # The firmware's handle_firmware_update logs
+                        # "OTA: firmware_update received (...)" on receipt
+                        # (firmware/rp2040/src/main.c). (The old marker
+                        # "FIRMWARE UPDATE REQUESTED" never matched RP2040 —
+                        # it was latent because Phase 5 always failed earlier
+                        # at the server's "No simulation firmware build
+                        # found" gate until that was fixed.)
+                        if b"OTA: firmware_update received" in f.read():
                             ota_seen = True
                             break
                 await asyncio.sleep(0.5)
@@ -819,7 +880,7 @@ async def run_test(ws_url: str, password: str,
                 _say("phase 5", "firmware acknowledged OTA request")
             else:
                 _say("phase 5",
-                     f"firmware never logged 'FIRMWARE UPDATE REQUESTED' "
+                     f"firmware never logged 'OTA: firmware_update received' "
                      f"within {SYNC_WAIT_S}s",
                      ok=False)
                 failures += 1

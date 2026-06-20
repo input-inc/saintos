@@ -144,6 +144,7 @@ set(SAINT_NODE_SOURCES
     ../shared/src/discovery_retry.cpp
     ../shared/src/maestro_driver.c
     ../shared/src/ota_streamer.c
+    ../shared/src/control_message.c
     src/hardware.c
     src/led_status.c
     src/pico_clock.c

@@ -86,6 +86,23 @@ class RoutingEvaluator:
         # Snapshot of the routing graph used for evaluation; refreshed
         # on every reconcile().
         self._routing: Optional[SystemRouting] = None
+        # "Compiled" wire topology, rebuilt only on reconcile() (i.e.
+        # when the operator edits the wiring) — never on the per-tick
+        # hot path. sheet.node_id → _SheetWireIndex. Replaces the
+        # O(operators × wires) full-wire rescan that _evaluate_sheet /
+        # _collect_operator_inputs used to do on every value tick: the
+        # graph structure is static between edits, so we derive it once
+        # and the tick path just runs it. See _build_wire_index.
+        self._wire_index: Dict[str, "_SheetWireIndex"] = {}
+        # Cross-tick incremental-eval state (only used for sheets whose
+        # index.incremental_ok is True). Per sheet: the operator output
+        # values and the leaf (ws_input/topic/joint) values from the last
+        # evaluation. On the next tick we diff the leaves; operators whose
+        # leaf-dependency set didn't change are seeded from _op_persist
+        # and skip recomputation. Reset on reconcile (structure changed →
+        # caches invalid).
+        self._op_persist: Dict[str, Dict[str, float]] = {}
+        self._leaf_persist: Dict[str, Dict[tuple, float]] = {}
         # Latest widget input values — exposed for the dashboard sheet
         # so widgets can render server-evaluated readings.
         self._widget_values: Dict[Tuple[str, str], float] = {}
@@ -146,6 +163,17 @@ class RoutingEvaluator:
 
         with self._lock:
             self._routing = routing
+            # Compile the wire topology once per wiring change. Cheap
+            # here (off the hot path); saves a full-wire rescan per
+            # operator on every value tick.
+            self._wire_index = {
+                sheet.node_id: _build_wire_index(sheet)
+                for sheet in routing.sheets.values()
+            }
+            # Structure changed — last-tick value caches are no longer
+            # valid against the new operator/leaf set.
+            self._op_persist = {}
+            self._leaf_persist = {}
             to_add = needed - self._subscribed_topics
             to_drop = self._subscribed_topics - needed
             self._subscribed_topics = set(needed)
@@ -336,6 +364,12 @@ class RoutingEvaluator:
     # ── evaluation ──────────────────────────────────────────────────
 
     def _evaluate_sheet(self, sheet: NodeSheet) -> None:
+        # Wire topology compiled at reconcile(); lazy-build as a fallback
+        # if a sheet is somehow evaluated before it was indexed.
+        idx = self._wire_index.get(sheet.node_id)
+        if idx is None:
+            idx = _build_wire_index(sheet)
+            self._wire_index[sheet.node_id] = idx
         # Memoize operator outputs so each operator is computed at most
         # once per evaluation pass. `visiting` doubles as a cycle guard.
         op_cache: Dict[str, float] = {}
@@ -372,6 +406,31 @@ class RoutingEvaluator:
             if v is not None:
                 sheet_ws_input_vals[ws.id] = v
 
+        # Incremental eval (leaf-pure sheets only): seed op_cache with
+        # last tick's value for every operator whose leaf dependencies
+        # are unchanged. eval_operator then returns those immediately
+        # (cache hit) instead of re-resolving the chain — so pushing one
+        # axis on an 18-channel sheet recomputes only that axis's chain.
+        cur_leaves: Optional[Dict[tuple, float]] = None
+        if idx.incremental_ok:
+            cur_leaves = {}
+            for iid, v in sheet_input_vals.items():
+                cur_leaves[("i", iid)] = v
+            for wid, v in sheet_ws_input_vals.items():
+                cur_leaves[("w", wid)] = v
+            prev_leaves = self._leaf_persist.get(sheet.node_id)
+            prev_ops = self._op_persist.get(sheet.node_id)
+            if prev_leaves is not None and prev_ops is not None:
+                dirty = {
+                    k for k in (cur_leaves.keys() | prev_leaves.keys())
+                    if cur_leaves.get(k) != prev_leaves.get(k)
+                }
+                for op in sheet.operators:
+                    deps = idx.op_leaf_deps.get(op.id)
+                    if (deps is not None and op.id in prev_ops
+                            and deps.isdisjoint(dirty)):
+                        op_cache[op.id] = prev_ops[op.id]
+
         def eval_operator(op_id: str) -> float:
             if op_id in op_cache:
                 return op_cache[op_id]
@@ -394,8 +453,9 @@ class RoutingEvaluator:
                 return 0.0
             visiting.add(op_id)
             try:
-                inputs = self._collect_operator_inputs(sheet, op_node, eval_operator,
-                                                      output_cache)
+                inputs = self._collect_operator_inputs(
+                    sheet, op_node, eval_operator, output_cache,
+                    idx.op_input_wires.get(op_id, ()))
                 value = _apply_operator(op_node, inputs)
             finally:
                 visiting.discard(op_id)
@@ -411,9 +471,7 @@ class RoutingEvaluator:
         # written here are visible to operator chains on OTHER sheets
         # this tick (sheet iteration order in evaluate() determines
         # last-writer-wins between conflicting writers).
-        for wire in sheet.wires:
-            if wire.sink.kind != "signal":
-                continue
+        for wire in idx.signal_sinks:
             value = self._resolve_source(sheet, wire.source, eval_operator,
                                          output_cache)
             if value is None or not wire.sink.parts:
@@ -423,9 +481,7 @@ class RoutingEvaluator:
         # Pass 1: resolve and dispatch outputs first so output_cache is
         # populated before any peripheral wire tries to tap an output as
         # its source.
-        for wire in sheet.wires:
-            if wire.sink.kind != "output":
-                continue
+        for wire in idx.output_sinks:
             value = self._resolve_source(sheet, wire.source, eval_operator,
                                          output_cache)
             if value is None:
@@ -437,9 +493,7 @@ class RoutingEvaluator:
 
         # Pass 2: peripheral and widget sinks; these can reference both
         # operators and outputs as sources.
-        for wire in sheet.wires:
-            if wire.sink.kind not in ("peripheral", "widget"):
-                continue
+        for wire in idx.perph_widget_sinks:
             value = self._resolve_source(sheet, wire.source, eval_operator,
                                          output_cache)
             if value is None:
@@ -488,9 +542,18 @@ class RoutingEvaluator:
             "signals":     sheet_signal_vals,
         }
 
+        # Persist this tick's operator + leaf values for next-tick
+        # incremental seeding. op_cache now holds every operator (Pass 3
+        # eager-evaluated them all), so clean ops next tick get a correct
+        # seed.
+        if idx.incremental_ok and cur_leaves is not None:
+            self._op_persist[sheet.node_id] = dict(op_cache)
+            self._leaf_persist[sheet.node_id] = cur_leaves
+
     def _collect_operator_inputs(self, sheet: NodeSheet, op_node: OperatorNode,
                                  eval_operator: Callable[[str], float],
                                  output_cache: Dict[str, float],
+                                 op_wires,
                                  ) -> Dict[str, float]:
         op_type = OPERATOR_CATALOG.get(op_node.op)
         if op_type is None:
@@ -503,13 +566,11 @@ class RoutingEvaluator:
             else:
                 inputs[spec.id] = spec.default
 
-        # Apply any wires feeding this operator's input pins.
-        for wire in sheet.wires:
+        # Apply the wires feeding this operator's input pins. `op_wires`
+        # is the precompiled list of operator-sink wires already filtered
+        # to this op (see _build_wire_index) — no full-wire rescan.
+        for wire in op_wires:
             sink = wire.sink
-            if sink.kind != "operator":
-                continue
-            if not sink.parts or sink.parts[0] != op_node.id:
-                continue
             pin = sink.parts[1] if len(sink.parts) > 1 else None
             if pin is None:
                 continue
@@ -653,6 +714,97 @@ class RoutingEvaluator:
 
 
 _EVALUATOR_CLIENT_ID = "_routing_evaluator"
+
+
+# ── compiled wire topology ──────────────────────────────────────────
+
+
+class _SheetWireIndex:
+    """Precomputed wire groupings for one sheet, built at reconcile().
+
+    The routing graph's structure only changes when the operator edits
+    the wiring, but values flow every tick. Deriving "which wires sink
+    where" was previously redone on every tick — and for operator inputs
+    it rescanned ALL wires once per operator, i.e. O(operators × wires).
+    Compiling these buckets once turns the per-tick cost back to linear.
+    """
+    __slots__ = ("signal_sinks", "output_sinks", "perph_widget_sinks",
+                 "op_input_wires", "incremental_ok", "op_leaf_deps")
+
+    def __init__(self) -> None:
+        self.signal_sinks: List[Wire] = []        # sink.kind == "signal"
+        self.output_sinks: List[Wire] = []        # sink.kind == "output"
+        self.perph_widget_sinks: List[Wire] = []  # "peripheral" | "widget"
+        # operator_id → wires whose sink is that operator's input pins
+        self.op_input_wires: Dict[str, List[Wire]] = {}
+        # Incremental (cross-tick memoized) eval is only sound when this
+        # sheet's operator values are PURE functions of its own ws_input
+        # / topic / joint leaves — i.e. nothing reads a signal (mutated
+        # out-of-band by other sheets) or an output (recomputed within
+        # the pass). On such sheets we can seed clean operators from last
+        # tick and skip recomputing chains whose leaves didn't change.
+        # Sheets with signals/outputs fall back to full evaluation so the
+        # cross-sheet contract (a trigger re-evaluates ALL sinks) holds.
+        self.incremental_ok: bool = False
+        # operator_id → frozenset of leaf keys it transitively depends on.
+        # Leaf keys: ("w", ws_input_id) | ("i", input_id). Only populated
+        # when incremental_ok.
+        self.op_leaf_deps: Dict[str, frozenset] = {}
+
+
+def _build_wire_index(sheet: NodeSheet) -> _SheetWireIndex:
+    idx = _SheetWireIndex()
+    for wire in sheet.wires:
+        kind = wire.sink.kind
+        if kind == "operator":
+            if wire.sink.parts:
+                idx.op_input_wires.setdefault(
+                    wire.sink.parts[0], []).append(wire)
+        elif kind == "signal":
+            idx.signal_sinks.append(wire)
+        elif kind == "output":
+            idx.output_sinks.append(wire)
+        elif kind in ("peripheral", "widget"):
+            idx.perph_widget_sinks.append(wire)
+
+    # Compile per-operator leaf dependencies for incremental eval. Bail
+    # to incremental_ok=False the moment we see a signal/output node or
+    # an operator input sourced from one — those make a sheet's values
+    # depend on state outside its own leaves.
+    ok = (not sheet.signals) and (not sheet.outputs)
+    op_leaf_deps: Dict[str, frozenset] = {}
+    if ok:
+        memo: Dict[str, frozenset] = {}
+        safe = [True]   # mutable flag closed over by _deps
+
+        def _deps(op_id: str, stack: frozenset) -> frozenset:
+            cached = memo.get(op_id)
+            if cached is not None:
+                return cached
+            if op_id in stack:
+                return frozenset()      # cycle: contributes no new leaves
+            acc: set = set()
+            for wire in idx.op_input_wires.get(op_id, ()):
+                src = wire.source
+                if src.kind == "ws_input" and src.parts:
+                    acc.add(("w", src.parts[0]))
+                elif src.kind == "input" and src.parts:
+                    acc.add(("i", src.parts[0]))
+                elif src.kind == "operator" and src.parts:
+                    acc |= _deps(src.parts[0], stack | {op_id})
+                else:
+                    # signal / output / unknown source → not leaf-pure.
+                    safe[0] = False
+            result = frozenset(acc)
+            memo[op_id] = result
+            return result
+
+        for op in sheet.operators:
+            op_leaf_deps[op.id] = _deps(op.id, frozenset())
+        ok = ok and safe[0]
+    idx.incremental_ok = ok
+    idx.op_leaf_deps = op_leaf_deps if ok else {}
+    return idx
 
 
 # ── operator implementations ───────────────────────────────────────

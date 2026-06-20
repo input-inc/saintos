@@ -360,8 +360,18 @@ def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
         # present in the channel object.
         diff: Dict[str, Any] = {}
         for k in _MAESTRO_CHANNEL_KEYS:
-            if ch.get(k) != default[k]:
-                diff[k] = ch.get(k)
+            # ch.get(k) returns None for fields the saved YAML predates
+            # (e.g. idle_disengage_ms on a config saved before that
+            # field shipped). None != 0 would emit `"key":null` on the
+            # wire for every channel — pure waste (the firmware parses
+            # "null" as 0 anyway, and 24×26 bytes of "null" alone is
+            # 624 bytes, enough to bust the XRCE-DDS reassembly cap on
+            # its own). Treat missing == default.
+            v = ch.get(k)
+            if v is None:
+                continue
+            if v != default[k]:
+                diff[k] = v
         slim.append(diff)
     out["channels"] = slim
     return out

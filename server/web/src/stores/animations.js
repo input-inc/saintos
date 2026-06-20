@@ -201,11 +201,25 @@ export const useAnimationsStore = defineStore('animations', () => {
     players.value.some(p => p.id === id && p.running)
   )
 
+  // Live Preview: dispatch one editor-sampled frame (value-track values
+  // + crossed triggers) without a running player, so the editor can show
+  // the real-time impact of scrubbing / keyframe edits on the rig. Fire-
+  // and-forget — errors are swallowed so a preview hiccup never blocks
+  // the editing loop.
+  async function previewFrame (values, triggers = []) {
+    try {
+      await ws.management('preview_animation_frame', {
+        values: values || [],
+        triggers: triggers || [],
+      })
+    } catch { /* preview is best-effort */ }
+  }
+
   return {
     list, loading, editing, dirty, error, players,
     reload, load, startNew, markDirty, save, remove,
     start, stop, pause, resume, seek, refreshPlayers,
-    isPlaying,
+    isPlaying, previewFrame,
     snapshot, undo, redo, canUndo, canRedo,
   }
 })

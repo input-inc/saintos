@@ -643,6 +643,10 @@ export function useBindings() {
         // the source-aware trigger the panel UI calls on select.
         activePanelItems: computed<PanelItem[]>(() =>
             activePanel.value ? panelItems(activePanel.value) : []),
+        // 'animations' | 'poses' | null — lets the panel UI show the
+        // right loading/empty message for server-backed panels.
+        activePanelSource: computed(() =>
+            activePanel.value ? panelSource(activePanel.value) : null),
         triggerActiveItem: (itemId: string) => {
             const p = activePanel.value;
             if (p) triggerPanelItem(p, itemId);

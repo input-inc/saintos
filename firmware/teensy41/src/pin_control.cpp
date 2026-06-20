@@ -18,6 +18,7 @@ extern "C" {
 #include "maestro_driver.h"   // maestro_set_target_preview (live extent-dial jog)
 #include "saint_types.h"   // led_set_override_color / led_set_override_brightness / led_clear_override
 #include "neopixel_strip.h" // operator-added WS2812 strips on arbitrary pins
+#include "control_message.h" // shared set_channel parse (hop-5 decode)
 }
 
 // =============================================================================
@@ -452,28 +453,6 @@ void pin_control_estop(void)
     Serial.printf("ESTOP: Complete\n");
 }
 
-/* Extract a JSON string field's value into `out`. Pointer-only parser
- * matching the style used by dispatch_action_buffer in main.cpp —
- * cheap and reliable enough for the small set_channel envelope. */
-static bool extract_str_field(const char* json, const char* key,
-                              char* out, size_t out_size)
-{
-    const char* p = strstr(json, key);
-    if (!p) return false;
-    p = strchr(p, ':');
-    if (!p) return false;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') return false;
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n + 1 < out_size) {
-        out[n++] = *p++;
-    }
-    out[n] = '\0';
-    return n > 0;
-}
-
 /* Route a set_channel write for the onboard LED (peripheral type
  * "neopixel" — same id used for the Feather's WS2812 so the dashboard
  * widget targets either platform identically). RGB and brightness
@@ -528,62 +507,51 @@ static bool apply_neopixel_channel(const char* channel_id, float value)
  * branch or via their own driver-specific actions. */
 static bool apply_set_channel(const char* json)
 {
-    char peripheral_id[PIN_CONFIG_MAX_NAME_LEN];
-    char channel_id[PIN_CONFIG_MAX_NAME_LEN];
-    char peripheral_type[PIN_CONFIG_MAX_NAME_LEN];
-
-    if (!extract_str_field(json, "\"peripheral\"", peripheral_id, sizeof(peripheral_id))) {
+    // Shared decode of the set_channel message (see control_message.c) —
+    // replaces the per-platform parse this file used to carry inline.
+    // The downstream routing (NeoPixel strip / onboard LED / pin_config
+    // walk / Maestro preview jog) is unchanged; it just reads from the
+    // parsed struct via the same local names it used before.
+    control_set_channel_t cmd;
+    control_parse_result_t pr = control_parse_set_channel(json, &cmd);
+    if (pr == CONTROL_PARSE_NO_PERIPHERAL) {
         Serial.printf("set_channel: missing 'peripheral' field\n");
         return false;
     }
-    if (!extract_str_field(json, "\"channel\"", channel_id, sizeof(channel_id))) {
+    if (pr == CONTROL_PARSE_NO_CHANNEL) {
         Serial.printf("set_channel: missing 'channel' field\n");
         return false;
     }
-    peripheral_type[0] = '\0';
-    extract_str_field(json, "\"type\"", peripheral_type, sizeof(peripheral_type));
-
-    /* Optional absolute-microseconds jog ("us"): the dashboard's live
-     * extent-dial preview drives the servo to a raw pulse so the
-     * operator can dial in start/end/center/home visually. It bypasses
-     * the normalized value→pulse mapping and the per-channel software
-     * clamp (Maestro only — routed to maestro_set_target_preview below).
-     * When "us" is present, "value" is optional. */
-    long preview_us = -1;
-    const char* us_str = strstr(json, "\"us\"");
-    if (us_str) {
-        us_str = strchr(us_str, ':');
-        if (us_str) {
-            us_str++;
-            while (*us_str == ' ') us_str++;
-            preview_us = atol(us_str);
-        }
-    }
-
-    float value = 0.0f;
-    bool has_value = false;
-    const char* value_str = strstr(json, "\"value\"");
-    if (value_str) {
-        value_str = strchr(value_str, ':');
-        if (value_str) {
-            value_str++;
-            while (*value_str == ' ') value_str++;
-            value = (float)atof(value_str);
-            has_value = true;
-        }
-    }
-    if (!has_value && preview_us < 0) {
+    if (pr == CONTROL_PARSE_NO_VALUE_OR_US) {
         Serial.printf("set_channel: missing both 'value' and 'us'\n");
         return false;
     }
+
+    const char* peripheral_id   = cmd.peripheral;
+    const char* channel_id      = cmd.channel;
+    const char* peripheral_type = cmd.type;            // "" when omitted
+    float       value           = cmd.has_value ? cmd.value : 0.0f;
+    long        preview_us      = cmd.has_us ? cmd.us : -1;
 
     /* Operator-added external WS2812 strip — checked FIRST, and by
      * EXACT instance id, so a configured strip (whose id may itself
      * contain "neopixel") routes to its own driver rather than the
      * onboard-LED fallback below. The onboard status LED is never a
-     * registered strip, so it falls through to apply_neopixel_channel. */
-    if (strcmp(peripheral_type, "neopixel") == 0
-        && neopixel_strip_exists(peripheral_id)) {
+     * registered strip, so it falls through to apply_neopixel_channel.
+     *
+     * The "type" field is OPTIONAL on the wire — the server's
+     * `set_channel_value` callback (server_node.send_channel_value)
+     * publishes only `peripheral` (id) + `channel` + `value`, no
+     * `type`. So we cannot require peripheral_type=="neopixel" here:
+     * doing so let "neopixel-1" cascade past this branch into the
+     * id-substring fallback below, which matched "neopixel" inside
+     * the id and routed every external strip's color/brightness to
+     * the ONBOARD LED instead of the actual strip (2026-06-20
+     * incident — the user saw the brightness slider randomize colors
+     * because both signals were landing on the status LED's HSV
+     * decoder). The strip-exists table is the source of truth; if
+     * the id matches a registered strip, route there. */
+    if (neopixel_strip_exists(peripheral_id)) {
         if (strcmp(channel_id, "color") == 0) {
             return neopixel_strip_set_color(peripheral_id, (uint32_t)value);
         }

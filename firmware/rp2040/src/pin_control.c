@@ -19,6 +19,7 @@
 #include "saint_types.h"   // led_set_override_color / led_clear_override
 #include "saint_log.h"     // saint_log_publish (dashboard Logs tab)
 #include "fas100_driver.h" // fas100_get_diag (per-peripheral health in /state)
+#include "control_message.h" // shared set_channel parse (hop-5 decode)
 
 // =============================================================================
 // Constants
@@ -480,23 +481,6 @@ void pin_control_clear_estop(void)
 // success; `out` is null-terminated. Mirrors extract_string_field() in
 // pin_config.c — duplicated rather than exposed because it's a small
 // helper and giving it a public home would mean reshuffling headers.
-static bool extract_str_field(const char* json, const char* key,
-                              char* out, size_t out_size)
-{
-    const char* p = strstr(json, key);
-    if (!p) return false;
-    p = strchr(p, ':');
-    if (!p) return false;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '"') p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_size - 1) {
-        out[n++] = *p++;
-    }
-    out[n] = '\0';
-    return n > 0;
-}
-
 // Resolve a (mode, channel_name) into the firmware channel offset within
 // the peripheral's virtual-GPIO slot. For mode-handled peripherals
 // (PWM, servo, digital_out) there's only one channel — return 0
@@ -591,35 +575,28 @@ static bool apply_neopixel_channel(const char* channel_id, float value)
 // (peripheral_id, channel) → GPIO translation lives here in the firmware.
 static bool apply_set_channel(const char* json)
 {
-    char peripheral_id[PIN_CONFIG_MAX_NAME_LEN];
-    char channel_id[PIN_CONFIG_MAX_NAME_LEN];
-
-    if (!extract_str_field(json, "\"peripheral\"", peripheral_id, sizeof(peripheral_id))) {
+    // Shared decode of the set_channel message (see control_message.c).
+    // Replaces the per-platform parse this file used to carry inline.
+    control_set_channel_t cmd;
+    control_parse_result_t pr = control_parse_set_channel(json, &cmd);
+    if (pr == CONTROL_PARSE_NO_PERIPHERAL) {
         saint_log_publish("warn", "set_channel: missing 'peripheral' field");
         return false;
     }
-    if (!extract_str_field(json, "\"channel\"", channel_id, sizeof(channel_id))) {
+    if (pr == CONTROL_PARSE_NO_CHANNEL) {
         saint_log_publish("warn", "set_channel: missing 'channel' field");
         return false;
     }
+    // RP2040 has no Maestro/USB-host preview path, so it requires a
+    // numeric "value" (the inline parse this replaced returned false
+    // when "value" was absent). A us-only message is rejected exactly
+    // as before — preserving existing behavior.
+    if (!cmd.has_value) return false;
 
-    const char* value_str = strstr(json, "\"value\"");
-    if (!value_str) return false;
-    value_str = strchr(value_str, ':');
-    if (!value_str) return false;
-    value_str++;
-    while (*value_str == ' ') value_str++;
-    float value = (float)atof(value_str);
-
-    // Optional peripheral type from server. Used to route writes for
-    // peripherals that don't live in pin_config — the built-in status
-    // NeoPixel is the canonical case (operator-chosen instance id
-    // like "onboard_neopixel" but firmware only knows it as
-    // type="neopixel"). Older servers don't send "type" — we fall
-    // back to id-substring matching below.
-    char peripheral_type[PIN_CONFIG_MAX_NAME_LEN];
-    peripheral_type[0] = '\0';
-    extract_str_field(json, "\"type\"", peripheral_type, sizeof(peripheral_type));
+    const char* peripheral_id   = cmd.peripheral;
+    const char* channel_id      = cmd.channel;
+    const char* peripheral_type = cmd.type;   // "" when the server omits it
+    float       value           = cmd.value;
 
     // NeoPixel isn't a pin_config entry — special-case before the
     // logical_name walk below would unconditionally fail for it.

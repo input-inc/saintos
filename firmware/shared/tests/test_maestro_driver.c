@@ -166,6 +166,17 @@ static size_t fake_read(uint8_t* data, size_t len, uint32_t timeout_ms)
     return take;
 }
 
+/* Stub the peripheral-state JSON helper. maestro_driver.c gained a
+ * maestro_state_emit_channels() that calls into peripheral_state_emit.c;
+ * this suite doesn't exercise state emission, so a no-op stub satisfies
+ * the linker without pulling that module in. */
+int peripheral_state_append_channel(char* buf, size_t cap, bool* first,
+                                    const char* pid, const char* cid, float v)
+{
+    (void)buf; (void)cap; (void)first; (void)pid; (void)cid; (void)v;
+    return 0;
+}
+
 /* Now pull in the unit under test. */
 #include "../src/maestro_driver.c"
 

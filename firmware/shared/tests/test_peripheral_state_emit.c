@@ -28,10 +28,13 @@
 #include <string.h>
 #include <assert.h>
 
-/* ── platform.h short-circuit + PLATFORM_PRINTF stub ─────────────── */
-
-#define PLATFORM_H   /* skip the shared stub header's #error */
-#define PLATFORM_PRINTF(...) ((void)0)   /* silence registration logs */
+/* ── PLATFORM_PRINTF stub ────────────────────────────────────────── */
+/* PLATFORM_H + the PLATFORM_* macros come from the force-included
+ * host_platform.h (see run_tests.sh). We only override PLATFORM_PRINTF
+ * to a no-op here so peripheral registration logs don't spam the test
+ * output — undef first to avoid a redefinition warning. */
+#undef  PLATFORM_PRINTF
+#define PLATFORM_PRINTF(...) ((void)0)
 
 /* peripheral_manager.cpp wraps no C++-only features (despite the
  * extension), so it compiles cleanly as C. */

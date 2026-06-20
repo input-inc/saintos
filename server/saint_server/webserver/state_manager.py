@@ -2002,7 +2002,17 @@ class StateManager:
             "version": node.peripheral_config.version,
             "peripherals": peripherals_out,
         }
-        out = json.dumps(payload)
+        # Compact separators (no spaces after , or :) shave ~300 bytes
+        # off a 24-channel Maestro + 2 NeoPixel push. Even after
+        # maestro_slim_channels_for_wire, the default `json.dumps`
+        # spacing was pushing us to 2027 bytes — under the 2048 XRCE
+        # reassembly cap on paper but over it once XRCE submessage
+        # headers + stream-framing overhead get added on the wire. The
+        # firmware silently dropped messages it couldn't reassemble,
+        # which looked exactly like "Teensy in a reboot loop" because
+        # the server kept seeing UNADOPTED and re-pushing. The firmware
+        # JSON parser handles either spacing.
+        out = json.dumps(payload, separators=(",", ":"))
         # Budget guard: alert at the source if a config push approaches
         # the firmware's reassembly cap. UXR_CONFIG_UDP_TRANSPORT_MTU is
         # 512, RMW_UXRCE_MAX_HISTORY is 4 → reassembly cap ≈ 2048 bytes.
@@ -2395,6 +2405,79 @@ class StateManager:
             else:
                 skipped.append(f"{sheet_id}/{ws_input_id}")
         return {"success": True, "applied": applied, "skipped": skipped}
+
+    def preview_animation_frame(self, values: List[Dict[str, Any]],
+                                triggers: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Dispatch one editor-sampled animation frame live, WITHOUT a
+        running player.
+
+        Powers the editor's "Live Preview" toggle: as the operator
+        scrubs the timeline or edits a keyframe at the playhead, the
+        client samples every value track at the current time and sends
+        the frame here, plus any trigger keyframes crossed since the
+        last frame. We fan each out through the SAME callables the
+        AnimationPlayer uses (routing evaluator + ROS bridge +
+        peripheral sender), so a previewed frame is wire-identical to a
+        played one. Nothing is persisted and no player is created.
+
+        ``values`` entries: ``{target_kind, value, id?, target?}``
+          * ``urdf_joint`` → ``set_urdf_joint_value(id, value)``
+          * ``ws_input``   → ``set_ws_input(target[0], target[1], value)``
+        ``triggers`` entries: ``{target_kind, target, value}`` —
+        ws_input / topic / peripheral_command, mirroring
+        AnimationPlayer._dispatch_trigger.
+        """
+        if self._routing_evaluator is None:
+            return {"success": False, "message": "Routing evaluator not ready"}
+        ev = self._routing_evaluator
+        applied = 0
+
+        for v in values or []:
+            kind = v.get("target_kind", "urdf_joint")
+            try:
+                val = float(v.get("value") or 0.0)
+            except (TypeError, ValueError):
+                val = 0.0
+            try:
+                if kind == "ws_input":
+                    tgt = v.get("target") or []
+                    if len(tgt) >= 2 and ev.set_ws_input(tgt[0], tgt[1], val):
+                        applied += 1
+                else:  # urdf_joint
+                    jid = v.get("id")
+                    if jid and ev.set_urdf_joint_value(jid, val):
+                        applied += 1
+            except Exception as e:
+                if self.logger:
+                    self.logger.warn(f"preview_animation_frame value failed: {e}")
+
+        for t in triggers or []:
+            kind = t.get("target_kind", "ws_input")
+            tgt = t.get("target") or []
+            val = t.get("value")
+            try:
+                if kind == "ws_input" and len(tgt) >= 2:
+                    ev.set_ws_input(tgt[0], tgt[1], float(val or 0.0))
+                elif kind == "topic" and len(tgt) >= 2 and self._ros_bridge is not None:
+                    self._ros_bridge.set_topic_channel(
+                        tgt[0], tgt[1], float(val or 0.0), "_animation_preview")
+                elif kind == "peripheral_command" and len(tgt) >= 2 \
+                        and self._peripheral_command_sender is not None:
+                    if isinstance(val, dict):
+                        cmd = str(val.get("command") or "")
+                        args = val.get("args") or {}
+                        args = dict(args) if isinstance(args, dict) else {}
+                    elif isinstance(val, str):
+                        cmd, args = "play_file", {"filename": val}
+                    else:
+                        cmd, args = "", {}
+                    if cmd:
+                        self._peripheral_command_sender(tgt[0], tgt[1], cmd, args)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warn(f"preview_animation_frame trigger failed: {e}")
+
+        return {"success": True, "applied": applied}
 
     async def start_animation(self, animation_id: str,
                               loop: Optional[bool] = None) -> Dict[str, Any]:
@@ -3206,6 +3289,16 @@ class StateManager:
 
     def _get_firmware_dir(self) -> Optional[str]:
         """Locate the RP2040 firmware *source* directory (parent of build/)."""
+        # Explicit override (same pattern as SAINT_INSTALL_PREFIX). Needed
+        # where the server runs from a colcon *install* tree with no source
+        # checkout above it — e.g. the Renode e2e container, where the
+        # firmware is bind-mounted at /work/firmware/rp2040 but neither the
+        # __file__-relative path below nor the ament-share dirname math
+        # resolves to it, so sim-build discovery (and OTA Phase 5) failed.
+        env_dir = os.environ.get("SAINT_FIRMWARE_RP2040_DIR")
+        if env_dir and os.path.isdir(env_dir):
+            return env_dir
+
         current_dir = os.path.dirname(__file__)
         firmware_dir = os.path.abspath(os.path.join(current_dir, '..', '..', 'firmware', 'rp2040'))
         if os.path.isdir(firmware_dir):
@@ -3415,7 +3508,15 @@ class StateManager:
         if fw_src:
             for sub, btype in [('build', 'hardware'),
                                ('build_hardware', 'hardware'),
-                               ('build_sim', 'simulation')]:
+                               ('build_sim', 'simulation'),
+                               # Canonical sim *install* dir (`make
+                               # install_sim`). build_sim is a dev-only
+                               # output; install/simulation is what gets
+                               # deployed AND what the Renode e2e container
+                               # mounts — without it, force_firmware_update
+                               # reported "No simulation firmware build
+                               # found" in the e2e (Phase 5).
+                               (os.path.join('install', 'simulation'), 'simulation')]:
                 p = os.path.join(fw_src, sub)
                 if os.path.isdir(p):
                     candidates.append((btype, p))

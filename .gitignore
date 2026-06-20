@@ -48,6 +48,11 @@ _rpi_debs_trixie/
 firmware/*/tests/test_*
 !firmware/*/tests/test_*.c
 firmware/*/tests/*.dSYM/
+# Same for the host-compiled perf benchmark binaries (run_benchmarks.sh)
+# — keep the bench_<name>.c / .h sources, drop the compiled executables.
+firmware/*/tests/bench_*
+!firmware/*/tests/bench_*.c
+!firmware/*/tests/bench_*.h
 
 # Locally-built firmware artifacts staged into the dist tarball.
 # The entire tree is build output — .bin / .hex / .uf2 / .elf binaries

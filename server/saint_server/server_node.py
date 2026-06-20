@@ -472,12 +472,28 @@ class SaintServerNode(Node):
                 # on either field increasing.
                 self._maybe_handle_announce_sync_ack(announced_node_id, parsed)
         except Exception as e:
-            # Dump the full raw payload so operators can see exactly what
-            # arrived — the bare error message ("unterminated string at
-            # column 251") tells you the symptom but not the cause.
+            # Catch-all is deliberate: this runs on the ROS callback
+            # thread, so a propagating exception would tear down the
+            # announcement subscription and stop ALL nodes from being
+            # discovered. We must not crash here — but we must also not
+            # fail SILENTLY. Malformed payloads are already handled above
+            # (parse errors return early via _report_announcement_parse_error),
+            # so reaching this block means a SERVER-SIDE BUG — a missing/
+            # renamed collaborator (AttributeError), a bad call signature
+            # (TypeError), etc. Those used to log a one-line message that
+            # read like a bad-payload problem and carried no traceback, so
+            # whole stretches of the handler (publishers, reconcile) could
+            # silently no-op. Log the exception type + full traceback so
+            # the failing call is locatable, and say plainly it's likely a
+            # bug, not bad data.
+            import traceback
             preview_len = len(raw) if raw is not None else 0
             self.get_logger().error(
-                f'Error processing announcement ({preview_len} bytes): {e}\n'
+                f'BUG processing announcement ({preview_len} bytes): '
+                f'{type(e).__name__}: {e} — the payload already parsed, so '
+                f'this is a server-side error, not a malformed announcement. '
+                f'Downstream steps for this node were skipped.\n'
+                f'{traceback.format_exc()}'
                 f'  RAW: {raw!r}'
             )
 

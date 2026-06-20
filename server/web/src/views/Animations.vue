@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAnimationsStore } from '@/stores/animations'
 import { usePosesStore } from '@/stores/poses'
@@ -242,8 +242,30 @@ function fmtTimeAgo (iso) {
   return `${Math.floor(dt / 86400)}d ago`
 }
 
+// Play / stop straight from the list, no editor round-trip. `isPlaying`
+// reads the live player set (refreshed on start/stop and by the poll
+// below, so a non-loop animation that runs to its end flips the button
+// back to ▶ on its own).
+function animIsPlaying (id) {
+  return animations.players.some(p => p.id === id && p.running)
+}
+async function togglePlayAnimation (a) {
+  if (animIsPlaying(a.id)) await animations.stop(a.id)
+  else await animations.start(a.id)
+}
+
+// Poll the player set while this screen is mounted so list play/stop
+// buttons reflect playback started elsewhere AND auto-revert when a
+// non-looping animation finishes. 1.5 s is responsive enough for a
+// transport indicator without hammering the management channel.
+let _playerPoll = null
 onMounted(async () => {
   await Promise.all([animations.reload(), poses.reload(), loadWsInputs()])
+  animations.refreshPlayers()
+  _playerPoll = setInterval(() => animations.refreshPlayers(), 1500)
+})
+onBeforeUnmount(() => {
+  if (_playerPoll) { clearInterval(_playerPoll); _playerPoll = null }
 })
 
 // If the sidebar selection lands on an empty bucket (e.g. the last
@@ -393,6 +415,14 @@ watch([animationGroups, poseGroups], () => {
                 </div>
                 <div class="text-xs text-fg-faint w-20 text-right shrink-0">{{ fmtTimeAgo(a.modified) }}</div>
                 <div class="flex items-center gap-1 shrink-0">
+                  <button :class="['btn-sm text-fg-strong',
+                                   animIsPlaying(a.id)
+                                     ? 'bg-red-600/80 hover:bg-red-500'
+                                     : 'bg-emerald-500/80 hover:bg-emerald-500']"
+                          :title="animIsPlaying(a.id) ? 'Stop' : 'Play'"
+                          @click="togglePlayAnimation(a)">
+                    <span class="material-icons icon-sm">{{ animIsPlaying(a.id) ? 'stop' : 'play_arrow' }}</span>
+                  </button>
                   <button class="btn-sm bg-surface hover:bg-cyan-600 text-fg-strong hover:text-fg-strong"
                           title="Open in editor" @click="openAnimation(a)">
                     <span class="material-icons icon-sm">edit</span>

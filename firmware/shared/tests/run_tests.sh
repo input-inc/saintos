@@ -27,6 +27,12 @@ CFLAGS=(
     -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter
     -Wno-unused-but-set-variable
     -DSIMULATION=1
+    # Force-include the host platform shim FIRST so every test TU has
+    # PLATFORM_H + the PLATFORM_* macros defined before any shared source
+    # pulls in the guard-stub platform.h. Without this, sources that use
+    # PLATFORM_MILLIS() (maestro_driver.c, saint_log.c) won't compile
+    # off-target. See host_platform.h.
+    -include "${SCRIPT_DIR}/host_platform.h"
     -I"${SHARED_INC}"
     -I"${SCRIPT_DIR}"
 )
@@ -37,18 +43,30 @@ TEST_BINARIES=(
     "test_maestro_driver"
     "test_ota_streamer"
     "test_peripheral_state_emit"
+    "test_control_message"
 )
 
+# Don't let one compile/run failure abort the whole sweep — we want to
+# see EVERY test's status in a single run, not just the first breakage
+# (that masking is how the harness silently rotted). Track + report all.
 overall_rc=0
+failed=()
 for name in "${TEST_BINARIES[@]}"; do
     src="${SCRIPT_DIR}/${name}.c"
     bin="${SCRIPT_DIR}/${name}"
     echo "=== ${name} ==="
-    "${CC}" "${CFLAGS[@]}" -o "${bin}" "${src}"
+    if ! "${CC}" "${CFLAGS[@]}" -o "${bin}" "${src}"; then
+        echo "  BUILD FAILED"
+        overall_rc=1; failed+=("${name} (build)")
+        echo; continue
+    fi
     if ! "${bin}"; then
-        overall_rc=1
+        overall_rc=1; failed+=("${name} (run)")
     fi
     echo
 done
 
+if [ "${overall_rc}" -ne 0 ]; then
+    echo "FAILURES: ${failed[*]}"
+fi
 exit "${overall_rc}"

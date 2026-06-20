@@ -1457,6 +1457,15 @@ class WebSocketHandler:
                     "data": self.state_manager.preview_setpoints(
                         params.get('setpoints') or [])}
 
+        elif action == 'preview_animation_frame':
+            # Live Preview: dispatch one editor-sampled frame (value-track
+            # values + any crossed triggers) without a running player, so
+            # scrubbing / keyframe edits show real-time impact on the rig.
+            return {"status": "ok",
+                    "data": self.state_manager.preview_animation_frame(
+                        params.get('values') or [],
+                        params.get('triggers') or [])}
+
         elif action == 'add_widget':
             node_id = params.get('node_id')
             type_id = params.get('type')

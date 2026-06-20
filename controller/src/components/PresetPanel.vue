@@ -8,8 +8,29 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useBindings, type PanelItem } from '../composables/useBindings';
+import { useConnection } from '../composables/useConnection';
+import { useLibrary } from '../composables/useLibrary';
 
 const bindings = useBindings();
+const conn = useConnection();
+const library = useLibrary();
+
+// For server-backed panels (Animations/Poses), explain WHY the grid is
+// empty instead of the generic "no presets": not connected vs still
+// loading vs genuinely empty on the server.
+const emptyState = computed(() => {
+    const source = bindings.activePanelSource.value;
+    if (!source) return { icon: 'folder_open', text: 'No presets in this panel' };
+    const kind = source === 'animations' ? 'animations' : 'poses';
+    if (!conn.isConnected.value) {
+        return { icon: 'cloud_off', text: `Connect to the robot to load ${kind}` };
+    }
+    const loaded = source === 'animations'
+        ? library.animationsLoaded.value
+        : library.posesLoaded.value;
+    if (!loaded) return { icon: 'sync', text: `Loading ${kind}…` };
+    return { icon: 'folder_open', text: `No ${kind} saved on the server` };
+});
 
 const panel = computed(() => bindings.activePanel.value);
 const panelState = computed(() => bindings.activePanelState.value);
@@ -96,8 +117,9 @@ function nextPage(): void { bindings.navigatePanel('next_page'); }
             </div>
 
             <div v-if="visiblePresets.length === 0" class="text-center py-12 text-saint-text-muted">
-                <span class="material-symbols-outlined text-4xl mb-2">folder_open</span>
-                <p>No presets in this panel</p>
+                <span class="material-symbols-outlined text-4xl mb-2"
+                      :class="{ 'animate-spin': emptyState.icon === 'sync' }">{{ emptyState.icon }}</span>
+                <p>{{ emptyState.text }}</p>
             </div>
         </div>
 

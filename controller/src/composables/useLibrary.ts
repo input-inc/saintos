@@ -27,6 +27,10 @@ export interface LibraryItem {
 
 const animationsRef = ref<LibraryItem[]>([]);
 const posesRef = ref<LibraryItem[]>([]);
+// Whether a list response has been received since connect — lets the UI
+// tell "still loading" apart from "loaded but genuinely empty".
+const animationsLoadedRef = ref(false);
+const posesLoadedRef = ref(false);
 
 let initialized = false;
 const unlistenFns: UnlistenFn[] = [];
@@ -61,11 +65,13 @@ async function ensureInit(): Promise<void> {
     unlistenFns.push(
         await listen<{ animations?: unknown }>('library-animations', event => {
             animationsRef.value = toItems(event.payload?.animations);
+            animationsLoadedRef.value = true;
         }),
     );
     unlistenFns.push(
         await listen<{ poses?: unknown }>('library-poses', event => {
             posesRef.value = toItems(event.payload?.poses);
+            posesLoadedRef.value = true;
         }),
     );
 
@@ -74,8 +80,16 @@ async function ensureInit(): Promise<void> {
     // doesn't linger in the panels.
     const conn = useConnection();
     watch(conn.isConnected, (connected) => {
-        if (connected) void refresh();
-        else { animationsRef.value = []; posesRef.value = []; }
+        if (connected) {
+            void refresh();
+        } else {
+            // Clear so a stale list doesn't linger, and reset loaded so
+            // the UI shows "not connected" rather than "empty".
+            animationsRef.value = [];
+            posesRef.value = [];
+            animationsLoadedRef.value = false;
+            posesLoadedRef.value = false;
+        }
     }, { immediate: true });
 }
 
@@ -84,6 +98,8 @@ export function useLibrary() {
     return {
         animations: computed(() => animationsRef.value),
         poses: computed(() => posesRef.value),
+        animationsLoaded: computed(() => animationsLoadedRef.value),
+        posesLoaded: computed(() => posesLoadedRef.value),
         refresh,
     };
 }

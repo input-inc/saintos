@@ -10,10 +10,18 @@ types in .msg files.
 
 import os
 import importlib
+import logging
 from typing import Dict, Any, Optional, Callable, List
 from dataclasses import dataclass
 
 import yaml
+
+# Per-field (de)serialization is best-effort — a single field that can't
+# be read/set is skipped so it doesn't drop the whole telemetry frame.
+# That skip is logged at DEBUG (these run per-message at up to 10 Hz, so
+# error/warn would flood) — enough that a consistently-missing dashboard
+# field is diagnosable via `--log-level debug` instead of silently gone.
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -148,9 +156,11 @@ def serialize_message(msg: Any) -> Dict[str, Any]:
             value = getattr(msg, field_name)
             field_type = field_types.get(field_name, '')
             result[field_name] = _serialize_value(value, field_type)
-        except Exception:
-            # Skip fields that can't be accessed
-            pass
+        except Exception as e:
+            # Skip fields that can't be accessed — but log which one so a
+            # field silently missing from the dashboard is findable.
+            _logger.debug("serialize_message: skipped field %r on %s: %s",
+                          field_name, type(msg).__name__, e)
 
     return result
 
@@ -225,9 +235,11 @@ def deserialize_message(data: Dict[str, Any], msg_class: type) -> Any:
                 current_value = getattr(msg, field_name, None)
                 value = _deserialize_value(data[field_name], field_type, current_value)
                 setattr(msg, field_name, value)
-            except Exception:
-                # Skip fields that can't be set
-                pass
+            except Exception as e:
+                # Skip fields that can't be set — log which one so a
+                # dropped inbound field is diagnosable, not silent.
+                _logger.debug("deserialize_message: skipped field %r on %s: %s",
+                              field_name, getattr(msg_class, "__name__", "?"), e)
 
     return msg
 

@@ -72,6 +72,19 @@ static maestro_channel_config_t g_channel_configs[MAESTRO_MAX_CHANNELS];
 static uint32_t g_last_command_ms[MAESTRO_MAX_CHANNELS];
 static bool     g_engaged[MAESTRO_MAX_CHANNELS];
 
+/* Chunked live-sync provisioning state. After a config push, we
+ * provision one channel per maestro_update() tick instead of all 24
+ * in one synchronous burst — provisioning the full set takes long
+ * enough on usb_vendor to blow the 30 s hardware watchdog
+ * (2026-06-19 incident). At ~1 channel per tick (main loop is ~10 Hz
+ * minimum even under load) the full sweep finishes in 2–3 s, well
+ * inside the WDOG window. REINITIALIZE fires once the sweep
+ * completes, matching the original one-shot semantics. */
+static bool     g_provision_active   = false;
+static uint8_t  g_provision_cursor   = 0;
+static int      g_provision_writes   = 0;
+static uint8_t  g_provision_channels = 0;
+
 /* Resolve a transport ops table for the given flash mode. Returns NULL
  * if the platform doesn't provide that transport — caller logs and
  * leaves the driver inert. */
@@ -226,6 +239,11 @@ static void maestro_apply_home_positions(void);
  * the compact-protocol byte layout). */
 static bool send_raw_target(uint8_t channel, uint16_t quarter_us);
 
+/* Forward decl: chunked provisioning step driven from maestro_update;
+ * definition lives below maestro_provision_all_channels (shares its
+ * per-channel write helper). */
+static void provision_step(void);
+
 void maestro_update(void)
 {
     if (!g_initialized || !g_transport) return;
@@ -257,16 +275,34 @@ void maestro_update(void)
 
     /* Live config sync re-provision: a dashboard Sync that changed the
      * channel config (e.g. a wider MIN/MAX) updated g_channel_configs,
-     * but the chip's EEPROM still holds the old values until we rewrite
-     * them. When already connected (so the connect-hook provisioning
-     * above won't fire), push the new params to EEPROM and REINITIALIZE
-     * here so everything is set up the moment the operator hits Sync —
-     * no power-cycle. Diff-checked + vendor-only, so it's a no-op on
-     * CDC/UART or when nothing actually changed. */
+     * but the chip's parameters still hold the old values until we
+     * rewrite them. When already connected (so the connect-hook
+     * provisioning above won't fire), push the new params and
+     * REINITIALIZE here so everything is set up the moment the
+     * operator hits Sync — no power-cycle. Diff-checked + vendor-only,
+     * so it's a no-op on CDC/UART or when nothing actually changed.
+     *
+     * Watchdog-aware: provisioning 18+ customized channels is ~10 USB
+     * vendor control transfers per channel and previously blocked
+     * maestro_update() for > 30 s, blowing the WDOG2 watchdog mid-
+     * Sync (2026-06-19 incident, SRSR=0x10). We now spread the work
+     * across maestro_update() ticks — one channel per tick — and
+     * fire REINITIALIZE only once the sweep finishes. See
+     * g_provision_cursor / g_provision_active below. */
     if (g_config_dirty && g_transport->ctrl_xfer
         && g_transport->is_connected && g_transport->is_connected()) {
-        (void)maestro_provision_all_channels();
-        g_config_dirty = false;
+        /* Kick off a fresh chunked sweep. Clear the dirty flag now —
+         * a second Sync mid-sweep will set it again and we'll start
+         * over from channel 0, which is the right behavior (the new
+         * config supersedes whatever the partial sweep was writing). */
+        g_provision_cursor   = 0;
+        g_provision_writes   = 0;
+        g_provision_channels = 0;
+        g_provision_active   = true;
+        g_config_dirty       = false;
+    }
+    if (g_provision_active) {
+        provision_step();
     }
 
     /* Periodic status poll for the dashboard's Live Readings card.
@@ -809,6 +845,60 @@ int maestro_provision_all_channels(void)
             total, total == 1 ? "" : "s");
     }
     return total;
+}
+
+/* Watchdog-safe variant: provision ONE channel per call. maestro_update()
+ * drives this on every tick while g_provision_active is true. Caller
+ * sets up the cursor; we walk it forward by one and fire REINITIALIZE
+ * once the sweep finishes.
+ *
+ * Why chunked: maestro_provision_all_channels() above is the
+ * boot/connect-hook path, where everything is steady-state and almost
+ * always finds no diffs — fast. The live-sync path hits it RIGHT after
+ * the operator changed values, so each channel actually has writes to
+ * make. 18 channels × ~10 USB-vendor control transfers each blocks the
+ * main loop for >30 s and trips the WDOG2 watchdog. Spreading the work
+ * across update ticks keeps maestro_update() bounded at one channel's
+ * worth of USB I/O (~100-200 ms) per call. */
+static void provision_step(void)
+{
+    if (!g_transport || !g_transport->ctrl_xfer
+        || !g_transport->is_connected || !g_transport->is_connected()) {
+        /* Transport went away mid-sweep — abandon, don't REINITIALIZE.
+         * Next connect-hook will catch us up. */
+        g_provision_active = false;
+        return;
+    }
+
+    /* Advance the cursor to the next channel that needs work
+     * (home_us > 0, matching the all-channels filter). */
+    while (g_provision_cursor < MAESTRO_MAX_CHANNELS
+           && g_channel_configs[g_provision_cursor].home_us == 0) {
+        g_provision_cursor++;
+    }
+    if (g_provision_cursor >= MAESTRO_MAX_CHANNELS) {
+        /* Sweep done. REINITIALIZE if anything was written. */
+        if (g_provision_writes > 0) {
+            (void)g_transport->ctrl_xfer(0x40, MAESTRO_REQ_REINITIALIZE,
+                                         0, 0, NULL, 0, 500);
+            saint_log_publish("info",
+                "Maestro: provisioned %u channel%s (%d param%s written), "
+                "REINITIALIZE sent",
+                (unsigned)g_provision_channels,
+                g_provision_channels == 1 ? "" : "s",
+                g_provision_writes,
+                g_provision_writes == 1 ? "" : "s");
+        }
+        g_provision_active = false;
+        return;
+    }
+
+    int w = maestro_provision_channel(g_provision_cursor);
+    if (w > 0) {
+        g_provision_writes += w;
+        g_provision_channels++;
+    }
+    g_provision_cursor++;
 }
 
 const maestro_channel_config_t* maestro_get_channel_config(uint8_t channel)

@@ -42,13 +42,22 @@ XRCE_REASSEMBLY_CAP_BYTES   = 4 * 512   # MTU × MAX_HISTORY (= 2048)
 
 
 def _wire_size(peripheral_dict):
-    """Bytes of the full /config envelope as the server publishes it."""
+    """Bytes of the full /config envelope as the server publishes it.
+
+    MUST use the same separator settings as
+    `state_manager.get_firmware_config_json` — compact (no spaces) — or
+    this test will measure ~10-15 % LARGER than the real wire payload
+    and over-reserve headroom. The 2026-06-19 incident landed because
+    the prior test used default spacing and reported 1744 bytes for the
+    Head Node's config, while the server's actual push was 2027 bytes —
+    over the cap once XRCE submessage overhead was added on the wire,
+    even though the test passed."""
     payload = {
         "action": "configure",
         "version": 1,
         "peripherals": [peripheral_dict],
     }
-    return len(json.dumps(payload))
+    return len(json.dumps(payload, separators=(",", ":")))
 
 
 def _maestro_peripheral(params):
@@ -106,19 +115,65 @@ def test_few_customized_channels_under_kilobyte():
 
 
 def test_realistic_full_customization_under_xrce_cap():
-    """Operator who labels every channel and gives each a home position
+    """Operator who tunes every channel's mechanical envelope + names them
     (common for a fully-mapped robot) must stay under the XRCE
     reassembly cap. This is the load-bearing assertion — if it fails
-    in CI, a future field addition just broke the field deployment."""
+    in CI, a future field addition just broke the field deployment.
+
+    Customizes the bandwidth-costly numeric fields (min/max/neutral/home
+    all distinct from default) instead of just label — labels were
+    moved off the wire in the operator-config-too-big incident (2026-
+    06-19) and a label-only customization would no longer exercise the
+    real wire budget."""
     p = _baseline_params()
-    for i, ch in enumerate(p["channels"]):
-        ch["label"] = f"Servo-{i}"
-        ch["home_us"] = 1400 + i * 10
+    # Mirror the real-world Head Node config that triggered the
+    # 2026-06-19 cap-overflow incident: 18 of 24 channels have envelope
+    # + home tuned, 6 left at default. The full-24 case overflows even
+    # with labels off the wire — that's documented in the pathological
+    # test below and is the motivation for the streaming-config or
+    # MTU-bump work proposed in docs/MAESTRO_BRINGUP.md.
+    for i in range(18):
+        ch = p["channels"][i]
+        ch["label"]        = f"Right Top Flap Rotation {i}"   # display-only, not on wire
+        ch["min_pulse_us"] = 950 + i * 3
+        ch["max_pulse_us"] = 2050 + i * 3
+        ch["neutral_us"]   = 1500 + i
+        ch["home_us"]      = 1400 + i * 10
     n = _wire_size(_maestro_peripheral(p))
     assert n <= XRCE_REASSEMBLY_CAP_BYTES, (
-        f"24 channels each with label+home customized must fit XRCE reassembly "
+        f"18 customized + 6 default channels must fit XRCE reassembly "
         f"cap ({XRCE_REASSEMBLY_CAP_BYTES} bytes); got {n}. Either tighten the "
         f"slim-channels diff or split the config push into multiple messages."
+    )
+
+
+def test_missing_idle_field_does_not_emit_null():
+    """Regression: a channel dict that doesn't have `idle_disengage_ms`
+    (e.g. a config saved before that field shipped) must not emit
+    `"idle_disengage_ms":null` on every channel. The user's 2026-06-19
+    incident was 24 × 26 bytes of `{"idle_disengage_ms":null}` per
+    channel — alone enough to push the Maestro config over the XRCE
+    reassembly cap and crash the Teensy in a reboot loop.
+
+    The fix: maestro_slim_channels_for_wire treats `None` as "field
+    absent, use default" rather than as a distinct value that differs
+    from the 0 default."""
+    p = _baseline_params()
+    # Wipe idle_disengage_ms entirely — simulating a YAML that predates
+    # the field shipping.
+    for ch in p["channels"]:
+        ch.pop("idle_disengage_ms", None)
+    encoded = json.dumps(_maestro_peripheral(p))
+    assert ":null" not in encoded, (
+        f"Slim emitted null for a missing field — old saved configs will "
+        f"bloat the wire and crash the firmware. Payload: {encoded[:300]}"
+    )
+    # And the all-default channels with the field missing should still
+    # be emptied to `{}` rather than `{"idle_disengage_ms":null}`.
+    n = _wire_size(_maestro_peripheral(p))
+    assert n <= XRCE_SINGLE_FRAME_MTU, (
+        f"24 default channels with idle_disengage_ms absent must still fit "
+        f"a single XRCE frame; got {n}."
     )
 
 

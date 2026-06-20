@@ -84,13 +84,38 @@ static void reset_capture(void)
 }
 
 /* Force the shared module back to a clean state between cases. The
- * statics live in saint_log.c — we just reach in (we're in the same
- * TU thanks to the #include above). */
+ * statics live in saint_log.c — we reach in (same TU via the #include).
+ *
+ * The boot-log model is now a ring buffer (g_pending_head/tail/dropped)
+ * drained one entry per call with a pacer, NOT the old
+ * count+flushed-flag. Reset the ring indices, the ready flag, and the
+ * pacer timestamp so each case starts fresh. */
 static void reset_shared_state(void)
 {
-    g_boot_log_count   = 0;
-    g_boot_log_flushed = false;
-    g_ros_ready        = false;
+    g_pending_head    = 0;
+    g_pending_tail    = 0;
+    g_pending_dropped = 0;
+    g_ros_ready       = false;
+    g_last_publish_ms = 0;
+    fake_uptime_ms    = 1000;   /* nonzero base so the pacer math is clean */
+}
+
+/* Drain the whole pending queue.
+ *
+ * The shared drain (saint_log_drain_pending) pops at most ONE entry per
+ * call and enforces SAINT_LOG_MIN_PUBLISH_INTERVAL_MS between publishes,
+ * gated on the stubbed saint_log_uptime_ms() (== fake_uptime_ms). We
+ * advance the fake clock past the interval before each attempt so the
+ * pacer never blocks, and stop when a call pops nothing (queue empty or
+ * not ros-ready). Returns how many entries this drain emitted. */
+static int drain_all(void)
+{
+    int before = captured_ros_count;
+    for (int guard = 0; guard < BOOT_LOG_MAX * 2 + 8; guard++) {
+        fake_uptime_ms += SAINT_LOG_MIN_PUBLISH_INTERVAL_MS;
+        if (!saint_log_drain_pending()) break;
+    }
+    return captured_ros_count - before;
 }
 
 /* ── Cases ────────────────────────────────────────────────────────── */
@@ -123,8 +148,7 @@ static void case_drain_replays_in_order(void)
      * caller's responsibility. */
     EXPECT(captured_ros_count == 0, "still no ros publish before drain");
 
-    saint_log_drain_boot_queue();
-    EXPECT(captured_ros_count == 3, "3 entries drained");
+    EXPECT(drain_all() == 3, "3 entries drained");
     EXPECT(strstr(captured_ros[0], "\"first\"")  != NULL, "first  in slot 0");
     EXPECT(strstr(captured_ros[1], "\"second\"") != NULL, "second in slot 1");
     EXPECT(strstr(captured_ros[2], "\"third\"")  != NULL, "third  in slot 2");
@@ -137,20 +161,25 @@ static void case_drain_is_idempotent(void)
 
     saint_log_publish("info", "only");
     saint_log_set_ros_ready(true);
-    saint_log_drain_boot_queue();
-    EXPECT(captured_ros_count == 1, "first drain emits");
-    saint_log_drain_boot_queue();
-    EXPECT(captured_ros_count == 1, "second drain is no-op");
+    EXPECT(drain_all() == 1, "first drain emits");
+    EXPECT(drain_all() == 0, "second drain is no-op (queue empty)");
+    EXPECT(captured_ros_count == 1, "still just the one entry");
 }
 
-static void case_publish_when_ready_skips_buffer(void)
+static void case_publish_always_enqueues_even_when_ready(void)
 {
-    printf("case_publish_when_ready_skips_buffer\n");
+    printf("case_publish_always_enqueues_even_when_ready\n");
     reset_capture(); reset_shared_state();
 
+    /* The old "if ros_ready, publish inline" fast path was REMOVED — it
+     * published from callback context and produced empty BEST_EFFORT
+     * frames. saint_log_publish now always enqueues; the main-loop
+     * drain is the only thing that emits. So even when ready, a publish
+     * does NOT emit inline — it waits for the drain. */
     saint_log_set_ros_ready(true);
     saint_log_publish("info", "direct");
-    EXPECT(captured_ros_count == 1, "publish goes straight out when ready");
+    EXPECT(captured_ros_count == 0, "publish enqueues, does not emit inline");
+    EXPECT(drain_all() == 1, "drain emits the enqueued entry");
     EXPECT(strstr(captured_ros[0], "\"direct\"") != NULL, "envelope has text");
 }
 
@@ -159,11 +188,15 @@ static void case_uptime_lands_in_envelope(void)
     printf("case_uptime_lands_in_envelope\n");
     reset_capture(); reset_shared_state();
 
-    fake_uptime_ms = 4242;
     saint_log_set_ros_ready(true);
     saint_log_publish("info", "x");
+    /* uptime in the envelope is stamped at PUBLISH (drain) time, not
+     * enqueue time. drain_all advances the fake clock past the pacer, so
+     * pin the clock to a known value right before the (single) drain. */
+    fake_uptime_ms = 4242 - SAINT_LOG_MIN_PUBLISH_INTERVAL_MS;
+    EXPECT(drain_all() == 1, "one entry drained");
     EXPECT(strstr(captured_ros[0], "\"uptime_ms\":4242") != NULL,
-           "uptime_ms field correct");
+           "uptime_ms field stamped at publish time");
 }
 
 static void case_json_escapes(void)
@@ -177,18 +210,21 @@ static void case_json_escapes(void)
      * response ends with a literal \n; without escaping the server's
      * json.loads bails with "Invalid control character at line 1 col N". */
     saint_log_publish("info", "v4.4.8\n");
+    drain_all();   /* publish enqueues; drain emits + escapes */
     EXPECT(strstr(captured_ros[0], "\\n")  != NULL, "newline -> \\n");
     EXPECT(strchr(captured_ros[0], '\n')   == NULL, "no literal newline in envelope");
 
     /* Quote and backslash: standard JSON requirements. */
     reset_capture();
     saint_log_publish("info", "quoted \"x\" and a \\back");
+    drain_all();
     EXPECT(strstr(captured_ros[0], "\\\"x\\\"") != NULL, "quote escaped");
     EXPECT(strstr(captured_ros[0], "\\\\back")  != NULL, "backslash escaped");
 
     /* Tab + CR */
     reset_capture();
     saint_log_publish("info", "tab:\there\rcr");
+    drain_all();
     EXPECT(strstr(captured_ros[0], "\\t")  != NULL, "tab -> \\t");
     EXPECT(strstr(captured_ros[0], "\\r")  != NULL, "CR  -> \\r");
 
@@ -198,6 +234,7 @@ static void case_json_escapes(void)
     reset_capture();
     char raw[8] = { 'a', 0x01, 'b', '\0', 0, 0, 0, 0 };
     saint_log_publish("info", raw);
+    drain_all();
     EXPECT(strstr(captured_ros[0], "\\u0001") != NULL, "0x01 -> \\u0001");
 }
 
@@ -206,18 +243,28 @@ static void case_buffer_is_bounded(void)
     printf("case_buffer_is_bounded\n");
     reset_capture(); reset_shared_state();
 
-    /* Push more than BOOT_LOG_MAX entries; extras are dropped, not
-     * evicting earlier ones. The early lines are the diagnostic gold
-     * we don't want to lose. */
-    for (int i = 0; i < BOOT_LOG_MAX + 5; i++) {
+    /* Ring buffer: push more than it holds. When full it drops the
+     * OLDEST entry (keeps the most recent context — see enqueue_pending
+     * in saint_log.c). Usable capacity is BOOT_LOG_MAX-1 (head==tail is
+     * the empty sentinel). So the newest lines survive and the earliest
+     * are dropped — the opposite of the old reject-when-full model. */
+    const int pushed = BOOT_LOG_MAX + 5;
+    for (int i = 0; i < pushed; i++) {
         saint_log_publish("info", "line %d", i);
     }
     saint_log_set_ros_ready(true);
-    saint_log_drain_boot_queue();
-    EXPECT(captured_ros_count == BOOT_LOG_MAX,
-           "drain stops at BOOT_LOG_MAX");
-    EXPECT(strstr(captured_ros[0], "\"line 0\"") != NULL,
-           "earliest line survived");
+    int drained = drain_all();
+    EXPECT(drained == BOOT_LOG_MAX - 1,
+           "drain yields ring capacity (BOOT_LOG_MAX-1)");
+    EXPECT(g_pending_dropped == (uint32_t)(pushed - (BOOT_LOG_MAX - 1)),
+           "dropped count = overflow amount");
+    /* Newest survived, oldest evicted. */
+    char newest[32];
+    snprintf(newest, sizeof(newest), "\"line %d\"", pushed - 1);
+    EXPECT(strstr(captured_ros[drained - 1], newest) != NULL,
+           "newest line survived (last drained)");
+    EXPECT(strstr(captured_ros[0], "\"line 0\"") == NULL,
+           "earliest line was dropped");
 }
 
 static void case_boot_queue_helper(void)
@@ -233,8 +280,7 @@ static void case_boot_queue_helper(void)
     saint_log_boot_queue("info", "deferred");
     EXPECT(captured_ros_count == 0, "boot_queue does not auto-publish");
 
-    saint_log_drain_boot_queue();
-    EXPECT(captured_ros_count == 1, "drain replays the deferred line");
+    EXPECT(drain_all() == 1, "drain replays the deferred line");
     EXPECT(strstr(captured_ros[0], "\"deferred\"") != NULL, "text round-trips");
 }
 
@@ -243,7 +289,7 @@ int main(void)
     case_local_always_fires();
     case_drain_replays_in_order();
     case_drain_is_idempotent();
-    case_publish_when_ready_skips_buffer();
+    case_publish_always_enqueues_even_when_ready();
     case_uptime_lands_in_envelope();
     case_json_escapes();
     case_buffer_is_bounded();

@@ -45,9 +45,15 @@ services:
 
     environment:
       ROS_DISTRO: kilted
+      # Point saint_server's firmware lookup at the bind-mounted firmware
+      # tree. The server runs from /work/install (colcon merge-install)
+      # with no source checkout above it, so _get_firmware_dir() can't
+      # auto-resolve the firmware dir — without this the sim-build probe
+      # (and OTA Phase 5) reported "No simulation firmware build found"
+      # even though firmware/rp2040/install/simulation is mounted below.
+      SAINT_FIRMWARE_RP2040_DIR: /work/firmware/rp2040
       # Default to the Python fake-firmware path. MODE=full uses
-      # Renode-sim firmware (currently blocked on the bootrom/XIP
-      # modelling issue described in the entrypoint header).
+      # Renode-sim firmware.
       MODE: ${MODE:-fake}
       WS_URL: ${WS_URL:-ws://localhost:80/api/ws}
       PASSWORD: ${PASSWORD:-12345}

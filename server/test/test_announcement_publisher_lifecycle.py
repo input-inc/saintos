@@ -43,12 +43,27 @@ def sm(tmp_path):
 
 
 def _make_stub(sm: StateManager) -> types.SimpleNamespace:
+    # One shared logger mock (not a fresh one per get_logger() call) so
+    # tests can assert on what the handler logged — in particular that a
+    # well-formed announcement logs NO error, and that a collaborator
+    # blowing up IS logged loudly rather than silently swallowed.
+    logger = MagicMock()
     stub = types.SimpleNamespace(
         state_manager=sm,
-        get_logger=lambda: MagicMock(),
+        get_logger=lambda: logger,
         _ensure_node_log_subscriber=MagicMock(),
         _ensure_node_state_subscriber=MagicMock(),
         _ensure_node_capabilities_subscriber=MagicMock(),
+        # Subscribers/handlers _on_node_announcement gained after this
+        # test was written. They run BEFORE the publisher pre-create
+        # block, so if the stub omits them the SimpleNamespace raises
+        # AttributeError mid-handler — which the handler's broad except
+        # swallows, silently skipping the publisher + reconcile calls
+        # these tests assert on. Keep this stub in lockstep with the
+        # collaborators _on_node_announcement actually invokes.
+        _ensure_node_ble_scan_subscriber=MagicMock(),
+        _ensure_node_update_progress_subscriber=MagicMock(),
+        _maybe_handle_announce_sync_ack=MagicMock(),
         _ensure_node_config_publisher=MagicMock(),
         _ensure_node_control_publisher=MagicMock(),
         _ensure_node_command_publisher=MagicMock(),
@@ -63,6 +78,7 @@ def _make_stub(sm: StateManager) -> types.SimpleNamespace:
     stub._report_announcement_parse_error = types.MethodType(
         SaintServerNode._report_announcement_parse_error, stub
     )
+    stub._test_logger = logger   # handle for assertions
     return stub
 
 
@@ -198,3 +214,47 @@ class TestPublisherPreCreate:
         }))
         stub._maybe_reconcile_adopted_unadopted.assert_called_once_with(
             "rp2040_TEST", "UNADOPTED")
+
+    def test_well_formed_announcement_logs_no_error(self, sm):
+        """A valid announcement must process end-to-end WITHOUT logging
+        an error. This is the guard that catches the whole class of
+        silent-failure bugs: if a collaborator goes missing or throws,
+        the handler's catch-all logs at error level — so asserting zero
+        error logs on the happy path fails loudly the moment any step in
+        the pipeline starts swallowing an exception (exactly the stale-
+        stub regression that masked the publisher calls)."""
+        stub = _make_stub(sm)
+        SaintServerNode._on_node_announcement(stub, _make_msg({
+            "node_id": "rp2040_TEST", "hw": "X", "fw": "1.0.0",
+            "state": "UNADOPTED",
+        }))
+        assert stub._test_logger.error.call_count == 0, (
+            "happy-path announcement logged an error — something in the "
+            "pipeline raised and was swallowed: "
+            f"{stub._test_logger.error.call_args_list}")
+
+    def test_collaborator_failure_is_logged_loudly_not_silent(self, sm):
+        """A programming error mid-pipeline (here: a collaborator raising
+        AttributeError, mimicking a missing/typo'd method) MUST NOT
+        propagate out of the callback (that would kill the announcement
+        subscription on the ROS thread) — but it also MUST be logged
+        loudly with a traceback so the failure is diagnosable instead of
+        silently no-op'ing the rest of the handler."""
+        stub = _make_stub(sm)
+        stub._ensure_node_state_subscriber = MagicMock(
+            side_effect=AttributeError("boom: simulated missing collaborator"))
+
+        # Must not raise — crash-safety contract for the callback thread.
+        SaintServerNode._on_node_announcement(stub, _make_msg({
+            "node_id": "rp2040_TEST", "hw": "X", "fw": "1.0.0",
+        }))
+
+        assert stub._test_logger.error.called, (
+            "a swallowed collaborator failure was not logged — silent failure")
+        logged = "\n".join(
+            str(c) for c in stub._test_logger.error.call_args_list)
+        assert "boom: simulated missing collaborator" in logged
+        # The traceback (or at least the exception type) must be present
+        # so the operator/dev can locate the failing call, not just see
+        # a generic "error processing announcement".
+        assert "AttributeError" in logged or "Traceback" in logged

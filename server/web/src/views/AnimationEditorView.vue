@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useRobotModelStore } from '@/stores/robotModel'
 import { useAnimationsStore } from '@/stores/animations'
 import { useWsStore } from '@/stores/ws'
-import { sampleAllTracks } from '@/composables/useCurveSampling'
+import { sampleAllTracks, sampleCurve } from '@/composables/useCurveSampling'
 import TimelineEditor from '@/components/animation/TimelineEditor.vue'
 
 const props = defineProps({
@@ -172,10 +172,37 @@ function driveUrdfFromPlayhead () {
     v.setJointValue(jointName, val)
   }
 }
-watch(playerPos, () => driveUrdfFromPlayhead())
+watch(playerPos, (now, prev) => {
+  driveUrdfFromPlayhead()
+  if (livePreviewActive()) sendLivePreview(now, crossedTriggers(prev ?? now, now))
+})
 watch(
   () => JSON.stringify(anim.value?.value_tracks || []),
-  () => driveUrdfFromPlayhead(),
+  () => {
+    driveUrdfFromPlayhead()
+    // A value keyframe was edited; time didn't move, so re-push values
+    // only (no trigger crossing).
+    if (livePreviewActive()) sendLivePreview(playerPos.value, [])
+  },
+)
+// Trigger keyframe edits: fire any trigger sitting AT the current
+// playhead (within a frame) so adjusting a point at the cursor shows
+// its effect immediately — matching the value-track behavior above.
+watch(
+  () => JSON.stringify(anim.value?.trigger_tracks || []),
+  () => {
+    if (!livePreviewActive()) return
+    const t = playerPos.value
+    const trg = []
+    for (const tt of anim.value?.trigger_tracks || []) {
+      for (const kf of tt.keyframes || []) {
+        if (Math.abs((kf.time || 0) - t) <= 0.05) {
+          trg.push({ target_kind: kf.target_kind, target: kf.target, value: kf.value })
+        }
+      }
+    }
+    if (trg.length) sendLivePreview(t, trg)
+  },
 )
 // When the server confirms playback started, sync the playhead once.
 // After that the RAF loop below takes over for smooth client-side
@@ -183,6 +210,83 @@ watch(
 // that felt much slower than dragging.
 watch(playingState, (s, prev) => {
   if (s && !prev) playerPos.value = s.t
+})
+
+// ── Live Preview ───────────────────────────────────────────────────
+//
+// When enabled, scrubbing the timeline or editing a keyframe at the
+// playhead pushes the sampled value-track frame (and any crossed
+// triggers) straight into the routing graph via the server's
+// preview_animation_frame action — same dispatch path the player uses
+// — so the operator sees real-time impact on the rig without starting
+// playback. Gated to when the SERVER player isn't already running this
+// animation (it drives the rig itself in that case).
+const livePreview = ref(false)
+function livePreviewActive () {
+  return livePreview.value && !!anim.value && !playingState.value?.running
+}
+
+// Build the value-track frame at time t: ws_input-bound tracks address
+// (sheet, input); everything else is a URDF joint keyed by track id.
+function buildPreviewValues (t) {
+  const out = []
+  for (const tr of anim.value?.value_tracks || []) {
+    const v = sampleCurve(tr.curve, t)
+    if (tr.target_kind === 'ws_input' && tr.target?.length >= 2) {
+      out.push({ target_kind: 'ws_input', target: tr.target, value: v })
+    } else {
+      out.push({ target_kind: 'urdf_joint', id: tr.id, value: v })
+    }
+  }
+  return out
+}
+// Triggers whose time falls in the (prev, now] window — forward only,
+// matching the player so a backward scrub doesn't re-fire events.
+function crossedTriggers (prevT, nowT) {
+  if (nowT <= prevT) return []
+  const out = []
+  for (const tt of anim.value?.trigger_tracks || []) {
+    for (const kf of tt.keyframes || []) {
+      if (kf.time > prevT && kf.time <= nowT) {
+        out.push({ target_kind: kf.target_kind, target: kf.target, value: kf.value })
+      }
+    }
+  }
+  return out
+}
+
+// ~30 Hz leading+trailing throttle on the value frame so a 60 fps scrub
+// doesn't flood the management channel; crossed triggers accumulate
+// across the throttle window so none are dropped, and the trailing call
+// always lands the final resting frame.
+let _previewLast = 0
+let _previewTimer = null
+let _pendingTriggers = []
+function sendLivePreview (t, triggers) {
+  if (triggers && triggers.length) _pendingTriggers.push(...triggers)
+  const flush = () => {
+    _previewLast = Date.now()
+    const trg = _pendingTriggers; _pendingTriggers = []
+    animations.previewFrame(buildPreviewValues(t), trg)
+  }
+  const wait = 33 - (Date.now() - _previewLast)
+  clearTimeout(_previewTimer)
+  if (wait <= 0) flush()
+  else _previewTimer = setTimeout(flush, wait)
+}
+// Relax the rig (all value targets → 0) when Live Preview turns off or
+// the editor unmounts, mirroring the player's stop-settles-to-neutral
+// behavior so the rig doesn't hold the last previewed pose.
+function relaxLivePreview () {
+  const zeros = (anim.value?.value_tracks || []).map(tr =>
+    (tr.target_kind === 'ws_input' && tr.target?.length >= 2)
+      ? { target_kind: 'ws_input', target: tr.target, value: 0 }
+      : { target_kind: 'urdf_joint', id: tr.id, value: 0 })
+  if (zeros.length) animations.previewFrame(zeros, [])
+}
+watch(livePreview, (on) => {
+  if (on) sendLivePreview(playerPos.value, [])   // snap rig to current frame
+  else relaxLivePreview()
 })
 
 // Local playback loop. requestAnimationFrame ticks at the display
@@ -456,6 +560,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   document.removeEventListener('focusin', onFocusIn)
   stopPlayLoop()
+  // Relax the live rig so leaving the editor with Live Preview on
+  // doesn't strand the robot in the previewed pose.
+  if (livePreview.value) { clearTimeout(_previewTimer); relaxLivePreview() }
   // Reset URDF to neutral so leaving doesn't leave joints frozen.
   const v = viewerRef?.value
   if (v?.setJointValue) {
@@ -495,6 +602,16 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="flex items-center gap-1 shrink-0">
+          <button :class="['btn-sm flex items-center gap-1',
+                           livePreview
+                             ? 'bg-emerald-500/90 hover:bg-emerald-500 text-fg-strong'
+                             : 'bg-surface hover:bg-surface-2 text-fg-strong']"
+                  title="Live Preview — push sampled positions + triggers to the rig in real time as you scrub or edit (disabled while playing)"
+                  :disabled="!!playingState?.running"
+                  @click="livePreview = !livePreview">
+            <span class="material-icons icon-sm">{{ livePreview ? 'sensors' : 'sensors_off' }}</span>
+            Live
+          </button>
           <button class="btn-sm bg-surface hover:bg-surface-2 text-fg-strong"
                   :title="`Undo (${undoHint})`"
                   :disabled="!animations.canUndo" @click="animations.undo()">
