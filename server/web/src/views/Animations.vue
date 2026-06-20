@@ -164,7 +164,7 @@ async function startEditPose (p) {
     editingPoseId.value = null
     return
   }
-  await poses.load(p.id)
+  await Promise.all([poses.load(p.id), loadWsInputs()])
   editingPoseId.value = p.id
 }
 async function saveEditedPose () {
@@ -173,6 +173,64 @@ async function saveEditedPose () {
 }
 async function applyPose (p) {
   await poses.apply(p.id)
+}
+// Push the in-progress edit live without saving — lets the operator
+// A/B it against the saved pose (the row's play button) before saving.
+const previewing = ref(false)
+async function previewEditedPose () {
+  previewing.value = true
+  try {
+    await poses.preview()
+  } finally {
+    previewing.value = false
+  }
+}
+
+// ── Pose tracks (setpoints) ────────────────────────────────────────
+// Each track binds one WS input on a controller node's routing sheet
+// (sheet_id, ws_input_id). Applying the pose pushes the value into that
+// sheet's routing graph, where it routes to the controller like any
+// other input. Sourced from the SAME server endpoint
+// PoseLibrary.vue / the controller's binding picker hit —
+// `list_websocket_inputs` on the router channel. The earlier
+// `ws.management('list_ws_inputs', …)` shape silently returned
+// "Unknown action" (no management handler exists by that name); the
+// catch below swallowed the error, wsInputs stayed empty forever, and
+// the operator-visible result was "Add track" disabled + the "No
+// controller inputs available" amber line even when there WERE WS-
+// input nodes on a sheet. Same fix landed in AnimationEditorView's
+// loadTriggerTargets.
+const wsInputs = ref([])
+async function loadWsInputs () {
+  try {
+    const r = await ws.router('list_websocket_inputs', {})
+    wsInputs.value = (r?.ws_inputs || r?.inputs || []).filter(x => x.kind !== 'state')
+  } catch (e) { console.warn('list_websocket_inputs failed:', e) }
+}
+const wsSheets = computed(() => {
+  const seen = new Map()
+  for (const w of wsInputs.value) {
+    if (!seen.has(w.sheet_id)) seen.set(w.sheet_id, w.sheet_label || w.sheet_id)
+  }
+  return [...seen.entries()].map(([id, label]) => ({ id, label }))
+})
+function wsInputsForSheet (sheetId) {
+  return wsInputs.value.filter(w => w.sheet_id === sheetId)
+}
+function addPoseTrack () {
+  if (!poses.editing) return
+  if (!Array.isArray(poses.editing.setpoints)) poses.editing.setpoints = []
+  const first = wsInputs.value[0]
+  poses.editing.setpoints.push({
+    sheet_id: first?.sheet_id || '',
+    ws_input_id: first?.input_id || '',
+    value: 0,
+  })
+  poses.markDirty()
+}
+function removePoseTrack (idx) {
+  poses.editing.setpoints.splice(idx, 1)
+  poses.markDirty()
 }
 
 function fmtTimeAgo (iso) {
@@ -185,7 +243,7 @@ function fmtTimeAgo (iso) {
 }
 
 onMounted(async () => {
-  await Promise.all([animations.reload(), poses.reload()])
+  await Promise.all([animations.reload(), poses.reload(), loadWsInputs()])
 })
 
 // If the sidebar selection lands on an empty bucket (e.g. the last
@@ -385,7 +443,7 @@ watch([animationGroups, poseGroups], () => {
                          placeholder="(group)"
                          @change="(e) => patchPose(p.id, { group: e.target.value })" />
                   <div class="text-xs text-fg-faint w-24 text-right tabular-nums shrink-0">
-                    {{ p.setpoint_count }} setpoint{{ p.setpoint_count === 1 ? '' : 's' }}
+                    {{ p.setpoint_count }} track{{ p.setpoint_count === 1 ? '' : 's' }}
                   </div>
                   <div class="text-xs text-fg-faint w-20 text-right shrink-0">{{ fmtTimeAgo(p.modified) }}</div>
                   <div class="flex items-center gap-1 shrink-0">
@@ -412,6 +470,13 @@ watch([animationGroups, poseGroups], () => {
                       <button class="btn-sm bg-surface hover:bg-surface-2 text-fg-strong" @click="editingPoseId = null">
                         Done
                       </button>
+                      <button class="btn-sm bg-emerald-600 hover:bg-emerald-500 text-fg-strong"
+                              :disabled="previewing || !poses.editing.setpoints?.length"
+                              title="Push this pose live without saving — compare it against the saved version with the row's play button"
+                              @click="previewEditedPose">
+                        <span class="material-icons icon-sm">play_arrow</span>
+                        Preview
+                      </button>
                       <button class="btn-sm bg-cyan-600 hover:bg-cyan-500 text-fg-strong"
                               :disabled="!poses.dirty" @click="saveEditedPose">
                         <span class="material-icons icon-sm">save</span>
@@ -424,10 +489,52 @@ watch([animationGroups, poseGroups], () => {
                     <input class="input-field w-full" v-model="poses.editing.description"
                            @input="poses.markDirty()" />
                   </label>
-                  <p class="text-xs text-fg-faint">
-                    Setpoints: {{ poses.editing.setpoints?.length || 0 }} — to add/remove,
-                    open the routing UI in another tab; the full pose builder will land here in a follow-on.
-                  </p>
+
+                  <!-- Tracks: each binds a WS input on a controller's
+                       sheet; the value is pushed into the routing graph
+                       on apply, routed like any other controller input. -->
+                  <div>
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="block text-fg-muted text-xs">Tracks</span>
+                      <button class="btn-sm bg-surface hover:bg-surface-2 text-fg-strong"
+                              :disabled="!wsInputs.length" @click="addPoseTrack">
+                        <span class="material-icons icon-sm">add</span>
+                        Add track
+                      </button>
+                    </div>
+                    <p v-if="!wsInputs.length" class="text-xs text-amber-300 italic mb-1">
+                      No controller inputs available — add WS-input nodes to a sheet in Routes first.
+                    </p>
+                    <ul v-if="poses.editing.setpoints?.length" class="space-y-2">
+                      <li v-for="(sp, idx) in poses.editing.setpoints" :key="idx"
+                          class="flex items-center gap-2">
+                        <select class="input-field text-xs w-36 shrink-0" v-model="sp.sheet_id"
+                                @change="poses.markDirty()">
+                          <option v-for="s in wsSheets" :key="s.id" :value="s.id">{{ s.label }}</option>
+                        </select>
+                        <select class="input-field text-xs w-40 shrink-0" v-model="sp.ws_input_id"
+                                @change="poses.markDirty()">
+                          <option v-for="w in wsInputsForSheet(sp.sheet_id)"
+                                  :key="w.input_id" :value="w.input_id">
+                            {{ w.label || w.input_id }}
+                          </option>
+                        </select>
+                        <input type="range" min="-1" max="1" step="0.01"
+                               class="flex-1 accent-cyan-500 cursor-pointer"
+                               v-model.number="sp.value" @input="poses.markDirty()" />
+                        <span class="text-xs font-mono text-cyan-400 w-12 text-right tabular-nums">
+                          {{ Number(sp.value).toFixed(2) }}
+                        </span>
+                        <button class="btn-sm bg-surface hover:bg-red-600 text-fg hover:text-fg-strong"
+                                title="Remove track" @click="removePoseTrack(idx)">
+                          <span class="material-icons icon-sm">delete</span>
+                        </button>
+                      </li>
+                    </ul>
+                    <p v-else class="text-xs text-fg-faint italic">
+                      No tracks yet — add one to bind a controller input.
+                    </p>
+                  </div>
                 </div>
               </template>
             </div>

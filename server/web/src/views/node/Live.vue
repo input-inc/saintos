@@ -6,6 +6,7 @@ import { useWsTopic } from '@/composables/useWsTopic'
 import { useChannelHistory } from '@/composables/useChannelHistory'
 import Sparkline from '@/components/Sparkline.vue'
 import BMSCard from '@/components/peripherals/BMSCard.vue'
+import MaestroCard from '@/components/peripherals/MaestroCard.vue'
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -136,6 +137,15 @@ function sparkSamples (nodeId, peripheralId, channelId) {
            generic path uses — no extra subscriptions. -->
       <BMSCard
         v-if="p.type === 'pathfinder_bms'"
+        :peripheral="p"
+        :channels="values[p.id] || {}"
+        :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"
+      />
+      <!-- Maestro gets its own card too — online dot, decoded error
+           flag badges, moving indicator. Falls back to the generic
+           channel table for the actual servo target values. -->
+      <MaestroCard
+        v-else-if="p.type === 'maestro'"
         :peripheral="p"
         :channels="values[p.id] || {}"
         :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"

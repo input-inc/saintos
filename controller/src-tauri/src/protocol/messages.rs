@@ -67,6 +67,7 @@ impl OutgoingMessage {
     }
 
     /// Discovery request to get active roles (roles assigned to nodes)
+    #[allow(dead_code)] // part of the discovery API; not wired into a UI yet
     pub fn discover_active_roles() -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -162,6 +163,80 @@ impl OutgoingMessage {
         }
     }
 
+    /// Subscribe to a dynamic set of owned topic strings (e.g. one
+    /// `pin_state/<node_id>` per adopted node). Same wire shape as
+    /// `subscribe`; separate constructor so callers building a Vec at
+    /// runtime don't have to juggle `&str` lifetimes.
+    pub fn subscribe_owned(topics: &[String]) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "subscribe".to_string(),
+            action: "subscribe".to_string(),
+            params: Some(serde_json::json!({ "topics": topics })),
+            password: None,
+        }
+    }
+
+    /// List adopted nodes. Server replies with `{ nodes: [{node_id, …}] }`.
+    /// The battery panel uses this to learn which `pin_state/<node>`
+    /// topics to subscribe to.
+    pub fn list_adopted() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "management".to_string(),
+            action: "list_adopted".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// List saved animations. Server replies with
+    /// `{ animations: [{id, name, icon, …}] }`. Forwarded to the
+    /// frontend on the `library-animations` event.
+    pub fn list_animations() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "management".to_string(),
+            action: "list_animations".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// List saved poses. Server replies with
+    /// `{ poses: [{id, name, icon, …}] }`. Forwarded on `library-poses`.
+    pub fn list_poses() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "management".to_string(),
+            action: "list_poses".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// Start (play) a saved animation by id.
+    pub fn start_animation(id: &str) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "management".to_string(),
+            action: "start_animation".to_string(),
+            params: Some(serde_json::json!({ "id": id })),
+            password: None,
+        }
+    }
+
+    /// Apply (snap to) a saved pose by id.
+    pub fn apply_pose(id: &str) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            msg_type: "management".to_string(),
+            action: "apply_pose".to_string(),
+            params: Some(serde_json::json!({ "id": id })),
+            password: None,
+        }
+    }
+
     pub fn emergency_stop() -> Self {
         // Server handler matches on action == "estop" (latching toggle:
         // each press flips system-wide state, fans out to all adopted
@@ -222,6 +297,7 @@ impl IncomingMessage {
         self.msg_type == "auth_result" && self.status.as_deref() == Some("ok")
     }
 
+    #[allow(dead_code)] // companion to is_auth_success; kept for completeness
     pub fn is_auth_failure(&self) -> bool {
         self.msg_type == "auth_result" && self.status.as_deref() != Some("ok")
     }

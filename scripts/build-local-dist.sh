@@ -554,10 +554,21 @@ else
 
     log "Building web/dist via Vite"
     ( cd server/web
-      # Use `npm ci` when a lockfile exists for reproducible installs;
-      # fall back to `npm install` on first build so the tree can be set up.
-      if [[ -f package-lock.json ]]; then
+      # `npm ci` wipes and reinstalls node_modules from scratch every
+      # run, which dominates the web step. Skip it when the lockfile is
+      # unchanged and a node_modules tree is already present (hash
+      # sentinel, same idea as the .deb cache). Only reinstall when the
+      # lockfile actually changed — then it's a clean, reproducible `npm
+      # ci`. First build (no lockfile yet) falls back to `npm install`.
+      lock_hash=""
+      [[ -f package-lock.json ]] && lock_hash=$($SHA256 package-lock.json | awk '{print $1}')
+      sentinel="node_modules/.saint-lock-hash"
+      if [[ -n "$lock_hash" && -d node_modules && -f "$sentinel" \
+            && "$(cat "$sentinel" 2>/dev/null)" == "$lock_hash" ]]; then
+          log "node_modules up to date (lockfile unchanged) — skipping npm install"
+      elif [[ -f package-lock.json ]]; then
           npm ci --no-audit --no-fund
+          printf '%s' "$lock_hash" > "$sentinel"
       else
           npm install --no-audit --no-fund
       fi
@@ -570,29 +581,50 @@ fi
 
 # --- build saint_os against bundled ROS2 -----------------------------------
 
-log "Building saint_os in debian:${DEBIAN_RELEASE} container (3-5 min)"
+# Builder image (cached). `docker run` gets no layer caching, so the
+# previous version re-ran apt-get + pip install inside the ephemeral
+# container on *every* build (~1-3 min). Bake the toolchain into an
+# image instead, tagged by a hash of the spec below so it rebuilds only
+# when the spec changes — otherwise Docker serves it instantly.
+#
+# CI (.github/workflows/dist.yml) installs its own toolchain on the
+# runner and never touches this image; the ONLY thing that must stay in
+# sync with CI is the `colcon build` invocation further down (keep them
+# identical). The toolchain list here mirrors what that container
+# installed before.
+BUILDER_APT="ca-certificates curl gnupg build-essential cmake git pkg-config python3 python3-dev python3-pip python3-numpy python3-yaml libpython3.11 libssl3 libtinyxml2-dev libxml2-dev libyaml-dev"
+BUILDER_PIP="colcon-common-extensions empy==3.3.4 lark"
+BUILDER_HASH=$(printf 'base:debian:%s\napt:%s\npip:%s\n' \
+    "$DEBIAN_RELEASE" "$BUILDER_APT" "$BUILDER_PIP" | $SHA256 | cut -c1-12)
+BUILDER_IMAGE="saint-os-builder:${DEBIAN_RELEASE}-${ARCH}-${BUILDER_HASH}"
+
+if docker image inspect "$BUILDER_IMAGE" >/dev/null 2>&1; then
+    log "Using cached builder image ${BUILDER_IMAGE}"
+else
+    log "Building builder image ${BUILDER_IMAGE} (one-time; cached after first run)"
+    # Unquoted heredoc: ${...} expand on the host so the resolved
+    # package lists are baked into the image layer.
+    docker build --platform "linux/${ARCH}" -t "$BUILDER_IMAGE" - <<DOCKERFILE
+FROM debian:${DEBIAN_RELEASE}
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
+RUN apt-get update && apt-get install -y --no-install-recommends ${BUILDER_APT} && python3 -m pip install --break-system-packages -U ${BUILDER_PIP} && apt-get clean && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
+fi
+
+# Mount the extracted ROS2 install tree READ-ONLY straight to /opt/ros
+# so the prebuilt setup.bash's baked /opt/ros paths resolve — no
+# per-build `cp -a` of the few-hundred-MB tree into the container's
+# writable layer. colcon only writes the saint_os package to
+# /work/install, never to the underlay, so read-only is both correct
+# and a safety net against corrupting the cached tree.
+log "Building saint_os in ${BUILDER_IMAGE} (incremental colcon; install/ persists)"
 docker run --rm -i --platform "linux/${ARCH}" \
   -v "${PWD}:/work" \
+  -v "${PWD}/_ros2/opt/ros/${ROS_DISTRO}:/opt/ros/${ROS_DISTRO}:ro" \
   -w /work \
   -e ROS_DISTRO="${ROS_DISTRO}" \
-  "debian:${DEBIAN_RELEASE}" \
+  "$BUILDER_IMAGE" \
   bash -eo pipefail <<'CONTAINER_EOF'
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends \
-    ca-certificates curl gnupg \
-    build-essential cmake git pkg-config \
-    python3 python3-dev python3-pip \
-    python3-numpy python3-yaml \
-    libpython3.11 libssl3 libtinyxml2-dev libxml2-dev libyaml-dev
-python3 -m pip install --break-system-packages -U \
-    colcon-common-extensions \
-    "empy==3.3.4" \
-    lark
-export LANG=C.UTF-8 LC_ALL=C.UTF-8
-
-mkdir -p "/opt/ros/${ROS_DISTRO}"
-cp -a "/work/_ros2/opt/ros/${ROS_DISTRO}/install" "/opt/ros/${ROS_DISTRO}/install"
 source "/opt/ros/${ROS_DISTRO}/install/setup.bash"
 
 # Fail loud if sourcing setup.bash didn't actually set the ament
@@ -613,6 +645,9 @@ source "/opt/ros/${ROS_DISTRO}/install/setup.bash"
 # "ignoring unknown package 'saint_os' in --packages-select" and an
 # empty install/. Explicit base-paths is also ~30s faster on a cold
 # discovery and keeps CI and local in sync.
+#
+# NOTE: keep this colcon invocation identical to the package-server job
+# in .github/workflows/dist.yml.
 colcon build \
     --base-paths server \
     --merge-install \

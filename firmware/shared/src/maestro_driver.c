@@ -20,8 +20,10 @@
 #include "flash_types.h"
 #include "peripheral_driver.h"
 #include "pin_types.h"
+#include "platform.h"
 #include "saint_log.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,6 +33,25 @@ static const maestro_transport_ops_t* g_transport = NULL;
 static bool     g_initialized   = false;
 static bool     g_was_connected = false;
 static uint32_t g_transport_mode = FLASH_MAESTRO_TRANSPORT_USB_HOST;
+
+/* Operator-configured peripheral id (e.g. "maestro-1"). Captured from
+ * the per-instance configure JSON in drv_parse_json so the
+ * state_emit_channels callback can label its records. Falls back to
+ * "maestro" if a config push arrives without an id (older flows). */
+static char     g_peripheral_id[48] = "maestro";
+
+/* Status-poll cache. maestro_update() refreshes these from the device
+ * at MAESTRO_STATUS_POLL_MS cadence; maestro_state_emit_channels
+ * publishes them on every pin_state broadcast (~10 Hz). Decoupling the
+ * poll rate from the broadcast rate keeps the byte-stream traffic
+ * bounded — error/moving polls cost a round-trip each on every
+ * transport (USB control xfer or UART command), and at 10 Hz we'd be
+ * saturating slower UARTs. 500 ms is plenty for an operator-watching-
+ * the-dashboard latency budget while leaving headroom on the link. */
+#define MAESTRO_STATUS_POLL_MS 500u
+static uint32_t g_last_poll_ms = 0;
+static uint16_t g_last_errors  = 0;     /* GET_ERRORS bitmap (16 bits) */
+static uint8_t  g_last_moving  = 0;     /* GET_MOVING_STATE (0 or 1)   */
 
 /* Set when a live config sync changes channel config (maestro_set_channel_config).
  * maestro_update() re-provisions the chip's EEPROM + REINITIALIZEs on the
@@ -232,6 +253,23 @@ void maestro_update(void)
         (void)maestro_provision_all_channels();
         g_config_dirty = false;
     }
+
+    /* Periodic status poll for the dashboard's Live Readings card.
+     * GET_ERRORS and GET_MOVING_STATE each round-trip the byte-stream
+     * link, so we rate-limit to MAESTRO_STATUS_POLL_MS to keep the
+     * link from saturating — operator-perceptible latency at 500ms is
+     * fine for "is the device alive / are there faults / is it
+     * driving servos" type info. Stays a no-op when disconnected;
+     * 0xFFFF / 0xFF sentinels from the helpers mean "no answer", which
+     * the emit path renders as connected=0. */
+    if (g_transport->is_connected && g_transport->is_connected()) {
+        uint32_t now = PLATFORM_MILLIS();
+        if (now - g_last_poll_ms >= MAESTRO_STATUS_POLL_MS) {
+            g_last_poll_ms = now;
+            g_last_errors = maestro_get_errors();
+            g_last_moving = maestro_get_moving_state();
+        }
+    }
 }
 
 bool maestro_is_connected(void)
@@ -349,6 +387,26 @@ uint16_t maestro_get_errors(void)
     if (!g_transport || !g_transport->read) return 0xFFFF;
     if (g_transport->read(r, sizeof(r), 10) != 2) return 0xFFFF;
     return (uint16_t)r[0] | ((uint16_t)r[1] << 8);
+}
+
+uint8_t maestro_get_moving_state(void)
+{
+    /* Pololu Maestro Compact Protocol "Get Moving State" — 0xA6.
+     * Returns 1 byte: 0 if all servos are at their target, 1 if any
+     * are still moving toward a target. Mini Maestro firmware 1.01+
+     * supports this; older Micro Maestros respond with 0 reliably.
+     *
+     * Returns 0xFF on transport failure so callers can distinguish
+     * "no answer" from a real 0/1. The state-emit path treats 0xFF
+     * the same as "not connected" (publishes 0 with connected=0).
+     */
+    uint8_t cmd = 0xA6;
+    if (!tx_bytes(&cmd, 1)) return 0xFFu;
+
+    uint8_t r = 0;
+    if (!g_transport || !g_transport->read) return 0xFFu;
+    if (g_transport->read(&r, 1, 10) != 1) return 0xFFu;
+    return r;
 }
 
 void maestro_go_home(void)
@@ -815,6 +873,32 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
     uint16_t home  = 0;
 
     const char* p;
+
+    /* Capture operator-configured peripheral id (e.g. "maestro-1") so
+     * state_emit_channels can label its records. The configure JSON
+     * envelope for this peripheral is "id":"...","type":"maestro",...
+     * The peripheral framework calls parse_json_params once per
+     * channel, so we re-extract on every call — same value each
+     * time, last write wins. Bounded by sizeof(g_peripheral_id). */
+    p = strstr(json_start, "\"id\"");
+    if (p && p < json_end) {
+        p = strchr(p, ':');
+        if (p) {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '"') {
+                p++;
+                const char* end = strchr(p, '"');
+                if (end && end < json_end) {
+                    size_t n = (size_t)(end - p);
+                    if (n >= sizeof(g_peripheral_id)) n = sizeof(g_peripheral_id) - 1;
+                    memcpy(g_peripheral_id, p, n);
+                    g_peripheral_id[n] = '\0';
+                }
+            }
+        }
+    }
+
     #define MAESTRO_PARSE_U16(key, into)                                          \
         do {                                                                       \
             p = strstr(json_start, "\"" key "\"");                                 \
@@ -1028,6 +1112,47 @@ static bool drv_load(const void* storage)
     return true;  /* failures already logged; don't abort flash load */
 }
 
+/* Emit Live-Readings status channels (error_flags, moving, connected)
+ * for the dashboard's Maestro card. Cached values come from the poll
+ * cadence in maestro_update(); we just publish whatever the most
+ * recent poll observed (or sentinels when never polled).
+ *
+ * connected = errors poll succeeded. GET_ERRORS (0xA1) is the
+ * canonical liveness check — every transport (UART, USB CDC, USB
+ * vendor) implements it. GET_MOVING_STATE (0xA6) is best-effort
+ * telemetry: the USB vendor transport in particular has no
+ * vendor-control mapping for 0xA6 today (would need to parse
+ * GET_VARIABLES servo-status; see maestro_transport.cpp's
+ * vendor_dispatch comment for GET_POSITION), so a healthy device
+ * answers errors but returns the 0xFF sentinel on moving. Before
+ * today we gated 'connected' on BOTH, which made every USB-vendor
+ * Maestro show Offline in the dashboard despite working perfectly
+ * from the controller. Now: connected reflects errors; moving
+ * defaults to 0 when unknown, which renders as "not moving" — fine
+ * for UI purposes until vendor's moving-state parser lands. */
+static int maestro_state_emit_channels(char* buf, size_t cap, bool* first)
+{
+    if (!g_initialized) return 0;
+    bool connected = (g_last_errors != 0xFFFFu);
+    uint16_t errs   = connected ? g_last_errors : 0u;
+    uint8_t  moving = (g_last_moving == 0xFFu) ? 0u : g_last_moving;
+
+    int total = 0, n;
+    n = peripheral_state_append_channel(buf + total, cap - (size_t)total, first,
+        g_peripheral_id, "connected", connected ? 1.0f : 0.0f);
+    if (n < 0) return -1;
+    total += n;
+    n = peripheral_state_append_channel(buf + total, cap - (size_t)total, first,
+        g_peripheral_id, "error_flags", (float)errs);
+    if (n < 0) return -1;
+    total += n;
+    n = peripheral_state_append_channel(buf + total, cap - (size_t)total, first,
+        g_peripheral_id, "moving", (float)moving);
+    if (n < 0) return -1;
+    total += n;
+    return total;
+}
+
 static const peripheral_driver_t maestro_peripheral = {
     .name              = "maestro",
     .mode_string       = "maestro_servo",
@@ -1047,6 +1172,7 @@ static const peripheral_driver_t maestro_peripheral = {
     .estop             = drv_estop,
     .save_config       = drv_save,
     .load_config       = drv_load,
+    .state_emit_channels = maestro_state_emit_channels,
 };
 
 const peripheral_driver_t* maestro_get_peripheral_driver(void)

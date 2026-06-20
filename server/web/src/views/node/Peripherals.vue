@@ -11,6 +11,19 @@ import ServoExtentsControl from '@/components/peripherals/ServoExtentsControl.vu
 // independent number inputs.
 const SERVO_EXTENT_PARAM_IDS = new Set(['start_us', 'end_us', 'center_us', 'home_us'])
 
+// Curated Material Icons (the ligature set already loaded app-wide via
+// the `material-icons` font) offered in the channel-edit modal so an
+// operator can tag each servo for the State view. Any valid ligature
+// name works server-side; this is just a quick-pick palette of
+// robot/servo-relevant glyphs.
+const CHANNEL_ICONS = [
+  'open_with', 'height', 'swap_horiz', 'swap_vert',
+  'rotate_left', 'rotate_right', 'sync', 'navigation',
+  'pan_tool', 'back_hand', 'waving_hand', 'precision_manufacturing',
+  'smart_toy', 'visibility', 'face', 'explore',
+  'straighten', 'tune', 'settings', 'bolt',
+]
+
 // Maestro: peripheral-level params that act as fallback defaults when
 // a per-channel value isn't set. The channel-edit modal exposes these
 // fields per-channel; the operator rarely needs to touch the
@@ -282,6 +295,12 @@ const pinsVisible = computed(() => {
   return true
 })
 
+// Which `pins` key the single-pin picker reads/writes. Most types use
+// "gpio"; NeoPixel uses "data" (its WS2812 data line) so added + onboard
+// instances carry the same slot. Falls back to "gpio" for any type that
+// doesn't declare one.
+const pinSlotKey = computed(() => modalType.value?.pin_slot || 'gpio')
+
 // ── BLE scan (BMS discovery) ────────────────────────────────────
 // Toggled by a button on the modal when the catalog type is the
 // BMS *and* the operator has picked the BLE transport. Results
@@ -472,6 +491,7 @@ function openChannelEdit (peripheral, channelIdx) {
   const homeUs     = Number(existing.home_us      ?? neutralUs)
   channelModalDraft.value = {
     label:        existing.label ?? `Ch ${channelIdx}`,
+    icon:         existing.icon ?? '',
     min_pulse_us: minPulseUs,
     max_pulse_us: maxPulseUs,
     neutral_us:   neutralUs,
@@ -503,6 +523,7 @@ async function saveChannelEdit () {
   // Coerce numerics — input fields hand back strings.
   channels[channelModalIdx.value] = {
     label:        String(channelModalDraft.value.label ?? '').slice(0, 32) || `Ch ${channelModalIdx.value}`,
+    icon:         String(channelModalDraft.value.icon ?? '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40),
     min_pulse_us: Math.max(64, Math.min(3200, Number(channelModalDraft.value.min_pulse_us) || 1000)),
     max_pulse_us: Math.max(64, Math.min(3200, Number(channelModalDraft.value.max_pulse_us) || 2000)),
     neutral_us:   Number(channelModalDraft.value.neutral_us) || 1500,
@@ -892,11 +913,11 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
         </div>
 
         <div v-else-if="pinsVisible && modalType && modalType.pin_kind !== 'builtin'">
-          <label class="block text-sm font-medium text-fg mb-1">Pin</label>
+          <label class="block text-sm font-medium text-fg mb-1">{{ pinSlotKey === 'data' ? 'Data pin' : 'Pin' }}</label>
           <select
             class="input-field w-full"
-            :value="modalPins.gpio !== undefined ? String(modalPins.gpio) : ''"
-            @change="(e) => { modalPins = { gpio: parseInt(e.target.value, 10) } }"
+            :value="modalPins[pinSlotKey] !== undefined ? String(modalPins[pinSlotKey]) : ''"
+            @change="(e) => { modalPins = { [pinSlotKey]: parseInt(e.target.value, 10) } }"
           >
             <option value="" disabled>Pick a pin…</option>
             <option
@@ -931,6 +952,43 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
         <div>
           <label class="block text-sm font-medium text-fg mb-1">Label</label>
           <input v-model="channelModalDraft.label" type="text" maxlength="32" class="input-field w-full" placeholder="e.g. Pan, Tilt, Left Arm" />
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-fg mb-1">Icon</label>
+          <div class="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              class="w-8 h-8 flex items-center justify-center rounded border transition-colors"
+              :class="!channelModalDraft.icon ? 'border-cyan-500 bg-cyan-500/15 text-cyan-300' : 'border-line text-fg-muted hover:text-fg-strong hover:border-fg-faint'"
+              title="No icon"
+              @click="channelModalDraft.icon = ''"
+            >
+              <span class="material-icons icon-sm">block</span>
+            </button>
+            <button
+              v-for="ic in CHANNEL_ICONS"
+              :key="ic"
+              type="button"
+              class="w-8 h-8 flex items-center justify-center rounded border transition-colors"
+              :class="channelModalDraft.icon === ic ? 'border-cyan-500 bg-cyan-500/15 text-cyan-300' : 'border-line text-fg-muted hover:text-fg-strong hover:border-fg-faint'"
+              :title="ic"
+              @click="channelModalDraft.icon = ic"
+            >
+              <span class="material-icons icon-sm">{{ ic }}</span>
+            </button>
+          </div>
+          <p class="text-xs text-fg-faint mt-1">
+            Shown next to this channel in the State view. Any
+            <a href="https://fonts.google.com/icons" target="_blank" rel="noopener" class="underline">Material Icons</a>
+            name also works:
+            <input
+              v-model="channelModalDraft.icon"
+              type="text" maxlength="40"
+              class="input-field inline-block w-32 ml-1 py-0 text-xs"
+              placeholder="e.g. memory"
+            />
+          </p>
         </div>
 
         <div class="space-y-1">

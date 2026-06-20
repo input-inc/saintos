@@ -17,6 +17,7 @@ extern "C" {
 #include "flash_storage.h"
 #include "saint_node.h"
 #include "peripheral_driver.h"
+#include "neopixel_strip.h"
 }
 
 // =============================================================================
@@ -183,6 +184,37 @@ static bool apply_one_peripheral(const char* obj_start, const char* obj_end)
         return false;
     }
 
+    char inst_id_buf[32];
+    inst_id_buf[0] = '\0';
+    extract_string_field(obj_start, obj_end, "\"id\"", inst_id_buf, sizeof(inst_id_buf));
+
+    // NeoPixel isn't a pin_config-mode peripheral — it owns its own
+    // WS2812 driver state (timing-critical, not a plain GPIO write), so
+    // it can't ride the driver-table path below. Pull its data pin
+    // ("pins":{"data":N}) and pixel count ("params":{"pixel_count":N})
+    // straight out of the object and register a strip. The onboard
+    // NeoPixel never reaches here — the server omits builtins from the
+    // config push (it's driven by led_status).
+    if (strcmp(type_id, "neopixel") == 0) {
+        auto extract_uint = [&](const char* key, long fallback) -> long {
+            const char* k = strstr(obj_start, key);
+            if (!k || k >= obj_end) return fallback;
+            k = strchr(k, ':');
+            if (!k || k >= obj_end) return fallback;
+            k++;
+            while (k < obj_end && (*k == ' ' || *k == '\t')) k++;
+            return atol(k);
+        };
+        long pin   = extract_uint("\"data\"", -1);
+        long count = extract_uint("\"pixel_count\"", 1);
+        if (pin < 0 || pin > 41) {   // Teensy 4.1 has GPIO 0..41
+            Serial.printf("Pin config: neopixel '%s' has no valid data pin "
+                          "(got %ld) — skipping\n", inst_id_buf, pin);
+            return false;
+        }
+        return neopixel_strip_add(inst_id_buf, (uint8_t)pin, (uint16_t)count);
+    }
+
     const peripheral_driver_t* drv = driver_for_type_id(type_id);
     if (!drv) {
         Serial.printf("Pin config: no driver for type '%s' — skipping\n", type_id);
@@ -209,6 +241,11 @@ static bool apply_peripherals_json(const char* arr_start, const char* json_end)
     if (!arr_start || arr_start >= json_end) return false;
 
     pin_config_reset();
+    // External NeoPixel strips live outside pin_config (their own
+    // WS2812 driver state), so they need a parallel reset before the
+    // peripheral list rebuilds them — otherwise a removed strip would
+    // keep running its last frame.
+    neopixel_strip_reset();
 
     const char* p = arr_start;
     while (p < json_end && *p != ']') {

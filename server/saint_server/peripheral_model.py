@@ -118,6 +118,12 @@ class PeripheralType:
     # and can't be removed by the operator. Examples: the Feather's
     # onboard NeoPixel.
     builtin_only: bool = False
+    # Key the single-pin picker writes into the instance's `pins` map.
+    # Defaults to "gpio" (Button, LED, Servo, …). NeoPixel uses "data"
+    # so the WS2812 data line is named correctly and matches the slot
+    # the board YAML seeds the onboard one with — added and onboard
+    # NeoPixels then carry the SAME pin key, so a driver reads one slot.
+    pin_slot: str = "gpio"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -125,6 +131,7 @@ class PeripheralType:
             "label": self.label,
             "description": self.description,
             "pin_kind": self.pin_kind,
+            "pin_slot": self.pin_slot,
             "channels": [c.to_dict() for c in self.channels],
             "params": [p.to_dict() for p in self.params],
             "builtin_only": self.builtin_only,
@@ -194,6 +201,11 @@ def _maestro_default_channel(idx: int, peripheral_params: Dict[str, Any]) -> Dic
     neutral_us = (min_pulse_us + max_pulse_us) // 2
     return {
         "label": f"Ch {idx}",
+        # Material-icons ligature name (e.g. "open_with", "pan_tool") for
+        # the State view so channels are visually distinguishable.
+        # Display-only — deliberately NOT in _MAESTRO_CHANNEL_KEYS, so it
+        # never goes on the firmware wire. Empty = no icon.
+        "icon": "",
         "min_pulse_us": min_pulse_us,
         "max_pulse_us": max_pulse_us,
         "neutral_us": neutral_us,
@@ -222,6 +234,12 @@ def _maestro_sanitize_channel(
     out: Dict[str, Any] = {}
     label = raw.get("label", default["label"])
     out["label"] = str(label)[:32] if label else default["label"]
+    # Material-icons ligature name — restrict to the charset those names
+    # use (lowercase ascii + digits + underscore) so a stray value can't
+    # inject markup into the State view. Empty = no icon.
+    _icon_ok = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+    raw_icon = str(raw.get("icon", default.get("icon", "")) or "").lower()
+    out["icon"] = "".join(c for c in raw_icon if c in _icon_ok)[:40]
     for key in ("min_pulse_us", "max_pulse_us", "neutral_us", "home_us"):
         try:
             v = int(raw.get(key, default[key]))
@@ -420,16 +438,29 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "neopixel": PeripheralType(
         id="neopixel", label="NeoPixel (RGB)",
-        description="WS2812 RGB LED, typically hardwired on the board.",
-        pin_kind="builtin",
+        description=(
+            "WS2812 / NeoPixel RGB LED(s) on a single data pin. Boards "
+            "with an onboard NeoPixel seed one automatically as a "
+            "built-in; operators can also add external NeoPixels (single "
+            "LED or a strip) on any free GPIO. The `color` and "
+            "`brightness` channels drive every pixel in the instance."
+        ),
+        # Data line is a single digital-output GPIO — surfaced through
+        # the same single-pin picker as Button/LED, but stored under the
+        # "data" slot (see pin_slot) to match the onboard seed.
+        pin_kind="gpio",
+        pin_slot="data",
         channels=[
             PeripheralChannel("color",      "Color (RGB)", "out", "rgb"),
             PeripheralChannel("brightness", "Brightness",  "out", "analog"),
         ],
         params=[
+            PeripheralTypeParam(
+                "pixel_count", "Pixel count", "int", 1, min=1, max=300,
+                help="Number of WS2812 LEDs on this data line. The "
+                     "onboard NeoPixel is 1; a strip can be longer."),
             PeripheralTypeParam("default_color", "Idle color (hex)", "string", "#1e293b"),
         ],
-        builtin_only=True,
     ),
     # Single-color onboard LED, typically hardwired on the board (e.g.
     # Teensy 4.1 pin 13). Distinct from `neopixel` because the LED has
@@ -499,6 +530,28 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
         channels=[
             PeripheralChannel(f"ch{i}", f"Channel {i}", "out", "analog")
             for i in range(_MAESTRO_MAX_CHANNELS)
+        ] + [
+            # Status channels the firmware-side driver
+            # (firmware/shared/src/maestro_driver.c) polls at ~2 Hz and
+            # emits via state_emit_channels. Drive the dashboard's
+            # Live-Readings MaestroCard:
+            #
+            #   connected   — 1 if the Maestro is currently answering
+            #                 GET_ERRORS / GET_MOVING_STATE round-trips;
+            #                 0 if not (USB unplugged, UART silent,
+            #                 wrong Serial Mode, …).
+            #   error_flags — 16-bit Pololu error bitmap (see Pololu
+            #                 Maestro User's Guide §6.4). Each bit
+            #                 means a distinct fault; the UI decodes
+            #                 into human-readable badges.
+            #   moving      — 0 if every servo is at its target,
+            #                 1 if at least one is still moving toward
+            #                 it. Useful for confirming a Pose
+            #                 transition is in flight vs. silently
+            #                 dropped.
+            PeripheralChannel("connected",   "Connected",   "in", "digital_in"),
+            PeripheralChannel("error_flags", "Error flags", "in", "analog"),
+            PeripheralChannel("moving",      "Moving",      "in", "digital_in"),
         ],
         params=[
             # Transport first — gates which sub-params and pin pickers
@@ -879,10 +932,11 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
                      "ID on the target node, e.g. the BMS instance "
                      "label. Leave blank for the overview view."),
             PeripheralTypeParam(
-                "server_url", "Server URL", "string", "http://localhost:8080",
+                "server_url", "Server URL", "string", "",
                 help="Base URL of the SAINT.OS server the kiosk browser "
-                     "loads. Use the hostname/IP the Pi can resolve — "
-                     "'localhost' only works when the Pi IS the server."),
+                     "loads. Leave blank to auto-detect the server's own "
+                     "address (the server fills it in on config push). "
+                     "Set only to override, e.g. http://opensaint.local."),
             PeripheralTypeParam(
                 "rotation", "Display rotation", "int", 0,
                 choices=[0, 90, 180, 270],

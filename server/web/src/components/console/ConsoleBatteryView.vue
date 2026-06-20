@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useWsStore } from '@/stores/ws'
 import ConsoleScreen from './ConsoleScreen.vue'
 
@@ -17,6 +18,20 @@ const props = defineProps({
 })
 
 const ws = useWsStore()
+const router = useRouter()
+
+// Bottom-bar buttons. Until the System menu lands, "Activate" doubles
+// as a Back button: the only navigation that makes sense from a pack
+// detail view is back up to the overview that linked here. Using
+// router.push() instead of router.back() so the operator can also
+// reach this view via a direct URL (e.g. a console_display peripheral
+// in single-pack mode); back() in that case would land them on
+// whatever page they were on before opening the kiosk URL, which is
+// not the right answer. "System" stays placeholder for now.
+const consoleButtons = [
+  { label: 'Activate', onClick: () => router.push({ name: 'console-batteries' }) },
+  { label: 'System',   onClick: null },
+]
 
 const topic = computed(() => `pin_state/${props.nodeId}`)
 let subscribed = false
@@ -226,7 +241,8 @@ function fmt (v, places = 1, unit = '') {
 </script>
 
 <template>
-  <ConsoleScreen :title="`BATTERY · ${peripheralId}`" :subtitle="status.label">
+  <ConsoleScreen :title="`BATTERY · ${peripheralId}`" :subtitle="status.label"
+                 :buttons="consoleButtons">
     <!-- Detail-view sizing matches the overview's 1440×2560 kiosk
          target: large headline, generous tile padding, tall cell
          strip. flex-1 on the cell-strip section lets it absorb the

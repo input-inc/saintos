@@ -552,13 +552,29 @@ echo "Step 4: Installing SAINT node package..."
 INSTALL_DIR="/opt/saint-node"
 mkdir -p "$INSTALL_DIR"
 
-# Copy node package
+# Copy node package. Remove any prior copy FIRST — a plain `cp -r` into
+# an existing $INSTALL_DIR/saint_node merges on top of it and, if a
+# previous run left the self-referential loop (see the ln note below),
+# cp itself recurses into ELOOP. `rm -rf` unlinks symlinks without
+# following them, so it clears that loop cleanly before we lay down the
+# fresh tree.
+rm -rf "$INSTALL_DIR/saint_node"
 cp -r "$FIRMWARE_DIR/saint_node" "$INSTALL_DIR/"
 
-# Create symlink for Python module access
+# Create symlink for Python module access.
+#
+# `ln -sfn` (note the -n / --no-dereference) is load-bearing: on the
+# FIRST install $SITE_PACKAGES/saint_node doesn't exist and any `ln -s`
+# variant works, but on a RE-install it already exists as a symlink to
+# a directory. Plain `ln -sf` treats that symlink-to-dir as a directory
+# and creates the new link INSIDE it — i.e.
+# $INSTALL_DIR/saint_node/saint_node -> $INSTALL_DIR/saint_node, a
+# self-referential loop that later sent the OTA's copytree into ELOOP
+# and bricked every subsequent update at the backup stage. -n replaces
+# the existing symlink itself instead of dereferencing into it.
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-ln -sf "$INSTALL_DIR/saint_node" "$SITE_PACKAGES/saint_node" 2>/dev/null || \
-    cp -r "$INSTALL_DIR/saint_node" "$SITE_PACKAGES/"
+ln -sfn "$INSTALL_DIR/saint_node" "$SITE_PACKAGES/saint_node" 2>/dev/null || \
+    { rm -rf "$SITE_PACKAGES/saint_node"; cp -r "$INSTALL_DIR/saint_node" "$SITE_PACKAGES/"; }
 
 echo ""
 echo "Step 5: Creating configuration + state directories..."

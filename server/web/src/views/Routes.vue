@@ -158,6 +158,9 @@ const inputModal = ref({
   open: false, kind: 'ws_input', topic: '', field: '', joint: '',
   label: '', labelEdited: false, error: '',
   urdfJoints: [],
+  // Role logical_functions for the active node, offered as clickable
+  // starting-point names. The label stays free-text — these just seed it.
+  roleFunctions: [], roleName: '',
 })
 function inputDerivedLabel () {
   if (inputModal.value.kind === 'urdf_joint') {
@@ -179,6 +182,7 @@ function openAddInput () {
     labelEdited: false,
     error: '',
     urdfJoints: [],
+    roleFunctions: [], roleName: '',
   }
   // Fire-and-forget: load the joint list so the URDF Model option has
   // something to pick from when the operator switches to it.
@@ -186,6 +190,27 @@ function openAddInput () {
     .then(r => r.ok ? r.json() : { joints: [] })
     .then(d => { inputModal.value.urdfJoints = d.joints || [] })
     .catch(() => { inputModal.value.urdfJoints = [] })
+  loadRoleFunctions()
+}
+
+// Pull the active node's role logical_functions (head.yaml etc.) so the
+// modal can offer them as starting-point names. Best-effort: a node with
+// no role, or a role the server can't resolve, just yields no chips.
+async function loadRoleFunctions () {
+  const node = nodes.all.find(n => n.node_id === activeSheetId.value)
+  const role = node?.role
+  if (!role) return
+  try {
+    const r = await ws.management('get_role_definition', { role })
+    inputModal.value.roleFunctions = r?.logical_functions || []
+    inputModal.value.roleName = r?.display_name || role
+  } catch (_) { /* non-fatal — leave chips empty */ }
+}
+// Seed the input name from a role function. Marks the label as
+// hand-edited so the topic-derived auto-label stops clobbering it.
+function applyRoleFunction (fn) {
+  inputModal.value.label = fn.display_name || fn.name
+  inputModal.value.labelEdited = true
 }
 const inputTopicChannels = computed(() =>
   topicCatalog.value.find(t => t.topic === inputModal.value.topic)?.channels || [],
@@ -531,6 +556,26 @@ const sheetCounts = computed(() => {
             </select>
           </div>
         </template>
+        <div v-if="!inputIsUrdf && inputModal.roleFunctions.length">
+          <label class="block text-sm font-medium text-fg mb-1">
+            Role functions<span v-if="inputModal.roleName" class="text-fg-faint font-normal"> · {{ inputModal.roleName }}</span>
+          </label>
+          <div class="flex flex-wrap gap-1.5">
+            <button
+              v-for="fn in inputModal.roleFunctions"
+              :key="fn.name"
+              type="button"
+              class="btn-sm bg-surface hover:bg-cyan-600 text-fg-strong"
+              :class="(inputModal.label === (fn.display_name || fn.name)) ? 'ring-1 ring-cyan-400' : ''"
+              :title="`${fn.name} · ${fn.type}${fn.required ? ' · required' : ''}`"
+              @click="applyRoleFunction(fn)"
+            >{{ fn.display_name || fn.name }}</button>
+          </div>
+          <p class="text-xs text-fg-faint mt-1">
+            Suggested starting points from this node's role. Click to set the name — you can still type anything below.
+          </p>
+        </div>
+
         <div>
           <label class="block text-sm font-medium text-fg mb-1">Label (optional)</label>
           <input

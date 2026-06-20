@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 # Throttle settings
 CONTROL_THROTTLE_MS = 50  # Minimum ms between control commands per node
 NEUTRAL_EPSILON = 0.02    # Values within this range of 0 are considered neutral/stop
+# Don't resend a channel value the firmware already has. Continuous
+# sources (joystick hold, animation tail, a parked slider) otherwise
+# stream identical/near-identical values forever — flooding /control and
+# saturating the node's executor (observed cause of nodes flapping
+# offline). 0.005 ≈ 5 µs on a servo's pulse range — below typical servo
+# deadband, so sub-threshold changes are imperceptible anyway.
+CONTROL_CHANGE_EPSILON = 0.005
 
 
 def is_neutral_value(value: float) -> bool:
@@ -207,6 +214,9 @@ class WebSocketHandler:
         # Throttle tracking: (node_id, gpio) -> last_send_time
         # Per-gpio throttling allows controlling multiple pins simultaneously
         self._control_throttle: Dict[tuple, float] = {}
+        # Last value actually SENT per (node, peripheral, channel) — used
+        # to suppress redundant resends (see CONTROL_CHANGE_EPSILON).
+        self._control_last_value: Dict[tuple, float] = {}
 
         # LiveLink callbacks (set by server_node)
         self._livelink_get_status: Optional[Callable[[], Dict[str, Any]]] = None
@@ -1439,6 +1449,14 @@ class WebSocketHandler:
             return {"status": "ok",
                     "data": self.state_manager.apply_pose(pose_id)}
 
+        elif action == 'preview_pose':
+            # Apply in-progress (unsaved) setpoints live, so the pose
+            # editor's Preview button can be A/B'd against the saved
+            # version's play button. Nothing is persisted.
+            return {"status": "ok",
+                    "data": self.state_manager.preview_setpoints(
+                        params.get('setpoints') or [])}
+
         elif action == 'add_widget':
             node_id = params.get('node_id')
             type_id = params.get('type')
@@ -1499,8 +1517,16 @@ class WebSocketHandler:
             if not self._update_manager:
                 return {"status": "error", "message": "Update manager not available"}
             await self.broadcast_activity('Installing software update — server will restart', 'info')
-            asyncio.create_task(self._update_manager.install_staged())
-            return {"status": "ok", "data": self._update_manager.state.to_dict()}
+            # Await the real outcome rather than fire-and-forget. The
+            # apply wrapper detaches the actual (long) install and returns
+            # fast, so this doesn't block — but it DOES surface a failed
+            # launch (missing wrapper, `sudo -n` needing a password,
+            # /var/log perms) as status="error" + last_error. The old
+            # create_task() returned the stale pre-install state, so a
+            # failed launch left the UI polling a log that never appeared
+            # ("Waiting for install log…" forever).
+            state = await self._update_manager.install_staged()
+            return {"status": "ok", "data": state.to_dict()}
 
         # Web Terminal Actions -----------------------------------------------
         elif action == 'terminal.open':
@@ -1944,6 +1970,17 @@ class WebSocketHandler:
             # any continuous drag, not bypass the throttle.
             is_neutral = raw_us is None and is_neutral_value(value)
 
+            # Change filter: skip values the firmware already has. Applies
+            # to the normalized path only (a raw_us preview always passes —
+            # the operator is actively dialing). Covers the held-position
+            # AND repeated-stop floods; the first transition still differs
+            # from the last sent value, so it always goes through.
+            if raw_us is None and value is not None:
+                last_value = self._control_last_value.get(throttle_key)
+                if (last_value is not None
+                        and abs(value - last_value) < CONTROL_CHANGE_EPSILON):
+                    return {"status": "ok", "data": {"unchanged": True}}
+
             if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
                 self.log('debug', f'[Control] THROTTLED {node_id} '
                                   f'{peripheral_id}/{channel_id}: {detail}')
@@ -1959,6 +1996,11 @@ class WebSocketHandler:
                                             value if value is not None else 0.0,
                                             peripheral_type, raw_us=raw_us)
                 self._control_throttle[throttle_key] = now
+                # Record the value we just sent so identical follow-ups
+                # dedupe. Don't record for raw_us previews — those don't
+                # change the routed value the firmware tracks.
+                if raw_us is None and value is not None:
+                    self._control_last_value[throttle_key] = value
                 bypass_note = ' [STOP]' if is_neutral else ''
                 self.log('info', f'[Control] SENT{bypass_note} {node_id} '
                                  f'{peripheral_id}/{channel_id}: {detail}')

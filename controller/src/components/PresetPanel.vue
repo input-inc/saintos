@@ -7,7 +7,7 @@
 -->
 <script setup lang="ts">
 import { computed } from 'vue';
-import { useBindings, type Preset } from '../composables/useBindings';
+import { useBindings, type PanelItem } from '../composables/useBindings';
 
 const bindings = useBindings();
 
@@ -16,17 +16,21 @@ const panelState = computed(() => bindings.activePanelState.value);
 const currentPage = computed(() => panelState.value.currentPage);
 const selectedIndex = computed(() => panelState.value.selectedIndex);
 
+// Items come from useBindings: server-backed panels (Animations/Poses)
+// stream live from the server library; static panels use their presets.
+const items = computed<PanelItem[]>(() => bindings.activePanelItems.value);
+
 const totalPages = computed(() => {
     const p = panel.value;
     if (!p) return 0;
-    return Math.ceil(p.presets.length / p.itemsPerPage);
+    return Math.ceil(items.value.length / p.itemsPerPage);
 });
 
 const visiblePresets = computed(() => {
     const p = panel.value;
     if (!p) return [];
     const start = currentPage.value * p.itemsPerPage;
-    return p.presets.slice(start, start + p.itemsPerPage);
+    return items.value.slice(start, start + p.itemsPerPage);
 });
 
 function isSelected(pageIndex: number): boolean {
@@ -36,8 +40,8 @@ function isSelected(pageIndex: number): boolean {
     return globalIndex === selectedIndex.value;
 }
 
-function selectPreset(preset: Preset): void {
-    void bindings.activatePreset(preset.id);
+function selectPreset(item: PanelItem): void {
+    bindings.triggerActiveItem(item.id);
     bindings.hidePanel();
 }
 

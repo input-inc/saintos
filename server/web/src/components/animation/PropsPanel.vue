@@ -84,6 +84,12 @@ const selectedKeyframe = computed(() => {
   if (s?.kind !== 'keyframe' || !selectedTrack.value) return null
   return selectedTrack.value.curve?.keys?.[s.kfIdx] || null
 })
+// ws_input value tracks carry controller scalars (−1..1), not joint
+// radians, so the keyframe value editor scopes its slider + helper text
+// to the binding kind.
+const selectedTrackIsWs = computed(() =>
+  selectedTrack.value?.target_kind === 'ws_input')
+const valueSliderRange = computed(() => selectedTrackIsWs.value ? 1 : JOINT_RANGE)
 
 // Flatten the categorized catalog into <optgroup>s for the native
 // <select>. Native grouping handles long lists better than a custom
@@ -236,9 +242,10 @@ function onIconChange (value) {
       </label>
 
       <label class="block">
-        <span class="block text-fg-muted text-xs mb-1">Value (drag to pose the joint)</span>
+        <span class="block text-fg-muted text-xs mb-1">{{
+          selectedTrackIsWs ? 'Value (−1 to 1 controller input)' : 'Value (drag to pose the joint)' }}</span>
         <div class="space-y-1">
-          <input type="range" :min="-JOINT_RANGE" :max="JOINT_RANGE" step="0.005"
+          <input type="range" :min="-valueSliderRange" :max="valueSliderRange" step="0.005"
                  v-model.number="selectedKeyframe.value"
                  @input="onChange"
                  class="w-full accent-cyan-400" />

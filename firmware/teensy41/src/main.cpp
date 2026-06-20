@@ -573,10 +573,14 @@ static void dispatch_action_buffer(const char* data, size_t size)
             p = strchr(p, ':');
             if (p) { p++; while (*p == ' ') p++; brightness = atoi(p); }
         }
-        if (r < 0) r = 0; if (r > 255) r = 255;
-        if (g < 0) g = 0; if (g > 255) g = 255;
-        if (b < 0) b = 0; if (b > 255) b = 255;
-        if (brightness < 0) brightness = 0; if (brightness > 255) brightness = 255;
+        // Clamp each channel to [0, 255]. Two statements per line
+        // wrapped in braces so -Wmisleading-indentation stops
+        // treating the trailing `if` as a continuation of the
+        // leading one.
+        if (r < 0) { r = 0; } if (r > 255) { r = 255; }
+        if (g < 0) { g = 0; } if (g > 255) { g = 255; }
+        if (b < 0) { b = 0; } if (b > 255) { b = 255; }
+        if (brightness < 0) { brightness = 0; } if (brightness > 255) { brightness = 255; }
         led_set_override_color((uint8_t)r, (uint8_t)g, (uint8_t)b,
                                 (uint8_t)brightness);
         Serial.printf("LED: override set RGB=(%d,%d,%d) brightness=%d "
@@ -901,13 +905,17 @@ static bool init_micro_ros(void)
     if (ret != RCL_RET_OK) return false;
     saint_log_set_ros_ready(true);
 
-    // Timers
-    ret = rclc_timer_init_default(&announce_timer, &support,
-        RCL_MS_TO_NS(ANNOUNCE_INTERVAL_MS), announce_timer_callback);
+    // Timers. rclc_timer_init_default was deprecated upstream in
+    // favor of rclc_timer_init_default2(handle, support, period_ns,
+    // callback, autostart). Passing `true` for autostart matches the
+    // legacy default behaviour (timer fires on its first scheduled
+    // tick) so this is a no-op rename for runtime behavior.
+    ret = rclc_timer_init_default2(&announce_timer, &support,
+        RCL_MS_TO_NS(ANNOUNCE_INTERVAL_MS), announce_timer_callback, true);
     if (ret != RCL_RET_OK) return false;
 
-    ret = rclc_timer_init_default(&state_timer, &support,
-        RCL_MS_TO_NS(STATE_PUBLISH_INTERVAL_MS), state_timer_callback);
+    ret = rclc_timer_init_default2(&state_timer, &support,
+        RCL_MS_TO_NS(STATE_PUBLISH_INTERVAL_MS), state_timer_callback, true);
     if (ret != RCL_RET_OK) return false;
 
     // Executor — actual handle count is 2 timers + 3 subscriptions = 5.
@@ -940,17 +948,24 @@ static bool init_micro_ros(void)
 
 static void cleanup_micro_ros(void)
 {
-    rcl_subscription_fini(&command_sub, &ros_node);
-    rcl_subscription_fini(&control_sub, &ros_node);
-    rcl_subscription_fini(&config_sub, &ros_node);
+    /* rcl_*_fini are declared with warn_unused_result. In a teardown
+     * path we genuinely don't have anywhere to surface a failure to —
+     * we're about to recreate everything (cleanup is called from the
+     * session-loss recovery path that immediately re-inits) so a fini
+     * failure is informational at best. Cast to (void) so the
+     * compiler stops nagging without us silently dropping the
+     * declaration's intent in some future caller that DOES care. */
+    (void)rcl_subscription_fini(&command_sub, &ros_node);
+    (void)rcl_subscription_fini(&control_sub, &ros_node);
+    (void)rcl_subscription_fini(&config_sub, &ros_node);
     saint_log_set_ros_ready(false);
-    rcl_publisher_fini(&log_pub, &ros_node);
-    rcl_publisher_fini(&state_pub, &ros_node);
-    rcl_publisher_fini(&announcement_pub, &ros_node);
-    rcl_timer_fini(&state_timer);
-    rcl_timer_fini(&announce_timer);
+    (void)rcl_publisher_fini(&log_pub, &ros_node);
+    (void)rcl_publisher_fini(&state_pub, &ros_node);
+    (void)rcl_publisher_fini(&announcement_pub, &ros_node);
+    (void)rcl_timer_fini(&state_timer);
+    (void)rcl_timer_fini(&announce_timer);
     rclc_executor_fini(&executor);
-    rcl_node_fini(&ros_node);
+    (void)rcl_node_fini(&ros_node);
     rclc_support_fini(&support);
 }
 
@@ -1230,7 +1245,13 @@ void setup()
     diag_stage(15, "led_init done");
 
     // Get unique ID
-    char unique_id[32];
+    /* unique_id is exactly 16 hex chars (OCOTP MAC0+MAC1 → "%08lx%08lx"
+     * in hardware_get_unique_id, see hardware.cpp). Size the buffer
+     * to that bound so the compiler can prove "teensy41_" + unique_id
+     * (9 + 16 = 25 chars) fits in g_node.node_id (32 bytes) without
+     * truncation — otherwise -Wformat-truncation flags it because
+     * a 32-byte input could theoretically overflow. */
+    char unique_id[17];
     hardware_get_unique_id(unique_id, sizeof(unique_id));
     snprintf(g_node.node_id, sizeof(g_node.node_id), "teensy41_%s", unique_id);
     Serial.printf("Node ID: %s\n", g_node.node_id);
@@ -1291,13 +1312,17 @@ void setup()
                    g_node.static_ip[2], g_node.static_ip[3]);
 
 #ifndef SIMULATION
-    Serial.printf("Discovering SAINT server...\n");
-    if (!discover_server(g_node.server_ip, &g_node.server_port, 2000, 10)) {
-        Serial.printf("ERROR: Could not discover SAINT server!\n");
-        node_set_state(NODE_STATE_ERROR);
-        led_set_state(NODE_STATE_ERROR);
-        return;
-    }
+    // Retry-forever discovery via the shared helper. The Pi-side server
+    // and node typically power up together; the Pi takes 30-60s to
+    // boot Linux + start saint-os + bind the discovery listener.
+    // discover_server_retry_forever() keeps trying with backoff and
+    // drives the LED + watchdog so neither stalls during the wait.
+    // See firmware/shared/src/discovery_retry.c — RP2040 uses the same
+    // call, so cold-boot resilience now stays in lockstep across
+    // platforms by construction (was a divergent open-coded loop on
+    // each side, with Teensy notoriously giving up after 20s).
+    discover_server_retry_forever(g_node.server_ip, &g_node.server_port,
+                                  2000, 10);
 #endif
     diag_stage(20, "discover_server done");
 

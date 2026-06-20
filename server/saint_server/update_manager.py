@@ -44,6 +44,10 @@ GITHUB_API_TIMEOUT_S = 5.0
 INSTALL_PREFIX = Path(os.environ.get("SAINT_INSTALL_PREFIX", "/opt/saint-os"))
 UPDATE_STAGING = Path(os.environ.get("SAINT_UPDATE_STAGING", "/var/lib/saint-os/updates"))
 APPLY_WRAPPER = INSTALL_PREFIX / "bin" / "apply-update.sh"
+# The wrapper now detaches the extract+install and returns in <1 s, so
+# this bounds only the launch, not the work. Keep a comfortable margin
+# for sudo + setsid overhead on a loaded Pi.
+APPLY_WRAPPER_TIMEOUT = 60
 USB_HELPER = INSTALL_PREFIX / "bin" / "usb-helper.sh"
 
 # Tarballs published by the dist workflow look like:
@@ -107,6 +111,15 @@ class UpdateState:
     # Staged tarball ready for install (set in 'downloaded' state).
     staged_tarball: Optional[str] = None
 
+    # Preflight: can this host actually apply an update? Populated once
+    # (cached) — the privileged apply wrapper must be present AND the
+    # service user must be able to run it via passwordless sudo. The UI
+    # uses this to warn (and disable Install) on a host that can't
+    # self-update, instead of letting the operator click into a failure.
+    # None = not yet checked.
+    can_self_update: Optional[bool] = None
+    self_update_blocker: Optional[str] = None
+
     def to_dict(self):
         d = asdict(self)
         # asdict serializes dataclasses recursively; nothing else to do.
@@ -162,6 +175,46 @@ class UpdateManager:
             "Accept": "application/vnd.github+json",
             "User-Agent": f"saint-os-update-manager/{self.state.installed_version}",
         }
+        # Preflight the self-update capability once at startup (cheap,
+        # cached on state) so the very first get_status the dashboard
+        # fetches already carries the verdict.
+        self._refresh_self_update_preflight()
+
+    # ── Self-update preflight ────────────────────────────────────────
+
+    def _refresh_self_update_preflight(self):
+        """Check (and cache on self.state) whether this host can apply an
+        update: the privileged wrapper must exist AND the service user
+        must be allowed to run it via passwordless sudo. Cheap, runtime-
+        stable — computed once at startup. Never raises."""
+        ok, blocker = self._probe_self_update()
+        self.state.can_self_update = ok
+        self.state.self_update_blocker = blocker
+
+    @staticmethod
+    def _probe_self_update():
+        """Returns (can_self_update, blocker_message_or_None)."""
+        if not APPLY_WRAPPER.exists():
+            return False, (f"Update wrapper missing at {APPLY_WRAPPER}. "
+                           f"Reinstall from a current dist tarball.")
+        if not os.access(str(APPLY_WRAPPER), os.X_OK):
+            return False, f"Update wrapper not executable: {APPLY_WRAPPER}"
+        # `sudo -n -l <wrapper>` asks the sudo policy whether we may run
+        # that command WITHOUT a password — it neither prompts nor runs
+        # anything. rc 0 = permitted; non-zero = no NOPASSWD rule (the
+        # exact failure that left Install hanging).
+        try:
+            r = subprocess.run(
+                ["sudo", "-n", "-l", str(APPLY_WRAPPER)],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception as e:
+            return False, f"Could not verify sudo access for the update wrapper: {e}"
+        if r.returncode != 0:
+            return False, ("Passwordless sudo for the update wrapper isn't "
+                           "configured (check /etc/sudoers.d/saint-os-updater). "
+                           "Reinstall from a current dist tarball.")
+        return True, None
 
     # ── Listener fanout ──────────────────────────────────────────────
 
@@ -513,6 +566,48 @@ class UpdateManager:
         shutil.copy2(src, dest)
         return str(dest)
 
+    # ── Browser upload ───────────────────────────────────────────────
+
+    async def register_uploaded_tarball(self, dest_path: str) -> UpdateState:
+        """Mark an operator-uploaded tarball as staged and ready to install.
+
+        The HTTP upload handler streams the file straight into the staging
+        directory; this just validates the name and flips the state so the
+        existing 'downloaded' UI (and ``install_staged``) take over. Unlike
+        the GitHub/USB paths we deliberately do NOT gate on
+        ``_version_newer`` — an operator who picks a file explicitly chose
+        it, so reinstall/downgrade is legitimate.
+        """
+        name = os.path.basename(dest_path)
+        m = TARBALL_RE.match(name)
+        if not m:
+            raise ValueError(f"not a valid dist tarball name: {name}")
+        if not os.path.isfile(dest_path):
+            raise FileNotFoundError(f"uploaded tarball not found: {dest_path}")
+
+        version = m.group("version")
+        try:
+            size = os.path.getsize(dest_path)
+        except OSError:
+            size = None
+
+        async with self._lock:
+            self._set_status(
+                "downloaded",
+                staged_tarball=str(dest_path),
+                download_total=size,
+                download_received=size or 0,
+                last_error=None,
+                github_release=ReleaseInfo(
+                    version=version,
+                    source="upload",
+                    asset_name=name,
+                    asset_size=size,
+                    local_path=str(dest_path),
+                ),
+            )
+        return self.state
+
     # ── Install ──────────────────────────────────────────────────────
 
     async def install_staged(self) -> UpdateState:
@@ -532,16 +627,34 @@ class UpdateManager:
         self._set_status("installing")
 
         try:
-            # Non-blocking — apply-update.sh returns immediately after
-            # detaching the install.
+            # Non-blocking — apply-update.sh validates + spawns a detached
+            # worker and returns immediately, so this resolves in <1 s.
             await asyncio.get_event_loop().run_in_executor(
                 None, self._run_apply_wrapper, tarball
             )
         except subprocess.CalledProcessError as e:
             self._set_status(
                 "error",
-                last_error=f"apply-update.sh failed (rc={e.returncode}): {e.stderr or e.stdout}",
+                last_error=f"apply-update.sh failed (rc={e.returncode}): "
+                           f"{(e.stderr or e.stdout or '').strip()[:500]}",
             )
+            return self.state
+        except subprocess.TimeoutExpired:
+            # Previously the #1 silent failure: the wrapper extracted the
+            # ~1.2 GB payload synchronously (~50 s) and got killed at the
+            # timeout before it ever wrote a log, leaving the UI on
+            # "Waiting for install log…". The wrapper detaches now, so a
+            # timeout here means the launch itself wedged.
+            self._set_status(
+                "error",
+                last_error=f"apply-update.sh did not return within "
+                           f"{APPLY_WRAPPER_TIMEOUT}s — it should detach and "
+                           f"return immediately; check the wrapper.",
+            )
+            return self.state
+        except Exception as e:
+            self._set_status(
+                "error", last_error=f"apply-update.sh launch failed: {e}")
             return self.state
 
         # Status stays at 'installing' — the WebSocket will disconnect as
@@ -556,5 +669,5 @@ class UpdateManager:
             check=True,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=APPLY_WRAPPER_TIMEOUT,
         )

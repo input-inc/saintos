@@ -423,6 +423,20 @@ class SaintServerNode(Node):
                 # operator triggers a scan; other targets never
                 # publish here, but the subscription is free.
                 self._ensure_node_ble_scan_subscriber(announced_node_id)
+                # Set up the OTA progress subscriber eagerly too. We
+                # used to create it lazily from send_firmware_update_command
+                # right before publishing, but DDS subscription matching
+                # takes a few seconds — and the Pi-side updater starts
+                # spraying download-progress messages immediately after
+                # receiving the command. The race window dropped most
+                # of the bar's "0 % → 100 %" climb on the floor (only
+                # the very late messages, after match completed, made
+                # it through), so the operator saw a stuck-at-0 bar
+                # that only jumped to 100 % at the end. Pre-creating
+                # here gives DDS plenty of time to match before any OTA
+                # fires; the cost is one extra subscription per
+                # adopted node, which is cheap.
+                self._ensure_node_update_progress_subscriber(announced_node_id)
 
                 # Pre-create per-node publishers at first contact so DDS
                 # discovery completes during the quiet stretch between

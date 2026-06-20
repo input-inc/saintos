@@ -213,6 +213,49 @@ pub fn send_ws_input_value(
     state.ws_client.send_ws_input_value(&sheet_id, &input_id, value)
 }
 
+/// Ask the server for the adopted-node list. The response is delivered
+/// out-of-band on the `adopted-nodes` Tauri event; the battery panel
+/// uses it to decide which `pin_state/<node>` topics to subscribe to.
+#[tauri::command]
+pub fn get_adopted_nodes(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_adopted_nodes()
+}
+
+/// Subscribe to a set of state topics (e.g. `pin_state/<node>` per
+/// node). Matching broadcasts arrive on the `pin-state` Tauri event.
+#[tauri::command]
+pub fn subscribe_topics(
+    state: State<'_, Arc<AppState>>,
+    topics: Vec<String>,
+) -> Result<(), String> {
+    state.ws_client.subscribe_topics(topics)
+}
+
+/// Request the saved-animation list. Result arrives on the
+/// `library-animations` Tauri event (see useLibrary).
+#[tauri::command]
+pub fn list_animations(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_list_animations()
+}
+
+/// Request the saved-pose list. Result arrives on `library-poses`.
+#[tauri::command]
+pub fn list_poses(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_list_poses()
+}
+
+/// Play a saved animation by id.
+#[tauri::command]
+pub fn start_animation(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    state.ws_client.start_animation(&id)
+}
+
+/// Apply a saved pose by id.
+#[tauri::command]
+pub fn apply_pose(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    state.ws_client.apply_pose(&id)
+}
+
 /// Check if a gamepad is connected
 #[tauri::command]
 pub fn is_gamepad_connected(state: State<'_, Arc<AppState>>) -> bool {

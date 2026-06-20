@@ -206,6 +206,7 @@ impl InputMapper {
             .find(|p| p.id == self.active_profile_id)
     }
 
+    #[allow(dead_code)] // panel state is owned/driven from the frontend today
     pub fn panel_state(&self) -> &PanelState {
         &self.panel_state
     }
@@ -320,6 +321,16 @@ impl InputMapper {
                         AnalogInput::RightStickX => (
                             input.gamepad.right_stick.y,
                             input.gamepad.right_stick.x,
+                        ),
+                        // Trackpads: throttle = y, turn = x, same as a stick
+                        // (either axis of the pad selects the whole pad).
+                        AnalogInput::LeftPadX | AnalogInput::LeftPadY => (
+                            input.left_touchpad.y,
+                            input.left_touchpad.x,
+                        ),
+                        AnalogInput::RightPadX | AnalogInput::RightPadY => (
+                            input.right_touchpad.y,
+                            input.right_touchpad.x,
                         ),
                         // Triggers don't make sense for differential drive
                         _ => continue,
@@ -592,6 +603,10 @@ impl InputMapper {
             AnalogInput::RightStickY => input.gamepad.right_stick.y,
             AnalogInput::LeftTrigger => input.gamepad.left_trigger,
             AnalogInput::RightTrigger => input.gamepad.right_trigger,
+            AnalogInput::LeftPadX => input.left_touchpad.x,
+            AnalogInput::LeftPadY => input.left_touchpad.y,
+            AnalogInput::RightPadX => input.right_touchpad.x,
+            AnalogInput::RightPadY => input.right_touchpad.y,
         }
     }
 

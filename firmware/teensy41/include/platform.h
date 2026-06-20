@@ -29,4 +29,22 @@
 
 #define PLATFORM_PRINTF        Serial.printf
 
+// Side-effect hooks that long-running shared helpers (e.g.
+// discover_server_retry_forever) call inside their sleep loops so the
+// status LED keeps animating and the hardware watchdog doesn't reset
+// the chip mid-wait. Per-platform implementations:
+//   Teensy — led_update() lives in src/led_status.cpp; watchdog_feed()
+//   is in src/watchdog.cpp (drives WDOG1; see the block comment there
+//   for the 30 s timeout rationale).
+#ifdef __cplusplus
+extern "C" {
+#endif
+void led_update(void);
+void watchdog_feed(void);
+#ifdef __cplusplus
+}
+#endif
+#define PLATFORM_LED_TICK()       led_update()
+#define PLATFORM_WATCHDOG_FEED()  watchdog_feed()
+
 #endif // PLATFORM_H

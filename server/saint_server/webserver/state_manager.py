@@ -1955,6 +1955,30 @@ class StateManager:
                         params["_kiosk_token"] = tok
                 except Exception:
                     pass
+                # server_url: the kiosk browser loads the dashboard from
+                # the SERVER, not from the console Pi — so "localhost"
+                # only works in the rare case the Pi IS the server. When
+                # the operator leaves it blank (or on the stale
+                # localhost default), fill in the server's own reachable
+                # address + web port so the kiosk just works without the
+                # operator knowing the IP. Mirrors the _kiosk_token
+                # injection above. An explicit operator value is left
+                # untouched so a custom hostname (e.g. opensaint.local)
+                # still wins.
+                _su = (params.get("server_url") or "").strip().rstrip("/")
+                if not _su or _su in ("http://localhost:8080",
+                                      "https://localhost:8080"):
+                    try:
+                        from saint_server.config import get_config
+                        ip = _resolve_server_ip()
+                        port = int(getattr(get_config().network,
+                                           "web_port", 80) or 80)
+                        if ip:
+                            params["server_url"] = (
+                                f"http://{ip}" if port == 80
+                                else f"http://{ip}:{port}")
+                    except Exception:
+                        pass
             # Maestro: slim default-equal channel entries down to {}
             # on the wire so the full 24-channel array doesn't blow the
             # firmware's config_buffer (2048-4096) or the XRCE-DDS
@@ -2335,6 +2359,41 @@ class StateManager:
                 applied += 1
             else:
                 skipped.append(f"{s.sheet_id}/{s.ws_input_id}")
+        return {"success": True, "applied": applied, "skipped": skipped}
+
+    def preview_setpoints(self, setpoints: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Apply an inline list of pose setpoints WITHOUT saving the pose.
+
+        Same fan-out as :meth:`apply_pose`, but driven by setpoints the
+        operator is editing rather than a stored pose. Lets the pose
+        editor's "Preview" button push the in-progress pose live so the
+        operator can A/B it against the saved version (the row's play
+        button) before committing the save. Nothing is persisted.
+        """
+        if self._routing_evaluator is None:
+            return {"success": False, "message": "Routing evaluator not ready"}
+        applied = 0
+        skipped: List[str] = []
+        for s in setpoints or []:
+            sheet_id = s.get("sheet_id")
+            ws_input_id = s.get("ws_input_id")
+            if not sheet_id or not ws_input_id:
+                continue
+            try:
+                value = float(s.get("value") or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            try:
+                ok = self._routing_evaluator.set_ws_input(
+                    sheet_id, ws_input_id, value)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warn(f"preview_setpoints set_ws_input failed: {e}")
+                ok = False
+            if ok:
+                applied += 1
+            else:
+                skipped.append(f"{sheet_id}/{ws_input_id}")
         return {"success": True, "applied": applied, "skipped": skipped}
 
     async def start_animation(self, animation_id: str,

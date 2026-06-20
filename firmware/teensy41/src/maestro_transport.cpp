@@ -87,6 +87,7 @@ static bool g_initialized = false;
 #define MAESTRO_COMPACT_GET_ERRORS   0xA1u
 #define MAESTRO_COMPACT_GO_HOME      0xA2u
 #define MAESTRO_COMPACT_STOP_SCRIPT  0xA4u
+#define MAESTRO_COMPACT_GET_MOVING_STATE 0xA6u
 
 /* ── Vendor (EP0 control transfer) USB host driver ───────────────────
  *
@@ -595,6 +596,22 @@ static size_t vendor_dispatch(const uint8_t* p, size_t avail)
             g_resp_len = 2;
             g_resp_pos = 0;
             return 2;
+        }
+        case MAESTRO_COMPACT_GET_MOVING_STATE: {
+            /* 0xA6 — used by the shared driver's status poll for the
+             * Live Readings card's "Moving" indicator. Like
+             * GET_POSITION, computing this over vendor needs the
+             * model-specific GET_VARIABLES servo-status walk to
+             * see whether any channel's actual ≠ target. Not
+             * implemented v1 — stash a 1-byte 0 so the shared
+             * driver's maestro_get_moving_state() returns 0
+             * ("not moving"), and the UI's connected predicate
+             * (errors-only) isn't fooled by a 0xFF sentinel into
+             * thinking we're offline. */
+            g_resp[0] = 0;
+            g_resp_len = 1;
+            g_resp_pos = 0;
+            return 1;
         }
         default:
             return 1;   /* unknown opcode — skip one byte to resync */

@@ -160,10 +160,59 @@ class ConsoleDisplayDriver(PeripheralDriver):
     def _render_launch_script(self, params: Dict[str, Any]) -> str:
         rotation = int(params.get("rotation", 0) or 0)
         # Chromium flag list — kiosk-mode best practice for an HDMI
-        # appliance. --kiosk hides chrome, --noerrdialogs suppresses
-        # the "Restore session?" bubble after a crash, --disable-pinch
-        # blocks unwanted zoom on touch displays, --incognito stops
-        # local profile bloat on every relaunch.
+        # appliance.
+        #
+        #   --kiosk
+        #       Hides browser chrome and disables zoom controls.
+        #   --noerrdialogs
+        #       Suppresses the "Restore session?" / "Chromium didn't
+        #       shut down correctly" bubble that pops after a crash.
+        #   --disable-pinch
+        #       Blocks unwanted pinch-zoom on touch displays.
+        #   --overscroll-history-navigation=0
+        #       Disables swipe-to-go-back; nothing for the operator
+        #       to navigate to and edge-gestures fire on accidental
+        #       touches.
+        #   --no-first-run
+        #       Skips the welcome/onboarding flow on a fresh profile.
+        #   --incognito
+        #       No local profile bloat across relaunches; also stops
+        #       cookies / cached-credential leaks between kiosk
+        #       configurations.
+        #   --password-store=basic
+        #       CRITICAL for an appliance: tells Chromium to use its
+        #       own internal password store instead of the system
+        #       keyring (libsecret / gnome-keyring / kwallet). On a
+        #       fresh Pi OS desktop session the keyring hasn't been
+        #       initialised, so Chromium's first secret access pops
+        #       a modal asking the user to set / unlock a keyring
+        #       password — which blocks the kiosk visibly until
+        #       someone clicks past it. With --password-store=basic
+        #       Chromium never touches the system keyring, so the
+        #       modal never fires. We don't care about secret
+        #       storage for the kiosk anyway — no human-typed
+        #       passwords to remember; auth runs off the
+        #       kiosk_token in the URL.
+        #   --use-mock-keychain
+        #       Belt to --password-store=basic's suspenders: forces
+        #       Chromium to use its mock keychain wherever the
+        #       OSCrypt subsystem (used for encrypting saved
+        #       autofill values, sync tokens, etc.) would otherwise
+        #       reach for the system keyring. Documented as macOS-
+        #       specific but harmless on Linux; some Chromium
+        #       builds key off it on Linux too.
+        #   --disable-features=GlobalMediaControls,DialMediaRouteProvider
+        #       Stops Chromium from running its media-control
+        #       background services and the Google Cast / DIAL
+        #       discovery loop in a kiosk. The former is a
+        #       small CPU win; the latter prevents the kiosk
+        #       from advertising itself as a Cast sink on the
+        #       LAN (kiosks-as-Cast-targets are a common
+        #       accidental footgun).
+        #   --check-for-update-interval=31536000
+        #       Effectively disables Chromium's self-update polling
+        #       (one year between checks). Updates ride OS apt cycles
+        #       on a SAINT.OS appliance, not Chromium's own check-in.
         flags = " ".join([
             "--kiosk",
             "--noerrdialogs",
@@ -172,6 +221,9 @@ class ConsoleDisplayDriver(PeripheralDriver):
             "--overscroll-history-navigation=0",
             "--no-first-run",
             "--incognito",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--disable-features=GlobalMediaControls,DialMediaRouteProvider",
             "--check-for-update-interval=31536000",
         ])
         # Try chromium-browser (Raspberry Pi OS), then chromium
@@ -271,9 +323,13 @@ def build_kiosk_url(params: Dict[str, Any]) -> Optional[str]:
     `target_peripheral_id` are required (otherwise the URL can't
     route to a specific pack).
 
+    `server_url` is normally injected by the server during the config
+    push (its own reachable address + web port, default :80), so the
+    operator can leave it blank — see state_manager.get_firmware_config_json.
+
     Examples:
-        http://saint.local:8080/#/console/batteries?kiosk_token=...
-        http://saint.local:8080/#/console/battery/controller-1/bms-1?kiosk_token=...
+        http://opensaint.local/#/console/batteries?kiosk_token=...
+        http://192.168.8.1/#/console/battery/controller-1/bms-1?kiosk_token=...
 
     The token is sourced from the private `_kiosk_token` param the
     server's state_manager injects during the config push. Operator

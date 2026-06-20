@@ -276,6 +276,14 @@ static void energize_unit(uint8_t unit_idx)
     u->last_command_ms = PLATFORM_MILLIS();
 }
 
+/* Unused at the moment — the only deenergize path (tic_drv_estop)
+ * inlines its own halt-and-deenergize sequence with the unit-level
+ * defense-in-depth comment. Kept as the parallel "energize_unit"
+ * primitive so anyone adding an operator-triggered deenergize
+ * action has a one-call entry point. __attribute__((unused))
+ * silences -Wunused-function without us having to rewrite the
+ * estop loop. */
+__attribute__((unused))
 static void deenergize_unit(uint8_t unit_idx)
 {
     if (unit_idx >= TIC_MAX_UNITS) return;

@@ -217,6 +217,16 @@ async function emergencyStop(): Promise<void> {
     await invoke('emergency_stop');
 }
 
+/** Play a saved animation on the server by id. */
+async function startAnimation(id: string): Promise<void> {
+    await invoke('start_animation', { id });
+}
+
+/** Apply a saved pose on the server by id. */
+async function applyPose(id: string): Promise<void> {
+    await invoke('apply_pose', { id });
+}
+
 // ─── Composable export ───────────────────────────────────────────────
 
 export function useConnection() {
@@ -242,6 +252,8 @@ export function useConnection() {
         sendCommand,
         sendTopicChannelValue,
         emergencyStop,
+        startAnimation,
+        applyPose,
 
         // Discovery requests (responses arrive via Tauri events
         // consumed by useDiscovery).

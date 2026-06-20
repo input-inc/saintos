@@ -94,8 +94,26 @@ export const usePosesStore = defineStore('poses', () => {
     }
   }
 
+  // Push the currently-edited (possibly unsaved) setpoints live without
+  // persisting, so the operator can compare the in-progress pose against
+  // the saved version (the row's play button) before committing a save.
+  async function preview () {
+    if (!editing.value) return null
+    error.value = ''
+    try {
+      const r = await ws.management('preview_pose', {
+        setpoints: editing.value.setpoints || [],
+      })
+      applyResult.value = r
+      return r
+    } catch (e) {
+      error.value = e.message || String(e)
+      return null
+    }
+  }
+
   return {
     list, loading, editing, dirty, error, applyResult,
-    reload, load, startNew, markDirty, save, remove, apply,
+    reload, load, startNew, markDirty, save, remove, apply, preview,
   }
 })

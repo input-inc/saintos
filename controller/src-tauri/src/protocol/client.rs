@@ -38,6 +38,7 @@ impl WebSocketClient {
         self.state.read().clone()
     }
 
+    #[allow(dead_code)] // public connection-state accessor; not all callers wired
     pub fn is_connected(&self) -> bool {
         self.state.read().status == ConnectionStatus::Connected
     }
@@ -397,6 +398,82 @@ impl WebSocketClient {
         }
     }
 
+    /// Ask the server for the adopted-node list. Response is forwarded
+    /// to the frontend on the `adopted-nodes` Tauri event (see the
+    /// `data.nodes` branch in handle_connection). Used by the battery
+    /// panel to learn which `pin_state/<node>` topics to subscribe to.
+    pub fn request_adopted_nodes(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::list_adopted())
+            .map_err(|e| format!("Failed to send list_adopted: {}", e))
+    }
+
+    /// Subscribe to a dynamic set of state topics (e.g. one
+    /// `pin_state/<node_id>` per adopted node). Subsequent `state`
+    /// broadcasts on those topics are forwarded to the frontend via the
+    /// `pin-state` Tauri event.
+    pub fn subscribe_topics(&self, topics: Vec<String>) -> Result<(), String> {
+        if topics.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::subscribe_owned(&topics))
+            .map_err(|e| format!("Failed to send subscribe: {}", e))
+    }
+
+    /// Request the saved-animation list. Response forwarded on the
+    /// `library-animations` Tauri event.
+    pub fn request_list_animations(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::list_animations())
+            .map_err(|e| format!("Failed to send list_animations: {}", e))
+    }
+
+    /// Request the saved-pose list. Response forwarded on `library-poses`.
+    pub fn request_list_poses(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::list_poses())
+            .map_err(|e| format!("Failed to send list_poses: {}", e))
+    }
+
+    /// Play a saved animation by id (fire-and-forget).
+    pub fn start_animation(&self, id: &str) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::start_animation(id))
+            .map_err(|e| format!("Failed to send start_animation: {}", e))
+    }
+
+    /// Apply a saved pose by id (fire-and-forget).
+    pub fn apply_pose(&self, id: &str) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::apply_pose(id))
+            .map_err(|e| format!("Failed to send apply_pose: {}", e))
+    }
+
     /// Send emergency stop command (bypasses throttling)
     pub fn send_emergency_stop(&self) -> Result<(), String> {
         let tx = self
@@ -580,8 +657,15 @@ async fn handle_connection<R: Runtime>(
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        // Log all incoming messages at info level for debugging
-                        tracing::info!("Received from server: {}", text);
+                        // Log incoming messages at info for debugging — but
+                        // not the per-node pin_state telemetry frames, which
+                        // arrive several times a second once the battery
+                        // panel subscribes and would otherwise flood the log.
+                        if text.contains("\"pin_state/") {
+                            tracing::trace!("Received pin_state frame ({} bytes)", text.len());
+                        } else {
+                            tracing::info!("Received from server: {}", text);
+                        }
                         if let Ok(incoming) = IncomingMessage::from_json(&text) {
                             tracing::debug!("Parsed message: type={}, status={:?}", incoming.msg_type, incoming.status);
 
@@ -623,6 +707,28 @@ async fn handle_connection<R: Runtime>(
                                             tracing::error!("Failed to emit discovery-ws-inputs: {}", e);
                                         }
                                     }
+                                    // Response to our list_adopted request (battery
+                                    // panel). Shape: { nodes: [{node_id, …}] }. The
+                                    // controller never calls list_unadopted, so a
+                                    // `nodes` key unambiguously means the adopted list.
+                                    if data.get("nodes").is_some() {
+                                        if let Err(e) = app_handle.emit("adopted-nodes", data) {
+                                            tracing::error!("Failed to emit adopted-nodes: {}", e);
+                                        }
+                                    }
+                                    // Response to list_animations — shape
+                                    // { animations: [{id, name, icon, …}] }.
+                                    if data.get("animations").is_some() {
+                                        if let Err(e) = app_handle.emit("library-animations", data) {
+                                            tracing::error!("Failed to emit library-animations: {}", e);
+                                        }
+                                    }
+                                    // Response to list_poses — { poses: [{id, name, icon, …}] }.
+                                    if data.get("poses").is_some() {
+                                        if let Err(e) = app_handle.emit("library-poses", data) {
+                                            tracing::error!("Failed to emit library-poses: {}", e);
+                                        }
+                                    }
                                     // Response to our get_estop_state bootstrap.
                                     // `data` shape: { "active": bool, "changed_at": float }.
                                     // The state-topic broadcast handler below
@@ -649,6 +755,25 @@ async fn handle_connection<R: Runtime>(
                                     .and_then(|v| v.as_bool())
                                 {
                                     update_estop_state(state, app_handle, active);
+                                }
+                            }
+
+                            // Per-node telemetry broadcast. The battery
+                            // panel subscribes to `pin_state/<node>` and
+                            // sniffs BMS channels out of the frame. Forward
+                            // the whole frame (node + channels) to the
+                            // frontend on the `pin-state` event.
+                            if incoming.msg_type == "state" {
+                                if let Some(node) = incoming.node.as_deref() {
+                                    if node.starts_with("pin_state/") {
+                                        let payload = serde_json::json!({
+                                            "node": node,
+                                            "data": incoming.data,
+                                        });
+                                        if let Err(e) = app_handle.emit("pin-state", payload) {
+                                            tracing::error!("Failed to emit pin-state: {}", e);
+                                        }
+                                    }
                                 }
                             }
                         } else {

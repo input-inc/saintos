@@ -5,6 +5,7 @@
  * Only uses memset/memcpy/strncpy - no platform-specific APIs.
  */
 
+#include <stdio.h>      /* snprintf */
 #include <string.h>
 
 #include "flash_types.h"
@@ -19,9 +20,13 @@ void flash_storage_from_node(flash_storage_data_t* data, const saint_node_config
     data->version = FLASH_STORAGE_VERSION;
     data->crc = 0; // TODO: Calculate CRC
 
-    strncpy(data->node_id, node->node_id, sizeof(data->node_id) - 1);
+    /* snprintf instead of strncpy(dst, src, sizeof(dst)-1): the latter
+     * idiom doesn't guarantee a NUL terminator when src is exactly
+     * the buffer length, and -Wstringop-truncation rightly flags
+     * it. snprintf always NUL-terminates and is clear-intent. */
+    snprintf(data->node_id, sizeof(data->node_id), "%s", node->node_id);
     data->role = node->role;
-    strncpy(data->display_name, node->display_name, sizeof(data->display_name) - 1);
+    snprintf(data->display_name, sizeof(data->display_name), "%s", node->display_name);
 
     data->use_dhcp = node->use_dhcp;
     memcpy(data->static_ip, node->static_ip, 4);
@@ -35,9 +40,9 @@ void flash_storage_to_node(const flash_storage_data_t* data, saint_node_config_t
 {
     if (!data || !node) return;
 
-    strncpy(node->node_id, data->node_id, sizeof(node->node_id) - 1);
+    snprintf(node->node_id, sizeof(node->node_id), "%s", data->node_id);
     node->role = data->role;
-    strncpy(node->display_name, data->display_name, sizeof(node->display_name) - 1);
+    snprintf(node->display_name, sizeof(node->display_name), "%s", data->display_name);
 
     node->use_dhcp = data->use_dhcp;
     memcpy(node->static_ip, data->static_ip, 4);

@@ -20,32 +20,7 @@ import { useConnection, ConnectionStatus } from './composables/useConnection';
 import { useInput, type ButtonEvent } from './composables/useInput';
 import { useBindings, type DigitalInput, type DigitalAction } from './composables/useBindings';
 import { useKeyboard } from './composables/useKeyboard';
-
-interface BatteryCell {
-    voltage: number;
-    temperature: number;
-    health: number;
-}
-
-interface BMSInfo {
-    manufacturer: string;
-    model: string;
-    serialNumber: string;
-    firmwareVersion: string;
-    cycleCount: number;
-    maxCapacity: number;
-    currentCapacity: number;
-}
-
-interface TrackBattery {
-    name: string;
-    cells: BatteryCell[];
-    chargePercent: number;
-    isCharging: boolean;
-    voltage: number;
-    current: number;
-    bms: BMSInfo;
-}
+import { useBatteries } from './composables/useBatteries';
 
 const conn = useConnection();
 const input = useInput();
@@ -73,46 +48,28 @@ const buttonMap: Record<string, DigitalInput> = {
     L4: 'l4', R4: 'r4', L5: 'l5', R5: 'r5', Steam: 'steam',
 };
 
-// Mock battery data — unchanged from the Angular shell. A real battery
-// feed would replace this; the structure is what the BMS UI renders.
-const batteries = ref<TrackBattery[]>([
-    {
-        name: 'Left Track',
-        cells: [
-            { voltage: 3.92, temperature: 28, health: 98 },
-            { voltage: 3.89, temperature: 29, health: 97 },
-            { voltage: 3.91, temperature: 28, health: 99 },
-            { voltage: 3.88, temperature: 30, health: 96 },
-        ],
-        chargePercent: 78, isCharging: false, voltage: 15.6, current: -1.2,
-        bms: {
-            manufacturer: 'SAINT Power', model: 'BMS-4S-30A',
-            serialNumber: 'SP-L-2024-00142', firmwareVersion: '1.2.4',
-            cycleCount: 127, maxCapacity: 5000, currentCapacity: 4850,
-        },
-    },
-    {
-        name: 'Right Track',
-        cells: [
-            { voltage: 3.95, temperature: 27, health: 99 },
-            { voltage: 3.93, temperature: 28, health: 98 },
-            { voltage: 3.94, temperature: 27, health: 99 },
-            { voltage: 3.91, temperature: 29, health: 97 },
-        ],
-        chargePercent: 82, isCharging: false, voltage: 15.73, current: -1.1,
-        bms: {
-            manufacturer: 'SAINT Power', model: 'BMS-4S-30A',
-            serialNumber: 'SP-R-2024-00143', firmwareVersion: '1.2.4',
-            cycleCount: 124, maxCapacity: 5000, currentCapacity: 4900,
-        },
-    },
-]);
+// Live BMS packs, sniffed from each adopted node's pin_state topic.
+// Same field set as the dashboard's BMSMonitor widget.
+const { batteries } = useBatteries();
 
+// Headline = average SOC across packs that are actually reporting.
 const overallBatteryPercent = computed(() => {
-    const bs = batteries.value;
-    if (bs.length === 0) return 0;
-    return Math.round(bs.reduce((sum, b) => sum + b.chargePercent, 0) / bs.length);
+    const withSoc = batteries.value.filter(b => typeof b.soc === 'number');
+    if (withSoc.length === 0) return 0;
+    return Math.round(withSoc.reduce((sum, b) => sum + (b.soc as number), 0) / withSoc.length);
 });
+
+// Temp shown in °C with one decimal; '—' when the pack isn't reporting.
+function fmt(v: number | null, places = 2, unit = ''): string {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    return `${v.toFixed(places)}${unit ? ' ' + unit : ''}`;
+}
+function socClass(soc: number | null): string {
+    if (soc === null) return 'text-saint-text-muted';
+    if (soc >= 50) return 'text-saint-success';
+    if (soc >= 20) return 'text-yellow-500';
+    return 'text-red-500';
+}
 
 const gamepadConnected = computed(() => input.isGamepadConnected.value);
 const gamepadName       = computed(() => input.gamepad.value.name);
@@ -509,81 +466,87 @@ onBeforeUnmount(() => {
                     </div>
                 </div>
 
-                <!-- Battery Panel -->
+                <!-- Battery Panel — live BMS packs sniffed from each
+                     node's pin_state topic (see useBatteries). Same
+                     field set as the dashboard's BMSMonitor widget. -->
                 <div v-if="activePanel === 'battery'" class="p-3 h-full overflow-auto">
-                    <div class="flex flex-wrap gap-3 h-full">
-                        <div v-for="battery in batteries" :key="battery.name"
+                    <div v-if="batteries.length === 0"
+                         class="h-full flex items-center justify-center text-saint-text-muted text-sm">
+                        No batteries reporting.
+                    </div>
+                    <div v-else class="flex flex-wrap gap-3 h-full">
+                        <div v-for="battery in batteries" :key="battery.key"
                              class="bg-saint-surface-light rounded-lg p-3 flex-1 min-w-[280px] flex flex-col">
-                            <div class="flex items-center justify-between mb-2">
-                                <div class="flex items-center gap-2">
-                                    <span class="material-icons text-2xl"
-                                          :class="{
-                                              'text-saint-success': battery.chargePercent >= 50,
-                                              'text-yellow-500': battery.chargePercent >= 20 && battery.chargePercent < 50,
-                                              'text-red-500': battery.chargePercent < 20,
-                                          }">
+                            <!-- Header: icon + name + SOC % -->
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="flex items-center gap-2 min-w-0">
+                                    <span class="material-icons text-2xl" :class="socClass(battery.soc)">
                                         {{
-                                            battery.isCharging ? 'battery_charging_full' :
-                                            battery.chargePercent >= 80 ? 'battery_full' :
-                                            battery.chargePercent >= 50 ? 'battery_4_bar' :
-                                            battery.chargePercent >= 20 ? 'battery_2_bar' :
+                                            battery.chargeOn ? 'battery_charging_full' :
+                                            battery.soc === null ? 'battery_unknown' :
+                                            battery.soc >= 80 ? 'battery_full' :
+                                            battery.soc >= 50 ? 'battery_4_bar' :
+                                            battery.soc >= 20 ? 'battery_2_bar' :
                                             'battery_1_bar'
                                         }}
                                     </span>
-                                    <div>
-                                        <div class="font-medium">{{ battery.name }}</div>
-                                        <div class="flex gap-3 text-xs text-saint-text-muted">
-                                            <span>{{ battery.voltage.toFixed(2) }}V</span>
-                                            <span>{{ battery.current.toFixed(1) }}A</span>
-                                            <span v-if="battery.isCharging" class="text-saint-success">Charging</span>
-                                        </div>
-                                    </div>
+                                    <div class="font-medium truncate">{{ battery.name }}</div>
                                 </div>
-                                <span class="text-2xl font-bold"
-                                      :class="{
-                                          'text-saint-success': battery.chargePercent >= 50,
-                                          'text-yellow-500': battery.chargePercent >= 20 && battery.chargePercent < 50,
-                                          'text-red-500': battery.chargePercent < 20,
-                                      }">
-                                    {{ battery.chargePercent }}%
+                                <span class="text-2xl font-bold" :class="socClass(battery.soc)">
+                                    {{ battery.soc === null ? '—' : Math.round(battery.soc) + '%' }}
                                 </span>
                             </div>
 
-                            <div class="flex gap-4 flex-1">
-                                <div class="flex-1 min-w-0 overflow-hidden">
-                                    <div class="text-xs text-saint-text-muted mb-1">Cell Voltages</div>
-                                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                                        <div v-for="(cell, i) in battery.cells" :key="i"
-                                             class="bg-saint-surface rounded p-1.5 text-center min-w-0">
-                                            <div class="text-[10px] text-saint-text-muted truncate">C{{ i + 1 }}</div>
-                                            <div class="text-xs sm:text-sm font-medium truncate"
-                                                 :class="{
-                                                     'text-saint-success': cell.voltage >= 3.7,
-                                                     'text-yellow-500': cell.voltage >= 3.4 && cell.voltage < 3.7,
-                                                     'text-red-500': cell.voltage < 3.4,
-                                                 }">
-                                                {{ cell.voltage.toFixed(2) }}V
-                                            </div>
-                                            <div class="text-[10px] text-saint-text-muted truncate">{{ cell.temperature }}°</div>
-                                        </div>
-                                    </div>
-                                </div>
+                            <!-- SOC bar -->
+                            <div class="h-2 w-full rounded-full bg-saint-surface overflow-hidden mb-3">
+                                <div class="h-2 transition-all"
+                                     :class="battery.soc === null ? 'bg-saint-surface'
+                                             : battery.soc >= 50 ? 'bg-saint-success'
+                                             : battery.soc >= 20 ? 'bg-yellow-500' : 'bg-red-500'"
+                                     :style="{ width: `${Math.max(0, Math.min(100, battery.soc ?? 0))}%` }" />
+                            </div>
 
-                                <div class="border-l border-saint-surface pl-3 min-w-0 flex-shrink-0 overflow-hidden">
-                                    <div class="text-xs text-saint-text-muted mb-1">BMS Info</div>
-                                    <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
-                                        <span class="text-saint-text-muted">Model</span>
-                                        <span class="truncate">{{ battery.bms.model }}</span>
-                                        <span class="text-saint-text-muted">Serial</span>
-                                        <span class="font-mono text-[10px] truncate">{{ battery.bms.serialNumber }}</span>
-                                        <span class="text-saint-text-muted">FW</span>
-                                        <span class="truncate">v{{ battery.bms.firmwareVersion }}</span>
-                                        <span class="text-saint-text-muted">Cycles</span>
-                                        <span>{{ battery.bms.cycleCount }}</span>
-                                        <span class="text-saint-text-muted">Cap</span>
-                                        <span class="truncate">{{ battery.bms.currentCapacity }}/{{ battery.bms.maxCapacity }}</span>
+                            <!-- Pack metrics: voltage / current / temp -->
+                            <div class="grid grid-cols-3 gap-2 text-center mb-3">
+                                <div class="bg-saint-surface rounded p-2">
+                                    <div class="text-[10px] uppercase text-saint-text-muted">Voltage</div>
+                                    <div class="font-mono">{{ fmt(battery.voltage, 2, 'V') }}</div>
+                                </div>
+                                <div class="bg-saint-surface rounded p-2">
+                                    <div class="text-[10px] uppercase text-saint-text-muted">Current</div>
+                                    <div class="font-mono"
+                                         :class="(battery.current ?? 0) >= 0 ? 'text-saint-success' : 'text-yellow-500'">
+                                        {{ fmt(battery.current, 2, 'A') }}
                                     </div>
                                 </div>
+                                <div class="bg-saint-surface rounded p-2">
+                                    <div class="text-[10px] uppercase text-saint-text-muted">Temp</div>
+                                    <div class="font-mono">{{ battery.temp === null ? '—' : fmt(battery.temp, 1, '°C') }}</div>
+                                </div>
+                            </div>
+
+                            <!-- FET state chips -->
+                            <div class="flex items-center gap-2 text-xs mb-2">
+                                <span class="px-2 py-0.5 rounded-full"
+                                      :class="battery.chargeOn ? 'bg-green-500/20 text-green-500' : 'bg-saint-surface text-saint-text-muted'">
+                                    CHG {{ battery.chargeOn ? 'ON' : 'OFF' }}
+                                </span>
+                                <span class="px-2 py-0.5 rounded-full"
+                                      :class="battery.dischargeOn ? 'bg-green-500/20 text-green-500' : 'bg-saint-surface text-saint-text-muted'">
+                                    DSG {{ battery.dischargeOn ? 'ON' : 'OFF' }}
+                                </span>
+                            </div>
+
+                            <!-- Fault panel — only when something is asserted -->
+                            <div v-if="battery.faults.length"
+                                 class="rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-xs mt-auto">
+                                <div class="flex items-center gap-1 text-red-400 font-medium mb-0.5">
+                                    <span class="material-icons text-base">warning</span>
+                                    BMS faults asserted
+                                </div>
+                                <ul class="list-disc list-inside text-red-300 ml-1">
+                                    <li v-for="f in battery.faults" :key="f">{{ f }}</li>
+                                </ul>
                             </div>
                         </div>
                     </div>

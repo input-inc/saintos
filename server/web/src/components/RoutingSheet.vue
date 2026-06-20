@@ -50,6 +50,22 @@ const PIN_OFFSET_X  = 6
 // fetch per page load, populated by Routes.vue's loadAll().
 const peripheralType = (id) => catalog.byType(id)
 const widgetType = (id) => catalog.widgetType(id)
+
+// Port label for a peripheral channel: prefer the operator's per-channel
+// name (params.channels[idx].label, set in the channel-edit modal) over
+// the generic catalog id ("Ch 0"). Maestro's 24 channels share one
+// catalog entry, so the routing sheet otherwise shows "Ch 0…23" instead
+// of "Pan"/"Tilt"/etc. Mirrors channelDisplayLabel in Peripherals.vue
+// and channelLabel in PeripheralCard.vue. Falls back to the catalog
+// display/id for channels with no custom label.
+function channelPortLabel (p, c) {
+  const m = /^ch(\d+)$/.exec(c.id)
+  if (m) {
+    const label = p.params?.channels?.[Number(m[1])]?.label
+    if (label && String(label).trim().length) return label
+  }
+  return c.display || c.id
+}
 const operatorType = (id) => catalog.operatorType(id)
 
 // ── Graph node assembly ─────────────────────────────────────────────────
@@ -212,8 +228,8 @@ function meta (g) {
       builtin: !!p.builtin, removable: false,
       // Legacy convention: channel.dir === 'out' means peripheral consumes
       // the value (a sink — left side); 'in' means peripheral produces it.
-      inputs:  channels.filter(c => c.dir === 'out').map(c => ({ id: c.id, label: c.display })),
-      outputs: channels.filter(c => c.dir === 'in').map(c => ({ id: c.id, label: c.display })),
+      inputs:  channels.filter(c => c.dir === 'out').map(c => ({ id: c.id, label: channelPortLabel(p, c) })),
+      outputs: channels.filter(c => c.dir === 'in').map(c => ({ id: c.id, label: channelPortLabel(p, c) })),
     }
   }
   if (g.kind === 'widget') {

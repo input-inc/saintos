@@ -25,6 +25,12 @@ from saint_server.webserver.websocket_handler import WebSocketHandler
 MAX_URDF_UPLOAD_BYTES = 64 * 1024 * 1024
 
 
+# Directory the privileged apply-update.sh writes per-run install logs to
+# (update-YYYYMMDD-HHMMSS.log). The live-log endpoint tails the newest one.
+# Mirrors install.sh's LOG_DIR; overridable for tests/dev installs.
+UPDATE_LOG_DIR = Path(os.environ.get("SAINT_LOG_DIR", "/var/log/saint-os"))
+
+
 # CORS policy. Required because the SAINT Controller AppImage (Tauri
 # webview) runs with origin `tauri://localhost` and cross-origin-fetches
 # this server's /api/firmware/* endpoints during the in-app update
@@ -166,6 +172,13 @@ class WebServer:
         self.app.router.add_get('/api/firmware', self._handle_firmware_list)
         self.app.router.add_get('/api/firmware/{fw_type}', self._handle_firmware_type_info)
         self.app.router.add_get('/api/firmware/{fw_type}/{filename}', self._handle_firmware_download)
+
+        # Software-update routes — browser upload of a dist tarball + live
+        # install-log tail. The update lifecycle itself (stage → install)
+        # runs over the WebSocket management API; these two are binary/poll
+        # endpoints that don't fit the JSON-RPC channel.
+        self.app.router.add_post('/api/update/upload', self._handle_update_upload)
+        self.app.router.add_get('/api/update/log', self._handle_update_log)
 
         # Robot URDF routes — uploaded model + meshes served back to
         # the animation builder UI (and, in a follow-on phase, the
@@ -391,6 +404,121 @@ class WebServer:
 
         self.log('info', f'Serving firmware: {fw_path}')
         return web.FileResponse(fw_path)
+
+    # ── Software-update routes ──────────────────────────────────────
+
+    async def _handle_update_upload(self, request: web.Request) -> web.Response:
+        """Accept a dist tarball uploaded from the operator's browser.
+
+        Streams the multipart file part straight to disk in the update
+        staging directory — tarballs are hundreds of MB, so we never buffer
+        in memory (unlike the URDF handler). Streaming also sidesteps
+        aiohttp's 1 MB client_max_size, the same way the 64 MB URDF upload
+        does. On success the update manager flips to 'downloaded' so the
+        existing Install flow (WS update.install) takes over unchanged.
+        """
+        from saint_server.update_manager import TARBALL_RE, UPDATE_STAGING
+
+        manager = getattr(self.ws_handler, '_update_manager', None)
+        if manager is None:
+            return web.json_response(
+                {'error': 'Update manager not ready'}, status=503)
+
+        try:
+            reader = await request.multipart()
+        except Exception as e:
+            return web.json_response(
+                {'error': f'Expected multipart upload: {e}'}, status=400)
+
+        field = await reader.next()
+        if field is None:
+            return web.json_response({'error': 'No upload field'}, status=400)
+
+        # basename() defends against path-traversal in the multipart name.
+        filename = os.path.basename((field.filename or '').strip())
+        if not filename or not TARBALL_RE.match(filename):
+            return web.json_response(
+                {'error': 'Filename must be a SAINT.OS dist tarball '
+                          '(saint-os_<version>_<arch>_<ros>.tar.zst)'},
+                status=400)
+
+        UPDATE_STAGING.mkdir(parents=True, exist_ok=True)
+        dest = UPDATE_STAGING / filename
+        part = dest.with_suffix(dest.suffix + '.part')
+        try:
+            with open(part, 'wb') as f:
+                while True:
+                    chunk = await field.read_chunk(size=64 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            os.replace(part, dest)
+        except Exception as e:
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            self.log('error', f'Update upload failed: {e}')
+            return web.json_response({'error': f'Upload failed: {e}'}, status=500)
+
+        try:
+            await manager.register_uploaded_tarball(str(dest))
+        except (ValueError, FileNotFoundError) as e:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            return web.json_response({'error': str(e)}, status=400)
+
+        release = manager.state.github_release
+        return web.json_response({
+            'version': release.version if release else None,
+            'staged_tarball': str(dest),
+        })
+
+    async def _handle_update_log(self, request: web.Request) -> web.Response:
+        """Tail the newest update-*.log for the live install console.
+
+        Each call is independent, so the browser keeps polling across the
+        saint-os service restart that install.sh triggers — when the server
+        comes back, the next poll resumes from the same byte offset against
+        the (still-growing or final) log file. 'present' tells the client
+        the log hasn't appeared yet (right after Install is clicked).
+        """
+        try:
+            offset = max(0, int(request.query.get('offset', '0')))
+        except (TypeError, ValueError):
+            offset = 0
+
+        logs = (sorted(UPDATE_LOG_DIR.glob('update-*.log'),
+                       key=lambda p: p.stat().st_mtime)
+                if UPDATE_LOG_DIR.is_dir() else [])
+        if not logs:
+            return web.json_response(
+                {'data': '', 'offset': offset, 'present': False, 'done': False},
+                headers=self.NO_CACHE_HEADERS)
+
+        log_path = logs[-1]
+        try:
+            size = log_path.stat().st_size
+            # A truncated/rotated file (size < offset) means a fresh run —
+            # restart the read from the top rather than seeking past EOF.
+            start = offset if offset <= size else 0
+            with open(log_path, 'rb') as f:
+                f.seek(start)
+                raw = f.read()
+        except OSError as e:
+            return web.json_response({'error': str(e)}, status=500)
+
+        return web.json_response({
+            'data': raw.decode('utf-8', errors='replace'),
+            'offset': start + len(raw),
+            'present': True,
+            # Best-effort: the client's authoritative "finished" signal is
+            # the WS reconnecting with the new installed_version. We leave
+            # done=false and let the client stop on that.
+            'done': False,
+        }, headers=self.NO_CACHE_HEADERS)
 
     # ── URDF model routes ───────────────────────────────────────────
 

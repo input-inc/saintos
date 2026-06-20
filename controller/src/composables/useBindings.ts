@@ -18,6 +18,8 @@
 import { computed, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { useLibrary } from './useLibrary';
+import { useConnection } from './useConnection';
 
 // ─── Input sources ───────────────────────────────────────────────────
 
@@ -27,7 +29,11 @@ export type AnalogInput =
     | 'right_stick_x'
     | 'right_stick_y'
     | 'left_trigger'
-    | 'right_trigger';
+    | 'right_trigger'
+    | 'left_pad_x'
+    | 'left_pad_y'
+    | 'right_pad_x'
+    | 'right_pad_y';
 
 export type DigitalInput =
     | 'a' | 'b' | 'x' | 'y'
@@ -177,6 +183,19 @@ export interface PresetPanel {
     layout: PanelLayout;
     columns: number;
     itemsPerPage: number;
+    /** Live data source. Absent = static (use `presets`).
+     *  'animations'/'poses' = populated from the server library
+     *  (useLibrary); selecting fires start_animation / apply_pose. */
+    source?: 'animations' | 'poses';
+}
+
+/** Minimal shape the panel grid renders. Both Preset and the server
+ *  library's items satisfy it. */
+export interface PanelItem {
+    id: string;
+    name: string;
+    icon?: string;
+    color?: string;
 }
 
 // ─── Profile + settings ──────────────────────────────────────────────
@@ -283,7 +302,7 @@ function getDefaultProfile(): BindingProfile {
             },
         ],
         digitalBindings: [
-            { input: 'y', trigger: 'press', action: { type: 'show_panel', panel_id: 'moods' }, enabled: true },
+            { input: 'y', trigger: 'press', action: { type: 'show_panel', panel_id: 'poses' }, enabled: true },
             { input: 'x', trigger: 'press', action: { type: 'show_panel', panel_id: 'animations' }, enabled: true },
             { input: 'a', trigger: 'press', action: { type: 'select_panel_item' }, enabled: true },
             { input: 'b', trigger: 'press', action: { type: 'hide_panel' }, enabled: true },
@@ -298,38 +317,16 @@ function getDefaultProfile(): BindingProfile {
         ],
         presetPanels: [
             {
-                id: 'moods', name: 'Moods', icon: 'mood', color: '#f59e0b',
-                layout: 'grid', columns: 4, itemsPerPage: 8,
-                presets: [
-                    { id: 'mood_happy',     name: 'Happy',     icon: 'sentiment_very_satisfied', color: '#22c55e', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_sad',       name: 'Sad',       icon: 'sentiment_dissatisfied',   color: '#3b82f6', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_angry',     name: 'Angry',     icon: 'mood_bad',                 color: '#ef4444', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_curious',   name: 'Curious',   icon: 'psychology',               color: '#8b5cf6', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_sleepy',    name: 'Sleepy',    icon: 'bedtime',                  color: '#6b7280', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_surprised', name: 'Surprised', icon: 'sentiment_excited',        color: '#f59e0b', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_love',      name: 'Love',      icon: 'favorite',                 color: '#ec4899', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_neutral',   name: 'Neutral',   icon: 'sentiment_neutral',        color: '#9ca3af', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_excited',   name: 'Excited',   icon: 'celebration',              color: '#f97316', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_confused',  name: 'Confused',  icon: 'help',                     color: '#a855f7', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_scared',    name: 'Scared',    icon: 'warning',                  color: '#facc15', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_proud',     name: 'Proud',     icon: 'military_tech',            color: '#eab308', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_shy',       name: 'Shy',       icon: 'face_retouching_off',      color: '#f472b6', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_bored',     name: 'Bored',     icon: 'sentiment_dissatisfied',   color: '#78716c', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_playful',   name: 'Playful',   icon: 'toys',                     color: '#06b6d4', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                    { id: 'mood_focused',   name: 'Focused',   icon: 'center_focus_strong',      color: '#0ea5e9', type: 'servo', data: { type: 'servo', positions: [], transitionMs: 500, easing: 'ease_in_out' } },
-                ],
+                // Server-backed: items stream from list_animations.
+                id: 'animations', name: 'Animations', icon: 'animation', color: '#8b5cf6',
+                layout: 'grid', columns: 4, itemsPerPage: 8, source: 'animations',
+                presets: [],
             },
             {
-                id: 'animations', name: 'Animations', icon: 'animation', color: '#8b5cf6',
-                layout: 'grid', columns: 4, itemsPerPage: 8,
-                presets: [
-                    { id: 'anim_wave',        name: 'Wave',        icon: 'waving_hand',     type: 'animation', data: { type: 'animation', keyframes: [], loop_animation: false } },
-                    { id: 'anim_nod',         name: 'Nod',         icon: 'check_circle',    type: 'animation', data: { type: 'animation', keyframes: [], loop_animation: false } },
-                    { id: 'anim_shake',       name: 'Shake Head',  icon: 'cancel',          type: 'animation', data: { type: 'animation', keyframes: [], loop_animation: false } },
-                    { id: 'anim_dance',       name: 'Dance',       icon: 'music_note',      type: 'animation', data: { type: 'animation', keyframes: [], loop_animation: false } },
-                    { id: 'anim_look_around', name: 'Look Around', icon: 'visibility',      type: 'animation', data: { type: 'animation', keyframes: [], loop_animation: false } },
-                    { id: 'anim_bow',         name: 'Bow',         icon: 'arrow_downward',  type: 'animation', data: { type: 'animation', keyframes: [], loop_animation: false } },
-                ],
+                // Server-backed: items stream from list_poses (Y opens this).
+                id: 'poses', name: 'Poses', icon: 'accessibility', color: '#3b82f6',
+                layout: 'grid', columns: 4, itemsPerPage: 8, source: 'poses',
+                presets: [],
             },
             {
                 id: 'sounds', name: 'Sounds', icon: 'volume_up', color: '#22c55e',
@@ -426,7 +423,7 @@ function navigatePanel(direction: NavigateDirection): void {
     const panel = profile.presetPanels.find(p => p.id === state.activePanelId);
     if (!panel) return;
 
-    const totalItems = panel.presets.length;
+    const totalItems = panelItems(panel).length;
     const columns = panel.columns;
     const itemsPerPage = panel.itemsPerPage;
     const totalPages = Math.ceil(totalItems / itemsPerPage);
@@ -493,12 +490,28 @@ function selectCurrentItem(): void {
     if (!profile || !state.activePanelId) return;
     const panel = profile.presetPanels.find(p => p.id === state.activePanelId);
     if (!panel) return;
-    const preset = panel.presets[state.selectedIndex];
-    if (preset) void activatePreset(preset.id);
+    const item = panelItems(panel)[state.selectedIndex];
+    if (item) triggerPanelItem(panel, item.id);
 }
 
 async function activatePreset(presetId: string): Promise<void> {
     await invoke('activate_preset', { presetId });
+}
+
+// Items shown for a panel. Server-backed panels (source set) stream
+// live from the server library; static panels use their stored presets.
+function panelItems(panel: PresetPanel): PanelItem[] {
+    if (panel.source === 'animations') return useLibrary().animations.value;
+    if (panel.source === 'poses') return useLibrary().poses.value;
+    return panel.presets;
+}
+
+// Fire the right action for a selected item: play/apply for the
+// server-backed panels, the local preset path otherwise.
+function triggerPanelItem(panel: PresetPanel, itemId: string): void {
+    if (panel.source === 'animations') void useConnection().startAnimation(itemId);
+    else if (panel.source === 'poses') void useConnection().applyPose(itemId);
+    else void activatePreset(itemId);
 }
 
 // ─── Mutators ────────────────────────────────────────────────────────
@@ -603,6 +616,14 @@ export function useBindings() {
         activeProfile,
         activePanelState: computed(() => panelStateRef.value),
         activePanel,
+        // Live items for the active panel (server-backed or static) and
+        // the source-aware trigger the panel UI calls on select.
+        activePanelItems: computed<PanelItem[]>(() =>
+            activePanel.value ? panelItems(activePanel.value) : []),
+        triggerActiveItem: (itemId: string) => {
+            const p = activePanel.value;
+            if (p) triggerPanelItem(p, itemId);
+        },
 
         loadProfiles,
         saveProfiles,

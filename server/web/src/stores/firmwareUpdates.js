@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
-import { reactive, computed } from 'vue'
+import { reactive, computed, watch } from 'vue'
 import { useWsStore } from './ws'
+import { useNodesStore } from './nodes'
 
 // Per-node firmware-update progress, surfaced to any view that wants to
 // render it (the Overview status card, the Nodes-view per-node card,
@@ -36,6 +37,12 @@ const TERMINAL_LINGER_MS = 8_000
 const STALE_THRESHOLD_MS = 5 * 60_000
 
 export const STAGE_LABELS = {
+  // RP2040 / Teensy path — they hand off to a bootloader / FlashTxx
+  // that the application can't publish from, so we only see "starting"
+  // and then later the node re-announces under the new firmware.
+  // Render indeterminate the whole time.
+  starting:    'Starting update',
+  // Pi path — granular stages emitted by saint_node.updater.
   downloading: 'Downloading',
   verifying:   'Verifying',
   extracting:  'Extracting',
@@ -47,7 +54,15 @@ export const STAGE_LABELS = {
 
 export const useFirmwareUpdatesStore = defineStore('firmwareUpdates', () => {
   const ws = useWsStore()
-  // node_id -> { stage, percent, status, message, startedAt, lastFrameAt }
+  const nodesStore = useNodesStore()
+  // node_id -> { stage, percent, status, message, startedAt, lastFrameAt,
+  //              startingVersion }
+  // startingVersion captures the node's firmware_version at start() time
+  // so we can flip to 'complete' when it changes (the new firmware
+  // re-announced under a new build). This is how RP2040 / Teensy OTAs
+  // resolve — those nodes can't publish per-percent progress because
+  // their flashing path lives in the bootloader, but they DO re-announce
+  // with the new version on the other side of the reboot.
   const entries = reactive({})
 
   function _topic (nodeId) { return `update_progress/${nodeId}` }
@@ -109,18 +124,30 @@ export const useFirmwareUpdatesStore = defineStore('firmwareUpdates', () => {
 
   async function start (nodeId) {
     if (!nodeId) return
-    // Seed an entry so the UI shows "starting…" instantly, before the
-    // first ROS frame arrives. Without this seed the operator clicks
-    // Update, the modal closes, and they see nothing for the ~1-2s
-    // it takes the control message to round-trip.
+    // Seed an entry so the UI shows activity instantly, before any
+    // ROS frame arrives. Stage = 'starting' (not 'downloading') so
+    // FirmwareUpdateProgress renders indeterminate — important for
+    // RP2040 / Teensy nodes, which hand off to their bootloader and
+    // can't publish per-percent progress at all. A determinate 0 %
+    // bar would just freeze visibly until the chip rebooted. Pi
+    // nodes overwrite this seed with a real 'downloading' frame on
+    // first progress tick (~hundreds of ms), so the bar still
+    // becomes determinate quickly when the data exists.
+    //
+    // We also snapshot the node's current firmware_version so the
+    // version-change watcher (below) can flip status → 'complete'
+    // when the new firmware re-announces. That's the only completion
+    // signal we get from bootloader-driven targets.
     if (!entries[nodeId] || TERMINAL_STATUSES.has(entries[nodeId].status)) {
+      const node = (nodesStore.all || []).find(n => n.node_id === nodeId)
       entries[nodeId] = {
-        stage:   'downloading',
-        percent: 0,
+        stage:   'starting',
+        percent: null,
         status:  'in_progress',
         message: '',
         startedAt: Date.now(),
         lastFrameAt: Date.now(),
+        startingVersion: node?.firmware_version || null,
       }
     }
     await _ensureSubscribed(nodeId)
@@ -139,6 +166,60 @@ export const useFirmwareUpdatesStore = defineStore('firmwareUpdates', () => {
     }
   })
   ws.on('state', onStateFrame)
+
+  // Auto-complete the entry when a node re-announces under a new
+  // firmware_version. This is the only completion signal we get
+  // from RP2040 / Teensy OTAs — those nodes hand off to their
+  // bootloader (which lives outside the saint_node application,
+  // can't reach the ROS stack, and definitely can't publish to
+  // /update_progress). What WE see is the node going offline mid-
+  // OTA, then coming back online some seconds later with a new
+  // firmware_version in its /announce. nodes.js maintains that
+  // in nodesStore.all, so we just watch for the version flip.
+  //
+  // Pi nodes ALSO benefit: their saint_node service restarts at
+  // the end of perform_update(), which means the last few
+  // 'restarting' progress frames get dropped (publisher dies
+  // mid-flight). The version-change watcher closes the loop so the
+  // bar still clears.
+  watch(
+    () => (nodesStore.all || []).map(n => ({ id: n.node_id, fw: n.firmware_version })),
+    (after, before) => {
+      if (!before) return
+      const prevByid = new Map(before.map(x => [x.id, x.fw]))
+      for (const cur of after) {
+        const entry = entries[cur.id]
+        if (!entry || TERMINAL_STATUSES.has(entry.status)) continue
+        const prevFw = prevByid.get(cur.id)
+        // Need a real prior value to detect a change — the first
+        // tick after page load has prevFw === undefined for every
+        // node and we'd false-positive complete every adopted node.
+        if (!prevFw) continue
+        if (cur.fw && cur.fw !== prevFw) {
+          // Compare to the version captured at start(): if it
+          // changed away from there, we definitely flipped over a
+          // reboot, not just a flapping cached value.
+          if (!entry.startingVersion || cur.fw !== entry.startingVersion) {
+            entries[cur.id] = {
+              ...entry,
+              stage: 'restarting',
+              percent: 100,
+              status: 'complete',
+              message: `Updated to ${cur.fw}`,
+              lastFrameAt: Date.now(),
+            }
+            setTimeout(() => {
+              const e = entries[cur.id]
+              if (e && TERMINAL_STATUSES.has(e.status)) {
+                delete entries[cur.id]
+              }
+            }, TERMINAL_LINGER_MS)
+          }
+        }
+      }
+    },
+    { deep: true }
+  )
 
   const byId = (nodeId) => computed(() => entries[nodeId] || null)
 

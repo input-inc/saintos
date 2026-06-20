@@ -13,6 +13,12 @@ pub enum AnalogInput {
     RightStickY,
     LeftTrigger,
     RightTrigger,
+    // Steam Deck trackpads. X/Y are -1..1, sourced from InputState's
+    // left_touchpad/right_touchpad (not gamepad) — see mapper.rs.
+    LeftPadX,
+    LeftPadY,
+    RightPadX,
+    RightPadY,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -176,6 +182,7 @@ pub enum ControlTarget {
 }
 
 impl ControlTarget {
+    #[allow(dead_code)] // accessor kept alongside the ControlTarget variants
     pub fn name(&self) -> Option<&str> {
         match self {
             ControlTarget::Topic { name, .. } | ControlTarget::WsInput { name, .. } =>
@@ -321,6 +328,12 @@ pub struct PresetPanel {
     pub columns: u32,
     #[serde(rename = "itemsPerPage")]
     pub items_per_page: u32,
+    /// Live data source for the panel's items. `None`/absent = static
+    /// (use `presets`). `"animations"`/`"poses"` = populated at runtime
+    /// from the server's library (see the frontend's useLibrary), with
+    /// selection triggering start_animation / apply_pose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -408,10 +421,12 @@ impl BindingProfile {
         }
     }
 
+    #[allow(dead_code)] // lookup helper; mapping currently iterates directly
     pub fn get_analog_binding(&self, input: &AnalogInput) -> Option<&AnalogBinding> {
         self.analog_bindings.iter().find(|b| &b.input == input && b.enabled)
     }
 
+    #[allow(dead_code)] // lookup helper; mapping currently iterates directly
     pub fn get_digital_binding(&self, input: &DigitalInput, trigger: &ButtonTrigger) -> Option<&DigitalBinding> {
         self.digital_bindings
             .iter()

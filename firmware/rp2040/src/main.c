@@ -1223,12 +1223,17 @@ static bool init_micro_ros(void)
     printf("Created log publisher: %s\n", log_topic);
     saint_log_set_ros_ready(true);
 
-    // Create announcement timer (1 second interval)
-    ret = rclc_timer_init_default(
+    // Create announcement timer (1 second interval).
+    // rclc_timer_init_default was deprecated upstream in favor of
+    // rclc_timer_init_default2(handle, support, period_ns, callback,
+    // autostart). Passing `true` autostart matches the legacy
+    // behaviour — timer fires on first scheduled tick.
+    ret = rclc_timer_init_default2(
         &announce_timer,
         &support,
         RCL_MS_TO_NS(ANNOUNCE_INTERVAL_MS),
-        announce_timer_callback
+        announce_timer_callback,
+        true
     );
     if (ret != RCL_RET_OK) {
         printf("Failed to create announcement timer: %d\n", ret);
@@ -1236,11 +1241,12 @@ static bool init_micro_ros(void)
     }
 
     // Create state timer (100ms = 10Hz)
-    ret = rclc_timer_init_default(
+    ret = rclc_timer_init_default2(
         &state_timer,
         &support,
         RCL_MS_TO_NS(STATE_PUBLISH_INTERVAL_MS),
-        state_timer_callback
+        state_timer_callback,
+        true
     );
     if (ret != RCL_RET_OK) {
         printf("Failed to create state timer: %d\n", ret);
@@ -1323,18 +1329,32 @@ static bool init_micro_ros(void)
  */
 static void cleanup_micro_ros(void)
 {
-    rcl_subscription_fini(&command_sub, &ros_node);
-    rcl_subscription_fini(&control_sub, &ros_node);
-    rcl_subscription_fini(&config_sub, &ros_node);
+    /* rcl_*_fini are declared with __attribute__((warn_unused_result)).
+     * In this teardown path cleanup is called from the session-loss
+     * recovery loop that immediately re-inits, so a fini failure is
+     * informational at best — there's nowhere to surface it.
+     *
+     * Curiosity: a bare `(void)` cast is the standard suppression
+     * idiom, but the arm-none-eabi-gcc shipped with the pico-SDK
+     * toolchain still emits -Wunused-result for `(void)expr` in C
+     * (unlike the cross-compiler PlatformIO ships for Teensy, where
+     * the same idiom works). Assigning to a local + casting that
+     * local to void DOES suppress on every version. The IGNORE_RC
+     * wrapper captures the intent and keeps the call site terse. */
+    #define IGNORE_RC(expr) do { rcl_ret_t _rc = (expr); (void)_rc; } while (0)
+    IGNORE_RC(rcl_subscription_fini(&command_sub, &ros_node));
+    IGNORE_RC(rcl_subscription_fini(&control_sub, &ros_node));
+    IGNORE_RC(rcl_subscription_fini(&config_sub, &ros_node));
     saint_log_set_ros_ready(false);
-    rcl_publisher_fini(&log_pub, &ros_node);
-    rcl_publisher_fini(&state_pub, &ros_node);
-    rcl_publisher_fini(&announcement_pub, &ros_node);
-    rcl_timer_fini(&state_timer);
-    rcl_timer_fini(&announce_timer);
+    IGNORE_RC(rcl_publisher_fini(&log_pub, &ros_node));
+    IGNORE_RC(rcl_publisher_fini(&state_pub, &ros_node));
+    IGNORE_RC(rcl_publisher_fini(&announcement_pub, &ros_node));
+    IGNORE_RC(rcl_timer_fini(&state_timer));
+    IGNORE_RC(rcl_timer_fini(&announce_timer));
     rclc_executor_fini(&executor);
-    rcl_node_fini(&ros_node);
+    IGNORE_RC(rcl_node_fini(&ros_node));
     rclc_support_fini(&support);
+    #undef IGNORE_RC
 }
 
 /**
@@ -1670,21 +1690,13 @@ int main(void)
     // backoff instead of stranding the node in ERROR; this mirrors the
     // DHCP retry-forever pattern in transport_w5500_connect(). LED was
     // last set to NODE_STATE_CONNECTING (yellow) by transport_connect,
-    // and we keep led_update() ticking inside the backoff so the
-    // operator sees the node is still trying.
-    printf("Discovering SAINT server...\n");
-    uint32_t disc_batch = 0;
-    while (!discover_server(g_node.server_ip, &g_node.server_port, 2000, 10)) {
-        disc_batch++;
-        uint32_t backoff_ms = (disc_batch < 3) ? 2000 : 5000;
-        printf("Discovery batch %lu failed; retrying in %lu ms "
-               "(server not up yet?)\n",
-               (unsigned long)disc_batch, (unsigned long)backoff_ms);
-        for (uint32_t slept = 0; slept < backoff_ms; slept += 100) {
-            sleep_ms(100);
-            led_update();
-        }
-    }
+    // and the shared helper keeps led_update() / watchdog_update()
+    // ticking inside the backoff so the operator sees the node is
+    // still trying. See firmware/shared/src/discovery_retry.c — Teensy
+    // uses the same call so cold-boot resilience stays in lockstep
+    // across platforms.
+    discover_server_retry_forever(g_node.server_ip, &g_node.server_port,
+                                  2000, 10);
 #endif
 
     // Set agent address (discovered or from config for simulation)

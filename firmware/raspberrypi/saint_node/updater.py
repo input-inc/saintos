@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -64,20 +65,92 @@ class FirmwareUpdater:
         self._current_version = __version__
         self._update_in_progress = False
         self._progress_callback: Optional[Callable[[str, int], None]] = None
+        # Terminal-result callback (success/failure + message). Needed
+        # because restart_service() kills this process before
+        # perform_update can return on the success path — so we publish
+        # the "complete" result through here, just before the restart,
+        # rather than relying on a return value the caller never sees.
+        self._result_callback: Optional[Callable[[bool, str], None]] = None
+        # Last (stage, percent) tuple we reported. Used to suppress
+        # per-block duplicate emissions during the download (urllib's
+        # urlretrieve calls the progress hook every 8 KB; on a 350 MB
+        # transfer that's ~43k invocations, most of which carry the
+        # same integer percent value as the prior call. Without
+        # de-duplication we saturate the /update_progress topic
+        # — DDS BEST_EFFORT depth=10 silently drops 99 % of frames
+        # and the UI's progress bar appears frozen).
+        self._last_progress_key: tuple = (None, None)
+        # Most recent error from a step (download/extract/validate/install).
+        # perform_update reads this so the operator-facing error message
+        # includes the specific reason ("tar --zstd extract failed:
+        # cannot open archive") instead of a generic "Extraction failed".
+        # Without it, /log + the OTA progress bar only carry the stage
+        # name; the actual error sits in the local journal where the
+        # operator can't see it.
+        self._last_error: Optional[str] = None
 
     def set_progress_callback(self, callback: Callable[[str, int], None]):
         """Set callback for progress updates: callback(stage, percent)."""
         self._progress_callback = callback
 
+    def set_result_callback(self, callback: Callable[[bool, str], None]):
+        """Set callback for the terminal result: callback(success, message)."""
+        self._result_callback = callback
+
+    def _report_result(self, success: bool, message: str):
+        """Emit the terminal update result, if a callback is wired."""
+        if self._result_callback:
+            try:
+                self._result_callback(success, message)
+            except Exception as e:
+                self._log("warn", f"Result callback failed: {e}")
+
     def _log(self, level: str, msg: str):
-        """Log a message."""
-        if self._logger:
-            getattr(self._logger, level)(msg)
-        else:
+        """Log a message.
+
+        Each severity MUST be dispatched from its own distinct source
+        line. rclpy's RcutilsLogger memoizes severity per call-site
+        (file+function+line); routing every level through a single
+        ``getattr(self._logger, level)(msg)`` line makes them all share
+        one call-site, so the first INFO call locks that line to INFO
+        and the next ERROR call raises
+        ``ValueError: Logger severity cannot be changed between calls.``
+        That exception used to fire from inside the updater's own
+        error-reporting path during an OTA — masking the real failure,
+        killing the update thread, and leaving the node running the old
+        code with no restart and no operator-visible error. Keep the
+        branches separate.
+        """
+        if not self._logger:
             print(f"[{level.upper()}] {msg}")
+            return
+        if level == "error":
+            self._logger.error(msg)
+        elif level in ("warn", "warning"):
+            self._logger.warning(msg)
+        elif level == "debug":
+            self._logger.debug(msg)
+        else:
+            self._logger.info(msg)
 
     def _report_progress(self, stage: str, percent: int):
-        """Report progress to callback if set."""
+        """Report progress to callback if set.
+
+        De-duplicated against the last (stage, percent) tuple we
+        reported. The progress hook in download_update is called per
+        8-KB block (urllib's default), so on a 350 MB download we'd
+        otherwise fire ~43,000 callbacks — most carrying the same
+        integer-percent value as the prior call. The /update_progress
+        ROS topic is BEST_EFFORT with depth=10; at that emission rate
+        the subscriber drops nearly everything and the UI looks
+        frozen until the download finishes. Filtering to one event per
+        true (stage, percent) change reduces it to ~100 events per
+        stage — which DDS delivers reliably and the UI renders smoothly.
+        """
+        key = (stage, percent)
+        if key == self._last_progress_key:
+            return
+        self._last_progress_key = key
         if self._progress_callback:
             self._progress_callback(stage, percent)
         self._log("info", f"Update progress: {stage} ({percent}%)")
@@ -141,13 +214,43 @@ class FirmwareUpdater:
 
             download_path = self.STAGING_DIR / filename
 
-            # Download with progress
-            def progress_hook(block_num, block_size, total_size):
-                if total_size > 0:
-                    percent = min(100, int(block_num * block_size * 100 / total_size))
-                    self._report_progress("downloading", percent)
-
-            urllib.request.urlretrieve(url, download_path, progress_hook)
+            # Stream the download in chunks so we can report real
+            # progress. urlretrieve's reporthook only yields a usable
+            # percent when the server sends Content-Length; a chunked or
+            # gzip-encoded response leaves total_size <= 0 and the bar
+            # never moves (the reported symptom). We request identity
+            # encoding to preserve Content-Length, read the header
+            # ourselves, and fall back to a byte counter when it's
+            # genuinely absent so the operator always sees activity.
+            req = urllib.request.Request(
+                url, headers={"Accept-Encoding": "identity"})
+            with urllib.request.urlopen(req, timeout=30) as resp, \
+                    open(download_path, "wb") as out:
+                try:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                read = 0
+                last = -1
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    read += len(chunk)
+                    if total > 0:
+                        pct = min(100, int(read * 100 / total))
+                        if pct != last:
+                            last = pct
+                            self._report_progress("downloading", pct)
+                    else:
+                        # No Content-Length — report MB downloaded so the
+                        # log still shows movement (percent stays 0).
+                        mb = read // (1024 * 1024)
+                        if mb != last:
+                            last = mb
+                            self._log("info",
+                                      f"Downloading firmware: {mb} MB")
 
             self._report_progress("downloading", 100)
 
@@ -223,12 +326,15 @@ class FirmwareUpdater:
                      '-C', str(extract_dir)],
                     capture_output=True, text=True)
                 if proc.returncode != 0:
-                    self._log("error",
-                        f"tar --zstd extract failed (rc={proc.returncode}): "
-                        f"{proc.stderr.strip()}")
+                    err = (f"tar --zstd extract failed (rc={proc.returncode}): "
+                           f"{proc.stderr.strip()[:200]}")
+                    self._log("error", err)
+                    self._last_error = err
                     return None
             else:
-                self._log("error", f"Unsupported package format: {package_path.suffix}")
+                err = f"Unsupported package format: {package_path.suffix}"
+                self._log("error", err)
+                self._last_error = err
                 return None
 
             self._report_progress("extracting", 100)
@@ -252,11 +358,16 @@ class FirmwareUpdater:
                 if init_file.exists():
                     return parent
 
-            self._log("error", "Could not find saint_node package in update")
+            err = ("Could not find saint_node/ package inside the extracted "
+                   "bundle — package layout looks wrong")
+            self._log("error", err)
+            self._last_error = err
             return None
 
         except Exception as e:
-            self._log("error", f"Extraction failed: {e}")
+            err = f"Extraction failed: {e}"
+            self._log("error", err)
+            self._last_error = err
             return None
 
     def validate_update(self, extracted_dir: Path) -> bool:
@@ -281,7 +392,9 @@ class FirmwareUpdater:
         for i, rel_path in enumerate(required_files):
             file_path = extracted_dir / rel_path
             if not file_path.exists():
-                self._log("error", f"Missing required file: {rel_path}")
+                err = f"Missing required file in bundle: {rel_path}"
+                self._log("error", err)
+                self._last_error = err
                 return False
             percent = int((i + 1) / len(required_files) * 100)
             self._report_progress("validating", percent)
@@ -301,7 +414,15 @@ class FirmwareUpdater:
 
     def create_backup(self) -> bool:
         """
-        Create backup of current firmware for rollback.
+        Create backup of the current ``saint_node/`` package for rollback.
+
+        Only the swappable bit (the Python package) gets backed up —
+        the same scope install_update() rewrites. If the OTA fails,
+        rollback() restores this one directory and the service is
+        good as new. Backing up /opt/saint-node/ in full was wasteful
+        in the legacy code (would copy GBs of mistakenly-placed
+        ros2_install/, deps/, etc.) AND pointless: those files don't
+        change across OTAs.
 
         Returns:
             True if successful
@@ -309,31 +430,53 @@ class FirmwareUpdater:
         self._report_progress("backup", 0)
 
         try:
-            if not self._install_dir.exists():
-                self._log("info", "No existing installation to backup")
+            src = self._install_dir / "saint_node"
+            if not src.exists():
+                self._log("info", "No existing saint_node/ to backup")
                 return True
 
             # Remove old backup
             if self.BACKUP_DIR.exists():
                 shutil.rmtree(self.BACKUP_DIR)
+            self.BACKUP_DIR.mkdir(parents=True)
 
-            # Copy current installation
-            shutil.copytree(self._install_dir, self.BACKUP_DIR)
+            # symlinks=True copies any symlink AS a symlink rather than
+            # recursing into its target. Without it a self-referential
+            # link (e.g. the saint_node/saint_node -> saint_node loop a
+            # buggy `ln -sf` in install.sh used to leave behind) sends
+            # copytree into infinite recursion until ELOOP — which is
+            # exactly the "Too many levels of symbolic links" failure
+            # that bricked the OTA at the backup stage.
+            shutil.copytree(src, self.BACKUP_DIR / "saint_node", symlinks=True)
 
             self._report_progress("backup", 100)
             self._log("info", f"Backup created at {self.BACKUP_DIR}")
             return True
 
         except Exception as e:
-            self._log("error", f"Backup failed: {e}")
+            err = f"Backup failed: {e}"
+            self._log("error", err)
+            self._last_error = err
             return False
 
     def install_update(self, extracted_dir: Path) -> bool:
         """
         Install extracted firmware to install directory.
 
+        Only the ``saint_node/`` Python package is swapped. The bundled
+        ``ros2_install/`` (~275 MB), ``deps/`` (~295 MB), ``scripts/``,
+        ``config/``, etc. are install-time-only artifacts the operator
+        already laid down via scripts/install.sh — there's no reason
+        to re-copy them on an OTA, AND copying them is actively
+        harmful: a Pi 5 SD card at ~10 MB/s would spend 60+ s blocking
+        on the copytree() call here, with no progress emission in the
+        meantime, so the operator-side bar appears frozen and they
+        give up before the install finishes. Restricting to
+        saint_node/ drops the install phase to <1 s of file ops.
+
         Args:
-            extracted_dir: Path to extracted firmware
+            extracted_dir: Path to extracted firmware bundle root
+                (contains saint_node/, scripts/, deps/, etc.)
 
         Returns:
             True if successful
@@ -341,41 +484,61 @@ class FirmwareUpdater:
         self._report_progress("installing", 0)
 
         try:
-            # Ensure install directory parent exists
-            self._install_dir.parent.mkdir(parents=True, exist_ok=True)
+            src_saint_node = extracted_dir / "saint_node"
+            if not src_saint_node.is_dir():
+                err = f"Installation source missing saint_node/: {src_saint_node}"
+                self._log("error", err)
+                self._last_error = err
+                return False
 
-            # Remove current installation
-            if self._install_dir.exists():
-                shutil.rmtree(self._install_dir)
+            dst_saint_node = self._install_dir / "saint_node"
+
+            # Ensure /opt/saint-node exists; scripts/install.sh created
+            # it on first install, but a bare-cold OTA shouldn't depend
+            # on that having happened.
+            self._install_dir.mkdir(parents=True, exist_ok=True)
 
             self._report_progress("installing", 30)
 
-            # Copy new firmware
-            shutil.copytree(extracted_dir, self._install_dir)
+            # Atomic swap: drop the old saint_node/ subdir, copy the
+            # new one in. Python's site-packages symlink (set up by
+            # install.sh) points at /opt/saint-node/saint_node and is
+            # untouched, so on next service start the new code is
+            # imported via the same path.
+            # rmtree unlinks symlinks without following them, so this
+            # also clears any stale self-referential link the old
+            # install.sh `ln -sf` bug may have left under the install
+            # dir. copytree(symlinks=True) keeps us loop-safe even if a
+            # future bundle ever ships a symlink.
+            if dst_saint_node.exists():
+                shutil.rmtree(dst_saint_node)
+            shutil.copytree(src_saint_node, dst_saint_node, symlinks=True)
 
             self._report_progress("installing", 80)
 
-            # Set permissions
-            for py_file in self._install_dir.rglob("*.py"):
+            # Set permissions on the swapped tree only — no point
+            # rglob'ing /opt/saint-node/ wholesale, which would now
+            # also walk anything operators dropped under there.
+            for py_file in dst_saint_node.rglob("*.py"):
                 py_file.chmod(0o644)
 
-            # Make scripts executable
-            scripts_dir = self._install_dir / "scripts"
-            if scripts_dir.exists():
-                for script in scripts_dir.iterdir():
-                    script.chmod(0o755)
-
             self._report_progress("installing", 100)
-            self._log("info", f"Firmware installed to {self._install_dir}")
+            self._log("info", f"Firmware installed to {dst_saint_node}")
             return True
 
         except Exception as e:
-            self._log("error", f"Installation failed: {e}")
+            err = f"Installation failed: {e}"
+            self._log("error", err)
+            self._last_error = err
             return False
 
     def rollback(self) -> bool:
         """
-        Rollback to previous firmware version.
+        Rollback the saint_node/ package to the pre-OTA backup.
+
+        Scoped to match install_update() / create_backup() — only
+        the swappable Python package is restored. The rest of
+        /opt/saint-node/ wasn't touched in the first place.
 
         Returns:
             True if successful
@@ -383,16 +546,16 @@ class FirmwareUpdater:
         self._log("warn", "Rolling back to previous firmware")
 
         try:
-            if not self.BACKUP_DIR.exists():
-                self._log("error", "No backup available for rollback")
+            backup_pkg = self.BACKUP_DIR / "saint_node"
+            if not backup_pkg.exists():
+                self._log("error",
+                    f"No backup available for rollback at {backup_pkg}")
                 return False
 
-            # Remove failed installation
-            if self._install_dir.exists():
-                shutil.rmtree(self._install_dir)
-
-            # Restore backup
-            shutil.copytree(self.BACKUP_DIR, self._install_dir)
+            dst = self._install_dir / "saint_node"
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(backup_pkg, dst, symlinks=True)
 
             self._log("info", "Rollback complete")
             return True
@@ -470,40 +633,61 @@ class FirmwareUpdater:
 
         self._update_in_progress = True
 
+        # Reset for this run — otherwise a stale error from a previous
+        # failed attempt would bleed into the next result message.
+        self._last_error = None
+
         try:
             self._log("info", f"Starting firmware update from {url}")
             if new_version:
                 self._log("info", f"Updating from {self._current_version} to {new_version}")
 
+            def _err(default: str) -> str:
+                return self._last_error or default
+
             # Download
             package_path = self.download_update(url, checksum)
             if not package_path:
-                return {"success": False, "message": "Download failed"}
+                return {"success": False, "message": _err("Download failed")}
 
             # Extract
             extracted_dir = self.extract_update(package_path)
             if not extracted_dir:
-                return {"success": False, "message": "Extraction failed"}
+                return {"success": False, "message": _err("Extraction failed")}
 
             # Validate
             if not self.validate_update(extracted_dir):
-                return {"success": False, "message": "Validation failed"}
+                return {"success": False, "message": _err("Validation failed")}
 
             # Backup current
             if not self.create_backup():
-                return {"success": False, "message": "Backup failed"}
+                return {"success": False, "message": _err("Backup failed")}
 
             # Install
             if not self.install_update(extracted_dir):
                 self.rollback()
-                return {"success": False, "message": "Installation failed, rolled back"}
+                return {"success": False,
+                        "message": _err("Installation failed") + " (rolled back)"}
 
             # Cleanup
             self.cleanup()
 
-            self._log("info", "Firmware update successful, restarting...")
+            # Publish the success result NOW. restart_service() kills
+            # this process before perform_update returns, so this is the
+            # only chance to tell the operator the update applied —
+            # otherwise the UI hangs on the last progress frame ("Backing
+            # up…") forever. Then sleep briefly so the RELIABLE
+            # /update_progress + /log frames (this result, plus the
+            # installing/restarting frames just queued) actually transmit
+            # before systemctl pulls the rug.
+            done_msg = (f"Updated to {new_version}" if new_version
+                        else "Update complete")
+            self._log("info", f"Firmware update successful: {done_msg}; restarting…")
+            self._report_progress("restarting", 100)
+            self._report_result(True, done_msg)
+            time.sleep(2)
 
-            # Restart (this may not return)
+            # Restart (this does not return on success)
             self.restart_service()
 
             return {"success": True, "message": "Update complete, restarting"}

@@ -27,12 +27,25 @@ class ValueTrack:
     """One continuous-value channel on an animation timeline.
 
     The track's value at any time t comes from its underlying
-    AnimationCurve. The (animation_id, track id) pair is the routing-
-    graph source identity — operators wire that source onto sheets.
+    AnimationCurve. ``target_kind`` selects where the sampled value is
+    pushed each tick — mirroring TriggerKeyframe's target model:
+
+      * ``"urdf_joint"`` (default) — ``track.id`` is the URDF joint
+        name; the value goes to ``set_urdf_joint_value(track.id, v)``.
+        Backward-compatible with every track authored before sheet
+        binding existed (those tracks have no ``target_kind`` and
+        deserialize to this).
+      * ``"ws_input"`` — ``target`` is ``[sheet_id, ws_input_id]``; the
+        value goes to ``set_ws_input(...)`` — the same path poses and
+        controller gamepad bindings use. This lets an animation drive a
+        controller routing-sheet input directly, so animations can be
+        authored with NO URDF at all.
     """
     id: str
     name: str
     curve: AnimationCurve
+    target_kind: str = "urdf_joint"
+    target: List[str] = field(default_factory=list)
 
     def value_at(self, t: float) -> float:
         return self.curve.get_value_at_time(t)
@@ -41,6 +54,8 @@ class ValueTrack:
         return {
             "id": self.id,
             "name": self.name,
+            "target_kind": self.target_kind,
+            "target": list(self.target),
             "curve": {
                 "name": self.curve.name,
                 "keys": [
@@ -72,6 +87,8 @@ class ValueTrack:
         return cls(
             id=str(d["id"]),
             name=str(d.get("name", "")),
+            target_kind=str(d.get("target_kind", "urdf_joint")),
+            target=[str(p) for p in (d.get("target") or [])],
             curve=AnimationCurve(name=str(curve_d.get("name", "")), keys=keys),
         )
 

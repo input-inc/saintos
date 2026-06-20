@@ -39,6 +39,18 @@ function channelLabel (ch) {
   }
   return ch.display || ch.id
 }
+
+// Operator-set Material Icons ligature for this channel (per-channel
+// config), shown beside the slider label so channels are easy to tell
+// apart in the State view. Empty string when none set.
+function channelIcon (ch) {
+  const m = /^ch(\d+)$/.exec(ch.id)
+  if (m) {
+    const entry = props.peripheral.params?.channels?.[Number(m[1])]
+    if (entry?.icon) return String(entry.icon)
+  }
+  return ''
+}
 </script>
 
 <template>
@@ -65,6 +77,7 @@ function channelLabel (ch) {
         <component
           :is="{ slider: ChannelSlider, toggle: ChannelToggle, color: ChannelColor }[specFor(peripheral.type, ch).kind] || 'div'"
           :label="channelLabel(ch)"
+          :icon="channelIcon(ch)"
           :spec="specFor(peripheral.type, ch)"
           :model-value="channelValues[ch.id]"
           @commit="v => commit(ch.id, v)"

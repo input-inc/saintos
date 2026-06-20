@@ -140,9 +140,32 @@ export const useWsStore = defineStore('ws', () => {
       // build hash hasn't changed; defer that until it actually
       // bites.
       if (hadSession) {
-        console.log('Reconnected after session — reloading for fresh server code.')
-        setTimeout(() => location.reload(), 100)
-        return
+        // Kiosk sessions opt out of the reload. A kiosk has no human
+        // at the keyboard — reloading drops the operator-visible
+        // dashboard back to a blank page, re-runs the kiosk_token
+        // auto-auth, and (in practice) gets stuck on the home route
+        // because any hiccup in the re-auth means LoginScreen wins
+        // and the kiosk view never re-mounts. Worse, the data
+        // already on screen (last-known SOC, etc.) is the last
+        // thing the operator has — much better to keep showing it
+        // dimmed with an "Offline" pill than to blank the panel.
+        //
+        // We detect kiosk mode via the kiosk_token in the URL: the
+        // console_display peripheral always injects one, and a
+        // normal admin browser never carries it. Same predicate
+        // main.js uses to decide whether to auto-auth.
+        const isKiosk = !!(
+          new URLSearchParams(window.location.search).get('kiosk_token') ||
+          (window.location.hash.includes('?') &&
+            new URLSearchParams(window.location.hash.split('?')[1]).get('kiosk_token'))
+        )
+        if (!isKiosk) {
+          console.log('Reconnected after session — reloading for fresh server code.')
+          setTimeout(() => location.reload(), 100)
+          return
+        }
+        console.log('Reconnected after session — kiosk mode, skipping reload.')
+        // Fall through — re-handshake on the same page, no reload.
       }
       serverName.value   = msg.server_name
       clientId.value     = msg.client_id

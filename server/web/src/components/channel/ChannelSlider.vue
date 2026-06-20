@@ -4,6 +4,7 @@ import { useThrottledSend } from '@/composables/useThrottledSend'
 
 const props = defineProps({
   label:    { type: String, required: true },
+  icon:     { type: String, default: '' },   // optional Material Icons ligature
   spec:     { type: Object, required: true },
   modelValue: { type: Number, default: null },
 })
@@ -40,7 +41,10 @@ const fmt = (v) => props.spec.format ? props.spec.format(v) : Number(v).toFixed(
 <template>
   <div>
     <div class="flex items-center justify-between mb-2">
-      <span class="text-sm font-medium text-fg-strong">{{ label }}</span>
+      <span class="text-sm font-medium text-fg-strong flex items-center gap-1.5">
+        <span v-if="icon" class="material-icons icon-sm text-fg-muted">{{ icon }}</span>
+        {{ label }}
+      </span>
       <div class="flex items-center gap-2">
         <span class="text-sm text-cyan-400 font-mono w-20 text-right">{{ fmt(local) }}</span>
         <button class="text-xs text-fg-muted hover:text-fg-strong transition-colors" @click="reset">

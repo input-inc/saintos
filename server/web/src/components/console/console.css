@@ -94,3 +94,54 @@
   outline: 4px solid var(--led-amber);
   outline-offset: 4px;
 }
+
+/* ── Offline state ──────────────────────────────────────────────── */
+/* Pulsing "OFFLINE" pill in the title bar. Red on black with a glow
+ * pulse so it reads as "active alarm" from across the room even at
+ * the kiosk's distance. Doubles as the only motion on screen during
+ * a disconnect — gives the operator something to confirm the panel
+ * itself didn't freeze. */
+.console-root .console-offline-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 1rem;
+  border: 3px solid var(--led-red);
+  background: rgba(255, 40, 64, 0.15);
+  color: var(--led-red);
+  text-transform: uppercase;
+  border-radius: 0.25rem;
+  animation: console-offline-pulse 1.1s ease-in-out infinite;
+}
+.console-root .console-offline-pill::before {
+  content: '';
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: var(--led-red);
+  box-shadow: 0 0 10px var(--led-red-glow);
+}
+@keyframes console-offline-pulse {
+  0%, 100% {
+    opacity: 0.6;
+    box-shadow: 0 0 8px var(--led-red-glow);
+  }
+  50% {
+    opacity: 1.0;
+    box-shadow: 0 0 24px var(--led-red-glow), inset 0 0 12px rgba(255, 40, 64, 0.25);
+  }
+}
+
+/* Content dim during disconnect. The view still renders its last-
+ * known data (so the operator can read whatever was on screen at
+ * the moment the WS dropped) but at reduced opacity so it reads as
+ * "stale" not "live". Transition is slow enough to avoid jank on a
+ * flapping link. */
+.console-root .console-content {
+  transition: opacity 350ms ease-out, filter 350ms ease-out;
+}
+.console-root .console-content--offline {
+  opacity: 0.35;
+  filter: saturate(0.6);
+  pointer-events: none;
+}

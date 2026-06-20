@@ -116,7 +116,7 @@ class AnimationPlayer:
         # Drop cached values so downstream peripherals settle at neutral
         # rather than holding the last animation frame indefinitely.
         for track in self.anim.value_tracks:
-            self._set_urdf_joint_value(track.id, 0.0)
+            self._dispatch_value(track, 0.0)
 
     @property
     def is_running(self) -> bool:
@@ -193,13 +193,27 @@ class AnimationPlayer:
     def _tick_value_tracks(self, t: float) -> None:
         for track in self.anim.value_tracks:
             try:
-                v = track.value_at(t)
-                # Track id is the URDF joint name — see the
-                # SetUrdfJointValue docstring above.
-                self._set_urdf_joint_value(track.id, v)
+                self._dispatch_value(track, track.value_at(t))
             except Exception as e:
                 self._log("warn",
                           f"value-track {self.anim.id}/{track.id} failed: {e}")
+
+    def _dispatch_value(self, track, v: float) -> None:
+        """Push a sampled value-track value to its bound target.
+
+        Mirrors the trigger-track target model: ``ws_input`` tracks fan
+        out via set_ws_input (no URDF needed); everything else defaults
+        to the legacy urdf_joint path where the track id is the joint
+        name.
+        """
+        if getattr(track, "target_kind", "urdf_joint") == "ws_input":
+            target = getattr(track, "target", None) or []
+            if len(target) >= 2:
+                self._set_ws_input(target[0], target[1], v)
+        else:
+            # urdf_joint (default): track id IS the joint name — see the
+            # SetUrdfJointValue docstring above.
+            self._set_urdf_joint_value(track.id, v)
 
     def _fire_triggers(self, t_prev: float, t_now: float) -> None:
         if t_now <= t_prev:

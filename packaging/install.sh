@@ -443,6 +443,18 @@ SUDOERS
     # Updates staging directory (writable by service user; tarballs land here).
     run install -d -m 0755 -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
         "${STATE_DIR}/updates"
+else
+    # No wrapper in the payload — the dashboard's self-update ("Install")
+    # will fail at the privileged step with "apply wrapper missing at
+    # ${PREFIX}/bin/apply-update.sh" and the staging dir + sudoers rule
+    # won't exist. Warn loudly rather than silently shipping an
+    # OTA-incapable server (this is exactly the bug that left the UI
+    # stuck on "Waiting for install log…"). A current make-dist.sh always
+    # bundles apply-update.sh, so seeing this means a stale/incomplete
+    # payload.
+    warn "apply-update.sh not found in payload (${PAYLOAD_DIR}) —"
+    warn "  in-app self-update will NOT work on this install. Reinstall"
+    warn "  from a current dist tarball to enable the Install flow."
 fi
 
 # --- systemd unit ------------------------------------------------------------

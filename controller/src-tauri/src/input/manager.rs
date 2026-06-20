@@ -60,7 +60,7 @@ impl InputManager {
         thread::spawn(move || {
             log::info!("Input emit thread started");
             while *running.read() {
-                let mut gamepad = gamepad_state.read().clone();
+                let gamepad = gamepad_state.read().clone();
 
                 // On Linux, merge HID data for back buttons, gyro, and touchpads
                 #[cfg(target_os = "linux")]
@@ -147,6 +147,7 @@ impl InputManager {
         );
     }
 
+    #[allow(dead_code)] // lifecycle hook; the input thread runs for the app's lifetime
     pub fn stop(&self) {
         *self.running.write() = false;
         #[cfg(target_os = "linux")]
@@ -154,7 +155,7 @@ impl InputManager {
     }
 
     pub fn get_state(&self) -> InputState {
-        let mut gamepad = self.gamepad.get_state();
+        let gamepad = self.gamepad.get_state();
 
         #[cfg(target_os = "linux")]
         let (gyro, left_touchpad, right_touchpad) = {

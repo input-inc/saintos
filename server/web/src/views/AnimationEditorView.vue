@@ -129,9 +129,27 @@ const topicCatalogForTriggers = ref([])  // [{ topic, channels: [{ field, label,
 async function loadTriggerTargets () {
   if (!wsInputCatalog.value.length) {
     try {
-      const r = await ws.management('list_ws_inputs', {})
-      wsInputCatalog.value = r?.ws_inputs || r?.inputs || []
-    } catch (e) { console.warn('list_ws_inputs failed:', e) }
+      // Pulls the live set of WS-input nodes across every routing
+      // sheet. MUST use the router channel + `list_websocket_inputs`
+      // action — the server's _handle_router has that handler
+      // (websocket_handler.py around line 1813), and there is no
+      // management-channel "list_ws_inputs" action at all. Using the
+      // wrong name made every request return "Unknown action", which
+      // the catch silently swallowed → wsInputCatalog stayed empty
+      // → the trigger-target sheet picker showed "No WS inputs
+      // available" even when the operator had plenty defined.
+      // PoseLibrary.vue's reloadInputs() uses the same call and
+      // works correctly — this brings the animation editor into
+      // parity.
+      const r = await ws.router('list_websocket_inputs', {})
+      // State-only WS inputs (the migration-only echoes of state-
+      // only ROS endpoints) aren't valid trigger targets — a trigger
+      // by definition pushes a value, and you can't push into a
+      // state echo. Filter to "command" kind, matching how
+      // PoseLibrary scopes its setpoint picker.
+      const raw = r?.ws_inputs || r?.inputs || []
+      wsInputCatalog.value = raw.filter(x => x.kind !== 'state')
+    } catch (e) { console.warn('list_websocket_inputs failed:', e) }
   }
   if (!topicCatalogForTriggers.value.length) {
     try {
@@ -226,7 +244,26 @@ function addJointTrack (jointName) {
   const id = ensureUniqueTrackId(jointName)
   anim.value.value_tracks.push({
     id, name: jointName,
+    target_kind: 'urdf_joint', target: [],
     curve: { name: jointName, keys: [] },
+  })
+  animations.markDirty()
+  selection.value = { kind: 'track', trackId: id }
+}
+// Bind a controller routing-sheet WS input as a value track — the path
+// that lets animations be authored with no URDF. The sampled curve
+// value is pushed via set_ws_input on the server (see ValueTrack
+// target_kind="ws_input"), routed like any other controller input.
+function addWsInputTrack (payload) {
+  if (!anim.value || !payload?.sheet_id || !payload?.ws_input_id) return
+  animations.snapshot({ force: true })
+  const label = payload.label || payload.ws_input_id
+  const id = ensureUniqueTrackId(`${payload.sheet_id}.${payload.ws_input_id}`)
+  anim.value.value_tracks.push({
+    id, name: label,
+    target_kind: 'ws_input',
+    target: [payload.sheet_id, payload.ws_input_id],
+    curve: { name: label, keys: [] },
   })
   animations.markDirty()
   selection.value = { kind: 'track', trackId: id }
@@ -300,7 +337,10 @@ watch(selection, (s) => {
     const kf = track?.curve?.keys?.[s.kfIdx]
     if (kf) {
       playerPos.value = Number(kf.time) || 0
-      v.selectJoint(track.id)
+      // Only joint-bound tracks drive the 3D gizmo; ws_input tracks
+      // have no URDF joint, so detach rather than hunt for a joint
+      // named after the sheet binding (which would never match).
+      v.selectJoint(track.target_kind === 'ws_input' ? null : track.id)
     } else {
       v.selectJoint(null)
     }
@@ -403,6 +443,10 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown)
   document.addEventListener('focusin', onFocusIn)
   await Promise.all([robot.refresh(), animations.reload()])
+  // Load the WS-input catalog up front so the timeline's "+ Input"
+  // dropdown is populated immediately — value tracks can bind a
+  // controller sheet input even when no URDF is installed.
+  loadTriggerTargets()
   await loadFromRoute()
   // Land at t=0 with the URDF reflecting any saved keyframes.
   playerPos.value = 0
@@ -520,6 +564,7 @@ onBeforeUnmount(() => {
                         :selection="selection"
                         :playing="!!playingState?.running"
                         :unbound-joints="unboundJoints"
+                        :ws-inputs="wsInputCatalog"
                         @update:player-pos="onTimelineScrub"
                         @select="onTimelineSelect"
                         @dirty="animations.markDirty()"
@@ -529,7 +574,8 @@ onBeforeUnmount(() => {
                         @remove-trigger-track="removeTriggerTrack"
                         @play="play"
                         @stop="stopPlayback"
-                        @add-joint="addJointTrack" />
+                        @add-joint="addJointTrack"
+                        @add-ws-input="addWsInputTrack" />
       </div>
     </div>
   </section>

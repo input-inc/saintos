@@ -86,12 +86,12 @@ pub fn create_default_profile() -> BindingProfile {
 
     // Digital bindings
     profile.digital_bindings = vec![
-        // Y - Show moods panel
+        // Y - Show poses panel (server-backed)
         DigitalBinding {
             input: DigitalInput::Y,
             trigger: ButtonTrigger::Press,
             action: DigitalAction::ShowPanel {
-                panel_id: "moods".to_string(),
+                panel_id: "poses".to_string(),
             },
             enabled: true,
         },
@@ -187,62 +187,18 @@ pub fn create_default_profile() -> BindingProfile {
         },
     ];
 
-    // Preset panels
+    // Preset panels. Animations and Poses are server-backed (source
+    // set) — their items stream live from the server's library via the
+    // frontend's useLibrary, and selecting one fires start_animation /
+    // apply_pose. Sounds stays a static local panel for now. (The old
+    // hardcoded Moods panel is dropped; Y now opens Poses.)
     profile.preset_panels = vec![
-        create_moods_panel(),
         create_animations_panel(),
-        create_sounds_panel(),
         create_poses_panel(),
+        create_sounds_panel(),
     ];
 
     profile
-}
-
-fn create_moods_panel() -> PresetPanel {
-    PresetPanel {
-        id: "moods".to_string(),
-        name: "Moods".to_string(),
-        icon: "mood".to_string(),
-        color: "#f59e0b".to_string(),
-        layout: PanelLayout::Grid,
-        columns: 4,
-        items_per_page: 8,
-        presets: vec![
-            // Page 1
-            create_mood_preset("happy", "Happy", "sentiment_very_satisfied", "#22c55e"),
-            create_mood_preset("sad", "Sad", "sentiment_dissatisfied", "#3b82f6"),
-            create_mood_preset("angry", "Angry", "mood_bad", "#ef4444"),
-            create_mood_preset("curious", "Curious", "psychology", "#8b5cf6"),
-            create_mood_preset("sleepy", "Sleepy", "bedtime", "#6b7280"),
-            create_mood_preset("surprised", "Surprised", "sentiment_excited", "#f59e0b"),
-            create_mood_preset("love", "Love", "favorite", "#ec4899"),
-            create_mood_preset("neutral", "Neutral", "sentiment_neutral", "#9ca3af"),
-            // Page 2
-            create_mood_preset("excited", "Excited", "celebration", "#f97316"),
-            create_mood_preset("confused", "Confused", "help", "#a855f7"),
-            create_mood_preset("scared", "Scared", "warning", "#facc15"),
-            create_mood_preset("proud", "Proud", "military_tech", "#eab308"),
-            create_mood_preset("shy", "Shy", "face_retouching_off", "#f472b6"),
-            create_mood_preset("bored", "Bored", "sentiment_dissatisfied", "#78716c"),
-            create_mood_preset("playful", "Playful", "toys", "#06b6d4"),
-            create_mood_preset("focused", "Focused", "center_focus_strong", "#0ea5e9"),
-        ],
-    }
-}
-
-fn create_mood_preset(id: &str, name: &str, icon: &str, color: &str) -> Preset {
-    Preset {
-        id: format!("mood_{}", id),
-        name: name.to_string(),
-        icon: Some(icon.to_string()),
-        color: Some(color.to_string()),
-        preset_type: PresetType::Servo,
-        data: PresetData::Servo(ServoPresetData {
-            positions: vec![],
-            transition_ms: 500,
-            easing: EasingType::EaseInOut,
-        }),
-    }
 }
 
 fn create_animations_panel() -> PresetPanel {
@@ -254,29 +210,22 @@ fn create_animations_panel() -> PresetPanel {
         layout: PanelLayout::Grid,
         columns: 4,
         items_per_page: 8,
-        presets: vec![
-            create_animation_preset("wave", "Wave", "waving_hand"),
-            create_animation_preset("nod", "Nod", "check_circle"),
-            create_animation_preset("shake", "Shake Head", "cancel"),
-            create_animation_preset("dance", "Dance", "music_note"),
-            create_animation_preset("look_around", "Look Around", "visibility"),
-            create_animation_preset("bow", "Bow", "arrow_downward"),
-        ],
+        source: Some("animations".to_string()),
+        presets: vec![],
     }
 }
 
-fn create_animation_preset(id: &str, name: &str, icon: &str) -> Preset {
-    Preset {
-        id: format!("anim_{}", id),
-        name: name.to_string(),
-        icon: Some(icon.to_string()),
-        color: None,
-        preset_type: PresetType::Animation,
-        data: PresetData::Animation(AnimationPresetData {
-            keyframes: vec![],
-            loop_animation: false,
-            loop_count: None,
-        }),
+fn create_poses_panel() -> PresetPanel {
+    PresetPanel {
+        id: "poses".to_string(),
+        name: "Poses".to_string(),
+        icon: "accessibility".to_string(),
+        color: "#3b82f6".to_string(),
+        layout: PanelLayout::Grid,
+        columns: 4,
+        items_per_page: 8,
+        source: Some("poses".to_string()),
+        presets: vec![],
     }
 }
 
@@ -289,6 +238,7 @@ fn create_sounds_panel() -> PresetPanel {
         layout: PanelLayout::Grid,
         columns: 4,
         items_per_page: 8,
+        source: None,
         presets: vec![
             create_sound_preset("hello", "Hello", "record_voice_over"),
             create_sound_preset("goodbye", "Goodbye", "waving_hand"),
@@ -313,42 +263,6 @@ fn create_sound_preset(id: &str, name: &str, icon: &str) -> Preset {
             sound_id: format!("{}.wav", id),
             volume: 1.0,
             priority: 1,
-        }),
-    }
-}
-
-fn create_poses_panel() -> PresetPanel {
-    PresetPanel {
-        id: "poses".to_string(),
-        name: "Poses".to_string(),
-        icon: "accessibility".to_string(),
-        color: "#3b82f6".to_string(),
-        layout: PanelLayout::Grid,
-        columns: 4,
-        items_per_page: 8,
-        presets: vec![
-            create_pose_preset("center", "Center", "center_focus_strong"),
-            create_pose_preset("look_left", "Look Left", "arrow_back"),
-            create_pose_preset("look_right", "Look Right", "arrow_forward"),
-            create_pose_preset("look_up", "Look Up", "arrow_upward"),
-            create_pose_preset("look_down", "Look Down", "arrow_downward"),
-            create_pose_preset("tilt_left", "Tilt Left", "rotate_left"),
-            create_pose_preset("tilt_right", "Tilt Right", "rotate_right"),
-        ],
-    }
-}
-
-fn create_pose_preset(id: &str, name: &str, icon: &str) -> Preset {
-    Preset {
-        id: format!("pose_{}", id),
-        name: name.to_string(),
-        icon: Some(icon.to_string()),
-        color: None,
-        preset_type: PresetType::Servo,
-        data: PresetData::Servo(ServoPresetData {
-            positions: vec![],
-            transition_ms: 300,
-            easing: EasingType::EaseOut,
         }),
     }
 }

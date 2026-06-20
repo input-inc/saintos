@@ -78,6 +78,10 @@ bool     maestro_set_speed(uint8_t channel, uint16_t speed);
 bool     maestro_set_acceleration(uint8_t channel, uint16_t accel);
 uint16_t maestro_get_position(uint8_t channel);
 uint16_t maestro_get_errors(void);
+/* Compact Protocol "Get Moving State" (0xA6). Returns 0 if all servos
+ * are at their target, 1 if any are still moving. 0xFF means the
+ * device didn't answer (transport failure). Mini Maestro 1.01+. */
+uint8_t  maestro_get_moving_state(void);
 void     maestro_go_home(void);
 
 /* Stop any currently running user script on the Maestro. Pololu

@@ -38,6 +38,10 @@ const ANALOG_INPUTS: { value: AnalogInput; label: string }[] = [
     { value: 'right_stick_y', label: 'Right Stick Y' },
     { value: 'left_trigger', label: 'Left Trigger' },
     { value: 'right_trigger', label: 'Right Trigger' },
+    { value: 'left_pad_x', label: 'Left Trackpad X' },
+    { value: 'left_pad_y', label: 'Left Trackpad Y' },
+    { value: 'right_pad_x', label: 'Right Trackpad X' },
+    { value: 'right_pad_y', label: 'Right Trackpad Y' },
 ];
 
 const DIGITAL_INPUTS: { value: DigitalInput; label: string }[] = [

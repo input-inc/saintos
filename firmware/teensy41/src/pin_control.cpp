@@ -17,6 +17,7 @@ extern "C" {
 #include "peripheral_driver.h"
 #include "maestro_driver.h"   // maestro_set_target_preview (live extent-dial jog)
 #include "saint_types.h"   // led_set_override_color / led_set_override_brightness / led_clear_override
+#include "neopixel_strip.h" // operator-added WS2812 strips on arbitrary pins
 }
 
 // =============================================================================
@@ -445,6 +446,9 @@ void pin_control_estop(void)
     peripheral_estop_all();
     Serial.printf("ESTOP: peripherals stopped\n");
 
+    // External NeoPixel strips → dark.
+    neopixel_strip_all_off();
+
     Serial.printf("ESTOP: Complete\n");
 }
 
@@ -570,6 +574,27 @@ static bool apply_set_channel(const char* json)
     }
     if (!has_value && preview_us < 0) {
         Serial.printf("set_channel: missing both 'value' and 'us'\n");
+        return false;
+    }
+
+    /* Operator-added external WS2812 strip — checked FIRST, and by
+     * EXACT instance id, so a configured strip (whose id may itself
+     * contain "neopixel") routes to its own driver rather than the
+     * onboard-LED fallback below. The onboard status LED is never a
+     * registered strip, so it falls through to apply_neopixel_channel. */
+    if (strcmp(peripheral_type, "neopixel") == 0
+        && neopixel_strip_exists(peripheral_id)) {
+        if (strcmp(channel_id, "color") == 0) {
+            return neopixel_strip_set_color(peripheral_id, (uint32_t)value);
+        }
+        if (strcmp(channel_id, "brightness") == 0) {
+            if (value < 0.0f) value = 0.0f;
+            if (value > 1.0f) value = 1.0f;
+            return neopixel_strip_set_brightness(
+                peripheral_id, (uint8_t)(value * 255.0f + 0.5f));
+        }
+        Serial.printf("NeoPixel: strip '%s' unknown channel '%s'\n",
+                       peripheral_id, channel_id);
         return false;
     }
 

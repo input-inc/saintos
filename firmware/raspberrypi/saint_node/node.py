@@ -145,6 +145,10 @@ class SaintNode(Node):
         # Firmware updater
         self._updater = FirmwareUpdater(self.get_logger())
         self._updater.set_progress_callback(self._on_update_progress)
+        # Terminal result — published on success from inside
+        # perform_update (just before the service restart kills us) and
+        # on failure from do_update below.
+        self._updater.set_result_callback(self._publish_update_result)
 
         # Apply saved configuration if adopted
         if self._config.is_adopted():
@@ -881,8 +885,11 @@ class SaintNode(Node):
     def _publish_update_result(self, success: bool, message: str):
         """Publish update result on both /update_progress and /log so
         the UI's progress bar AND the server's activity feed see it.
-        Called only on FAILURE — success path doesn't reach here
-        because the service restart kills us before we'd publish.
+        Wired as the updater's result callback: success is published
+        from inside perform_update just before the service restart (with
+        a flush delay), and failure is published from do_update. Either
+        way the UI gets a terminal frame instead of hanging on the last
+        progress stage.
         """
         msg_data = {
             'node_id': self._node_id,

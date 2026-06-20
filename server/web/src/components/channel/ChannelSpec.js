@@ -28,9 +28,11 @@ export function specFor (peripheralType, channel) {
   // on 0 so the slider rests at neutral and can reach both sides of
   // the servo's travel.
   if (peripheralType === 'maestro') {
+    // −1…+1 maps to the channel's configured [min, max] extents in the
+    // firmware, so the slider already can't command outside the range.
+    // Show the raw routed signal (−1.00 … 1.00), not a percentage.
     return { kind: 'slider', min: -1, max: 1, step: 0.01, neutral: 0,
-             format: v => `${(v * 100).toFixed(0)}%`,
-             hint: '−100% min · 0 center · +100% max' }
+             format: v => Number(v).toFixed(2) }
   }
   if (channel.cap === 'digital_out') return { kind: 'toggle' }
   if (channel.cap === 'rgb')         return { kind: 'color', unsupported: true, note: 'No firmware control path yet.' }

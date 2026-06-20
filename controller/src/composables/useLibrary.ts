@@ -1,0 +1,89 @@
+/**
+ * Server library composable — the controller's view of the animations
+ * and poses saved on the SAINT.OS server.
+ *
+ * The preset panels marked `source: 'animations'` / `'poses'` render
+ * from these lists (names + icons), and selecting an item fires
+ * start_animation / apply_pose (see useBindings.triggerActiveItem).
+ *
+ * Data path (over the existing WS):
+ *   connect → invoke('list_animations') / invoke('list_poses')
+ *           → 'library-animations' / 'library-poses' events → refs.
+ *
+ * Module-scoped singleton (same pattern as useConnection/useBatteries)
+ * so one fetch feeds every caller.
+ */
+
+import { computed, ref, watch } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { useConnection } from './useConnection';
+
+export interface LibraryItem {
+    id: string;
+    name: string;
+    icon?: string;
+}
+
+const animationsRef = ref<LibraryItem[]>([]);
+const posesRef = ref<LibraryItem[]>([]);
+
+let initialized = false;
+const unlistenFns: UnlistenFn[] = [];
+
+// The server summaries carry more than we render (group, duration, …);
+// keep just what the panel needs and tolerate missing fields.
+function toItems(raw: unknown): LibraryItem[] {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+        .map(x => ({
+            id: String(x['id'] ?? ''),
+            name: String(x['name'] ?? x['id'] ?? ''),
+            icon: typeof x['icon'] === 'string' && x['icon'] ? x['icon'] : undefined,
+        }))
+        .filter(i => i.id);
+}
+
+async function refresh(): Promise<void> {
+    await Promise.all([
+        invoke('list_animations').catch(e =>
+            console.error('[useLibrary] list_animations failed:', e)),
+        invoke('list_poses').catch(e =>
+            console.error('[useLibrary] list_poses failed:', e)),
+    ]);
+}
+
+async function ensureInit(): Promise<void> {
+    if (initialized) return;
+    initialized = true;
+
+    unlistenFns.push(
+        await listen<{ animations?: unknown }>('library-animations', event => {
+            animationsRef.value = toItems(event.payload?.animations);
+        }),
+    );
+    unlistenFns.push(
+        await listen<{ poses?: unknown }>('library-poses', event => {
+            posesRef.value = toItems(event.payload?.poses);
+        }),
+    );
+
+    // Fetch on connect, and re-fetch on every reconnect (a server
+    // restart drops our view). Clear on disconnect so a stale list
+    // doesn't linger in the panels.
+    const conn = useConnection();
+    watch(conn.isConnected, (connected) => {
+        if (connected) void refresh();
+        else { animationsRef.value = []; posesRef.value = []; }
+    }, { immediate: true });
+}
+
+export function useLibrary() {
+    void ensureInit();
+    return {
+        animations: computed(() => animationsRef.value),
+        poses: computed(() => posesRef.value),
+        refresh,
+    };
+}

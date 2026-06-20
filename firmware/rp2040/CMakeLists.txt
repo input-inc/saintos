@@ -141,6 +141,7 @@ set(SAINT_NODE_SOURCES
     ../shared/src/peripheral_manager.cpp
     ../shared/src/uart_pin_pairs_parse.c
     ../shared/src/saint_log.c
+    ../shared/src/discovery_retry.cpp
     ../shared/src/maestro_driver.c
     ../shared/src/ota_streamer.c
     src/hardware.c
