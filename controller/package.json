@@ -8,7 +8,9 @@
         "build": "npm run version:sync && vite build",
         "preview": "vite preview",
         "tauri:dev": "tauri dev",
-        "tauri:build": "npm run version:sync && tauri build"
+        "tauri:build": "npm run version:sync && tauri build",
+        "posttauri:build": "bash scripts/tidy-build-cache.sh || true",
+        "tidy": "bash scripts/tidy-build-cache.sh --install"
     },
     "private": true,
     "dependencies": {

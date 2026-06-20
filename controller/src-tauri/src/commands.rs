@@ -677,6 +677,20 @@ pub fn install_controller_update(
 
     let target = target_appimage_path()?;
 
+    // If $APPIMAGE is unset we're guessing at the install location (XDG
+    // fallback). The launcher (Steam tile / .desktop) almost certainly
+    // points at the ORIGINAL file elsewhere, so the bytes land where
+    // nothing launches and the operator sees "installed but still old
+    // version after restart". Make that loud in the log; the UI also
+    // surfaces the running-vs-installed path mismatch from get_build_info.
+    if std::env::var("APPIMAGE").is_err() {
+        log::warn!(
+            "install_controller_update: $APPIMAGE unset — writing to fallback \
+             {} which the launcher may not point at; relaunch from there or \
+             repoint the launcher, or the new version won't take effect.",
+            target.display());
+    }
+
     // `with_extension` would replace `.AppImage` outright; we want to
     // append, so build the staging filename manually.
     let mut staging = target.clone();
@@ -788,8 +802,19 @@ pub fn get_installed_controller_info() -> Result<Option<serde_json::Value>, Stri
 /// filesystem reads, can't go stale relative to the running code.
 #[tauri::command]
 pub fn get_build_info() -> serde_json::Value {
+    // `appimage_path` is the file THIS process was launched from (the
+    // AppImage runtime exports $APPIMAGE). The UI compares it to the
+    // `path` recorded in installed.json by the last OTA: if they
+    // differ, the launcher (Steam tile, .desktop) is pointing at a
+    // DIFFERENT file than the one the update overwrote — which is
+    // exactly the "installed the new version but restart still shows
+    // the old one" failure. Null means we're not running from an
+    // AppImage (dev build / raw binary), where OTA self-update doesn't
+    // apply anyway.
+    let appimage_path = std::env::var("APPIMAGE").ok();
     serde_json::json!({
         "version": env!("SAINT_BUILD_VERSION"),
         "built_at_unix": env!("SAINT_BUILD_UNIX").parse::<u64>().unwrap_or(0),
+        "appimage_path": appimage_path,
     })
 }

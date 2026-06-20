@@ -187,6 +187,24 @@ is the supported path. The native-dev recipe is preserved in
 | `controller/appimage/build-docker.sh --clean` | Wipe the persistent build cache and start fresh |
 | `npm run tauri dev` | Native dev mode (hot reload, macOS / Linux desktops) |
 | `npm run tauri build` | Native production build (host-OS bundle, not AppImage) |
+| `npm run tidy` | Prune stale Rust build artifacts in `src-tauri/target` (installs cargo-sweep on first run) |
+
+### Keeping the build cache tidy
+
+Cargo never garbage-collects `src-tauri/target/debug/deps` or the
+`incremental/` caches — every old dependency version and dead toolchain
+artifact just accumulates (easily several GB). Two ways to reclaim it:
+
+- `npm run tidy` — uses [`cargo-sweep`](https://github.com/holmgr/cargo-sweep)
+  to remove artifacts unused for >14 days and those from uninstalled
+  toolchains, while leaving the current working set so the next build
+  stays incremental. `npm run tauri:build` runs this automatically
+  afterward (best-effort; skipped if cargo-sweep isn't installed).
+- `bash scripts/tidy-build-cache.sh --deep` — `cargo clean`: reclaims
+  everything immediately, but the next build is from scratch.
+
+The Docker dist build keeps its cache in a separate dir; reset it with
+`build-docker.sh --clean`.
 
 ## Documentation
 

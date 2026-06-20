@@ -9,15 +9,24 @@ import { useWsStore } from '@/stores/ws'
 const ws = useWsStore()
 const needLogin = computed(() => ws.authRequired && !ws.authenticated)
 
+// useRoute() is inject()-backed, so it MUST be resolved once here in
+// setup — never re-called lazily inside a computed getter. When such a
+// computed re-evaluates outside the active component-setup context
+// (route change, reconnect-driven re-render) inject() returns undefined
+// and `.meta` throws "undefined is not an object", which crashes the
+// whole app render and leaves the dashboard blank (no nodes /
+// peripherals / routing). Resolve the route object once; every
+// dependent computed reads off it.
+const route = useRoute()
+
 // Console kiosk routes opt out of the operator-UI chrome (AppHeader,
 // NavBar, max-w container) via meta.chromeless. They render their own
 // title bar / button bar via ConsoleScreen and take the full viewport.
-const chromeless = computed(() => !!useRoute().meta?.chromeless)
+const chromeless = computed(() => !!route.meta?.chromeless)
 
 // Full-bleed pages (Routes, Logs) opt out of <main>'s max-w-7xl + padding
 // via body-level classes that style.css keys off — matches vanilla's
 // `body.routing-fullwidth` / `body.logs-fullwidth` mechanism.
-const route = useRoute()
 watch(
   () => route.name,
   (name) => {

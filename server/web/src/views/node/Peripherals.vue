@@ -498,6 +498,7 @@ function openChannelEdit (peripheral, channelIdx) {
     home_us:      homeUs,
     speed:        Number(existing.speed ?? 0),
     acceleration: Number(existing.acceleration ?? 0),
+    idle_disengage_ms: Number(existing.idle_disengage_ms ?? 0),
   }
   channelModalPeripheralId.value = peripheral.id
   channelModalIdx.value = channelIdx
@@ -530,6 +531,7 @@ async function saveChannelEdit () {
     home_us:      Number(channelModalDraft.value.home_us)    || 1500,
     speed:        Math.max(0, Math.min(65535, Number(channelModalDraft.value.speed) || 0)),
     acceleration: Math.max(0, Math.min(255,   Number(channelModalDraft.value.acceleration) || 0)),
+    idle_disengage_ms: Math.max(0, Math.min(600000, Number(channelModalDraft.value.idle_disengage_ms) || 0)),
   }
   const updated = {
     id:    peripheral.id,
@@ -1029,6 +1031,19 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
           <div class="col-span-2 text-xs text-fg-faint italic">
             Default speed/accel are applied on Pose transitions only. Real-time
             animation/control input snaps to the target value at full speed.
+          </div>
+
+          <div class="col-span-2 pt-2 border-t border-line">
+            <label class="block text-xs text-fg-muted mb-1">Idle disengage (ms)</label>
+            <input v-model.number="channelModalDraft.idle_disengage_ms" type="number" min="0" max="600000" step="100" class="input-field w-full" />
+            <p class="text-xs text-fg-faint mt-1">
+              0 = always engaged. <strong>&gt;0</strong> = after this many milliseconds of
+              the target not changing, the firmware kills PWM on this channel so the
+              servo goes limp and stops the idle-correction whine. The next control
+              value re-engages it. Use only on channels that don't hold a load —
+              eyes, mouth flaps, eyebrows. Leave at 0 for arms, anything fighting a
+              spring, or anything supporting weight.
+            </p>
           </div>
         </div>
       </div>

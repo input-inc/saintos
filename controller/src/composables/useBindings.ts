@@ -405,6 +405,11 @@ function showPanel(panelId: string): void {
         selectedIndex: 0,
         currentPage: 0,
     };
+    // Pull a fresh server list when opening a server-backed panel so the
+    // grid is current even if items changed since connect.
+    const profile = profilesRef.value.find(p => p.id === activeProfileIdRef.value);
+    const panel = profile?.presetPanels.find(p => p.id === panelId);
+    if (panel && panelSource(panel)) void library.refresh();
 }
 
 function hidePanel(): void {
@@ -498,19 +503,37 @@ async function activatePreset(presetId: string): Promise<void> {
     await invoke('activate_preset', { presetId });
 }
 
-// Items shown for a panel. Server-backed panels (source set) stream
-// live from the server library; static panels use their stored presets.
+// Eager singletons: initializing the library here (rather than lazily
+// inside a computed) means it fetches on connect even before any panel
+// is opened, and panelItems can return stable computed refs.
+const library = useLibrary();
+const connection = useConnection();
+
+// Classify a panel's server backing. Honors the explicit `source`
+// field, and also falls back to the built-in panel id so profiles
+// saved before `source` existed still bind to the server lists without
+// needing a profile reset.
+function panelSource(panel: PresetPanel): 'animations' | 'poses' | null {
+    if (panel.source === 'animations' || panel.id === 'animations') return 'animations';
+    if (panel.source === 'poses' || panel.id === 'poses') return 'poses';
+    return null;
+}
+
+// Items shown for a panel. Server-backed panels stream live from the
+// server library; static panels use their stored presets.
 function panelItems(panel: PresetPanel): PanelItem[] {
-    if (panel.source === 'animations') return useLibrary().animations.value;
-    if (panel.source === 'poses') return useLibrary().poses.value;
+    const src = panelSource(panel);
+    if (src === 'animations') return library.animations.value;
+    if (src === 'poses') return library.poses.value;
     return panel.presets;
 }
 
 // Fire the right action for a selected item: play/apply for the
 // server-backed panels, the local preset path otherwise.
 function triggerPanelItem(panel: PresetPanel, itemId: string): void {
-    if (panel.source === 'animations') void useConnection().startAnimation(itemId);
-    else if (panel.source === 'poses') void useConnection().applyPose(itemId);
+    const src = panelSource(panel);
+    if (src === 'animations') void connection.startAnimation(itemId);
+    else if (src === 'poses') void connection.applyPose(itemId);
     else void activatePreset(itemId);
 }
 

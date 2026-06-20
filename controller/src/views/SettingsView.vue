@@ -60,14 +60,18 @@ const discoveredServers = ref<DiscoveredServer[]>([]);
 let discoveryPollHandle: ReturnType<typeof setInterval> | null = null;
 
 const currentVersion = ref<string | null>(null);
-const installedInfo = ref<{ version?: string; checksum?: string; filename?: string } | null>(null);
+// `path` is where the last OTA actually wrote the AppImage (recorded
+// by install_controller_update). Compared against the running file's
+// path (buildInfo.appimage_path) to detect a launcher pointing at a
+// stale copy — see updateFileMismatch.
+const installedInfo = ref<{ version?: string; checksum?: string; filename?: string; path?: string } | null>(null);
 // Compile-time canonical build version, baked into the binary by
 // build.rs. Same format the AppImage filename uses
 // (e.g. "0.5.0-local.d85dad7") so an operator can correlate the
 // running build with the file on disk at a glance. Falls back to
 // the bare Tauri `getVersion()` if the new command isn't available
 // (e.g. running an older controller against a newer dashboard).
-const buildInfo = ref<{ version: string; built_at_unix: number } | null>(null);
+const buildInfo = ref<{ version: string; built_at_unix: number; appimage_path?: string | null } | null>(null);
 const updateInfo = ref<FirmwareInfo | null>(null);
 const updateState = ref<UpdateState>('not-connected');
 const updateError = ref<string>('');
@@ -78,6 +82,22 @@ const updateProgress = ref<string>('');
 // covers the brief window before get_build_info resolves on mount.
 const buildLabel = computed<string>(() =>
     buildInfo.value?.version || currentVersion.value || '…');
+
+// Path this process was launched from (the AppImage runtime's
+// $APPIMAGE). Empty when running a dev/raw build where OTA self-update
+// doesn't apply.
+const runningPath = computed<string>(() => buildInfo.value?.appimage_path || '');
+
+// The smoking gun for "updated but restart shows the old version": the
+// last OTA wrote to installedInfo.path, but this process is running
+// from a DIFFERENT file (runningPath). That means the launcher (Steam
+// tile / .desktop / file manager) points at a stale copy the update
+// never touched. Only meaningful once both paths are known.
+const updateFileMismatch = computed<boolean>(() => {
+    const wrote = installedInfo.value?.path;
+    const running = runningPath.value;
+    return !!wrote && !!running && wrote !== running;
+});
 
 const buildBuiltAtLabel = computed<string>(() => {
     const ts = buildInfo.value?.built_at_unix;
@@ -556,6 +576,9 @@ onBeforeUnmount(() => {
                 <p v-if="buildBuiltAtLabel" class="text-xs">
                     Built: {{ buildBuiltAtLabel }}
                 </p>
+                <p v-if="runningPath" class="text-xs break-all">
+                    Running from: <span class="font-mono">{{ runningPath }}</span>
+                </p>
                 <p>A Tauri-based controller application for SAINT.OS robots.</p>
                 <p>Supports gamepad, gyroscope, and touch input.</p>
             </div>
@@ -580,6 +603,23 @@ onBeforeUnmount(() => {
                 <div v-if="updateInfo?.latest_version" class="flex items-center justify-between">
                     <span class="text-saint-text-muted">Latest on server</span>
                     <span class="font-mono text-right">{{ updateInfo.latest_version }}</span>
+                </div>
+
+                <!-- Path mismatch: the last OTA wrote a new AppImage to one
+                     file, but this process launched from a different one — so
+                     the update "succeeds" yet a restart keeps showing the old
+                     version. Surface both paths and tell the operator how to
+                     fix it (relaunch from / repoint the launcher at the file
+                     the update actually wrote). -->
+                <div v-if="updateFileMismatch"
+                     class="bg-saint-error/20 border border-saint-error rounded-lg p-3 text-xs space-y-1">
+                    <strong class="text-saint-error">Updates aren't taking effect.</strong>
+                    <p>This app is running from a different file than the one the
+                       update writes, so a restart keeps loading the old version.</p>
+                    <p>Running: <span class="font-mono break-all">{{ runningPath }}</span></p>
+                    <p>Updated:  <span class="font-mono break-all">{{ installedInfo?.path }}</span></p>
+                    <p>Point your Steam shortcut (or launcher) at the “Updated” path,
+                       or relaunch from there.</p>
                 </div>
 
                 <template v-if="updateState === 'not-connected'">

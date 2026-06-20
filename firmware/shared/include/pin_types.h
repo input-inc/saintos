@@ -126,6 +126,8 @@ typedef struct {
             uint16_t speed;
             uint16_t acceleration;
             uint16_t home_us;
+            /* See maestro_driver.h::maestro_channel_config_t.idle_disengage_ms */
+            uint32_t idle_disengage_ms;
         } maestro;
         struct {
             uint8_t address;

@@ -62,6 +62,16 @@ static bool     g_config_dirty  = false;
 
 static maestro_channel_config_t g_channel_configs[MAESTRO_MAX_CHANNELS];
 
+/* Per-channel idle-disengage state. PWM is "engaged" once we've sent
+ * a real target; after idle_disengage_ms elapses with no further
+ * SET_TARGET on that channel, maestro_update() sends quarter_us=0 to
+ * release PWM (servo goes limp, idle-correction whine stops). The next
+ * SET_TARGET (drv_set_value or maestro_set_target_preview) re-engages
+ * because it writes a fresh target through the chip. See
+ * peripheral_model._MAESTRO_CHANNEL_KEYS for the per-channel knob. */
+static uint32_t g_last_command_ms[MAESTRO_MAX_CHANNELS];
+static bool     g_engaged[MAESTRO_MAX_CHANNELS];
+
 /* Resolve a transport ops table for the given flash mode. Returns NULL
  * if the platform doesn't provide that transport — caller logs and
  * leaves the driver inert. */
@@ -211,6 +221,11 @@ void maestro_init(void)
  * call this, so it needs a prototype here. */
 static void maestro_apply_home_positions(void);
 
+/* Forward decl: maestro_update's idle-disengage scan calls this, but
+ * the definition sits next to maestro_set_target (with which it shares
+ * the compact-protocol byte layout). */
+static bool send_raw_target(uint8_t channel, uint16_t quarter_us);
+
 void maestro_update(void)
 {
     if (!g_initialized || !g_transport) return;
@@ -269,6 +284,25 @@ void maestro_update(void)
             g_last_errors = maestro_get_errors();
             g_last_moving = maestro_get_moving_state();
         }
+
+        /* Per-channel idle disengage: release PWM (target=0) on any
+         * channel whose configured idle_disengage_ms has elapsed since
+         * the last SET_TARGET. The Maestro responds to target=0 by
+         * stopping pulse output entirely on that channel — the servo
+         * goes limp and stops the audible idle-correction whine. The
+         * next SET_TARGET re-engages because maestro_set_target writes
+         * a fresh target. Channels with idle_disengage_ms == 0 are
+         * always-on (the safe default for load-bearing joints).
+         * Cheap: one comparison per channel per tick, the actual TX
+         * only fires once at the moment of disengage. */
+        for (uint8_t ch = 0; ch < MAESTRO_MAX_CHANNELS; ch++) {
+            uint32_t disengage_ms = g_channel_configs[ch].idle_disengage_ms;
+            if (disengage_ms == 0 || !g_engaged[ch]) continue;
+            if ((now - g_last_command_ms[ch]) >= disengage_ms) {
+                (void)send_raw_target(ch, 0);
+                g_engaged[ch] = false;
+            }
+        }
     }
 }
 
@@ -292,6 +326,23 @@ static bool tx_bytes(const uint8_t* buf, size_t len)
     return g_transport->write(buf, len);
 }
 
+/* Bypass-clamp variant of SET_TARGET used by the idle-disengage path
+ * to send quarter_us=0 (release PWM). The public maestro_set_target
+ * clamps to the channel's calibrated MIN/MAX so a target of 0 would
+ * be snapped up to min_qus — exactly what we don't want when the
+ * intent is "stop driving this servo entirely". Does not touch
+ * engagement bookkeeping (caller manages that). */
+static bool send_raw_target(uint8_t channel, uint16_t quarter_us)
+{
+    uint8_t cmd[4] = {
+        0x84,
+        channel,
+        (uint8_t)(quarter_us & 0x7F),
+        (uint8_t)((quarter_us >> 7) & 0x7F),
+    };
+    return tx_bytes(cmd, sizeof(cmd));
+}
+
 bool maestro_set_target(uint8_t channel, uint16_t quarter_us)
 {
     if (channel >= MAESTRO_MAX_CHANNELS) return false;
@@ -312,13 +363,14 @@ bool maestro_set_target(uint8_t channel, uint16_t quarter_us)
     if (quarter_us < min_qus) quarter_us = min_qus;
     if (quarter_us > max_qus) quarter_us = max_qus;
 
-    uint8_t cmd[4] = {
-        0x84,
-        channel,
-        (uint8_t)(quarter_us & 0x7F),
-        (uint8_t)((quarter_us >> 7) & 0x7F),
-    };
-    return tx_bytes(cmd, sizeof(cmd));
+    /* Engagement bookkeeping for the per-channel idle_disengage_ms
+     * watchdog in maestro_update(). Every real SET_TARGET counts as
+     * "this channel is in active use" — re-engages if currently
+     * released, and resets the idle timer either way. */
+    g_last_command_ms[channel] = PLATFORM_MILLIS();
+    g_engaged[channel] = true;
+
+    return send_raw_target(channel, quarter_us);
 }
 
 bool maestro_set_target_preview(uint8_t channel, uint16_t us)
@@ -332,14 +384,14 @@ bool maestro_set_target_preview(uint8_t channel, uint16_t us)
     if (us < MAESTRO_PREVIEW_MIN_US) us = MAESTRO_PREVIEW_MIN_US;
     if (us > MAESTRO_PREVIEW_MAX_US) us = MAESTRO_PREVIEW_MAX_US;
 
-    uint16_t quarter_us = (uint16_t)(us * 4u);
-    uint8_t cmd[4] = {
-        0x84,
-        channel,
-        (uint8_t)(quarter_us & 0x7F),
-        (uint8_t)((quarter_us >> 7) & 0x7F),
-    };
-    return tx_bytes(cmd, sizeof(cmd));
+    /* Live preview = operator is interacting with this channel right
+     * now. Same engagement bookkeeping as maestro_set_target so a
+     * channel being dialed in the modal doesn't disengage out from
+     * under the operator. */
+    g_last_command_ms[channel] = PLATFORM_MILLIS();
+    g_engaged[channel] = true;
+
+    return send_raw_target(channel, (uint16_t)(us * 4u));
 }
 
 bool maestro_set_speed(uint8_t channel, uint16_t speed)
@@ -437,6 +489,16 @@ void maestro_set_channel_config(uint8_t channel,
 {
     if (channel >= MAESTRO_MAX_CHANNELS || !config) return;
     g_channel_configs[channel] = *config;
+
+    /* Reset the idle-disengage timer on any config push so the operator
+     * doesn't watch a still-engaged channel disengage milliseconds
+     * after they hit Sync (which would happen if last_command_ms was
+     * already older than the new idle_disengage_ms). Disengaged
+     * channels stay disengaged — the operator's next deliberate
+     * SET_TARGET (slider, animation, route) re-engages naturally. */
+    if (g_engaged[channel]) {
+        g_last_command_ms[channel] = PLATFORM_MILLIS();
+    }
 
     /* Mark for EEPROM re-provision on the next update tick (live config
      * sync — see g_config_dirty). Only this live-apply path sets it;
@@ -844,6 +906,7 @@ static void drv_set_defaults(uint8_t channel, pin_config_t* config)
     config->params.maestro.speed        = 0;
     config->params.maestro.acceleration = 0;
     config->params.maestro.home_us      = 0;
+    config->params.maestro.idle_disengage_ms = 0;
 }
 
 static bool drv_apply_config(uint8_t channel, const pin_config_t* config)
@@ -856,6 +919,7 @@ static bool drv_apply_config(uint8_t channel, const pin_config_t* config)
         .speed         = config->params.maestro.speed,
         .acceleration  = config->params.maestro.acceleration,
         .home_us       = config->params.maestro.home_us,
+        .idle_disengage_ms = config->params.maestro.idle_disengage_ms,
     };
     maestro_set_channel_config(channel, &mcfg);
     return true;
@@ -871,6 +935,7 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
     uint16_t spd   = 0;
     uint16_t acc   = 0;
     uint16_t home  = 0;
+    uint32_t idle  = 0;
 
     const char* p;
 
@@ -981,6 +1046,25 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
                     MAESTRO_PARSE_CH_U16("acceleration", acc);
                     MAESTRO_PARSE_CH_U16("home_us",      home);
                     #undef MAESTRO_PARSE_CH_U16
+                    /* idle_disengage_ms is uint32 — server caps at 600_000.
+                     * Per-channel only; no peripheral-level fallback because
+                     * "release every channel after N ms idle" is exactly the
+                     * wrong default for load-bearing servos. Each channel
+                     * opts in. strtoul is overkill for a JSON integer this
+                     * size; atol is fine and matches the surrounding atoi
+                     * style. */
+                    {
+                        const char* k = strstr(obj_s, "\"idle_disengage_ms\"");
+                        if (k && k < obj_e) {
+                            k = strchr(k, ':');
+                            if (k && k < obj_e) {
+                                k++; while (*k == ' ') k++;
+                                long v = atol(k);
+                                if (v < 0) v = 0;
+                                idle = (uint32_t)v;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1021,12 +1105,13 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
      * picks up the just-saved pair. */
     (void)bind_transport((uint8_t)g_transport_mode, NULL);
 
-    config->params.maestro.min_pulse_us  = min_p;
-    config->params.maestro.max_pulse_us  = max_p;
-    config->params.maestro.neutral_us    = neut;
-    config->params.maestro.speed         = spd;
-    config->params.maestro.acceleration  = acc;
-    config->params.maestro.home_us       = home;
+    config->params.maestro.min_pulse_us      = min_p;
+    config->params.maestro.max_pulse_us      = max_p;
+    config->params.maestro.neutral_us        = neut;
+    config->params.maestro.speed             = spd;
+    config->params.maestro.acceleration      = acc;
+    config->params.maestro.home_us           = home;
+    config->params.maestro.idle_disengage_ms = idle;
     return true;
 }
 

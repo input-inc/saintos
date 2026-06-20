@@ -51,6 +51,14 @@ typedef struct {
     uint16_t speed;             /* Speed limit (0 = unlimited)          */
     uint16_t acceleration;      /* Acceleration limit (0 = none)        */
     uint16_t home_us;           /* Home position pulse width (0=neutral)*/
+    /* Idle disengage: after this many ms of the channel's target not
+     * changing, the driver writes SET_TARGET=0 to release PWM so the
+     * servo stops the idle-correction whine. The next control value
+     * restores PWM. 0 = always engaged (no auto-release). Server caps
+     * at 600_000 (10 min). uint32 because uint16 maxes at ~65 s — fine
+     * for the eye/mouth case but tight if an operator wants "release
+     * after 2 minutes of idle". See peripheral_model._MAESTRO_CHANNEL_KEYS. */
+    uint32_t idle_disengage_ms;
 } maestro_channel_config_t;
 
 /* ── High-level lifecycle (called from peripheral framework) ─────── */

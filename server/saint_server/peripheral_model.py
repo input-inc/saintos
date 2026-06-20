@@ -184,9 +184,18 @@ def visible_maestro_channels(peripheral) -> int:
 # transitions only — see TODO in maestro_driver.c — but stored under
 # the bare firmware names.
 _MAESTRO_CHANNEL_KEYS = (
-    "label", "min_pulse_us", "max_pulse_us", "neutral_us", "home_us",
-    "speed", "acceleration",
+    "min_pulse_us", "max_pulse_us", "neutral_us", "home_us",
+    "speed", "acceleration", "idle_disengage_ms",
 )
+# Channel fields the dashboard stores but the firmware never reads —
+# kept in the in-memory model + on-disk YAML for display only, never on
+# the wire. The 2 KB XRCE-DDS reassembly cap is real (memory:
+# feedback_xrce_wire_size_budget) and an operator with all 24 channels
+# named "Right Top Flap Rotation"-style burns ~600 bytes on labels
+# alone — enough on its own to push the Maestro config over the cap
+# and crash the firmware mid-apply. "icon" is also stored on the model
+# but already excluded from _MAESTRO_CHANNEL_KEYS for the same reason.
+_MAESTRO_CHANNEL_DISPLAY_ONLY_KEYS = ("label", "icon")
 
 
 def _maestro_default_channel(idx: int, peripheral_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -220,6 +229,14 @@ def _maestro_default_channel(idx: int, peripheral_params: Dict[str, Any]) -> Dic
         # Pose editor work); animation input snaps at full speed.
         "speed": 0,
         "acceleration": 0,
+        # 0 = always engaged. >0 = after N ms of unchanged target, the
+        # firmware writes SET_TARGET=0 (kills PWM) so the servo goes
+        # limp and stops the idle-correction whine. The next control
+        # value restores PWM. Set per-channel because load-bearing
+        # joints (arms, anything fighting a spring) must stay armed,
+        # but cosmetic ones (eyes, eyebrows, mouth flaps) can safely
+        # release.
+        "idle_disengage_ms": 0,
     }
 
 
@@ -263,6 +280,13 @@ def _maestro_sanitize_channel(
         out["acceleration"] = max(0, min(255, int(raw.get("acceleration", 0))))
     except (TypeError, ValueError):
         out["acceleration"] = 0
+    # Cap at 10 minutes — past that the firmware is functionally "never
+    # disengage" anyway, and capping keeps the JSON-wire field a tight
+    # uint32 in practice. Lower bound 0 = disabled (always engaged).
+    try:
+        out["idle_disengage_ms"] = max(0, min(600_000, int(raw.get("idle_disengage_ms", 0))))
+    except (TypeError, ValueError):
+        out["idle_disengage_ms"] = 0
     return out
 
 
