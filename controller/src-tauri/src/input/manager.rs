@@ -60,7 +60,11 @@ impl InputManager {
         thread::spawn(move || {
             log::info!("Input emit thread started");
             while *running.read() {
-                let gamepad = gamepad_state.read().clone();
+                // `mut` is only needed on Linux, where the HID merge below
+                // inserts back-button/stick-click states; allow it so the
+                // non-Linux build doesn't warn about an unused `mut`.
+                #[allow(unused_mut)]
+                let mut gamepad = gamepad_state.read().clone();
 
                 // On Linux, merge HID data for back buttons, gyro, and touchpads
                 #[cfg(target_os = "linux")]
@@ -155,7 +159,9 @@ impl InputManager {
     }
 
     pub fn get_state(&self) -> InputState {
-        let gamepad = self.gamepad.get_state();
+        // `mut` is only needed on Linux (HID button merge below).
+        #[allow(unused_mut)]
+        let mut gamepad = self.gamepad.get_state();
 
         #[cfg(target_os = "linux")]
         let (gyro, left_touchpad, right_touchpad) = {

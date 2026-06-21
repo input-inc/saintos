@@ -150,7 +150,7 @@ impl SteamDeckHidReader {
         log::info!("=== End HID scan ===");
 
         // Collect all Steam Deck HID devices
-        let mut deck_devices: Vec<_> = api.device_list()
+        let deck_devices: Vec<_> = api.device_list()
             .filter(|d| d.vendor_id() == STEAM_DECK_VID && d.product_id() == STEAM_DECK_PID)
             .collect();
 

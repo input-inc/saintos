@@ -316,6 +316,9 @@ pub fn activate_preset(state: State<'_, Arc<AppState>>, preset_id: String) -> Re
 /// Get gamepad debug info
 #[tauri::command]
 pub fn get_gamepad_debug_info() -> String {
+    // Only the macOS branch shells out (ioreg); gating the import keeps
+    // the Linux build from warning about an unused import.
+    #[cfg(target_os = "macos")]
     use std::process::Command;
 
     let mut info = String::new();
