@@ -213,19 +213,23 @@ impl InputMapper {
 
     /// Process input state and generate action events
     pub fn process(&mut self, input: &InputState) -> Vec<ActionEvent> {
-        let profile = match self.active_profile() {
-            Some(p) => p.clone(),
-            None => return Vec::new(),
-        };
-
+        // Move the profiles Vec out of `self` so the active profile can
+        // be borrowed immutably while process_*_bindings hold &mut self
+        // (for the change-detection caches). This replaces a full
+        // BindingProfile CLONE on every 60 Hz frame — the profile carries
+        // Vecs of analog + digital bindings, panels, and presets, so that
+        // clone dominated the per-frame cost (~5.5 µs). mem::take swaps in
+        // an empty Vec (cheap) and we restore it before returning; the
+        // binding helpers never read self.profiles, so the temporarily-
+        // empty Vec is never observed.
+        let profiles = std::mem::take(&mut self.profiles);
         let mut events = Vec::new();
-
-        // Process analog bindings
-        self.process_analog_bindings(&profile, input, &mut events);
-
-        // Process digital bindings
-        self.process_digital_bindings(&profile, input, &mut events);
-
+        if let Some(idx) = profiles.iter().position(|p| p.id == self.active_profile_id) {
+            let profile = &profiles[idx];
+            self.process_analog_bindings(profile, input, &mut events);
+            self.process_digital_bindings(profile, input, &mut events);
+        }
+        self.profiles = profiles; // restore
         events
     }
 
@@ -529,7 +533,7 @@ impl InputMapper {
                 let total_items = panel.presets.len();
                 let columns = panel.columns as usize;
                 let items_per_page = panel.items_per_page as usize;
-                let total_pages = (total_items + items_per_page - 1) / items_per_page;
+                let total_pages = total_items.div_ceil(items_per_page);
 
                 match direction {
                     // Grid navigation
@@ -665,5 +669,149 @@ impl InputMapper {
 impl Default for InputMapper {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Behavior lock-down + perf benchmarks for the per-frame input
+    //! mapping hot path. Benches are #[ignore]d so they stay out of the
+    //! normal `cargo test` run; invoke them with:
+    //!   cargo test --release --lib -- --ignored --nocapture bench
+    //!
+    //! We set the mapper's private fields directly rather than calling
+    //! set_profiles()/set_active_profile() — those persist to the real
+    //! user data dir (profiles.json) and a test must not clobber the
+    //! operator's saved profiles.
+    use super::*;
+    use crate::input::gamepad::GamepadState;
+    use crate::input::gyro::{GyroState, TouchpadState};
+    use crate::input::manager::InputState;
+    use std::time::Instant;
+
+    fn fresh_mapper() -> InputMapper {
+        let mut m = InputMapper::new();
+        m.profiles = vec![crate::bindings::presets::create_default_profile()];
+        m.active_profile_id = "default".to_string();
+        // Clear change-detection caches so each test starts deterministic.
+        m.last_analog_values.clear();
+        m.last_send_times.clear();
+        m.last_button_states.clear();
+        m
+    }
+
+    fn input_left_stick(x: f32, y: f32) -> InputState {
+        let mut gp = GamepadState { connected: true, ..Default::default() };
+        gp.left_stick.x = x;
+        gp.left_stick.y = y;
+        InputState {
+            gamepad: gp,
+            gyro: GyroState::default(),
+            left_touchpad: TouchpadState::default(),
+            right_touchpad: TouchpadState::default(),
+        }
+    }
+
+    fn cmd_value(cmd: &MappedCommand) -> f64 {
+        match cmd {
+            MappedCommand::Topic { value, .. } | MappedCommand::WsInput { value, .. } => {
+                value.as_f64().unwrap_or(f64::NAN)
+            }
+        }
+    }
+
+    // ── behavior (the "don't break anything" net) ───────────────────
+
+    #[test]
+    fn deflected_stick_emits_commands() {
+        let mut m = fresh_mapper();
+        let events = m.process(&input_left_stick(0.0, 0.9));
+        let cmds = events.iter().filter(|e| matches!(e, ActionEvent::Command(_))).count();
+        assert!(cmds > 0, "deflected stick must emit Command(s); got {:?}", events);
+    }
+
+    #[test]
+    fn deflection_values_finite_and_nonzero() {
+        let mut m = fresh_mapper();
+        let events = m.process(&input_left_stick(0.0, 0.9));
+        let mut saw_nonzero = false;
+        for e in &events {
+            if let ActionEvent::Command(cmd) = e {
+                let v = cmd_value(cmd);
+                assert!(v.is_finite(), "command value must be finite");
+                if v.abs() > 1e-6 {
+                    saw_nonzero = true;
+                }
+            }
+        }
+        assert!(saw_nonzero, "strong deflection should produce a non-zero command");
+    }
+
+    #[test]
+    fn process_is_deterministic() {
+        // Two independent mappers, same input → identical event stream.
+        // This is the core invariant the profile-access refactor must
+        // preserve (it changes HOW the active profile is read, not the math).
+        let mut a = fresh_mapper();
+        let mut b = fresh_mapper();
+        let inp = input_left_stick(0.3, 0.7);
+        let ea = a.process(&inp);
+        let eb = b.process(&inp);
+        assert_eq!(ea.len(), eb.len(), "event counts must match");
+        assert_eq!(
+            serde_json::to_string(&ea).unwrap(),
+            serde_json::to_string(&eb).unwrap(),
+            "event streams must be byte-identical",
+        );
+    }
+
+    #[test]
+    fn deadstick_after_deflection_emits_zero() {
+        let mut m = fresh_mapper();
+        let _ = m.process(&input_left_stick(0.0, 0.9)); // deflect
+        let stop = m.process(&input_left_stick(0.0, 0.0)); // release
+        let mut saw_zero = false;
+        for e in &stop {
+            if let ActionEvent::Command(cmd) = e {
+                if cmd_value(cmd).abs() <= 1e-6 {
+                    saw_zero = true;
+                }
+            }
+        }
+        assert!(saw_zero, "release must emit a zero stop command; got {:?}", stop);
+    }
+
+    #[test]
+    fn no_profile_emits_nothing() {
+        let mut m = fresh_mapper();
+        m.profiles.clear();
+        m.active_profile_id = "nope".to_string();
+        assert!(m.process(&input_left_stick(0.0, 0.9)).is_empty());
+    }
+
+    // ── benchmarks (#[ignore]; run with --ignored --nocapture) ───────
+
+    #[test]
+    #[ignore = "benchmark — run explicitly with --ignored --nocapture"]
+    fn bench_process_per_frame() {
+        let mut m = fresh_mapper();
+        let inp = input_left_stick(0.4, 0.7); // actively deflected → emits every frame
+        let n: u32 = 2_000_000;
+        for _ in 0..10_000 {
+            let _ = m.process(&inp);
+        }
+        let mut sink = 0usize;
+        let t0 = Instant::now();
+        for _ in 0..n {
+            sink += m.process(&inp).len();
+        }
+        let el = t0.elapsed();
+        println!(
+            "\n[bench] InputMapper::process() per frame: {:.1} ns/call  ({:.0} calls/s, n={}, sink={})",
+            el.as_nanos() as f64 / n as f64,
+            n as f64 / el.as_secs_f64(),
+            n,
+            sink,
+        );
     }
 }

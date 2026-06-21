@@ -12,6 +12,18 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tauri_plugin_log::{Target, TargetKind, RotationStrategy};
 
+/// Input sample + binding-process cadence. Decoupled from the WIRE send
+/// rate: the WebSocket client throttles outgoing control to THROTTLE_MS
+/// (protocol/client.rs), so sampling/processing faster than that does
+/// NOT increase traffic to the server — it only makes the value that
+/// eventually passes the throttle FRESHER (sampled ~4 ms ago instead of
+/// up to ~16 ms ago) and detects stick/button changes sooner. Cheap to
+/// run at this rate now that process() is ~3 µs/frame (see
+/// bindings/mapper.rs). Effective freshness is ultimately bounded by the
+/// gamepad's HID report rate; the Steam Deck reports at ~250 Hz, so 4 ms
+/// matches the hardware without busy-spinning past it.
+const INPUT_LOOP_MS: u64 = 4; // 250 Hz sample + process
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -31,9 +43,11 @@ pub fn run() {
         .setup(|app| {
             let state = Arc::new(AppState::new());
 
-            // Start input polling (emits input-state events to frontend for UI)
+            // Start input polling (emits input-state events to frontend for UI).
+            // Sampled fast (INPUT_LOOP_MS); the wire send rate is gated
+            // separately by the WS client throttle — see INPUT_LOOP_MS.
             let app_handle = app.handle().clone();
-            state.input_manager.start(app_handle.clone(), 16); // 60Hz polling
+            state.input_manager.start(app_handle.clone(), INPUT_LOOP_MS);
 
             // Start input processing loop (processes bindings and sends commands)
             let state_for_processing = state.clone();
@@ -81,7 +95,11 @@ pub fn run() {
                         }
                     }
 
-                    thread::sleep(Duration::from_millis(16)); // ~60Hz processing
+                    // Process at the sample cadence so a stick/button change
+                    // is turned into a (throttled) send within INPUT_LOOP_MS,
+                    // not up to a 60 Hz frame later. The WS throttle still
+                    // caps what actually reaches the server.
+                    thread::sleep(Duration::from_millis(INPUT_LOOP_MS));
                 }
             });
 
@@ -89,7 +107,7 @@ pub fn run() {
             app.manage(state);
 
             // Log the log file location
-            if let Some(log_dir) = app.path().app_log_dir().ok() {
+            if let Ok(log_dir) = app.path().app_log_dir() {
                 log::info!("Log files location: {:?}", log_dir);
             }
 

@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic per-process message-id source. Replaces uuid::new_v4() on
+/// every outgoing message: ids only need to be unique within a single
+/// connection's pending-request window (for response correlation), and
+/// a process-lifetime counter guarantees that without the v4 RNG draw +
+/// 36-char hyphenated formatting. On the 20 Hz streaming-control path
+/// that allocation+RNG was a measurable slice of per-message cost.
+static MSG_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_id() -> String {
+    format!("c{}", MSG_SEQ.fetch_add(1, Ordering::Relaxed))
+}
 
 /// Outgoing message to the SAINT.OS server
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,7 +30,7 @@ pub struct OutgoingMessage {
 impl OutgoingMessage {
     pub fn auth(password: &str) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "auth".to_string(),
             action: "login".to_string(),
             params: None,
@@ -28,7 +41,7 @@ impl OutgoingMessage {
     /// Legacy command using node_id + pin_id (deprecated)
     pub fn command(node_id: &str, pin_id: u32, value: Value) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "control".to_string(),
             action: "set_pin_value".to_string(),
             params: Some(serde_json::json!({
@@ -43,7 +56,7 @@ impl OutgoingMessage {
     /// High-level control using role + function (preferred)
     pub fn control_function(role: &str, function: &str, value: Value) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "control".to_string(),
             action: "set_function_value".to_string(),
             params: Some(serde_json::json!({
@@ -58,7 +71,7 @@ impl OutgoingMessage {
     /// Discovery request to get available roles
     pub fn discover_roles() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "discovery".to_string(),
             action: "get_roles".to_string(),
             params: None,
@@ -70,7 +83,7 @@ impl OutgoingMessage {
     #[allow(dead_code)] // part of the discovery API; not wired into a UI yet
     pub fn discover_active_roles() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "discovery".to_string(),
             action: "get_active_roles".to_string(),
             params: None,
@@ -81,7 +94,7 @@ impl OutgoingMessage {
     /// Discovery request to get controllable functions
     pub fn discover_controllable() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "discovery".to_string(),
             action: "get_controllable_functions".to_string(),
             params: None,
@@ -95,7 +108,7 @@ impl OutgoingMessage {
     /// picker that mirrors the server-side routing graph.
     pub fn discover_topic_channels() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "ros".to_string(),
             action: "list_topic_channels".to_string(),
             params: None,
@@ -109,7 +122,7 @@ impl OutgoingMessage {
     /// instead of the old topic/channel picker.
     pub fn list_websocket_inputs() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "router".to_string(),
             action: "list_websocket_inputs".to_string(),
             params: None,
@@ -123,7 +136,7 @@ impl OutgoingMessage {
     /// downstream operators and peripheral sinks see it immediately.
     pub fn set_ws_input(sheet_id: &str, input_id: &str, value: Value) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "router".to_string(),
             action: "set_input".to_string(),
             params: Some(serde_json::json!({
@@ -141,7 +154,7 @@ impl OutgoingMessage {
     /// message is published with the existing throttle.
     pub fn set_topic_channel(topic: &str, channel: &str, value: Value) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "ros".to_string(),
             action: "set_topic_channel".to_string(),
             params: Some(serde_json::json!({
@@ -155,7 +168,7 @@ impl OutgoingMessage {
 
     pub fn subscribe(topics: &[&str]) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "subscribe".to_string(),
             action: "subscribe".to_string(),
             params: Some(serde_json::json!({ "topics": topics })),
@@ -169,7 +182,7 @@ impl OutgoingMessage {
     /// runtime don't have to juggle `&str` lifetimes.
     pub fn subscribe_owned(topics: &[String]) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "subscribe".to_string(),
             action: "subscribe".to_string(),
             params: Some(serde_json::json!({ "topics": topics })),
@@ -182,7 +195,7 @@ impl OutgoingMessage {
     /// topics to subscribe to.
     pub fn list_adopted() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "management".to_string(),
             action: "list_adopted".to_string(),
             params: None,
@@ -195,7 +208,7 @@ impl OutgoingMessage {
     /// frontend on the `library-animations` event.
     pub fn list_animations() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "management".to_string(),
             action: "list_animations".to_string(),
             params: None,
@@ -207,7 +220,7 @@ impl OutgoingMessage {
     /// `{ poses: [{id, name, icon, …}] }`. Forwarded on `library-poses`.
     pub fn list_poses() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "management".to_string(),
             action: "list_poses".to_string(),
             params: None,
@@ -218,7 +231,7 @@ impl OutgoingMessage {
     /// Start (play) a saved animation by id.
     pub fn start_animation(id: &str) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "management".to_string(),
             action: "start_animation".to_string(),
             params: Some(serde_json::json!({ "id": id })),
@@ -229,7 +242,7 @@ impl OutgoingMessage {
     /// Apply (snap to) a saved pose by id.
     pub fn apply_pose(id: &str) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "management".to_string(),
             action: "apply_pose".to_string(),
             params: Some(serde_json::json!({ "id": id })),
@@ -247,7 +260,7 @@ impl OutgoingMessage {
         // method name (it's the user-facing semantic) but emit the wire
         // action the server actually accepts.
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "command".to_string(),
             action: "estop".to_string(),
             params: None,
@@ -261,7 +274,7 @@ impl OutgoingMessage {
     /// broadcast. Server responds with `{ active, changed_at }`.
     pub fn get_estop_state() -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id(),
             msg_type: "management".to_string(),
             action: "get_estop_state".to_string(),
             params: None,
@@ -339,5 +352,78 @@ impl Default for ConnectionState {
             error: None,
             estop_active: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Shape lock-down + serialize benchmark for outgoing messages.
+    //! Bench is #[ignore]d; run with:
+    //!   cargo test --release --lib -- --ignored --nocapture bench
+    use super::*;
+    use serde_json::json;
+    use std::time::Instant;
+
+    #[test]
+    fn topic_channel_message_shape() {
+        let m = OutgoingMessage::set_topic_channel("/tracks", "left_velocity", json!(0.5));
+        assert_eq!(m.msg_type, "ros");
+        assert_eq!(m.action, "set_topic_channel");
+        let p = m.params.as_ref().expect("params present");
+        assert_eq!(p["endpoint"], "/tracks");
+        assert_eq!(p["field"], "left_velocity");
+        assert_eq!(p["value"], 0.5);
+        assert!(!m.id.is_empty(), "id must be present");
+        let s = m.to_json();
+        assert!(s.contains("\"type\":\"ros\""), "json: {s}");
+        assert!(s.contains("set_topic_channel"), "json: {s}");
+    }
+
+    #[test]
+    fn ws_input_message_shape() {
+        let m = OutgoingMessage::set_ws_input("sheetA", "in1", json!(-1.0));
+        assert_eq!(m.msg_type, "router");
+        assert_eq!(m.action, "set_input");
+        let p = m.params.as_ref().expect("params present");
+        assert_eq!(p["sheet_id"], "sheetA");
+        assert_eq!(p["input_id"], "in1");
+        assert!(!m.id.is_empty());
+    }
+
+    #[test]
+    fn message_ids_are_unique() {
+        // Per-message-unique ids back request/response correlation. The
+        // uuid→counter optimization MUST preserve this invariant.
+        let a = OutgoingMessage::set_topic_channel("/t", "c", json!(1));
+        let b = OutgoingMessage::set_topic_channel("/t", "c", json!(1));
+        let c = OutgoingMessage::auth("pw");
+        assert_ne!(a.id, b.id);
+        assert_ne!(b.id, c.id);
+        assert_ne!(a.id, c.id);
+    }
+
+    #[test]
+    #[ignore = "benchmark — run explicitly with --ignored --nocapture"]
+    fn bench_build_and_serialize() {
+        let n: u32 = 2_000_000;
+        for i in 0..10_000u32 {
+            let m = OutgoingMessage::set_topic_channel("/tracks", "left_velocity", json!(i));
+            let _ = m.to_json();
+        }
+        let mut sink = 0usize;
+        let t0 = Instant::now();
+        for i in 0..n {
+            let m = OutgoingMessage::set_topic_channel(
+                "/tracks", "left_velocity", json!(i as f64 * 0.001));
+            sink += m.to_json().len();
+        }
+        let el = t0.elapsed();
+        println!(
+            "\n[bench] build set_topic_channel + to_json: {:.1} ns/msg  ({:.0} msg/s, n={}, sink={})",
+            el.as_nanos() as f64 / n as f64,
+            n as f64 / el.as_secs_f64(),
+            n,
+            sink,
+        );
     }
 }

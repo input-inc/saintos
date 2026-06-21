@@ -37,6 +37,12 @@ from saint_server.animation.models import (
 SetUrdfJointValue = Callable[[str, float], bool]
 SetWSInput = Callable[[str, str, float], bool]
 SetTopicChannel = Callable[[str, str, float, str], Dict]
+# ``ApplyFrame(joint_values, ws_values)`` — applies a whole tick's worth
+# of value-track setpoints in ONE evaluator call (one sheet eval per
+# touched sheet + one UI-snapshot broadcast), instead of one re-eval +
+# broadcast PER track. Optional; when None the player falls back to the
+# per-track set_* path. See RoutingEvaluator.apply_animation_frame.
+ApplyFrame = Callable[[Dict[str, float], Dict], bool]
 # Out-of-band peripheral command — used by trigger tracks to fire
 # string-arg commands like audio_player.play_file. Signature matches
 # server_node.send_peripheral_command (node_id, peripheral_id, command,
@@ -69,6 +75,7 @@ class AnimationPlayer:
         set_topic_channel: SetTopicChannel,
         estop_active: EstopGate,
         send_peripheral_command: Optional[SendPeripheralCommand] = None,
+        apply_frame: Optional[ApplyFrame] = None,
         on_finished: Optional[Callable[[str], None]] = None,
         logger=None,
     ):
@@ -76,6 +83,7 @@ class AnimationPlayer:
         self._set_urdf_joint_value = set_urdf_joint_value
         self._set_ws_input = set_ws_input
         self._set_topic_channel = set_topic_channel
+        self._apply_frame = apply_frame
         self._send_peripheral_command = send_peripheral_command
         self._estop_active = estop_active
         self._on_finished = on_finished
@@ -191,12 +199,41 @@ class AnimationPlayer:
                     self._log("error", f"on_finished callback failed: {e}")
 
     def _tick_value_tracks(self, t: float) -> None:
+        # Fast path: batch every track's sampled value into ONE evaluator
+        # call so the shared sheet is evaluated once and the UI snapshot
+        # broadcast once per frame — not once per track. Falls back to
+        # per-track dispatch when no batch callable is wired.
+        if self._apply_frame is None:
+            for track in self.anim.value_tracks:
+                try:
+                    self._dispatch_value(track, track.value_at(t))
+                except Exception as e:
+                    self._log("warn",
+                              f"value-track {self.anim.id}/{track.id} failed: {e}")
+            return
+
+        joint_values: Dict[str, float] = {}
+        ws_values: Dict = {}
         for track in self.anim.value_tracks:
             try:
-                self._dispatch_value(track, track.value_at(t))
+                v = track.value_at(t)
             except Exception as e:
                 self._log("warn",
                           f"value-track {self.anim.id}/{track.id} failed: {e}")
+                continue
+            if getattr(track, "target_kind", "urdf_joint") == "ws_input":
+                target = getattr(track, "target", None) or []
+                if len(target) >= 2:
+                    ws_values[(target[0], target[1])] = v
+            else:
+                joint_values[track.id] = v
+
+        if joint_values or ws_values:
+            try:
+                self._apply_frame(joint_values, ws_values)
+            except Exception as e:
+                self._log("error",
+                          f"apply_animation_frame {self.anim.id} failed: {e}")
 
     def _dispatch_value(self, track, v: float) -> None:
         """Push a sampled value-track value to its bound target.
@@ -324,11 +361,13 @@ class AnimationPlayerRegistry:
         set_topic_channel: SetTopicChannel,
         estop_active: EstopGate,
         send_peripheral_command: Optional[SendPeripheralCommand] = None,
+        apply_frame: Optional[ApplyFrame] = None,
         logger=None,
     ):
         self._set_urdf_joint_value = set_urdf_joint_value
         self._set_ws_input = set_ws_input
         self._set_topic_channel = set_topic_channel
+        self._apply_frame = apply_frame
         self._send_peripheral_command = send_peripheral_command
         self._estop_active = estop_active
         self.logger = logger
@@ -346,6 +385,7 @@ class AnimationPlayerRegistry:
             set_ws_input=self._set_ws_input,
             set_topic_channel=self._set_topic_channel,
             send_peripheral_command=self._send_peripheral_command,
+            apply_frame=self._apply_frame,
             estop_active=self._estop_active,
             on_finished=self._on_player_finished,
             logger=self.logger,

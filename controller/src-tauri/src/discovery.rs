@@ -99,7 +99,7 @@ fn discovered_from(info: &ServiceInfo) -> Option<DiscoveredServer> {
         .get_addresses_v4()
         .iter()
         .copied()
-        .map(|a| *a)
+        .copied()
         .next();
     Some(DiscoveredServer {
         instance_name,

@@ -298,6 +298,92 @@ class RoutingEvaluator:
                 self._log("error", f"routing_values broadcast failed: {e}")
         return True
 
+    def apply_animation_frame(
+        self,
+        joint_values: Dict[str, float],
+        ws_values: Optional[Dict[Tuple[str, str], float]] = None,
+    ) -> bool:
+        """Apply a whole animation tick at once.
+
+        An animation frame delivers many setpoints that are all known at
+        the same instant — every URDF joint (and optionally every
+        ws_input) a player's value tracks sampled this tick. Pushing them
+        one at a time via :meth:`set_urdf_joint_value` re-evaluates each
+        shared sheet AND rebuilds + broadcasts the full value snapshot
+        once *per* setpoint, so an N-joint rig on one sheet costs ~N sheet
+        evaluations and ~N snapshot builds per frame — all redundant.
+
+        This collapses the frame into: write every cache once, evaluate
+        the UNION of touched sheets exactly once, broadcast exactly once.
+        The observable result (final sink values + snapshot) is identical
+        to applying the same values per-track — see
+        ``test_animation_frame_equivalence``.
+
+        ``joint_values`` maps URDF joint name → setpoint.
+        ``ws_values`` maps (sheet_id, input_id) → value (for ws_input
+        value tracks). Returns False only if no routing graph is loaded.
+        """
+        routing = self._routing
+        if routing is None:
+            return False
+        if not joint_values and not ws_values:
+            return True
+
+        # 1) Coerce + write every cache under one lock.
+        clean_joints: Dict[str, float] = {}
+        for joint, value in joint_values.items():
+            try:
+                clean_joints[joint] = float(value)
+            except (TypeError, ValueError):
+                self._log("warn",
+                          f"apply_animation_frame: non-numeric {joint}={value!r}")
+        clean_ws: Dict[Tuple[str, str], float] = {}
+        if ws_values:
+            for key, value in ws_values.items():
+                try:
+                    clean_ws[key] = float(value)
+                except (TypeError, ValueError):
+                    self._log("warn",
+                              f"apply_animation_frame: non-numeric ws {key}={value!r}")
+
+        with self._lock:
+            self._urdf_joint_values.update(clean_joints)
+            for key, value in clean_ws.items():
+                self._ws_input_values[key] = value
+
+        # 2) Union of sheets touched by any setpoint in this frame.
+        touched: List[NodeSheet] = []
+        seen: Set[str] = set()
+        ws_sheets = {sid for (sid, _iid) in clean_ws}
+        for sheet in routing.sheets.values():
+            if sheet.node_id in seen:
+                continue
+            hit = sheet.node_id in ws_sheets
+            if not hit:
+                for inp in sheet.inputs:
+                    if inp.kind == "urdf_joint" and inp.joint in clean_joints:
+                        hit = True
+                        break
+            if hit:
+                touched.append(sheet)
+                seen.add(sheet.node_id)
+
+        # 3) Evaluate each touched sheet exactly once.
+        for sheet in touched:
+            try:
+                self._evaluate_sheet(sheet)
+            except Exception as e:
+                self._log("error",
+                          f"Sheet '{sheet.node_id}' evaluation failed: {e}")
+
+        # 4) Broadcast exactly once.
+        if touched and self._on_values_changed is not None:
+            try:
+                self._on_values_changed(self.get_value_snapshot())
+            except Exception as e:
+                self._log("error", f"routing_values broadcast failed: {e}")
+        return True
+
     def clear_urdf_joint_value(self, joint: Optional[str] = None) -> None:
         """Drop cached URDF joint values. If ``joint`` is None, clear
         the entire cache (typically called when no animations are

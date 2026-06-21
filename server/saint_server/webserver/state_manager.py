@@ -2745,6 +2745,7 @@ class StateManager:
             set_urdf_joint_value=evaluator.set_urdf_joint_value,
             set_ws_input=evaluator.set_ws_input,
             set_topic_channel=bridge.set_topic_channel,
+            apply_frame=evaluator.apply_animation_frame,
             estop_active=estop_active,
             send_peripheral_command=self._peripheral_command_sender,
             logger=self.logger,

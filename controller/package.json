@@ -2,8 +2,9 @@
     "name": "saint-controller",
     "version": "0.5.0",
     "description": "SAINT.OS Controller Application",
+    "type": "module",
     "scripts": {
-        "version:sync": "node scripts/sync-version.js",
+        "version:sync": "node scripts/sync-version.cjs",
         "dev": "vite",
         "build": "npm run version:sync && vite build",
         "preview": "vite preview",
