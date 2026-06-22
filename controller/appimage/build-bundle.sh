@@ -112,6 +112,19 @@ if [ -z "${SAINT_BUILD_VERSION:-}" ]; then
 fi
 echo "==> Build version: $SAINT_BUILD_VERSION"
 
+# Force a fresh compile of the controller's OWN crate every build, while
+# leaving the (expensive) dependency artifacts in the cache untouched.
+# Cargo's change-detection has shipped a stale binary under a fresh
+# filename before — its git-SHA rerun trigger doesn't fire on same-branch
+# commits — so rather than trust it for a correctness-critical embedded
+# version, we always recompile the few seconds of app code. `cargo clean
+# -p` also drops build.rs's cached output, so SAINT_BUILD_VERSION is
+# re-baked from the value computed above.
+echo "==> Clearing controller crate from the build cache (deps stay cached)"
+cargo clean --release \
+    --manifest-path "$CONTROLLER_DIR/src-tauri/Cargo.toml" \
+    -p saint-controller 2>/dev/null || true
+
 echo "==> Running tauri build --bundles appimage"
 # We treat tauri's own bundling step as best-effort: it produces the
 # AppDir we want (binary + icon + .desktop + Steam library art under
@@ -136,6 +149,22 @@ if [ -z "$APPDIR" ]; then
     echo "ERROR: tauri did not produce an AppDir" >&2
     exit 1
 fi
+
+# Guard against shipping a stale compile under a fresh filename: the
+# binary tauri just produced MUST contain the version string we're about
+# to stamp on the .AppImage. If it doesn't, a cached object slipped
+# through despite the clean above — fail loudly HERE rather than on the
+# operator's Deck (the "installed the update but it still shows the old
+# version" failure this whole path exists to prevent).
+APP_BIN="$APPDIR/usr/bin/saint-controller"
+if ! grep -aqF "$SAINT_BUILD_VERSION" "$APP_BIN" 2>/dev/null; then
+    echo "ERROR: built binary does not embed '$SAINT_BUILD_VERSION' — stale compile." >&2
+    echo "       embedded instead: $(grep -aoE '[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9.+-]*\.[0-9a-f]{7}' "$APP_BIN" 2>/dev/null | sort -u | tr '\n' ' ')" >&2
+    echo "       Try a clean rebuild: controller/appimage/build-docker.sh --clean" >&2
+    exit 1
+fi
+echo "==> Verified binary embeds $SAINT_BUILD_VERSION"
+
 if ! command -v linuxdeploy >/dev/null \
     || ! command -v appimagetool >/dev/null; then
     echo "ERROR: linuxdeploy + appimagetool not on PATH" >&2

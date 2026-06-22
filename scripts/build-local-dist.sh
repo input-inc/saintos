@@ -376,19 +376,19 @@ build_firmware_raspberrypi() {
 # Build the Steam Deck controller .AppImage via the linux/amd64 Docker
 # wrapper. Slow on first run (Apple Silicon: Rosetta-emulated cargo
 # build, ~15-25 min cold); incremental rebuilds are fast once the
-# persistent cache warms. Failures here are non-fatal — we'd rather
-# ship a dist tarball with the previous controller bundle than fail
-# the whole build over an AppImage hiccup.
+# persistent dependency cache warms (the app crate itself is always
+# recompiled — see build-bundle.sh). A failure is FATAL: the old
+# "leave the previous staged bundle" fallback silently shipped stale
+# controller code under a fresh version label. Pass --skip-controller-build
+# to deliberately reuse the already-staged bundle.
 build_controller_appimage() {
     local driver=controller/appimage/build-docker.sh
     if [[ ! -x "$driver" ]]; then
-        warn "Controller AppImage driver $driver missing — skipping"
-        return
+        die "Controller AppImage driver $driver missing"
     fi
     log "Building controller AppImage (linux/amd64 Docker; Rosetta on Apple Silicon)"
     if ! "$driver" 2>&1; then
-        warn "Controller AppImage build failed — leaving existing staged bundle (if any)"
-        return
+        die "Controller AppImage build failed. Fix it, or pass --skip-controller-build to ship the already-staged bundle on purpose."
     fi
 }
 

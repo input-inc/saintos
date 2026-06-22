@@ -71,12 +71,24 @@ fn resolve_build_version() -> String {
 }
 
 fn main() {
-    // Re-run if HEAD moves or anything in the index changes — those
-    // are the two things that can shift the short SHA or the
-    // dirty/clean flag between builds.
+    // Re-run when the inputs to the version string change. `.git/HEAD`
+    // alone is NOT enough: its content is `ref: refs/heads/<branch>`,
+    // which only changes on a branch *switch* — a commit or pull on the
+    // current branch leaves it untouched, so the embedded SHA would go
+    // stale (this shipped a mislabeled binary once). So also track the
+    // resolved ref file (where the commit actually moves) and
+    // packed-refs. `.git/index` covers the dirty/clean suffix. The
+    // SAINT_BUILD_VERSION env override (set by build-bundle.sh) remains
+    // the authoritative path for dist builds.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/index");
+    println!("cargo:rerun-if-changed=../../.git/packed-refs");
     println!("cargo:rerun-if-env-changed=SAINT_BUILD_VERSION");
+    if let Ok(head) = std::fs::read_to_string("../../.git/HEAD") {
+        if let Some(git_ref) = head.strip_prefix("ref:").map(str::trim) {
+            println!("cargo:rerun-if-changed=../../.git/{git_ref}");
+        }
+    }
 
     let version = resolve_build_version();
     let timestamp = build_timestamp();
