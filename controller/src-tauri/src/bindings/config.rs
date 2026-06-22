@@ -446,3 +446,93 @@ impl BindingProfile {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Lock down InputTransform::apply — the per-axis movement transform
+    //! every analog binding runs raw stick/trigger/pad values through
+    //! (deadzone → rescale → expo → scale → sign → invert → clamp). This
+    //! is the math that decides how hard the robot actually moves, so a
+    //! regression here is a safety/feel bug.
+    use super::*;
+
+    fn tf(deadzone: f32, scale: f32, expo: f32, invert: bool) -> InputTransform {
+        InputTransform { deadzone, scale, expo, invert }
+    }
+
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-5, "expected {b}, got {a}");
+    }
+
+    #[test]
+    fn below_deadzone_is_zero() {
+        let t = tf(0.1, 1.0, 1.0, false);
+        approx(t.apply(0.0), 0.0);
+        approx(t.apply(0.05), 0.0);
+        approx(t.apply(-0.099), 0.0);
+        // Exactly at the deadzone edge maps to 0 (rescale numerator is 0).
+        approx(t.apply(0.1), 0.0);
+    }
+
+    #[test]
+    fn full_deflection_maps_to_unit() {
+        let t = tf(0.1, 1.0, 1.0, false);
+        approx(t.apply(1.0), 1.0);
+        approx(t.apply(-1.0), -1.0);
+    }
+
+    #[test]
+    fn rescales_above_deadzone() {
+        // (0.55 - 0.1) / (1 - 0.1) = 0.45 / 0.9 = 0.5
+        let t = tf(0.1, 1.0, 1.0, false);
+        approx(t.apply(0.55), 0.5);
+    }
+
+    #[test]
+    fn sign_is_preserved() {
+        let t = tf(0.1, 1.0, 1.0, false);
+        approx(t.apply(-0.55), -0.5);
+    }
+
+    #[test]
+    fn expo_curve_softens_midrange() {
+        // deadzone 0 so rescale is identity: 0.5^2 = 0.25, sign reapplied.
+        let t = tf(0.0, 1.0, 2.0, false);
+        approx(t.apply(0.5), 0.25);
+        approx(t.apply(-0.5), -0.25);
+        // Endpoints stay put under any expo.
+        approx(t.apply(1.0), 1.0);
+        approx(t.apply(-1.0), -1.0);
+    }
+
+    #[test]
+    fn scale_multiplies_output() {
+        let t = tf(0.0, 0.5, 1.0, false);
+        approx(t.apply(1.0), 0.5);
+        approx(t.apply(0.4), 0.2);
+    }
+
+    #[test]
+    fn invert_flips_sign() {
+        let t = tf(0.0, 1.0, 1.0, true);
+        approx(t.apply(0.5), -0.5);
+        approx(t.apply(-0.5), 0.5);
+    }
+
+    #[test]
+    fn output_is_clamped_to_unit_range() {
+        // scale > 1 would push past ±1 without the final clamp.
+        let t = tf(0.0, 5.0, 1.0, false);
+        approx(t.apply(1.0), 1.0);
+        approx(t.apply(-1.0), -1.0);
+        approx(t.apply(0.5), 1.0);   // 0.5 * 5 = 2.5 → clamp 1.0
+    }
+
+    #[test]
+    fn default_transform_is_light_deadzone_unity_gain() {
+        let t = InputTransform::default();
+        approx(t.apply(0.05), 0.0);   // inside 0.1 deadzone
+        approx(t.apply(1.0), 1.0);    // unity gain at full deflection
+        assert!(!t.invert);
+    }
+}

@@ -152,6 +152,7 @@ static const char* ota_fail_reason_str(uint8_t reason)
 #include "maestro_driver.h"
 #include "tic_driver.h"
 #include "tmc2208_driver.h"
+#include "kangaroo_driver.h"
 #include "saint_log.h"
 
 #ifdef SAINT_OS_OTA_BOOTLOADER
@@ -1600,6 +1601,7 @@ int main(void)
     peripheral_register(pathfinder_bms_get_peripheral_driver());
     peripheral_register(tic_get_peripheral_driver());
     peripheral_register(tmc2208_get_peripheral_driver());
+    peripheral_register(kangaroo_get_peripheral_driver());
 
     // Load saved pin configuration (also fans out to each driver's
     // load_config callback).

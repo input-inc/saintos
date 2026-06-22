@@ -118,6 +118,14 @@ bool flash_storage_load(flash_storage_data_t* data)
             memset(&mutable_data->uart_pins, 0,
                    sizeof(mutable_data->uart_pins));
         }
+        // v11 -> v12: inserted flash_kangaroo_config_t between
+        // tmc2208_config and uart_pins. Same fix pattern.
+        if (mutable_data->version <= 11) {
+            memset(&mutable_data->kangaroo_config, 0,
+                   sizeof(mutable_data->kangaroo_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+        }
         mutable_data->version = FLASH_STORAGE_VERSION;
     }
 
@@ -230,6 +238,10 @@ bool flash_storage_load(flash_storage_data_t* data)
         }
         if (data->version <= 10) {
             memset(&data->tmc2208_config, 0, sizeof(data->tmc2208_config));
+            memset(&data->uart_pins, 0, sizeof(data->uart_pins));
+        }
+        if (data->version <= 11) {
+            memset(&data->kangaroo_config, 0, sizeof(data->kangaroo_config));
             memset(&data->uart_pins, 0, sizeof(data->uart_pins));
         }
         data->version = FLASH_STORAGE_VERSION;

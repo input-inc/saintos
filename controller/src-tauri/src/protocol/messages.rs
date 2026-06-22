@@ -403,6 +403,101 @@ mod tests {
     }
 
     #[test]
+    fn auth_message_carries_password() {
+        let m = OutgoingMessage::auth("hunter2");
+        assert_eq!(m.msg_type, "auth");
+        assert_eq!(m.action, "login");
+        assert_eq!(m.password.as_deref(), Some("hunter2"));
+        // password must serialize so the server can authenticate.
+        assert!(m.to_json().contains("hunter2"));
+    }
+
+    #[test]
+    fn control_function_message_shape() {
+        let m = OutgoingMessage::control_function("driver", "throttle", json!(0.75));
+        assert_eq!(m.msg_type, "control");
+        assert_eq!(m.action, "set_function_value");
+        let p = m.params.as_ref().expect("params present");
+        assert_eq!(p["role"], "driver");
+        assert_eq!(p["function"], "throttle");
+        assert_eq!(p["value"], 0.75);
+    }
+
+    #[test]
+    fn estop_uses_the_action_the_server_accepts() {
+        // Regression guard: the server matches on action == "estop". We
+        // previously sent "emergency_stop", which fell through the match
+        // and silently did nothing — the e-stop button was dead. Lock the
+        // wire action (and type) so that can't regress.
+        let m = OutgoingMessage::emergency_stop();
+        assert_eq!(m.msg_type, "command");
+        assert_eq!(m.action, "estop");
+        let s = m.to_json();
+        assert!(s.contains("\"action\":\"estop\""), "json: {s}");
+        assert!(!s.contains("emergency_stop"), "must not send the dead action name: {s}");
+    }
+
+    #[test]
+    fn set_topic_channel_preserves_value_types() {
+        // Negative, zero, and fractional values must round-trip exactly —
+        // the streaming control path sends all three constantly.
+        for v in [json!(-1.0), json!(0.0), json!(0.5), json!(1.0)] {
+            let m = OutgoingMessage::set_topic_channel("/t", "c", v.clone());
+            assert_eq!(m.params.as_ref().unwrap()["value"], v);
+        }
+    }
+
+    #[test]
+    fn discovery_and_library_message_shapes() {
+        assert_eq!(OutgoingMessage::discover_topic_channels().action, "list_topic_channels");
+        assert_eq!(OutgoingMessage::list_websocket_inputs().action, "list_websocket_inputs");
+        assert_eq!(OutgoingMessage::list_animations().action, "list_animations");
+        assert_eq!(OutgoingMessage::list_poses().action, "list_poses");
+        assert_eq!(OutgoingMessage::start_animation("anim1").params.unwrap()["id"], "anim1");
+        assert_eq!(OutgoingMessage::apply_pose("pose1").params.unwrap()["id"], "pose1");
+    }
+
+    #[test]
+    fn incoming_auth_result_predicates() {
+        let ok = IncomingMessage::from_json(r#"{"type":"auth_result","status":"ok"}"#).unwrap();
+        assert!(ok.is_auth_success());
+        assert!(!ok.is_auth_failure());
+
+        let bad = IncomingMessage::from_json(
+            r#"{"type":"auth_result","status":"error","message":"bad password"}"#).unwrap();
+        assert!(!bad.is_auth_success());
+        assert!(bad.is_auth_failure());
+        assert_eq!(bad.message.as_deref(), Some("bad password"));
+    }
+
+    #[test]
+    fn incoming_state_broadcast_parses_topic_and_data() {
+        // The estop state topic the client reads to gate outgoing control.
+        let msg = IncomingMessage::from_json(
+            r#"{"type":"state","node":"estop","data":{"active":true}}"#).unwrap();
+        assert_eq!(msg.msg_type, "state");
+        assert_eq!(msg.node.as_deref(), Some("estop"));
+        assert_eq!(msg.data.unwrap()["active"], true);
+    }
+
+    #[test]
+    fn incoming_tolerates_missing_optional_fields() {
+        // Server greetings/acks often omit most fields; parsing must not
+        // fail or the connection handshake aborts.
+        let msg = IncomingMessage::from_json(r#"{"type":"connected"}"#).unwrap();
+        assert_eq!(msg.msg_type, "connected");
+        assert!(msg.status.is_none() && msg.data.is_none() && msg.node.is_none());
+    }
+
+    #[test]
+    fn connection_state_defaults_to_safe_disconnected() {
+        let s = ConnectionState::default();
+        assert_eq!(s.status, ConnectionStatus::Disconnected);
+        assert!(s.error.is_none());
+        assert!(!s.estop_active, "must default to NOT e-stopped");
+    }
+
+    #[test]
     #[ignore = "benchmark — run explicitly with --ignored --nocapture"]
     fn bench_build_and_serialize() {
         let n: u32 = 2_000_000;

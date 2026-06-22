@@ -26,6 +26,7 @@ extern "C" {
 #include "pathfinder_bms_driver.h"
 #include "tic_driver.h"
 #include "tmc2208_driver.h"
+#include "kangaroo_driver.h"
 #include "watchdog.h"
 extern "C" {
 #include "saint_log.h"
@@ -1224,6 +1225,8 @@ void setup()
     diag_stage(10, "tic registered");
     peripheral_register(tmc2208_get_peripheral_driver());
     diag_stage(11, "tmc2208 registered");
+    peripheral_register(kangaroo_get_peripheral_driver());
+    diag_stage(12, "kangaroo registered");
 
     // Load saved pin configuration (also fans out to each driver's
     // load_config callback).

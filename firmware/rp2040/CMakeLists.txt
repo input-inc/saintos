@@ -164,6 +164,8 @@ set(SAINT_NODE_SOURCES
     ../shared/src/tic_driver.c
     src/tmc2208_transport.c
     ../shared/src/tmc2208_driver.c
+    src/kangaroo_transport.c
+    ../shared/src/kangaroo_driver.c
     src/maestro_driver.c
     src/pio_uart.c
 )

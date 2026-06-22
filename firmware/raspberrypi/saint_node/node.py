@@ -35,6 +35,7 @@ from .peripherals.syren import SyRenDriver
 from .peripherals.maestro import MaestroDriver
 from .peripherals.roboclaw import RoboClawDriver
 from .peripherals.tic import TicDriver
+from .peripherals.kangaroo import KangarooDriver
 from .peripherals.pathfinder_bms import PathfinderBMSDriver
 from .peripherals.fas100 import FAS100Driver
 from .peripherals.audio_player import PiAudioPlayerDriver
@@ -129,6 +130,7 @@ class SaintNode(Node):
         self._peripherals.register(MaestroDriver)
         self._peripherals.register(RoboClawDriver)
         self._peripherals.register(TicDriver)
+        self._peripherals.register(KangarooDriver)
         self._peripherals.register(PathfinderBMSDriver)
         self._peripherals.register(FAS100Driver)
         # Built-in audio playback: lives on every Pi-host saint-node,

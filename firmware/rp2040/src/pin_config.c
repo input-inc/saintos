@@ -143,6 +143,7 @@ static const struct {
     {"pathfinder_bms", "pathfinder_bms_sensor"},
     {"tic",            "tic_stepper"},
     {"tmc2208",        "tmc2208_stepper"},
+    {"kangaroo",       "kangaroo_motion"},
 };
 
 static const peripheral_driver_t* driver_for_type_id(const char* type_id)

@@ -90,7 +90,11 @@ typedef struct peripheral_driver {
 // Manager API
 // =============================================================================
 
-#define PERIPHERAL_MAX_DRIVERS 8
+// 8 drivers ship today (maestro, syren, fas100, roboclaw, pathfinder_bms,
+// tic, tmc2208, kangaroo) — exactly the old cap of 8. Bumped to 12 so the
+// next driver doesn't silently fail peripheral_register(). Only costs a
+// few pointers of .bss in the drivers[] table.
+#define PERIPHERAL_MAX_DRIVERS 12
 
 bool peripheral_register(const peripheral_driver_t* driver);
 void peripheral_init_all(void);

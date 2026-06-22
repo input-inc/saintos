@@ -20,7 +20,7 @@ extern "C" {
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   11
+#define FLASH_STORAGE_VERSION   12
 // Bump history:
 //   v8: added uart_pins block.
 //   v9: added estop_pin + uart_swap to flash_roboclaw_config_t units.
@@ -49,6 +49,14 @@ extern "C" {
 //        tic_config so blocks BEFORE it (maestro/syren/fas100/roboclaw/
 //        pathfinder/tic) keep their offsets. The v10→v11 migration
 //        zeros tmc2208_config + uart_pins; non-Tic peripheral configs
+//        survive untouched but operators must re-sync UART pin pairs.
+//   v12: added flash_kangaroo_config_t for the Dimension Engineering
+//        Kangaroo X2 closed-loop motion controller, AND added
+//        kangaroo_tx_pin/kangaroo_rx_pin to flash_uart_pins_t (consuming
+//        the last 2 reserved_u bytes — the struct size is unchanged).
+//        The Kangaroo block lives AFTER tmc2208_config so every block
+//        BEFORE it keeps its offset. The v11→v12 migration zeros
+//        kangaroo_config + uart_pins; pre-existing peripheral configs
 //        survive untouched but operators must re-sync UART pin pairs.
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
@@ -221,6 +229,28 @@ typedef struct __attribute__((packed)) {
 } flash_tmc2208_config_t;
 
 // =============================================================================
+// Kangaroo X2 Closed-Loop Motion Controller Configuration
+// =============================================================================
+
+#define FLASH_KANGAROO_MAX_UNITS 8
+
+typedef struct __attribute__((packed)) {
+    uint8_t  unit_count;
+    uint8_t  serial_port;    // Which UART (0-1 RP2040, 1-8 Teensy)
+    uint16_t reserved_k;     // padding to keep baud_rate aligned
+    uint32_t baud_rate;      // Default 9600; full 32 bits because the
+                             // Kangaroo can run up to 115200 (> uint16).
+    struct __attribute__((packed)) {
+        uint8_t address;        // 128-135
+        uint8_t channel_name;   // '1'/'2' (independent) or 'D'/'T' (mixed)
+        uint8_t protocol;       // 0 = packet serial, 1 = simplified serial
+        uint8_t home_on_start;  // 0/1
+        int32_t max_position;   // operator scaling for target_position
+        int32_t max_speed;      // operator scaling for target_speed (units/s)
+    } units[FLASH_KANGAROO_MAX_UNITS];
+} flash_kangaroo_config_t;
+
+// =============================================================================
 // UART Pin Assignments (added v8)
 // =============================================================================
 //
@@ -244,7 +274,8 @@ typedef struct __attribute__((packed)) {
     uint8_t tic_rx_pin;
     uint8_t tmc2208_tx_pin;
     uint8_t tmc2208_rx_pin;
-    uint8_t reserved_u[2];
+    uint8_t kangaroo_tx_pin;   // added v12 (stolen from reserved_u)
+    uint8_t kangaroo_rx_pin;
 } flash_uart_pins_t;
 
 // =============================================================================
@@ -282,6 +313,8 @@ typedef struct __attribute__((packed)) {
     flash_tic_config_t tic_config;
 
     flash_tmc2208_config_t tmc2208_config;
+
+    flash_kangaroo_config_t kangaroo_config;
 
     flash_uart_pins_t uart_pins;
 

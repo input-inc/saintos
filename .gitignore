@@ -90,6 +90,8 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
+# JS test coverage output (vitest --coverage) for controller/ + server/web/
+coverage/
 *.py,cover
 .hypothesis/
 .pytest_cache/

@@ -11,27 +11,20 @@ use std::time::Duration;
 const STEAM_DECK_VID: u16 = 0x28DE;
 const STEAM_DECK_PID: u16 = 0x1205;
 
-// Feature report IDs for Steam Controller protocol
-const STEAM_FEATURE_REPORT_CLEAR_MAPPINGS: u8 = 0x81;
-const STEAM_FEATURE_REPORT_SET_SETTINGS: u8 = 0x87;
+// Feature report ID for the Steam Controller protocol: enable
+// gyro/sensors. (0x81 "clear mappings" is deliberately never sent —
+// see enable_sensors() — and 0x83 "get settings" is used inline there,
+// so neither needs a named constant.)
 const STEAM_FEATURE_REPORT_ENABLE_SENSORS: u8 = 0x87;
 
-// Button masks for ulButtonsL (lower 32 bits)
-const STEAMDECK_LBUTTON_R2: u32 = 0x00000001;
-const STEAMDECK_LBUTTON_L2: u32 = 0x00000002;
-const STEAMDECK_LBUTTON_R: u32 = 0x00000004;
-const STEAMDECK_LBUTTON_L: u32 = 0x00000008;
-const STEAMDECK_LBUTTON_Y: u32 = 0x00000010;
-const STEAMDECK_LBUTTON_B: u32 = 0x00000020;
-const STEAMDECK_LBUTTON_X: u32 = 0x00000040;
-const STEAMDECK_LBUTTON_A: u32 = 0x00000080;
-const STEAMDECK_LBUTTON_DPAD_UP: u32 = 0x00000100;
-const STEAMDECK_LBUTTON_DPAD_RIGHT: u32 = 0x00000200;
-const STEAMDECK_LBUTTON_DPAD_LEFT: u32 = 0x00000400;
-const STEAMDECK_LBUTTON_DPAD_DOWN: u32 = 0x00000800;
-const STEAMDECK_LBUTTON_VIEW: u32 = 0x00001000;  // Select
+// Button masks for ulButtonsL (lower 32 bits). Only the inputs the
+// standard gamepad API can't surface are decoded here: the Steam/QAM
+// buttons, the back paddles' stick-click neighbors, the trackpad
+// touch/click bits, and the stick clicks. Face buttons, the D-pad,
+// Start/Select, shoulders and triggers all come through gilrs / the
+// macOS GameController API in gamepad.rs (same `gamepad.buttons` map,
+// same names the binding mapper reads), so their masks aren't kept here.
 const STEAMDECK_LBUTTON_STEAM: u32 = 0x00002000;
-const STEAMDECK_LBUTTON_MENU: u32 = 0x00004000;  // Start
 const STEAMDECK_LBUTTON_L5: u32 = 0x00008000;
 const STEAMDECK_LBUTTON_R5: u32 = 0x00010000;
 const STEAMDECK_LBUTTON_LEFT_PAD: u32 = 0x00020000;
@@ -443,5 +436,141 @@ impl SteamDeckHidReader {
 impl Default for SteamDeckHidReader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// Gated to Linux because parse_hid_report (and the whole module) is
+// Steam-Deck-only — it isn't compiled on macOS/Windows, so neither are
+// these tests. They run under `cargo test` on Linux (CI / on a Deck).
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    // Build a 64-byte report. Field offsets are payload-relative + the
+    // 4-byte header skip the parser applies (payload = data[4..]), so a
+    // payload byte P lives at data index 4 + P. The helpers below take
+    // the already-resolved data index.
+    fn report(id: u8) -> [u8; 64] {
+        let mut b = [0u8; 64];
+        b[0] = id;
+        b
+    }
+    fn put_u32(b: &mut [u8; 64], i: usize, v: u32) { b[i..i + 4].copy_from_slice(&v.to_le_bytes()); }
+    fn put_i16(b: &mut [u8; 64], i: usize, v: i16) { b[i..i + 2].copy_from_slice(&v.to_le_bytes()); }
+    fn put_u16(b: &mut [u8; 64], i: usize, v: u16) { b[i..i + 2].copy_from_slice(&v.to_le_bytes()); }
+
+    // data indices (4 + payload offset)
+    const BTN_L: usize = 8;
+    const BTN_H: usize = 12;
+    const LPAD_X: usize = 16;
+    const LPAD_Y: usize = 18;
+    const RPAD_X: usize = 20;
+    const ACC_X: usize = 24;
+    const ACC_Y: usize = 26;
+    const ACC_Z: usize = 28;
+    const GYRO_X: usize = 30;
+    const GYRO_Y: usize = 32;
+    const GYRO_Z: usize = 34;
+    const PRESS_L: usize = 56;
+
+    fn parse(buf: &[u8]) -> SteamDeckHidState {
+        let st = Arc::new(RwLock::new(SteamDeckHidState::default()));
+        SteamDeckHidReader::parse_hid_report(buf, &st);
+        let out = st.read().clone();
+        out
+    }
+    fn approx(a: f32, b: f32) { assert!((a - b).abs() < 0.02, "expected {b}, got {a}"); }
+
+    #[test]
+    fn ignores_short_reports() {
+        let st = parse(&[0u8; 32]);
+        approx(st.gyro_pitch, 0.0);
+        assert!(!st.steam_pressed);
+    }
+
+    #[test]
+    fn ignores_non_input_report_ids() {
+        let mut b = report(0x04); // mouse/keyboard emulation, not input
+        put_i16(&mut b, GYRO_X, 16384);
+        let st = parse(&b);
+        approx(st.gyro_pitch, 0.0); // untouched
+    }
+
+    #[test]
+    fn decodes_gyro_with_scale_and_yaw_negation() {
+        let mut b = report(0x09);
+        put_i16(&mut b, GYRO_X, 16384); // pitch
+        put_i16(&mut b, GYRO_Y, 16384); // yaw (negated)
+        put_i16(&mut b, GYRO_Z, 8192);  // roll
+        let st = parse(&b);
+        approx(st.gyro_pitch, 1000.0);  // 16384 * 2000/32768
+        approx(st.gyro_yaw, -1000.0);   // negated per SDL
+        approx(st.gyro_roll, 500.0);
+    }
+
+    #[test]
+    fn normalizes_touchpads_to_unit_range_with_sign() {
+        let mut b = report(0x09);
+        put_i16(&mut b, LPAD_X, 16384);   // +0.5
+        put_i16(&mut b, LPAD_Y, -16384);  // -0.5
+        put_i16(&mut b, RPAD_X, 32767);   // ~+1.0
+        let st = parse(&b);
+        approx(st.left_pad_x, 0.5);
+        approx(st.left_pad_y, -0.5);
+        approx(st.right_pad_x, 1.0);
+    }
+
+    #[test]
+    fn decodes_accel_with_scale_and_y_negation() {
+        let mut b = report(0x09);
+        put_i16(&mut b, ACC_X, 16384);
+        put_i16(&mut b, ACC_Y, 16384); // negated
+        put_i16(&mut b, ACC_Z, 8192);
+        let st = parse(&b);
+        approx(st.accel_x, 9.81);
+        approx(st.accel_y, -9.81);
+        approx(st.accel_z, 4.905);
+    }
+
+    #[test]
+    fn pressure_drives_the_click_threshold() {
+        let mut hard = report(0x09);
+        put_u32(&mut hard, BTN_L, STEAMDECK_LBUTTON_LEFT_PAD);
+        put_u16(&mut hard, PRESS_L, 65535); // full pressure → 1.0
+        let st = parse(&hard);
+        approx(st.left_pad_pressure, 1.0);
+        assert!(st.left_pad_touched); // from the LEFT_PAD button bit
+        assert!(st.left_pad_clicked); // pressure > 0.5
+
+        let mut soft = report(0x09);
+        put_u16(&mut soft, PRESS_L, 16384); // 0.25 → below threshold
+        let st2 = parse(&soft);
+        assert!(!st2.left_pad_clicked);
+    }
+
+    #[test]
+    fn decodes_button_masks() {
+        let mut b = report(0x09);
+        put_u32(&mut b, BTN_L,
+            STEAMDECK_LBUTTON_STEAM | STEAMDECK_LBUTTON_L5
+            | STEAMDECK_LBUTTON_R5 | STEAMDECK_LBUTTON_L3 | STEAMDECK_LBUTTON_R3);
+        put_u32(&mut b, BTN_H,
+            STEAMDECK_HBUTTON_L4 | STEAMDECK_HBUTTON_R4 | STEAMDECK_HBUTTON_QAM);
+        let st = parse(&b);
+        assert!(st.steam_pressed);
+        assert!(st.l5_pressed && st.r5_pressed);
+        assert!(st.l3_pressed && st.r3_pressed);
+        assert!(st.l4_pressed && st.r4_pressed);
+        assert!(st.qam_pressed);
+    }
+
+    #[test]
+    fn report_id_01_is_also_parsed() {
+        let mut b = report(0x01);
+        put_i16(&mut b, GYRO_X, 16384);
+        let st = parse(&b);
+        approx(st.gyro_pitch, 1000.0);
     }
 }

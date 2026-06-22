@@ -1,0 +1,32 @@
+name: controller-tests
+
+# Runs the controller's Rust test suite on Linux so the
+# `#[cfg(target_os = "linux")]` paths (notably the Steam Deck HID parser
+# in src/input/steamdeck_hid.rs) are actually exercised — they're
+# compiled out on macOS/Windows dev boxes. Uses the same container image
+# + script that local devs run via controller/ci/run-linux-tests.sh, so
+# CI and local stay in lockstep.
+
+on:
+  pull_request:
+    paths:
+      - 'controller/**'
+      - '.github/workflows/controller-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'controller/**'
+      - '.github/workflows/controller-tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: controller-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run controller Rust tests (Linux, incl. Steam Deck HID parser)
+        run: controller/ci/run-linux-tests.sh

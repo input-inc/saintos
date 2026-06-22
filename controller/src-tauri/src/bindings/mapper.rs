@@ -684,10 +684,97 @@ mod tests {
     //! user data dir (profiles.json) and a test must not clobber the
     //! operator's saved profiles.
     use super::*;
+    use crate::bindings::config::*;
     use crate::input::gamepad::GamepadState;
     use crate::input::gyro::{GyroState, TouchpadState};
     use crate::input::manager::InputState;
     use std::time::Instant;
+
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-5, "expected {b}, got {a}");
+    }
+
+    // Identity transform (no deadzone/expo/scale) so binding-level math
+    // is exercised without the per-axis transform muddying the numbers —
+    // InputTransform::apply has its own dedicated tests in config.rs.
+    fn tf0() -> InputTransform {
+        InputTransform { deadzone: 0.0, scale: 1.0, expo: 1.0, invert: false }
+    }
+
+    fn mapper_with(profile: BindingProfile) -> InputMapper {
+        let mut m = InputMapper::new();
+        let id = profile.id.clone();
+        m.profiles = vec![profile];
+        m.active_profile_id = id;
+        m.last_analog_values.clear();
+        m.last_send_times.clear();
+        m.last_button_states.clear();
+        m.modifier_values.clear();
+        m.toggle_states.clear();
+        m.cycle_indices.clear();
+        m.panel_state = PanelState::default();
+        m
+    }
+
+    fn analog_profile(binding: AnalogBinding) -> BindingProfile {
+        let mut p = BindingProfile::new("test", "Test");
+        p.analog_bindings = vec![binding];
+        p
+    }
+
+    fn digital_profile(binding: DigitalBinding) -> BindingProfile {
+        let mut p = BindingProfile::new("test", "Test");
+        p.digital_bindings = vec![binding];
+        p
+    }
+
+    fn input_right_stick(x: f32, y: f32) -> InputState {
+        let mut gp = GamepadState { connected: true, ..Default::default() };
+        gp.right_stick.x = x;
+        gp.right_stick.y = y;
+        InputState {
+            gamepad: gp,
+            gyro: GyroState::default(),
+            left_touchpad: TouchpadState::default(),
+            right_touchpad: TouchpadState::default(),
+        }
+    }
+
+    fn input_buttons(pairs: &[(&str, bool)]) -> InputState {
+        let mut gp = GamepadState { connected: true, ..Default::default() };
+        for (name, pressed) in pairs {
+            gp.buttons.insert((*name).to_string(), *pressed);
+        }
+        InputState {
+            gamepad: gp,
+            gyro: GyroState::default(),
+            left_touchpad: TouchpadState::default(),
+            right_touchpad: TouchpadState::default(),
+        }
+    }
+
+    // Value written to a specific Topic channel, if any command targets it.
+    fn topic_cmd(events: &[ActionEvent], channel: &str) -> Option<f64> {
+        for e in events {
+            if let ActionEvent::Command(MappedCommand::Topic { channel: c, value, .. }) = e {
+                if c == channel {
+                    return value.as_f64();
+                }
+            }
+        }
+        None
+    }
+
+    fn has_estop(events: &[ActionEvent]) -> bool {
+        events.iter().any(|e| matches!(e, ActionEvent::EStop))
+    }
+
+    fn cycle_value(events: &[ActionEvent]) -> Option<String> {
+        events.iter().find_map(|e| match e {
+            ActionEvent::CycleOutput { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+    }
 
     fn fresh_mapper() -> InputMapper {
         let mut m = InputMapper::new();
@@ -787,6 +874,348 @@ mod tests {
         m.profiles.clear();
         m.active_profile_id = "nope".to_string();
         assert!(m.process(&input_left_stick(0.0, 0.9)).is_empty());
+    }
+
+    // ── differential drive (tank mixing) ────────────────────────────
+
+    fn diff_drive_profile() -> BindingProfile {
+        analog_profile(AnalogBinding {
+            input: AnalogInput::LeftStickY,
+            action: AnalogAction::DifferentialDrive {
+                topic: "/tracks".into(),
+                left_channel: "left".into(),
+                right_channel: "right".into(),
+                throttle_transform: tf0(),
+                turn_transform: tf0(),
+            },
+            enabled: true,
+        })
+    }
+
+    #[test]
+    fn diff_drive_mixes_throttle_and_turn() {
+        // throttle (y) = 0.5, turn (x) = 0.5 → left = 1.0, right = 0.0.
+        let mut m = mapper_with(diff_drive_profile());
+        let ev = m.process(&input_left_stick(0.5, 0.5));
+        approx(topic_cmd(&ev, "left").unwrap() as f32, 1.0);
+        approx(topic_cmd(&ev, "right").unwrap() as f32, 0.0);
+    }
+
+    #[test]
+    fn diff_drive_pure_throttle_drives_both_equally() {
+        // throttle 0.8, no turn → both tracks 0.8.
+        let mut m = mapper_with(diff_drive_profile());
+        let ev = m.process(&input_left_stick(0.0, 0.8));
+        approx(topic_cmd(&ev, "left").unwrap() as f32, 0.8);
+        approx(topic_cmd(&ev, "right").unwrap() as f32, 0.8);
+    }
+
+    #[test]
+    fn diff_drive_normalizes_when_sum_exceeds_one() {
+        // throttle 1.0 + turn 1.0 → left 2.0, right 0.0; proportional
+        // normalize divides by max (2.0) → left 1.0, right 0.0. Without
+        // this the left track would saturate while right does nothing,
+        // pulling the robot off the commanded arc.
+        let mut m = mapper_with(diff_drive_profile());
+        let ev = m.process(&input_left_stick(1.0, 1.0));
+        approx(topic_cmd(&ev, "left").unwrap() as f32, 1.0);
+        approx(topic_cmd(&ev, "right").unwrap() as f32, 0.0);
+    }
+
+    // ── modifiers (precision / speed boost) ──────────────────────────
+
+    #[test]
+    fn precision_modifier_scales_down() {
+        let mut m = fresh_mapper();
+        m.modifier_values.insert("precision".into(), 1.0); // full trigger
+        approx(m.apply_modifiers(1.0), 0.3); // 1 - 1*(1-0.3) = 0.3
+        m.modifier_values.insert("precision".into(), 0.5);
+        approx(m.apply_modifiers(1.0), 0.65); // 1 - 0.5*0.7
+    }
+
+    #[test]
+    fn speed_boost_modifier_scales_up_and_clamps() {
+        let mut m = fresh_mapper();
+        m.modifier_values.insert("speed_boost".into(), 1.0); // full trigger
+        approx(m.apply_modifiers(0.5), 0.75); // 0.5 * 1.5
+        approx(m.apply_modifiers(1.0), 1.0); // 1.5 → clamp 1.0
+    }
+
+    #[test]
+    fn modifiers_compose_then_clamp() {
+        let mut m = fresh_mapper();
+        m.modifier_values.insert("precision".into(), 1.0);   // ×0.3
+        m.modifier_values.insert("speed_boost".into(), 1.0); // ×1.5
+        approx(m.apply_modifiers(1.0), 0.45); // 1 * 0.3 * 1.5
+    }
+
+    #[test]
+    fn no_modifiers_is_identity() {
+        let m = fresh_mapper();
+        approx(m.apply_modifiers(0.7), 0.7);
+        approx(m.apply_modifiers(-0.7), -0.7);
+    }
+
+    // ── digital actions ──────────────────────────────────────────────
+
+    #[test]
+    fn estop_button_emits_estop() {
+        let mut m = mapper_with(digital_profile(DigitalBinding {
+            input: DigitalInput::Select,
+            trigger: ButtonTrigger::Press,
+            action: DigitalAction::EStop,
+            enabled: true,
+        }));
+        let ev = m.process(&input_buttons(&[("Select", true)]));
+        assert!(has_estop(&ev), "Select press must emit EStop; got {ev:?}");
+    }
+
+    #[test]
+    fn press_triggers_on_rising_edge_only() {
+        let mut m = mapper_with(digital_profile(DigitalBinding {
+            input: DigitalInput::A,
+            trigger: ButtonTrigger::Press,
+            action: DigitalAction::EStop,
+            enabled: true,
+        }));
+        // Rising edge fires once.
+        assert!(has_estop(&m.process(&input_buttons(&[("A", true)]))));
+        // Held (still pressed, no new edge) does not re-fire.
+        assert!(!has_estop(&m.process(&input_buttons(&[("A", true)]))));
+        // Release does not fire a Press binding.
+        assert!(!has_estop(&m.process(&input_buttons(&[("A", false)]))));
+    }
+
+    #[test]
+    fn release_trigger_fires_on_falling_edge() {
+        let mut m = mapper_with(digital_profile(DigitalBinding {
+            input: DigitalInput::A,
+            trigger: ButtonTrigger::Release,
+            action: DigitalAction::EStop,
+            enabled: true,
+        }));
+        assert!(!has_estop(&m.process(&input_buttons(&[("A", true)])))); // press: no
+        assert!(has_estop(&m.process(&input_buttons(&[("A", false)])))); // release: yes
+    }
+
+    #[test]
+    fn hold_doubletap_longpress_are_not_yet_implemented() {
+        // Lock the current TODO behaviour: these triggers never fire.
+        // When implemented, this test breaks and prompts an update —
+        // better than silently shipping a no-op binding.
+        for trig in [ButtonTrigger::Hold, ButtonTrigger::DoubleTap, ButtonTrigger::LongPress] {
+            let mut m = mapper_with(digital_profile(DigitalBinding {
+                input: DigitalInput::A,
+                trigger: trig,
+                action: DigitalAction::EStop,
+                enabled: true,
+            }));
+            assert!(!has_estop(&m.process(&input_buttons(&[("A", true)]))));
+            assert!(!has_estop(&m.process(&input_buttons(&[("A", true)]))));
+        }
+    }
+
+    #[test]
+    fn disabled_binding_does_nothing() {
+        let mut m = mapper_with(digital_profile(DigitalBinding {
+            input: DigitalInput::Select,
+            trigger: ButtonTrigger::Press,
+            action: DigitalAction::EStop,
+            enabled: false,
+        }));
+        assert!(!has_estop(&m.process(&input_buttons(&[("Select", true)]))));
+    }
+
+    #[test]
+    fn toggle_output_flips_each_press() {
+        let mut m = mapper_with(digital_profile(DigitalBinding {
+            input: DigitalInput::A,
+            trigger: ButtonTrigger::Press,
+            action: DigitalAction::ToggleOutput { target_id: "motor".into() },
+            enabled: true,
+        }));
+        m.process(&input_buttons(&[("A", true)]));   // press → true
+        assert_eq!(m.toggle_states.get("motor"), Some(&true));
+        m.process(&input_buttons(&[("A", false)]));  // release (no edge)
+        m.process(&input_buttons(&[("A", true)]));   // press → false
+        assert_eq!(m.toggle_states.get("motor"), Some(&false));
+    }
+
+    #[test]
+    fn cycle_output_advances_and_wraps() {
+        let mut m = mapper_with(digital_profile(DigitalBinding {
+            input: DigitalInput::A,
+            trigger: ButtonTrigger::Press,
+            action: DigitalAction::CycleOutput {
+                target_id: "mode".into(),
+                values: vec!["a".into(), "b".into(), "c".into()],
+            },
+            enabled: true,
+        }));
+        let press = |m: &mut InputMapper| {
+            let e = m.process(&input_buttons(&[("A", true)]));
+            m.process(&input_buttons(&[("A", false)]));
+            cycle_value(&e)
+        };
+        assert_eq!(press(&mut m).as_deref(), Some("b"));
+        assert_eq!(press(&mut m).as_deref(), Some("c"));
+        assert_eq!(press(&mut m).as_deref(), Some("a")); // wrap
+    }
+
+    #[test]
+    fn show_panel_toggles_open_then_closed() {
+        let mut m = mapper_with(digital_profile(DigitalBinding {
+            input: DigitalInput::Y,
+            trigger: ButtonTrigger::Press,
+            action: DigitalAction::ShowPanel { panel_id: "poses".into() },
+            enabled: true,
+        }));
+        let open = m.process(&input_buttons(&[("Y", true)]));
+        assert!(open.iter().any(|e| matches!(e, ActionEvent::ShowPanel { panel_id } if panel_id == "poses")));
+        assert_eq!(m.panel_state.active_panel_id.as_deref(), Some("poses"));
+
+        m.process(&input_buttons(&[("Y", false)])); // release
+        let close = m.process(&input_buttons(&[("Y", true)])); // same button again
+        assert!(close.iter().any(|e| matches!(e, ActionEvent::HidePanel)));
+        assert_eq!(m.panel_state.active_panel_id, None);
+    }
+
+    #[test]
+    fn digital_direct_control_sends_fixed_value() {
+        let mut m = mapper_with(digital_profile(DigitalBinding {
+            input: DigitalInput::B,
+            trigger: ButtonTrigger::Press,
+            action: DigitalAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/saint/horn".into(),
+                    channel: "on".into(),
+                    name: None,
+                },
+                value: 1.0,
+            },
+            enabled: true,
+        }));
+        let ev = m.process(&input_buttons(&[("B", true)]));
+        approx(topic_cmd(&ev, "on").unwrap() as f32, 1.0);
+    }
+
+    // ── target routing ───────────────────────────────────────────────
+
+    #[test]
+    fn direct_control_routes_to_ws_input_target() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickX,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::WsInput {
+                    sheet_id: "sheetA".into(),
+                    input_id: "in1".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+        let ev = m.process(&input_right_stick(0.8, 0.0));
+        let routed = ev.iter().find_map(|e| match e {
+            ActionEvent::Command(MappedCommand::WsInput { sheet_id, input_id, value }) =>
+                Some((sheet_id.clone(), input_id.clone(), value.as_f64().unwrap_or(f64::NAN))),
+            _ => None,
+        });
+        let (sheet, input, value) = routed.expect("expected a WsInput command");
+        assert_eq!(sheet, "sheetA");
+        assert_eq!(input, "in1");
+        approx(value as f32, 0.8);
+    }
+
+    // ── panel grid navigation ────────────────────────────────────────
+
+    fn panel_profile(presets: usize, columns: u32, items_per_page: u32) -> BindingProfile {
+        let mut p = BindingProfile::new("test", "Test");
+        let presets = (0..presets)
+            .map(|i| Preset {
+                id: format!("p{i}"),
+                name: format!("P{i}"),
+                icon: None,
+                color: None,
+                preset_type: PresetType::Sound,
+                data: PresetData::Sound(SoundPresetData {
+                    sound_id: "s".into(),
+                    volume: 1.0,
+                    priority: 1,
+                }),
+            })
+            .collect();
+        p.preset_panels = vec![PresetPanel {
+            id: "grid".into(),
+            name: "Grid".into(),
+            icon: "i".into(),
+            color: "#fff".into(),
+            presets,
+            layout: PanelLayout::Grid,
+            columns,
+            items_per_page,
+            source: None,
+        }];
+        p
+    }
+
+    #[test]
+    fn navigate_grid_moves_within_bounds() {
+        // 6 items, 4 columns, single page.
+        let profile = panel_profile(6, 4, 8);
+        let mut m = mapper_with(profile.clone());
+        m.panel_state.active_panel_id = Some("grid".into());
+
+        m.navigate_panel(&profile, &NavigateDirection::Right);
+        assert_eq!(m.panel_state.selected_index, 1);
+
+        m.panel_state.selected_index = 0;
+        m.navigate_panel(&profile, &NavigateDirection::Down); // +columns
+        assert_eq!(m.panel_state.selected_index, 4);
+
+        m.navigate_panel(&profile, &NavigateDirection::Up); // back to row 0
+        assert_eq!(m.panel_state.selected_index, 0);
+    }
+
+    #[test]
+    fn navigate_grid_clamps_at_edges() {
+        let profile = panel_profile(6, 4, 8);
+        let mut m = mapper_with(profile.clone());
+        m.panel_state.active_panel_id = Some("grid".into());
+
+        // Up from row 0 is a no-op.
+        m.navigate_panel(&profile, &NavigateDirection::Up);
+        assert_eq!(m.panel_state.selected_index, 0);
+        // Left from index 0 is a no-op.
+        m.navigate_panel(&profile, &NavigateDirection::Left);
+        assert_eq!(m.panel_state.selected_index, 0);
+        // Right past the last item (index 5) is a no-op.
+        m.panel_state.selected_index = 5;
+        m.navigate_panel(&profile, &NavigateDirection::Right);
+        assert_eq!(m.panel_state.selected_index, 5);
+        // Down would land on index 9 (>= 6) → no-op.
+        m.panel_state.selected_index = 5;
+        m.navigate_panel(&profile, &NavigateDirection::Down);
+        assert_eq!(m.panel_state.selected_index, 5);
+    }
+
+    #[test]
+    fn navigate_grid_pages() {
+        // 10 items, 4 columns, 8 per page → 2 pages.
+        let profile = panel_profile(10, 4, 8);
+        let mut m = mapper_with(profile.clone());
+        m.panel_state.active_panel_id = Some("grid".into());
+
+        m.navigate_panel(&profile, &NavigateDirection::NextPage);
+        assert_eq!(m.panel_state.current_page, 1);
+        assert_eq!(m.panel_state.selected_index, 8); // first item of page 2
+
+        m.navigate_panel(&profile, &NavigateDirection::NextPage); // already last page
+        assert_eq!(m.panel_state.current_page, 1);
+
+        m.navigate_panel(&profile, &NavigateDirection::PrevPage);
+        assert_eq!(m.panel_state.current_page, 0);
+        assert_eq!(m.panel_state.selected_index, 0);
     }
 
     // ── benchmarks (#[ignore]; run with --ignored --nocapture) ───────

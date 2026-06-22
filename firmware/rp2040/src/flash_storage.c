@@ -144,6 +144,16 @@ bool flash_storage_load(flash_storage_data_t* data)
             memset(&mutable_data->uart_pins, 0,
                    sizeof(mutable_data->uart_pins));
         }
+        // Version 11 -> 12: inserted flash_kangaroo_config_t between
+        // tmc2208_config and uart_pins. Same fix pattern — zero the new
+        // block + uart_pins so misaligned bytes don't get read as live
+        // config. All peripherals before kangaroo keep their offsets.
+        if (mutable_data->version <= 11) {
+            memset(&mutable_data->kangaroo_config, 0,
+                   sizeof(mutable_data->kangaroo_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+        }
 
         mutable_data->version = FLASH_STORAGE_VERSION;
     }

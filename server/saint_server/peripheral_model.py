@@ -797,6 +797,79 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralTypeParam("max_speed_pps",   "Max speed (pulses/s)", "int", 1000,  min=1, max=12500),
         ],
     ),
+    "kangaroo": PeripheralType(
+        id="kangaroo", label="Kangaroo X2",
+        description=(
+            "Dimension Engineering Kangaroo X2 self-tuning closed-loop "
+            "motion controller (rides on a Sabertooth / SyRen power "
+            "stage). One peripheral = one Kangaroo motor channel; add a "
+            "second for the board's other channel. Speaks packet serial "
+            "(binary, CRC-14) or simplified serial (ASCII). The channel "
+            "must be tuned in DEScribe first — this driver does motion, "
+            "not tuning."
+        ),
+        pin_kind="uart",
+        channels=[
+            PeripheralChannel("target_position",  "Target position",  "out", "analog"),
+            PeripheralChannel("target_speed",     "Target speed",     "out", "analog"),
+            PeripheralChannel("current_position", "Current position", "in",  "analog"),
+            PeripheralChannel("current_speed",    "Current speed",    "in",  "analog"),
+            PeripheralChannel("moving",           "Moving",           "in",  "digital_in"),
+            PeripheralChannel("error_status",     "Error status",     "in",  "analog"),
+        ],
+        params=[
+            # Board address (high bit set on the wire). Two Kangaroo
+            # channels share one address; `channel` picks which.
+            PeripheralTypeParam("address", "Address", "int", 128, min=128, max=135),
+            PeripheralTypeParam(
+                "channel", "Channel", "string", "1",
+                choices=[
+                    {"value": "1", "label": "1 — Motor 1 (independent)"},
+                    {"value": "2", "label": "2 — Motor 2 (independent)"},
+                    {"value": "D", "label": "D — Drive (mixed/differential)"},
+                    {"value": "T", "label": "T — Turn (mixed/differential)"},
+                ],
+                help="Use 1/2 for independent mode, D/T for mixed "
+                     "(tank-drive) mode. Must match how the Kangaroo was "
+                     "tuned in DEScribe.",
+            ),
+            PeripheralTypeParam(
+                "protocol", "Protocol", "string", "packet",
+                choices=[
+                    {"value": "packet", "label": "Packet serial (binary, CRC-14)"},
+                    {"value": "simple", "label": "Simplified serial (ASCII)"},
+                ],
+                help="Packet is more robust and is the default. Simplified "
+                     "serial is plain ASCII — easier to debug with a serial "
+                     "terminal but unframed. Set the matching mode in "
+                     "DEScribe / via the DIP switches.",
+            ),
+            PeripheralTypeParam(
+                "home_on_start", "Home on start", "bool", False,
+                help="Send a Home command after Start. Needed for "
+                     "quadrature / limit-switch rigs before absolute moves "
+                     "are accepted; not meaningful in mixed (D/T) mode.",
+            ),
+            # Operator-facing scaling. The dashboard sends [-1, 1]; the
+            # firmware multiplies by these to get the value on the wire
+            # in the Kangaroo's machine units (set via DEScribe `units`).
+            PeripheralTypeParam("max_position", "Max position (units)", "int", 10000,
+                                min=1, max=536870911),
+            PeripheralTypeParam("max_speed",    "Max speed (units/s)",  "int", 1000,
+                                min=1, max=536870911),
+            PeripheralTypeParam(
+                "baud", "Baud rate", "int", 9600,
+                choices=[
+                    {"value":   9600, "label": "9600 bps (default)"},
+                    {"value":  19200, "label": "19200 bps"},
+                    {"value":  38400, "label": "38400 bps"},
+                    {"value": 115200, "label": "115200 bps"},
+                ],
+                help="Must match the rate set in DEScribe. The Kangaroo "
+                     "has no autobaud — it listens at exactly this rate.",
+            ),
+        ],
+    ),
     "pathfinder_bms": PeripheralType(
         id="pathfinder_bms", label="Pathfinder BMS",
         description="JBD-compatible battery management system. "

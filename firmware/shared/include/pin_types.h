@@ -32,6 +32,7 @@
 #define PIN_CAP_PATHFINDER_BMS  0x2000
 #define PIN_CAP_TIC_STEPPER     0x4000
 #define PIN_CAP_TMC2208_STEPPER 0x8000
+#define PIN_CAP_KANGAROO        0x10000
 
 // Convenience combinations
 #define PIN_CAP_GPIO            (PIN_CAP_DIGITAL_IN | PIN_CAP_DIGITAL_OUT)
@@ -60,7 +61,8 @@ typedef enum {
     PIN_MODE_ROBOCLAW_MOTOR,
     PIN_MODE_PATHFINDER_BMS,
     PIN_MODE_TIC_STEPPER,
-    PIN_MODE_TMC2208_STEPPER
+    PIN_MODE_TMC2208_STEPPER,
+    PIN_MODE_KANGAROO
 } pin_mode_t;
 
 // =============================================================================
@@ -230,6 +232,26 @@ typedef struct {
             int32_t  max_position;     /* default 10000 steps */
             uint16_t max_speed_pps;    /* default 1000 pulses/sec */
         } tmc2208;
+        struct {
+            /* Sabertooth/SyRen-style board address (128..135), high bit
+             * set on the wire. Two Kangaroo channels share one address. */
+            uint8_t  address;
+            /* Channel-name character: '1'/'2' (independent mode) or
+             * 'D'/'T' (mixed/differential). Lives inside the payload,
+             * not in the address byte — so two peripheral instances on
+             * the same board differ only by this. */
+            uint8_t  channel_name;
+            /* KANGAROO_PROTO_PACKET (binary, CRC-14, default) or
+             * KANGAROO_PROTO_SIMPLE (newline-terminated ASCII). */
+            uint8_t  protocol;
+            /* 1 = send Home after Start (quadrature/limit-switch rigs). */
+            uint8_t  home_on_start;
+            /* Operator-facing scaling. set_value gets [-1,1]; the driver
+             * maps to ±max_position (position channel) / ±max_speed
+             * (speed channel) in the Kangaroo's machine units. */
+            int32_t  max_position;     /* default 10000 units      */
+            int32_t  max_speed;        /* default 1000 units/sec   */
+        } kangaroo;
     } params;
 } pin_config_t;
 

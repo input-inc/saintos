@@ -39,6 +39,7 @@ TEST_BINARIES=(
     "test_maestro_driver"
     "test_tic_driver"
     "test_tmc2208_driver"
+    "test_kangaroo_driver"
 )
 
 overall_rc=0

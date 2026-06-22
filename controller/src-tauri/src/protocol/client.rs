@@ -16,6 +16,32 @@ const MAX_RECONNECT_DELAY_MS: u64 = 30000;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// Build the WebSocket URL the controller dials. Centralized so the
+/// connect path and tests agree on the scheme + `/api/ws` path.
+fn build_ws_url(host: &str, port: u16) -> String {
+    format!("ws://{}:{}/api/ws", host, port)
+}
+
+/// Next exponential-backoff reconnect delay, capped at
+/// `MAX_RECONNECT_DELAY_MS`. Doubles each retry (1s → 2s → 4s → … → 30s)
+/// then holds at the cap. `saturating_mul` keeps a pathologically large
+/// input from wrapping (the live caller never exceeds the cap anyway).
+fn next_reconnect_delay(current_ms: u64) -> u64 {
+    current_ms.saturating_mul(2).min(MAX_RECONNECT_DELAY_MS)
+}
+
+/// Whether a control value counts as a "stop" (near zero). Stop commands
+/// bypass the per-target send throttle so a stick release always reaches
+/// the robot even mid-throttle-window. Non-numeric values are never
+/// stops. Shared by every send_* path so the throttle-bypass rule can't
+/// drift between them.
+fn is_stop_value(value: &Value) -> bool {
+    match value {
+        Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
+        _ => false,
+    }
+}
+
 pub struct WebSocketClient {
     state: Arc<RwLock<ConnectionState>>,
     command_tx: Arc<RwLock<Option<mpsc::Sender<OutgoingMessage>>>>,
@@ -53,7 +79,7 @@ impl WebSocketClient {
         // Disconnect existing connection
         self.disconnect();
 
-        let url = format!("ws://{}:{}/api/ws", host, port);
+        let url = build_ws_url(host, port);
         let password = password.to_string();
         let state = self.state.clone();
         let command_tx_holder = self.command_tx.clone();
@@ -143,10 +169,7 @@ impl WebSocketClient {
     /// High-level control using role + function (preferred)
     pub fn send_function_control(&self, role: &str, function: &str, value: Value) -> Result<(), String> {
         // Check if this is a "stop" command (value near zero) - these bypass throttle
-        let is_stop_command = match &value {
-            Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
-            _ => false,
-        };
+        let is_stop_command = is_stop_value(&value);
 
         // Per-target throttle key
         let throttle_key = format!("{}:{}", role, function);
@@ -303,10 +326,7 @@ impl WebSocketClient {
         if self.state.read().estop_active {
             return Ok(());
         }
-        let is_stop_command = match &value {
-            Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
-            _ => false,
-        };
+        let is_stop_command = is_stop_value(&value);
         let throttle_key = format!("ws::{}::{}", sheet_id, input_id);
         if !is_stop_command {
             let mut times = self.last_command_times.write();
@@ -362,10 +382,7 @@ impl WebSocketClient {
         if self.state.read().estop_active {
             return Ok(());
         }
-        let is_stop_command = match &value {
-            Value::Number(n) => n.as_f64().map(|v| v.abs() < 0.01).unwrap_or(false),
-            _ => false,
-        };
+        let is_stop_command = is_stop_value(&value);
         let throttle_key = format!("{}::{}", topic, channel);
         if !is_stop_command {
             let mut times = self.last_command_times.write();
@@ -535,7 +552,7 @@ async fn run_connection_loop<R: Runtime>(
 
         tracing::info!("Reconnecting in {}ms", reconnect_delay);
         tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
-        reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY_MS);
+        reconnect_delay = next_reconnect_delay(reconnect_delay);
     }
 
     {
@@ -867,5 +884,64 @@ fn emit_state<R: Runtime>(app_handle: &AppHandle<R>, state: &ConnectionState) {
 impl Default for WebSocketClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Network-path decision logic: URL building, reconnect backoff, and
+    //! the stop-command throttle bypass. These are the pure pieces of the
+    //! WebSocket client extracted so the "does control survive a flaky
+    //! link" behaviour is testable without standing up a real socket.
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ws_url_has_scheme_host_port_and_path() {
+        assert_eq!(build_ws_url("192.168.1.50", 8080), "ws://192.168.1.50:8080/api/ws");
+        assert_eq!(build_ws_url("opensaint.local", 80), "ws://opensaint.local:80/api/ws");
+    }
+
+    #[test]
+    fn reconnect_backoff_doubles_then_caps() {
+        // Mirrors the live loop: start at RECONNECT_DELAY_MS, double each
+        // retry, hold at MAX_RECONNECT_DELAY_MS. A regression here means
+        // either hammering the server (no growth) or never retrying
+        // (overshoot past the cap).
+        let mut d = RECONNECT_DELAY_MS;
+        let seq: Vec<u64> = (0..8)
+            .map(|_| {
+                let cur = d;
+                d = next_reconnect_delay(d);
+                cur
+            })
+            .collect();
+        assert_eq!(seq, vec![1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
+        // Idempotent at the ceiling.
+        assert_eq!(next_reconnect_delay(MAX_RECONNECT_DELAY_MS), MAX_RECONNECT_DELAY_MS);
+    }
+
+    #[test]
+    fn reconnect_backoff_never_overflows() {
+        // Defense in depth: even a corrupt huge delay clamps, not wraps.
+        assert_eq!(next_reconnect_delay(u64::MAX), MAX_RECONNECT_DELAY_MS);
+    }
+
+    #[test]
+    fn stop_value_detects_near_zero_numbers() {
+        assert!(is_stop_value(&json!(0)));
+        assert!(is_stop_value(&json!(0.0)));
+        assert!(is_stop_value(&json!(0.005)));   // within the 0.01 band
+        assert!(is_stop_value(&json!(-0.005)));
+    }
+
+    #[test]
+    fn nonzero_and_nonnumeric_values_are_not_stops() {
+        assert!(!is_stop_value(&json!(0.5)));
+        assert!(!is_stop_value(&json!(-1.0)));
+        assert!(!is_stop_value(&json!(0.01)));   // exactly at the band edge — not a stop
+        assert!(!is_stop_value(&json!("stop")));
+        assert!(!is_stop_value(&json!(null)));
+        assert!(!is_stop_value(&json!({"v": 0})));
     }
 }

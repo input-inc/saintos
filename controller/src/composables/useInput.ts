@@ -103,9 +103,14 @@ function detectButtonChanges(currentButtons: { [key: string]: boolean }): void {
             emitButtonEvent({ button, pressed });
         }
     }
-    // Buttons that disappeared from the state are treated as released.
+    // Buttons that disappeared entirely from the state are treated as
+    // released. Guard on absence (`!(button in …)`), NOT falsiness — a
+    // button present as `false` was already handled by the transition
+    // loop above. The firmware emits the full button map every frame, so
+    // `!currentButtons[button]` here would re-fire every release a second
+    // time.
     for (const [button, wasPressed] of Object.entries(previousButtons)) {
-        if (wasPressed && !currentButtons[button]) {
+        if (wasPressed && !(button in currentButtons)) {
             emitButtonEvent({ button, pressed: false });
         }
     }
