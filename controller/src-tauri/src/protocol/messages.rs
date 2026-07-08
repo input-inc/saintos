@@ -282,6 +282,54 @@ impl OutgoingMessage {
         }
     }
 
+    /// Current AP WiFi config. Server replies with
+    /// `{ ok, ssid, password, band, channel, iface }` — same handler
+    /// the web dashboard's WiFi card uses. The client strips
+    /// `password` before forwarding to the frontend (`wifi-config`
+    /// event); the panel has no use for it.
+    pub fn wifi_get_config() -> Self {
+        Self {
+            id: next_id(),
+            msg_type: "management".to_string(),
+            action: "wifi_get_config".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// Scan for neighboring APs and report per-channel congestion.
+    /// Server replies (~10 s later — `iw scan` runs on the Pi) with
+    /// `{ ok, iface, current_channel, channels: [{band, channel,
+    /// freq_mhz, ap_count, strongest_signal_dbm, is_dfs, is_current}],
+    /// error }`. Forwarded on the `wifi-survey` event.
+    pub fn wifi_survey() -> Self {
+        Self {
+            id: next_id(),
+            msg_type: "management".to_string(),
+            action: "wifi_survey".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
+    /// Move the server's AP to a different channel. `band` is the wire
+    /// encoding ("bg" = 2.4 GHz, "a" = 5 GHz). The server ACKs with
+    /// `{ switching: true, band, channel }` BEFORE restarting the AP —
+    /// expect the WebSocket to drop for ~5-10 s right after (60 s+ if
+    /// a DFS channel needs its radar-listen period).
+    pub fn wifi_set_channel(band: &str, channel: u32) -> Self {
+        Self {
+            id: next_id(),
+            msg_type: "management".to_string(),
+            action: "wifi_set_channel".to_string(),
+            params: Some(serde_json::json!({
+                "band": band,
+                "channel": channel,
+            })),
+            password: None,
+        }
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -455,6 +503,25 @@ mod tests {
         assert_eq!(OutgoingMessage::list_poses().action, "list_poses");
         assert_eq!(OutgoingMessage::start_animation("anim1").params.unwrap()["id"], "anim1");
         assert_eq!(OutgoingMessage::apply_pose("pose1").params.unwrap()["id"], "pose1");
+    }
+
+    #[test]
+    fn wifi_message_shapes() {
+        // Wire actions must match the server's management handler
+        // (websocket_handler.py) exactly — a drifted action name fails
+        // silently as "unknown action" (same failure mode the estop
+        // button had).
+        assert_eq!(OutgoingMessage::wifi_get_config().action, "wifi_get_config");
+        assert_eq!(OutgoingMessage::wifi_get_config().msg_type, "management");
+        assert_eq!(OutgoingMessage::wifi_survey().action, "wifi_survey");
+        assert_eq!(OutgoingMessage::wifi_survey().msg_type, "management");
+
+        let m = OutgoingMessage::wifi_set_channel("bg", 6);
+        assert_eq!(m.msg_type, "management");
+        assert_eq!(m.action, "wifi_set_channel");
+        let p = m.params.as_ref().expect("params present");
+        assert_eq!(p["band"], "bg");
+        assert_eq!(p["channel"], 6);
     }
 
     #[test]

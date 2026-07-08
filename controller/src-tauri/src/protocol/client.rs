@@ -10,7 +10,12 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
-const THROTTLE_MS: u64 = 50;
+// Per-target streaming-send rate cap (50 Hz). Lower bound is the 4 ms
+// input loop; the mapper re-emits held deflections every tick, so this
+// window is what actually paces the wire. 50 → 20 ms (2026-07 latency
+// audit, item 4 of docs/LATENCY_REDUCTION.md) cut the per-value worst
+// case by 30 ms.
+const THROTTLE_MS: u64 = 20;
 const RECONNECT_DELAY_MS: u64 = 1000;
 const MAX_RECONNECT_DELAY_MS: u64 = 30000;
 
@@ -42,12 +47,30 @@ fn is_stop_value(value: &Value) -> bool {
     }
 }
 
+/// Queue-full drops arrive in bursts (congested link, slow server), so
+/// warn at most once per window; the counters keep the burst size
+/// visible in the one line that does land.
+const DROP_WARN_INTERVAL_MS: u64 = 5000;
+
+/// Book-keeping for writes dropped because the outgoing command queue
+/// was full. These were TRACE-only before — invisible in release
+/// builds, so a backlogged link silently ate stick input.
+#[derive(Default)]
+struct DropStats {
+    /// Dropped writes since connect().
+    total: u64,
+    /// Dropped writes since the last warn line.
+    since_warn: u64,
+    last_warn: Option<Instant>,
+}
+
 pub struct WebSocketClient {
     state: Arc<RwLock<ConnectionState>>,
     command_tx: Arc<RwLock<Option<mpsc::Sender<OutgoingMessage>>>>,
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
     /// Per-target throttle timers (key = "role:function")
     last_command_times: Arc<RwLock<HashMap<String, Instant>>>,
+    drop_stats: Arc<RwLock<DropStats>>,
 }
 
 impl WebSocketClient {
@@ -57,7 +80,30 @@ impl WebSocketClient {
             command_tx: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             last_command_times: Arc::new(RwLock::new(HashMap::new())),
+            drop_stats: Arc::new(RwLock::new(DropStats::default())),
         }
+    }
+
+    /// Record a queue-full drop and emit a rate-limited warn. Returns
+    /// whether a warning was actually logged this call (exposed so the
+    /// window behavior is testable).
+    fn note_dropped_write(&self, target: &str) -> bool {
+        let mut s = self.drop_stats.write();
+        s.total += 1;
+        s.since_warn += 1;
+        let warn_due = s
+            .last_warn
+            .map_or(true, |t| t.elapsed() >= Duration::from_millis(DROP_WARN_INTERVAL_MS));
+        if warn_due {
+            log::warn!(
+                "Command queue full: dropped {} ({} drop(s) in the last window, {} since connect) — \
+                 link congested or server slow; stick input is being lost",
+                target, s.since_warn, s.total
+            );
+            s.last_warn = Some(Instant::now());
+            s.since_warn = 0;
+        }
+        warn_due
     }
 
     pub fn state(&self) -> ConnectionState {
@@ -92,6 +138,10 @@ impl WebSocketClient {
             s.error = None;
         }
         emit_state(&app_handle, &state.read());
+
+        // Fresh drop counters per connection so the warn line's "since
+        // connect" number means what it says.
+        *self.drop_stats.write() = DropStats::default();
 
         // Create channels
         let (command_tx, command_rx) = mpsc::channel::<OutgoingMessage>(100);
@@ -199,7 +249,7 @@ impl WebSocketClient {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 // Channel full, drop this command (next one will go through)
-                log::trace!("Channel full, dropped command for {}:{}", role, function);
+                self.note_dropped_write(&format!("control {}:{}", role, function));
                 Ok(())
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -350,7 +400,7 @@ impl WebSocketClient {
         match tx.try_send(msg) {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                log::trace!("Channel full, dropped ws_input write for {}::{}", sheet_id, input_id);
+                self.note_dropped_write(&format!("ws_input {}::{}", sheet_id, input_id));
                 Ok(())
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -406,7 +456,7 @@ impl WebSocketClient {
         match tx.try_send(msg) {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                log::trace!("Channel full, dropped command for {}::{}", topic, channel);
+                self.note_dropped_write(&format!("topic {}::{}", topic, channel));
                 Ok(())
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -444,6 +494,45 @@ impl WebSocketClient {
             .ok_or_else(|| "Not connected".to_string())?;
         tx.blocking_send(OutgoingMessage::subscribe_owned(&topics))
             .map_err(|e| format!("Failed to send subscribe: {}", e))
+    }
+
+    /// Ask for the AP's current WiFi config (SSID, band, channel).
+    /// Response forwarded on the `wifi-config` Tauri event with the
+    /// password field stripped.
+    pub fn request_wifi_config(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::wifi_get_config())
+            .map_err(|e| format!("Failed to send wifi_get_config: {}", e))
+    }
+
+    /// Kick off a channel-congestion survey on the server (~10 s —
+    /// `iw scan` on the Pi). Response forwarded on the `wifi-survey`
+    /// Tauri event.
+    pub fn request_wifi_survey(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::wifi_survey())
+            .map_err(|e| format!("Failed to send wifi_survey: {}", e))
+    }
+
+    /// Move the AP to a new channel. The server ACKs (`wifi-switching`
+    /// event), then restarts the AP — the connection WILL drop for
+    /// ~5-10 s and the reconnect loop brings it back.
+    pub fn request_wifi_set_channel(&self, band: &str, channel: u32) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::wifi_set_channel(band, channel))
+            .map_err(|e| format!("Failed to send wifi_set_channel: {}", e))
     }
 
     /// Request the saved-animation list. Response forwarded on the
@@ -733,6 +822,42 @@ async fn handle_connection<R: Runtime>(
                                             tracing::error!("Failed to emit adopted-nodes: {}", e);
                                         }
                                     }
+                                    // WiFi survey response — the only ok-response
+                                    // we request whose data carries BOTH `channels`
+                                    // and `current_channel` (wifi_admin.survey()
+                                    // always includes both keys, even on failure —
+                                    // the frontend reads data.ok / data.error).
+                                    if data.get("channels").is_some()
+                                        && data.get("current_channel").is_some()
+                                    {
+                                        if let Err(e) = app_handle.emit("wifi-survey", data) {
+                                            tracing::error!("Failed to emit wifi-survey: {}", e);
+                                        }
+                                    }
+                                    // WiFi config response — `ssid` appears in no
+                                    // other response we request. The payload also
+                                    // carries the AP password in cleartext
+                                    // (wifi_admin.get_credentials()); the panel has
+                                    // no use for it, so strip before it crosses
+                                    // into the webview.
+                                    if data.get("ssid").is_some() && data.get("channels").is_none() {
+                                        let mut sanitized = data.clone();
+                                        if let Some(obj) = sanitized.as_object_mut() {
+                                            obj.remove("password");
+                                        }
+                                        if let Err(e) = app_handle.emit("wifi-config", sanitized) {
+                                            tracing::error!("Failed to emit wifi-config: {}", e);
+                                        }
+                                    }
+                                    // wifi_set_channel / wifi_set_credentials ACK —
+                                    // { switching: true, … }. The AP restarts right
+                                    // after this arrives; the frontend shows its
+                                    // reconnect state until the link comes back.
+                                    if data.get("switching").is_some() {
+                                        if let Err(e) = app_handle.emit("wifi-switching", data) {
+                                            tracing::error!("Failed to emit wifi-switching: {}", e);
+                                        }
+                                    }
                                     // Response to list_animations — shape
                                     // { animations: [{id, name, icon, …}] }.
                                     if data.get("animations").is_some() {
@@ -943,5 +1068,76 @@ mod tests {
         assert!(!is_stop_value(&json!("stop")));
         assert!(!is_stop_value(&json!(null)));
         assert!(!is_stop_value(&json!({"v": 0})));
+    }
+
+    // ── throttle-gate semantics (2026-07 latency audit lock-down) ──────
+    //
+    // The per-target throttle runs BEFORE the "Not connected" check, so
+    // on a disconnected client the return value tells us which gate a
+    // call died at: Err("Not connected") = it passed the throttle;
+    // Ok(()) = the throttle (or estop gate) swallowed it. That makes the
+    // silent-drop behavior testable without standing up a socket.
+
+    #[test]
+    fn nonstop_value_inside_throttle_window_is_silently_swallowed() {
+        let c = WebSocketClient::new();
+        // First non-stop value passes the throttle, then dies at the
+        // connection check — proving it got through the gate.
+        assert!(c.send_function_control("drive", "left", json!(0.5)).is_err());
+        // A fresher value inside the THROTTLE_MS window is dropped and
+        // reported as success. This is the documented trailing-edge
+        // hole; the mapper's per-tick re-emit is what recovers it.
+        assert!(c.send_function_control("drive", "left", json!(0.9)).is_ok());
+    }
+
+    #[test]
+    fn stop_values_bypass_throttle_on_every_streaming_path() {
+        let c = WebSocketClient::new();
+        // Open a throttle window with a non-stop value, then confirm a
+        // stop value still reaches the connection check (is_err) instead
+        // of being swallowed by the window (would be is_ok).
+        assert!(c.send_function_control("drive", "left", json!(0.5)).is_err());
+        assert!(c.send_function_control("drive", "left", json!(0.0)).is_err());
+
+        assert!(c.send_ws_input_value("sheet", "input", json!(0.5)).is_err());
+        assert!(c.send_ws_input_value("sheet", "input", json!(0.0)).is_err());
+
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.5)).is_err());
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.0)).is_err());
+    }
+
+    #[test]
+    fn throttle_windows_are_per_target() {
+        let c = WebSocketClient::new();
+        // Each (topic, channel) gets its own window — the second track
+        // of a tank must not inherit the first track's throttle stamp.
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.5)).is_err());
+        assert!(c.send_topic_channel_value("/tracks", "right", json!(0.5)).is_err());
+    }
+
+    #[test]
+    fn dropped_write_warns_once_per_window_but_counts_every_drop() {
+        let c = WebSocketClient::new();
+        assert!(c.note_dropped_write("test"), "first drop must warn");
+        assert!(!c.note_dropped_write("test"), "drop inside the window is counted silently");
+        assert_eq!(c.drop_stats.read().total, 2);
+        assert_eq!(c.drop_stats.read().since_warn, 1);
+        // Backdate the window; the next drop warns again and re-arms.
+        c.drop_stats.write().last_warn =
+            Some(Instant::now() - Duration::from_millis(DROP_WARN_INTERVAL_MS + 1));
+        assert!(c.note_dropped_write("test"));
+        assert_eq!(c.drop_stats.read().total, 3);
+        assert_eq!(c.drop_stats.read().since_warn, 0);
+    }
+
+    #[test]
+    fn estop_gate_swallows_streaming_sends_before_throttle() {
+        let c = WebSocketClient::new();
+        c.state.write().estop_active = true;
+        // While estop is engaged the client drops streaming writes
+        // outright (Ok, never reaches the connection check) so a
+        // deflected stick doesn't pour dead traffic into the socket.
+        assert!(c.send_ws_input_value("sheet", "input", json!(0.5)).is_ok());
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.5)).is_ok());
     }
 }

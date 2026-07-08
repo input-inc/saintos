@@ -79,6 +79,20 @@ echo "==> Building controller AppImage in linux/amd64 container"
 echo "    repo:  $REPO_ROOT"
 echo "    cache: $CACHE_ROOT"
 
+# controller/node_modules must be the container-side symlink into the
+# cache (build-bundle.sh creates it). A host-side `npm install` for
+# local dev turns it into a real directory; reclaim it HERE, on the
+# host, before the container starts. Doing the rm inside the container
+# is unreliable on Docker Desktop for Mac: rm -rf over the virtiofs
+# bind mount races directory-entry caching (and Finder's .DS_Store
+# drops) and dies with "Directory not empty".
+NODE_MODULES="$REPO_ROOT/controller/node_modules"
+if [ -e "$NODE_MODULES" ] && [ ! -L "$NODE_MODULES" ]; then
+    echo "==> Removing host-installed controller/node_modules (container will re-link it into the cache)"
+    echo "    (re-run 'npm install' in controller/ if you need host-side npm tooling again)"
+    rm -rf "$NODE_MODULES"
+fi
+
 # Plain bind mounts. No --privileged, no --security-opt, no named
 # volume — none of the flatpak workarounds are needed because no
 # kernel-level sandboxing happens inside.

@@ -5,9 +5,12 @@ The controller → server → peripheral movement-control pipeline had up to
 stopping). This doc tracks the diagnosis, the staged fixes, and the
 testing plan.
 
-Status as of 2026-05-25: items 1-3 + 6 implemented; items 1-3 awaiting
-on-hardware verification (now possible — node firmware reflashed past
-the topic split). Items 4-5 and 7-8 queued.
+Status as of 2026-07-05: items 1-7 implemented in source (items 4, 5, 7
+landed with the control-pipeline audit — see
+`docs/CONTROL_PIPELINE_AUDIT.md`). Items 4-5 need a node reflash +
+on-hardware verification. Item 8 is PARKED — see its section; removing
+the throttle without a mapper-side rate cap would put ~250 Hz per
+active axis on the socket.
 
 ## The pipeline (where latency can hide)
 
@@ -104,28 +107,25 @@ has, keyed on the left channel (left + right are always sent together
 so one timer covers both tracks). Re-uses the existing `HEARTBEAT_MS =
 500` constant.
 
-## Tier 2 — moderate wins (queued)
+## Tier 2 — moderate wins
 
-### 4. Shrink controller-side throttle 50 → 20 ms
+### 4. Shrink controller-side throttle 50 → 20 ms (done 2026-07-05)
 
-`controller/src-tauri/src/protocol/client.rs:13` — `THROTTLE_MS: u64 =
-50`. Bumping to 20 ms gives 50 Hz update rate, still gentle on the
-link. Lower bound is the input poll rate (16 ms).
+`controller/src-tauri/src/protocol/client.rs` — `THROTTLE_MS` is now
+20 ms (50 Hz per target). Lower bound is the 4 ms input loop; the
+server-side `CONTROL_THROTTLE_MS` (50 ms) is now the tighter window on
+the channel-addressed path, so a follow-up there is the next lever if
+more rate is wanted.
 
-### 5. Shrink firmware main-loop sleep 10 → 2 ms
+### 5. Shrink firmware main-loop sleep 10 → 2 ms (done 2026-07-05, needs reflash)
 
-`firmware/rp2040/src/main.c` (~line 1785) and
-`firmware/teensy41/src/main.cpp` (~line 747) currently do:
-
-```c
-rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
-sleep_ms(10);
-```
-
-Worst-case ~20 ms from packet arrival to actuator write. Dropping the
-sleep to 2 ms saves up to 8 ms per node tick. Watchdog still has
-plenty of headroom. Verify on hardware before merging — the spin
-budget interacts with the rest of the executor work.
+`firmware/rp2040/src/main.c` — `sleep_ms(10)` → `sleep_ms(2)` after
+the executor spin. `firmware/teensy41/src/main.cpp` — the loop-pacing
+deadline (`now + 10`) → `now + 2`; when spin_some idles its full 10 ms
+timeout the deadline is already met, so idle loop rate is unchanged —
+only the post-message blind window shrinks. Watchdog budgets (500 ms
+RP2040 / 30 s Teensy) are untouched. Verify deadstick feel on hardware
+after reflashing.
 
 ### 6. Hot-path file logging (done)
 
@@ -167,29 +167,23 @@ both of which are real costs in production. If the bench shows no
 win, the work has moved somewhere else and the diagnosis needs to
 re-start.
 
-## Tier 3 — nice-to-have (queued)
+## Tier 3 — nice-to-have
 
-### 7. mpsc `try_send` visibility
+### 7. mpsc `try_send` visibility (done 2026-07-05)
 
-`controller/src-tauri/src/protocol/client.rs:167` — currently:
+All three streaming send paths now route queue-full drops through
+`WebSocketClient::note_dropped_write()`: a per-connection counter plus
+a warn line rate-limited to once per 5 s window (`DROP_WARN_INTERVAL_MS`)
+that carries the burst size. Counters reset on `connect()`. Behavior is
+pinned by `dropped_write_warns_once_per_window_but_counts_every_drop`.
 
-```rust
-Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-    log::trace!("Channel full, dropped command for {}:{}", role, function);
-    Ok(())
-}
-```
+### 8. Drop controller-side throttle on WS-input path (PARKED — do not do naively)
 
-The `trace!` log is below default level so dropped commands are
-invisible. Add a counter + warn-once-per-window log so this becomes
-visible during testing.
-
-### 8. Drop controller-side throttle on WS-input path
-
-The 50 ms per-target throttle predates the routing graph. The server
-side has no rate limit on `router/set_input`, and the WebSocket frame
-rate is already capped by the 16 ms input poll. Removing the throttle
-on `send_ws_input_value` eliminates a source of jitter.
+The 2026-07 audit (`docs/CONTROL_PIPELINE_AUDIT.md`) found the mapper
+re-emits held deflections on every 4 ms tick (`value_active`), which
+the per-target throttle relies on to plug its trailing-edge drop — and
+which would hit the socket at ~250 Hz per active axis if the throttle
+were removed. Only ship this together with a mapper-side rate cap.
 
 ## Testing plan
 

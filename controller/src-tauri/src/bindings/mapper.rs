@@ -279,7 +279,8 @@ impl InputMapper {
                     //    dropped packet (Wi-Fi blip, firmware brown-out reboot,
                     //    server reconnect, etc.) can't permanently strand the
                     //    motor at a non-zero value.
-                    // The WebSocket client throttles at 50ms to prevent flooding.
+                    // The WebSocket client's per-target throttle
+                    // (THROTTLE_MS in protocol/client.rs) paces the wire.
                     let value_changed = delta > 0.001;
                     let value_active = modified.abs() > 0.001;
                     let returned_to_zero = last.abs() > 0.001 && modified.abs() <= 0.001;
@@ -866,6 +867,75 @@ mod tests {
             }
         }
         assert!(saw_zero, "release must emit a zero stop command; got {:?}", stop);
+    }
+
+    // ── emission cadence (2026-07 latency audit lock-down) ──────────────
+
+    #[test]
+    fn held_deflection_reemits_every_tick() {
+        // The value_active branch makes a held stick emit on EVERY
+        // process() tick (~250 Hz at the 4 ms input loop); the client's
+        // per-target throttle (THROTTLE_MS) caps the wire rate. The two
+        // are load-bearing partners: this steady re-emit is what plugs
+        // the throttle's trailing-edge drop for non-zero values. If this
+        // test fails because held values stopped re-emitting, deadstick
+        // recovery for mid-range setpoints rests solely on the 500 ms
+        // heartbeat — revisit the throttle before shipping that.
+        // Compare non-zero emissions only: the very first process() also
+        // emits a one-time zero baseline for every idle binding
+        // (heartbeat_due is true when a key has never sent), which then
+        // goes quiet.
+        fn nonzero_cmds(events: &[ActionEvent]) -> usize {
+            events.iter()
+                .filter(|e| match e {
+                    ActionEvent::Command(cmd) => cmd_value(cmd).abs() > 0.001,
+                    _ => false,
+                })
+                .count()
+        }
+        let mut m = fresh_mapper();
+        let inp = input_left_stick(0.0, 0.9);
+        let first = nonzero_cmds(&m.process(&inp));
+        let second = nonzero_cmds(&m.process(&inp));
+        assert!(first > 0, "deflection must emit");
+        assert_eq!(first, second, "held deflection must re-emit each tick");
+    }
+
+    #[test]
+    fn idle_zero_is_quiet_within_heartbeat_window() {
+        // A resting stick must NOT stream zeros between heartbeats —
+        // that's the no-signal-overkill half of the contract.
+        let mut m = fresh_mapper();
+        let _ = m.process(&input_left_stick(0.0, 0.9));
+        let _ = m.process(&input_left_stick(0.0, 0.0)); // release → stop sent
+        let idle = m.process(&input_left_stick(0.0, 0.0));
+        let cmds = idle.iter()
+            .filter(|e| matches!(e, ActionEvent::Command(_))).count();
+        assert_eq!(cmds, 0, "resting stick must be quiet inside the heartbeat window");
+    }
+
+    #[test]
+    fn heartbeat_reasserts_idle_value_after_interval() {
+        // A dropped stop packet must be re-covered by the heartbeat:
+        // backdate the send stamps past HEARTBEAT_MS and the idle zero
+        // must be re-emitted.
+        let mut m = fresh_mapper();
+        let _ = m.process(&input_left_stick(0.0, 0.9));
+        let _ = m.process(&input_left_stick(0.0, 0.0));
+        let quiet = m.process(&input_left_stick(0.0, 0.0));
+        assert_eq!(
+            quiet.iter().filter(|e| matches!(e, ActionEvent::Command(_))).count(),
+            0,
+        );
+        let past = Instant::now() - std::time::Duration::from_millis(HEARTBEAT_MS + 50);
+        for t in m.last_send_times.values_mut() {
+            *t = past;
+        }
+        let hb = m.process(&input_left_stick(0.0, 0.0));
+        assert!(
+            hb.iter().filter(|e| matches!(e, ActionEvent::Command(_))).count() > 0,
+            "heartbeat must re-assert the idle value after HEARTBEAT_MS",
+        );
     }
 
     #[test]

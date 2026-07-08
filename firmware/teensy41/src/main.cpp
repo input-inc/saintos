@@ -1456,7 +1456,15 @@ void loop()
      * dark for the 15 s server timeout, repeatedly. delay(1) is a
      * yield-busy-loop on Teensy 4 — chip runs hotter when idle, but
      * the rest of the stack works. */
-    uint32_t loop_deadline = now + 10;
+    /* Loop-pacing deadline. This is the blind window after a fast
+     * spin_some (data arrived and was dispatched quickly): a follow-up
+     * control packet waits out the remainder before the next spin.
+     * 10 → 2 ms (2026-07 latency audit, item 5 of
+     * docs/LATENCY_REDUCTION.md). When spin_some idles its full 10 ms
+     * timeout the iteration already exceeds this deadline and the
+     * wait is a no-op, so idle-loop rate (and heat) is unchanged —
+     * only the post-message latency shrinks. */
+    uint32_t loop_deadline = now + 2;
     while ((int32_t)(millis() - loop_deadline) < 0) {
         delay(1);
     }

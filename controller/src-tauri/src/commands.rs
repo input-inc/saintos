@@ -231,6 +231,32 @@ pub fn subscribe_topics(
     state.ws_client.subscribe_topics(topics)
 }
 
+/// Ask for the server AP's WiFi config (SSID, band, channel). Result
+/// arrives on the `wifi-config` Tauri event, password stripped.
+#[tauri::command]
+pub fn get_wifi_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_wifi_config()
+}
+
+/// Run a channel-congestion survey on the server (~10 s). Result
+/// arrives on the `wifi-survey` Tauri event.
+#[tauri::command]
+pub fn wifi_survey(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_wifi_survey()
+}
+
+/// Move the server's AP to a new channel. `band` is the wire encoding
+/// ("bg" = 2.4 GHz, "a" = 5 GHz). The connection drops ~5-10 s while
+/// the AP restarts; the ACK arrives first on `wifi-switching`.
+#[tauri::command]
+pub fn set_wifi_channel(
+    state: State<'_, Arc<AppState>>,
+    band: String,
+    channel: u32,
+) -> Result<(), String> {
+    state.ws_client.request_wifi_set_channel(&band, channel)
+}
+
 /// Request the saved-animation list. Result arrives on the
 /// `library-animations` Tauri event (see useLibrary).
 #[tauri::command]

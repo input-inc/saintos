@@ -8,6 +8,7 @@ server:
 websocket:
   password: '12345'
   auth_timeout: 10.0
+  kiosk_token: lHfQTmr4TQMnsTOjBjyGkpyn-aESvqE4k3_wrj18veQ
 network:
   web_port: 80
 ros_bridge:
@@ -15,3 +16,5 @@ ros_bridge:
 livelink:
   enabled: true
   port: 11111
+logging:
+  level: WARNING

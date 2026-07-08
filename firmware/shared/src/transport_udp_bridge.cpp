@@ -161,6 +161,20 @@ volatile uint32_t g_transport_read_entries  = 0;
 volatile uint32_t g_transport_read_exits    = 0;
 volatile uint32_t g_transport_write_entries = 0;
 volatile uint32_t g_transport_write_exits   = 0;
+/* Added with the passive-RX session-timeout work (Teensy main.cpp
+ * check_agent_connection). Unlike the four counters above — which only
+ * this TU defines — the Teensy hardware transport
+ * (transport_native_eth.cpp) defines + stamps its own pair, and this
+ * TU is compiled into BOTH envs, so define here only for SIMULATION
+ * (sim link was broken without them) and borrow the hardware
+ * transport's otherwise. */
+#ifdef SIMULATION
+volatile uint32_t g_transport_read_data     = 0;  // poll calls that pulled bytes
+volatile uint32_t g_transport_last_rx_ms    = 0;  // PLATFORM_MILLIS() of last RX with data
+#else
+extern volatile uint32_t g_transport_read_data;
+extern volatile uint32_t g_transport_last_rx_ms;
+#endif
 }
 
 size_t transport_udp_bridge_write(
@@ -234,6 +248,8 @@ size_t transport_udp_bridge_read(
             }
 
             *err = 0;
+            g_transport_read_data++;
+            g_transport_last_rx_ms = PLATFORM_MILLIS();
             g_transport_read_exits++;
             return rx_len;
         }

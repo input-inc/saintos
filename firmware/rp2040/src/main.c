@@ -1899,8 +1899,12 @@ int main(void)
             last_status_print = now;
         }
 
-        // Small delay
-        sleep_ms(10);
+        // Small delay between spins. This is the loop's blind window —
+        // a control packet arriving here waits it out before the next
+        // spin_some picks it up. 10 → 2 ms (2026-07 latency audit,
+        // item 5 of docs/LATENCY_REDUCTION.md); the watchdog budget is
+        // orders of magnitude above either value.
+        sleep_ms(2);
     }
 
     // Cleanup (never reached)

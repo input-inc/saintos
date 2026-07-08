@@ -21,6 +21,7 @@ import { useInput, type ButtonEvent } from './composables/useInput';
 import { useBindings, type DigitalInput, type DigitalAction } from './composables/useBindings';
 import { useKeyboard } from './composables/useKeyboard';
 import { useBatteries } from './composables/useBatteries';
+import { useWifi, type SurveyChannel } from './composables/useWifi';
 
 const conn = useConnection();
 const input = useInput();
@@ -51,6 +52,86 @@ const buttonMap: Record<string, DigitalInput> = {
 // Live BMS packs, sniffed from each adopted node's pin_state topic.
 // Same field set as the dashboard's BMSMonitor widget.
 const { batteries } = useBatteries();
+
+// WiFi link health + channel management (port of the dashboard's WiFi
+// card + channel-survey modal — see useWifi).
+const {
+    config: wifiConfig,
+    live: wifiLive,
+    survey: wifiSurvey,
+    switching: wifiSwitching,
+    bestPick: wifiBestPick,
+    runSurvey: runWifiSurvey,
+    applyChannel: applyWifiChannel,
+} = useWifi();
+
+// Panel-local survey selection + two-step apply confirm. A row click
+// selects; the first Apply press arms the confirm, the second fires.
+const wifiSelected = ref<SurveyChannel | null>(null);
+const wifiApplyArmed = ref(false);
+
+function selectWifiChannel(ch: SurveyChannel): void {
+    wifiSelected.value = ch;
+    wifiApplyArmed.value = false;
+}
+
+function isWifiSelected(ch: SurveyChannel): boolean {
+    const s = wifiSelected.value;
+    return !!s && s.band === ch.band && s.channel === ch.channel;
+}
+
+async function onWifiApply(): Promise<void> {
+    const ch = wifiSelected.value;
+    if (!ch || ch.is_current) return;
+    if (!wifiApplyArmed.value) {
+        wifiApplyArmed.value = true;
+        return;
+    }
+    wifiApplyArmed.value = false;
+    wifiSelected.value = null;
+    try { await applyWifiChannel(ch); }
+    catch (err) { console.error('WiFi channel switch failed:', err); }
+}
+
+function wifiBandLabel(band: string | null): string {
+    if (band === 'a') return '5 GHz';
+    if (band === 'bg') return '2.4 GHz';
+    return '—';
+}
+
+// Signal quality thresholds (dBm): ≥ -55 solid, ≥ -70 usable, below
+// that expect deadstick-grade latency.
+function wifiSignalTextClass(dbm: number | null): string {
+    if (dbm === null) return 'text-saint-text-muted';
+    if (dbm >= -55) return 'text-saint-success';
+    if (dbm >= -70) return 'text-yellow-500';
+    return 'text-red-500';
+}
+function wifiSignalBarClass(dbm: number | null): string {
+    if (dbm === null) return 'bg-saint-surface';
+    if (dbm >= -55) return 'bg-saint-success';
+    if (dbm >= -70) return 'bg-yellow-500';
+    return 'bg-red-500';
+}
+// Map -90…-30 dBm onto 0…100 % for the bar.
+function wifiSignalPct(dbm: number | null): number {
+    if (dbm === null) return 0;
+    return Math.max(0, Math.min(100, ((dbm + 90) / 60) * 100));
+}
+function getWifiStatusClass(): string {
+    const dbm = wifiLive.value.signalDbm;
+    if (dbm === null) return 'bg-saint-text-muted/20 text-saint-text-muted';
+    if (dbm >= -55) return 'bg-saint-success/20 text-saint-success';
+    if (dbm >= -70) return 'bg-yellow-500/20 text-yellow-500';
+    return 'bg-red-500/20 text-red-500';
+}
+// Same congestion color bands as the dashboard's survey modal.
+function apCountClass(count: number): string {
+    if (count === 0) return 'bg-saint-success/20 text-saint-success';
+    if (count <= 2) return 'bg-saint-surface text-saint-text-muted';
+    if (count <= 5) return 'bg-yellow-500/20 text-yellow-500';
+    return 'bg-red-500/20 text-red-500';
+}
 
 // Headline = average SOC across packs that are actually reporting.
 const overallBatteryPercent = computed(() => {
@@ -336,6 +417,19 @@ onBeforeUnmount(() => {
                         expand_less
                     </span>
                 </button>
+                <button :class="getTabClass('wifi')"
+                        class="flex items-center gap-2 px-4 py-2 text-sm transition-colors"
+                        @click="togglePanel('wifi')">
+                    <span class="material-icons icon-sm">wifi</span>
+                    <span>WiFi</span>
+                    <span class="px-2 py-0.5 text-xs rounded-full font-mono" :class="getWifiStatusClass()">
+                        {{ wifiLive.signalDbm === null ? '—' : Math.round(wifiLive.signalDbm) + ' dBm' }}
+                    </span>
+                    <span class="material-icons icon-sm transition-transform"
+                          :class="{ 'rotate-180': activePanel === 'wifi' }">
+                        expand_less
+                    </span>
+                </button>
             </div>
 
             <!-- Sliding Panel -->
@@ -547,6 +641,149 @@ onBeforeUnmount(() => {
                                 <ul class="list-disc list-inside text-red-300 ml-1">
                                     <li v-for="f in battery.faults" :key="f">{{ f }}</li>
                                 </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- WiFi Panel — link health to the server AP plus the
+                     channel-survey / channel-change flow ported from
+                     the dashboard's WifiChannelModal (see useWifi). -->
+                <div v-if="activePanel === 'wifi'" class="p-3 h-full overflow-hidden">
+
+                    <!-- AP restarting: the switch was commanded and the
+                         link is expected to drop for ~5-10 s. -->
+                    <div v-if="wifiSwitching.active"
+                         class="h-full flex flex-col items-center justify-center gap-2 text-saint-text-muted">
+                        <span class="material-icons text-4xl animate-spin">autorenew</span>
+                        <div class="font-medium text-saint-text">Restarting WiFi AP…</div>
+                        <div v-if="wifiSwitching.detail" class="text-sm">
+                            Switching to {{ wifiSwitching.detail }} — reconnecting automatically.
+                        </div>
+                    </div>
+
+                    <div v-else class="h-full flex gap-3">
+                        <!-- Link status card -->
+                        <div class="w-64 shrink-0 bg-saint-surface-light rounded-lg p-3 flex flex-col">
+                            <div class="flex items-center justify-between mb-1">
+                                <div class="font-medium truncate">{{ wifiConfig.ssid ?? 'No AP info' }}</div>
+                                <span class="px-2 py-0.5 text-xs rounded-full bg-saint-surface text-saint-text-muted font-mono">
+                                    {{ wifiBandLabel(wifiConfig.band) }} · ch {{ wifiConfig.channel ?? '—' }}
+                                </span>
+                            </div>
+                            <div class="text-3xl font-bold font-mono mb-1"
+                                 :class="wifiSignalTextClass(wifiLive.signalDbm)">
+                                {{ wifiLive.signalDbm === null ? '—' : Math.round(wifiLive.signalDbm) + ' dBm' }}
+                            </div>
+                            <div class="h-2 w-full rounded-full bg-saint-surface overflow-hidden mb-3">
+                                <div class="h-2 transition-all"
+                                     :class="wifiSignalBarClass(wifiLive.signalDbm)"
+                                     :style="{ width: `${wifiSignalPct(wifiLive.signalDbm)}%` }" />
+                            </div>
+                            <div class="grid grid-cols-3 gap-2 text-center">
+                                <div class="bg-saint-surface rounded p-2">
+                                    <div class="text-[10px] uppercase text-saint-text-muted">Retries</div>
+                                    <div class="font-mono"
+                                         :class="(wifiLive.retryPct ?? 0) > 10 ? 'text-yellow-500' : ''">
+                                        {{ wifiLive.retryPct === null ? '—' : wifiLive.retryPct.toFixed(1) + '%' }}
+                                    </div>
+                                </div>
+                                <div class="bg-saint-surface rounded p-2">
+                                    <div class="text-[10px] uppercase text-saint-text-muted">Noise</div>
+                                    <div class="font-mono">
+                                        {{ wifiLive.noiseDbm === null ? '—' : Math.round(wifiLive.noiseDbm) + ' dBm' }}
+                                    </div>
+                                </div>
+                                <div class="bg-saint-surface rounded p-2">
+                                    <div class="text-[10px] uppercase text-saint-text-muted">Rate</div>
+                                    <div class="font-mono">
+                                        {{ wifiLive.bitrateMbps === null ? '—' : Math.round(wifiLive.bitrateMbps) + ' Mb/s' }}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mt-auto text-[10px] text-saint-text-muted">
+                                Signal is your Deck's link as the AP sees it, updated 1 Hz.
+                            </div>
+                        </div>
+
+                        <!-- Channel survey + switch -->
+                        <div class="flex-1 min-w-0 bg-saint-surface-light rounded-lg p-3 flex flex-col">
+                            <div class="flex items-center justify-between mb-2">
+                                <div class="font-medium">Channel survey</div>
+                                <button class="px-3 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-1"
+                                        :class="wifiSurvey.loading
+                                            ? 'bg-saint-surface text-saint-text-muted'
+                                            : 'bg-saint-primary hover:bg-blue-600 text-white'"
+                                        :disabled="wifiSurvey.loading"
+                                        @click="runWifiSurvey">
+                                    <span class="material-icons text-sm"
+                                          :class="{ 'animate-spin': wifiSurvey.loading }">
+                                        {{ wifiSurvey.loading ? 'autorenew' : 'radar' }}
+                                    </span>
+                                    {{ wifiSurvey.loading ? 'Scanning… ~10 s' : 'Scan' }}
+                                </button>
+                            </div>
+
+                            <div v-if="wifiSurvey.error"
+                                 class="text-xs text-red-400 mb-2">{{ wifiSurvey.error }}</div>
+
+                            <div v-if="!wifiSurvey.channels.length && !wifiSurvey.loading"
+                                 class="flex-1 flex items-center justify-center text-saint-text-muted text-sm text-center px-4">
+                                Scan to see nearby AP congestion per channel and move the
+                                robot's AP somewhere quieter.
+                            </div>
+
+                            <div v-else class="flex-1 overflow-auto touch-scroll">
+                                <button v-for="ch in wifiSurvey.channels"
+                                        :key="`${ch.band}-${ch.channel}`"
+                                        class="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs text-left transition-colors"
+                                        :class="[
+                                            isWifiSelected(ch) ? 'ring-1 ring-saint-primary bg-saint-primary/10'
+                                                               : 'hover:bg-saint-surface',
+                                            ch.is_current ? 'opacity-70' : '',
+                                        ]"
+                                        @click="selectWifiChannel(ch)">
+                                    <span class="font-mono w-20 shrink-0">{{ ch.band }} GHz · {{ ch.channel }}</span>
+                                    <span class="font-mono w-16 shrink-0 text-saint-text-muted">{{ ch.freq_mhz }} MHz</span>
+                                    <span class="px-2 py-0.5 rounded-full font-mono shrink-0" :class="apCountClass(ch.ap_count)">
+                                        {{ ch.ap_count }} AP{{ ch.ap_count === 1 ? '' : 's' }}
+                                    </span>
+                                    <span class="font-mono text-saint-text-muted shrink-0">
+                                        {{ ch.strongest_signal_dbm === null ? '' : Math.round(ch.strongest_signal_dbm) + ' dBm' }}
+                                    </span>
+                                    <span class="ml-auto flex items-center gap-1 shrink-0">
+                                        <span v-if="ch.is_current"
+                                              class="px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-400">Current</span>
+                                        <span v-if="wifiBestPick === ch"
+                                              class="px-2 py-0.5 rounded-full bg-saint-success/20 text-saint-success">Best</span>
+                                        <span v-if="ch.is_dfs"
+                                              class="px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-500"
+                                              title="DFS: 60 s radar-listen before the AP can transmit">DFS</span>
+                                    </span>
+                                </button>
+                            </div>
+
+                            <div v-if="wifiSurvey.channels.length"
+                                 class="pt-2 mt-1 border-t border-saint-surface flex items-center gap-2">
+                                <div class="text-[11px] text-saint-text-muted flex-1 min-w-0 truncate">
+                                    <template v-if="wifiApplyArmed && wifiSelected">
+                                        All clients (including this Deck) drop and reconnect over ~5–10 s{{ wifiSelected.is_dfs ? ' — DFS adds a 60 s radar-listen' : '' }}.
+                                    </template>
+                                    <template v-else-if="wifiBestPick">
+                                        Recommended: {{ wifiBestPick.band }} GHz ch {{ wifiBestPick.channel }}
+                                        ({{ wifiBestPick.ap_count }} AP{{ wifiBestPick.ap_count === 1 ? '' : 's' }} nearby).
+                                    </template>
+                                </div>
+                                <button class="px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors shrink-0"
+                                        :class="!wifiSelected || wifiSelected.is_current
+                                            ? 'bg-saint-surface text-saint-text-muted'
+                                            : wifiApplyArmed
+                                                ? 'bg-amber-500 hover:bg-amber-600 text-black'
+                                                : 'bg-saint-primary hover:bg-blue-600 text-white'"
+                                        :disabled="!wifiSelected || wifiSelected.is_current"
+                                        @click="onWifiApply">
+                                    {{ wifiApplyArmed ? 'Confirm — restart AP' : 'Apply channel' }}
+                                </button>
                             </div>
                         </div>
                     </div>
