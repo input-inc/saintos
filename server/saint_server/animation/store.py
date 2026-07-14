@@ -17,7 +17,7 @@ import shutil
 import threading
 from typing import Dict, List, Optional
 
-from saint_server.animation.models import Animation, Pose
+from saint_server.animation.models import Animation, Pose, Sound
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
@@ -211,6 +211,96 @@ class PoseStore:
 
     def delete(self, pose_id: str) -> bool:
         return self.store.delete(pose_id)
+
+    def _log(self, level: str, msg: str) -> None:
+        if self.logger:
+            # rcutils tracks log calls by file/line; getattr-dispatch
+            # funnels every severity through one line and trips rclpy's
+            # severity-change check. See saint_server.log_level.log_at.
+            from saint_server.log_level import log_at
+            log_at(self.logger, level, msg)
+
+
+class SoundStore:
+    """JSON-backed soundboard library at ``{config_dir}/sounds/``.
+
+    Unlike animations/poses, sounds carry an explicit ``position`` so the
+    operator can drag-order them; ``list()`` sorts by (group, position,
+    name) and ``reorder()`` rewrites positions for a group.
+    """
+
+    def __init__(self, config_dir: str, logger=None):
+        self.config_dir = config_dir
+        self.store = _JSONStore(os.path.join(config_dir, "sounds"), logger=logger)
+        self.logger = logger
+
+    def list(self) -> List[Dict]:
+        out = []
+        for sid in self.store.list_ids():
+            raw = self.store.read_raw(sid)
+            if not raw:
+                continue
+            out.append({
+                "id": raw.get("id", sid),
+                "name": raw.get("name", sid),
+                "icon": raw.get("icon", ""),
+                "group": raw.get("group", ""),
+                "node_id": raw.get("node_id", ""),
+                "file_path": raw.get("file_path", ""),
+                "output_device": raw.get("output_device", ""),
+                "volume": raw.get("volume", 1.0),
+                "start_time": raw.get("start_time", 0.0),
+                "loop": raw.get("loop", False),
+                "loop_count": raw.get("loop_count", 0),
+                "position": raw.get("position", 0),
+                "modified": raw.get("modified", ""),
+            })
+        # Stable order for sidebar/controller: group, then explicit
+        # position, then name as a tiebreaker.
+        out.sort(key=lambda s: (s["group"], s["position"], s["name"].lower()))
+        return out
+
+    def get(self, sound_id: str) -> Optional[Sound]:
+        raw = self.store.read_raw(sound_id)
+        if not raw:
+            return None
+        try:
+            return Sound.from_dict(raw)
+        except Exception as e:
+            self._log("warning", f"Failed to parse sound {sound_id}: {e}")
+            return None
+
+    def save(self, sound: Sound) -> Sound:
+        if not sound.id:
+            sound.id = slugify(sound.name) or "untitled"
+        else:
+            sound.id = slugify(sound.id)
+        # New entries land at the end of their group unless a position
+        # was set explicitly by the caller.
+        if sound.position == 0 and self.store.read_raw(sound.id) is None:
+            peers = [s for s in self.list() if s["group"] == sound.group]
+            sound.position = max((s["position"] for s in peers), default=0) + 1
+        sound.stamp()
+        self.store.write_raw(sound.id, sound.to_dict())
+        return sound
+
+    def delete(self, sound_id: str) -> bool:
+        return self.store.delete(sound_id)
+
+    def reorder(self, ordered_ids: List[str]) -> List[Dict]:
+        """Rewrite ``position`` to match ``ordered_ids`` order.
+
+        Positions are assigned 1..N in the given sequence; ids not present
+        in the store are skipped. Returns the refreshed summary list.
+        """
+        for idx, sid in enumerate(ordered_ids, start=1):
+            snd = self.get(sid)
+            if snd is None:
+                continue
+            snd.position = idx
+            snd.stamp()
+            self.store.write_raw(snd.id, snd.to_dict())
+        return self.list()
 
     def _log(self, level: str, msg: str) -> None:
         if self.logger:

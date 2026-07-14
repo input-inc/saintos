@@ -15,19 +15,21 @@ const bindings = useBindings();
 const conn = useConnection();
 const library = useLibrary();
 
-// For server-backed panels (Animations/Poses), explain WHY the grid is
-// empty instead of the generic "no presets": not connected vs still
-// loading vs genuinely empty on the server.
+// For server-backed panels (Animations/Poses/Sounds), explain WHY the
+// grid is empty instead of the generic "no presets": not connected vs
+// still loading vs genuinely empty on the server.
 const emptyState = computed(() => {
     const source = bindings.activePanelSource.value;
     if (!source) return { icon: 'folder_open', text: 'No presets in this panel' };
-    const kind = source === 'animations' ? 'animations' : 'poses';
+    const kind = source;   // 'animations' | 'poses' | 'sounds'
     if (!conn.isConnected.value) {
         return { icon: 'cloud_off', text: `Connect to the robot to load ${kind}` };
     }
     const loaded = source === 'animations'
         ? library.animationsLoaded.value
-        : library.posesLoaded.value;
+        : (source === 'poses'
+            ? library.posesLoaded.value
+            : library.soundsLoaded.value);
     if (!loaded) return { icon: 'sync', text: `Loading ${kind}…` };
     return { icon: 'folder_open', text: `No ${kind} saved on the server` };
 });

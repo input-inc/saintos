@@ -776,9 +776,10 @@ class StateManager:
         # immediately usable from disk; the player registry can only
         # start animations once the routing evaluator + bridge are
         # wired (it depends on both for the dispatch fan-out).
-        from saint_server.animation.store import AnimationStore, PoseStore
+        from saint_server.animation.store import AnimationStore, PoseStore, SoundStore
         self.animation_store = AnimationStore(self.config_dir, logger=self.logger)
         self.pose_store = PoseStore(self.config_dir, logger=self.logger)
+        self.sound_store = SoundStore(self.config_dir, logger=self.logger)
         self._animation_registry = None
 
         # Chip + board YAML catalog. Replaces the firmware-emitted
@@ -2418,6 +2419,74 @@ class StateManager:
             else:
                 skipped.append(f"{sheet_id}/{ws_input_id}")
         return {"success": True, "applied": applied, "skipped": skipped}
+
+    # ── soundboard ────────────────────────────────────────────────
+    #
+    # Persistence + entry resolution only. The actual play/stop/browse
+    # ROS round-trips are issued by the websocket handler through the
+    # soundboard callback (like ble_scan) — kept out of here so this
+    # module stays free of ROS concerns.
+
+    def list_sounds(self) -> List[Dict[str, Any]]:
+        return self.sound_store.list()
+
+    def get_sound(self, sound_id: str) -> Optional[Dict[str, Any]]:
+        snd = self.sound_store.get(sound_id)
+        return snd.to_dict() if snd else None
+
+    def save_sound(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from saint_server.animation.models import Sound
+        try:
+            snd = Sound.from_dict(payload)
+        except (KeyError, ValueError, TypeError) as e:
+            return {"success": False, "message": f"Invalid sound payload: {e}"}
+        saved = self.sound_store.save(snd)
+        return {"success": True, "sound": saved.to_dict()}
+
+    def delete_sound(self, sound_id: str) -> Dict[str, Any]:
+        if not self.sound_store.delete(sound_id):
+            return {"success": False, "message": "Sound not found"}
+        return {"success": True}
+
+    def reorder_sounds(self, ordered_ids: List[str]) -> Dict[str, Any]:
+        return {"success": True,
+                "sounds": self.sound_store.reorder(ordered_ids or [])}
+
+    def list_audio_nodes(self) -> List[Dict[str, Any]]:
+        """Adopted nodes that can play soundboard entries.
+
+        Audio playback is VLC/ALSA on the Pi node, so this is the set of
+        adopted ``raspberrypi`` nodes. Returns id + a display label for
+        the "pick a node" selector.
+        """
+        out = []
+        for node_id, node in self.state.adopted_nodes.items():
+            if node.chip_family == "raspberrypi":
+                out.append({
+                    "node_id": node_id,
+                    "name": node.display_name or node.hardware_model or node_id,
+                    "online": node.online,
+                })
+        out.sort(key=lambda n: n["name"].lower())
+        return out
+
+    def resolve_sound_play(self, sound_id: str) -> Optional[Dict[str, Any]]:
+        """Resolve a saved sound into ``{node_id, args}`` for a play
+        command, or ``None`` if the sound doesn't exist."""
+        snd = self.sound_store.get(sound_id)
+        if snd is None:
+            return None
+        return {
+            "node_id": snd.node_id,
+            "args": {
+                "path": snd.file_path,
+                "device": snd.output_device or "default",
+                "volume": snd.volume,
+                "start_time_s": snd.start_time,
+                "loop": snd.loop,
+                "loop_count": snd.loop_count,
+            },
+        }
 
     def preview_animation_frame(self, values: List[Dict[str, Any]],
                                 triggers: List[Dict[str, Any]]) -> Dict[str, Any]:

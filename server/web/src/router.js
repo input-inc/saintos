@@ -24,8 +24,11 @@ export const router = createRouter({
     { path: '/inputs',          name: 'inputs',      component: () => import('@/views/Inputs.vue') },
     { path: '/livelink',        name: 'livelink',    component: () => import('@/views/LiveLink.vue') },
     { path: '/control',         name: 'control',     component: () => import('@/views/Control.vue') },
-    // Landing / management table.
-    { path: '/animations',      name: 'animations',
+    // Landing / management table ("Boards": animations, poses, sounds).
+    // `/boards` is the current nav target; `/animations` stays as an
+    // alias so existing bookmarks + the editor's back-to-list
+    // (router.push({name:'animations'})) keep working.
+    { path: '/animations',      name: 'animations', alias: '/boards',
       component: () => import('@/views/Animations.vue') },
     // Full-screen editor for a single animation, addressable by id so
     // bookmarks + browser back/forward work.

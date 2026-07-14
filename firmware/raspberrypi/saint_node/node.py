@@ -43,6 +43,7 @@ from .peripherals.audio_mixer import AlsaMixerDriver
 from .peripherals.console_display import ConsoleDisplayDriver
 from .pi_model import detect_pi_model
 from . import ble_transport
+from . import soundboard
 
 
 class NodeState(Enum):
@@ -219,6 +220,20 @@ class SaintNode(Node):
         # Re-entry guard: one scan at a time. BlueZ doesn't like
         # parallel scans on the same adapter.
         self._ble_scan_thread: Optional[threading.Thread] = None
+        # Soundboard: filesystem-browse + device-enumeration replies (both
+        # correlated by request_id) and play-command acks. Reliable QoS so
+        # a dropped frame doesn't strand the operator's picker/spinner.
+        self._pub_soundboard_fs = self.create_publisher(
+            String, f'/saint/nodes/{self._node_id}/soundboard_fs',
+            self._qos_reliable)
+        self._pub_soundboard_devices = self.create_publisher(
+            String, f'/saint/nodes/{self._node_id}/soundboard_devices',
+            self._qos_reliable)
+        self._pub_soundboard_result = self.create_publisher(
+            String, f'/saint/nodes/{self._node_id}/soundboard_result',
+            self._qos_reliable)
+        # Single-voice player; created lazily on first play.
+        self._soundboard_player: Optional[soundboard.SoundboardPlayer] = None
 
         # Subscribers
         self._sub_config = self.create_subscription(
@@ -658,6 +673,18 @@ class SaintNode(Node):
             elif action == 'ble_scan':
                 self._handle_ble_scan(data)
 
+            elif action == 'soundboard_list_dir':
+                self._handle_soundboard_list_dir(data)
+
+            elif action == 'soundboard_list_devices':
+                self._handle_soundboard_list_devices(data)
+
+            elif action == 'soundboard_play':
+                self._handle_soundboard_play(data)
+
+            elif action == 'soundboard_stop':
+                self._handle_soundboard_stop(data)
+
             else:
                 self.get_logger().warn(f'Unknown control action: {action}')
 
@@ -749,6 +776,70 @@ class SaintNode(Node):
         msg = String()
         msg.data = json.dumps(payload)
         self._pub_ble_scan.publish(msg)
+
+    # ── Soundboard ────────────────────────────────────────────────
+    #
+    # Server-orchestrated, request_id-correlated (see soundboard.py).
+    # Listing and play() are sub-second, so they run inline on the ROS
+    # callback thread rather than in workers like the multi-second BLE
+    # scan does.
+
+    def _ensure_soundboard_player(self) -> "soundboard.SoundboardPlayer":
+        if self._soundboard_player is None:
+            self._soundboard_player = soundboard.SoundboardPlayer(
+                logger=self.get_logger())
+        return self._soundboard_player
+
+    def _handle_soundboard_list_dir(self, data: Dict[str, Any]) -> None:
+        # The server wraps command params under `args` (send_soundboard_
+        # command); fall back to top-level for direct/test invocation.
+        request_id = str(data.get('request_id', ''))
+        args = data.get('args') or data
+        path = str(args.get('path', '/') or '/')
+        result = soundboard.list_directory(path)
+        result["request_id"] = request_id
+        self._publish_soundboard(self._pub_soundboard_fs, result)
+
+    def _handle_soundboard_list_devices(self, data: Dict[str, Any]) -> None:
+        request_id = str(data.get('request_id', ''))
+        result = soundboard.list_audio_devices()
+        result["request_id"] = request_id
+        self._publish_soundboard(self._pub_soundboard_devices, result)
+
+    def _handle_soundboard_play(self, data: Dict[str, Any]) -> None:
+        request_id = str(data.get('request_id', ''))
+        args = data.get('args') or data
+        player = self._ensure_soundboard_player()
+        ok, message = player.play(
+            path=str(args.get('path', '') or args.get('file_path', '')),
+            device=str(args.get('device', '') or args.get('output_device', '')
+                       or 'default'),
+            volume=float(args.get('volume', 1.0)),
+            start_time_s=float(args.get('start_time_s',
+                                        args.get('start_time', 0.0))),
+            loop=bool(args.get('loop', False)),
+            loop_count=int(args.get('loop_count', 0)),
+        )
+        self._publish_soundboard(self._pub_soundboard_result, {
+            "status": "ok" if ok else "error",
+            "message": message,
+            "request_id": request_id,
+        })
+
+    def _handle_soundboard_stop(self, data: Dict[str, Any]) -> None:
+        request_id = str(data.get('request_id', ''))
+        if self._soundboard_player is not None:
+            self._soundboard_player.stop()
+        self._publish_soundboard(self._pub_soundboard_result, {
+            "status": "ok",
+            "message": "stopped",
+            "request_id": request_id,
+        })
+
+    def _publish_soundboard(self, publisher, payload: Dict[str, Any]) -> None:
+        msg = String()
+        msg.data = json.dumps(payload)
+        publisher.publish(msg)
 
     def _handle_estop(self):
         """Operator-triggered emergency stop: fan out to every

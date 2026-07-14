@@ -205,6 +205,16 @@ class WebSocketHandler:
         self._ble_scan_callback: Optional[
             Callable[[str, float, bool, str], None]] = None
 
+        # Callback for issuing a soundboard control action against a node
+        # (set by server_node). Signature: (node_id, action, args,
+        # request_id) -> None where action is one of soundboard_list_dir /
+        # soundboard_list_devices / soundboard_play / soundboard_stop.
+        # Browse/device/play replies arrive asynchronously on the
+        # soundboard_fs|soundboard_devices|soundboard_result/<node_id> WS
+        # topics keyed by request_id.
+        self._soundboard_callback: Optional[
+            Callable[[str, str, dict, str], None]] = None
+
         # System-wide E-Stop latch state. Mutated by 'estop' command
         # handlers; broadcast to subscribers on the 'estop' topic so
         # multiple dashboards stay in sync.
@@ -295,6 +305,11 @@ class WebSocketHandler:
     def set_identify_node_callback(self, callback: Callable[[str], None]):
         """Set callback for sending identify command to node. Callback takes (node_id)."""
         self._identify_node_callback = callback
+
+    def set_soundboard_callback(
+            self, callback: Callable[[str, str, dict, str], None]):
+        """Register the node soundboard-command sender."""
+        self._soundboard_callback = callback
 
     def set_ble_scan_callback(
             self, callback: Callable[[str, float, bool, str], None]):
@@ -1465,6 +1480,111 @@ class WebSocketHandler:
                     "data": self.state_manager.preview_animation_frame(
                         params.get('values') or [],
                         params.get('triggers') or [])}
+
+        # ── soundboard ────────────────────────────────────────────────
+        elif action == 'list_sounds':
+            return {"status": "ok",
+                    "data": {"sounds": self.state_manager.list_sounds()}}
+
+        elif action == 'get_sound':
+            sound_id = params.get('id')
+            if not sound_id:
+                return {"status": "error", "message": "Missing id"}
+            snd = self.state_manager.get_sound(sound_id)
+            if snd is None:
+                return {"status": "error", "message": "Not found"}
+            return {"status": "ok", "data": {"sound": snd}}
+
+        elif action == 'save_sound':
+            payload = params.get('sound')
+            if not isinstance(payload, dict):
+                return {"status": "error", "message": "Missing sound payload"}
+            return {"status": "ok",
+                    "data": self.state_manager.save_sound(payload)}
+
+        elif action == 'delete_sound':
+            sound_id = params.get('id')
+            if not sound_id:
+                return {"status": "error", "message": "Missing id"}
+            return {"status": "ok",
+                    "data": self.state_manager.delete_sound(sound_id)}
+
+        elif action == 'reorder_sounds':
+            return {"status": "ok",
+                    "data": self.state_manager.reorder_sounds(
+                        params.get('ordered_ids') or [])}
+
+        elif action == 'sound_list_nodes':
+            return {"status": "ok",
+                    "data": {"nodes": self.state_manager.list_audio_nodes()}}
+
+        elif action == 'sound_list_dir':
+            # Browse a node's filesystem for the file picker. The listing
+            # comes back asynchronously on soundboard_fs/<node_id> keyed
+            # by request_id (client subscribes before invoking).
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            if not self._soundboard_callback:
+                return {"status": "error",
+                        "message": "Soundboard callback not configured"}
+            request_id = str(params.get('request_id', ''))
+            path = str(params.get('path', '/') or '/')
+            self._soundboard_callback(
+                node_id, 'soundboard_list_dir', {"path": path}, request_id)
+            return {"status": "ok", "data": {"request_id": request_id}}
+
+        elif action == 'sound_list_devices':
+            # Enumerate a node's ALSA output devices for the per-sound
+            # output selector. Reply on soundboard_devices/<node_id>.
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            if not self._soundboard_callback:
+                return {"status": "error",
+                        "message": "Soundboard callback not configured"}
+            request_id = str(params.get('request_id', ''))
+            self._soundboard_callback(
+                node_id, 'soundboard_list_devices', {}, request_id)
+            return {"status": "ok", "data": {"request_id": request_id}}
+
+        elif action == 'play_sound':
+            # Resolve a saved sound to its node + play args and fire the
+            # play command. Ack (ok/error) returns on
+            # soundboard_result/<node_id> keyed by request_id.
+            sound_id = params.get('id')
+            if not sound_id:
+                return {"status": "error", "message": "Missing id"}
+            if not self._soundboard_callback:
+                return {"status": "error",
+                        "message": "Soundboard callback not configured"}
+            resolved = self.state_manager.resolve_sound_play(sound_id)
+            if resolved is None:
+                return {"status": "error", "message": "Sound not found"}
+            if not resolved["node_id"]:
+                return {"status": "error",
+                        "message": "Sound has no node assigned"}
+            request_id = str(params.get('request_id', ''))
+            self._soundboard_callback(
+                resolved["node_id"], 'soundboard_play',
+                resolved["args"], request_id)
+            return {"status": "ok",
+                    "data": {"node_id": resolved["node_id"],
+                             "request_id": request_id}}
+
+        elif action == 'stop_sound':
+            # Stop whatever a node is currently playing (stop-and-replace
+            # means there's only ever one voice per node).
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            if not self._soundboard_callback:
+                return {"status": "error",
+                        "message": "Soundboard callback not configured"}
+            request_id = str(params.get('request_id', ''))
+            self._soundboard_callback(
+                node_id, 'soundboard_stop', {}, request_id)
+            return {"status": "ok", "data": {"request_id": request_id}}
 
         elif action == 'add_widget':
             node_id = params.get('node_id')

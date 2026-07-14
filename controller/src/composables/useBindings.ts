@@ -184,9 +184,10 @@ export interface PresetPanel {
     columns: number;
     itemsPerPage: number;
     /** Live data source. Absent = static (use `presets`).
-     *  'animations'/'poses' = populated from the server library
-     *  (useLibrary); selecting fires start_animation / apply_pose. */
-    source?: 'animations' | 'poses';
+     *  'animations'/'poses'/'sounds' = populated from the server library
+     *  (useLibrary); selecting fires start_animation / apply_pose /
+     *  play_sound. */
+    source?: 'animations' | 'poses' | 'sounds';
 }
 
 /** Minimal shape the panel grid renders. Both Preset and the server
@@ -330,15 +331,8 @@ function getDefaultProfile(): BindingProfile {
             },
             {
                 id: 'sounds', name: 'Sounds', icon: 'volume_up', color: '#22c55e',
-                layout: 'grid', columns: 4, itemsPerPage: 8,
-                presets: [
-                    { id: 'sound_hello',   name: 'Hello',   icon: 'record_voice_over',        type: 'sound', data: { type: 'sound', soundId: 'hello.wav',   volume: 1.0, priority: 1 } },
-                    { id: 'sound_goodbye', name: 'Goodbye', icon: 'waving_hand',              type: 'sound', data: { type: 'sound', soundId: 'goodbye.wav', volume: 1.0, priority: 1 } },
-                    { id: 'sound_yes',     name: 'Yes',     icon: 'thumb_up',                 type: 'sound', data: { type: 'sound', soundId: 'yes.wav',     volume: 1.0, priority: 1 } },
-                    { id: 'sound_no',      name: 'No',      icon: 'thumb_down',               type: 'sound', data: { type: 'sound', soundId: 'no.wav',      volume: 1.0, priority: 1 } },
-                    { id: 'sound_laugh',   name: 'Laugh',   icon: 'sentiment_very_satisfied', type: 'sound', data: { type: 'sound', soundId: 'laugh.wav',   volume: 1.0, priority: 1 } },
-                    { id: 'sound_alert',   name: 'Alert',   icon: 'notifications',            type: 'sound', data: { type: 'sound', soundId: 'alert.wav',   volume: 1.0, priority: 1 } },
-                ],
+                layout: 'grid', columns: 4, itemsPerPage: 8, source: 'sounds',
+                presets: [],
             },
         ],
         settings: {
@@ -513,9 +507,10 @@ const connection = useConnection();
 // field, and also falls back to the built-in panel id so profiles
 // saved before `source` existed still bind to the server lists without
 // needing a profile reset.
-function panelSource(panel: PresetPanel): 'animations' | 'poses' | null {
+function panelSource(panel: PresetPanel): 'animations' | 'poses' | 'sounds' | null {
     if (panel.source === 'animations' || panel.id === 'animations') return 'animations';
     if (panel.source === 'poses' || panel.id === 'poses') return 'poses';
+    if (panel.source === 'sounds' || panel.id === 'sounds') return 'sounds';
     return null;
 }
 
@@ -525,6 +520,7 @@ function panelItems(panel: PresetPanel): PanelItem[] {
     const src = panelSource(panel);
     if (src === 'animations') return library.animations.value;
     if (src === 'poses') return library.poses.value;
+    if (src === 'sounds') return library.sounds.value;
     return panel.presets;
 }
 
@@ -534,6 +530,7 @@ function triggerPanelItem(panel: PresetPanel, itemId: string): void {
     const src = panelSource(panel);
     if (src === 'animations') void connection.startAnimation(itemId);
     else if (src === 'poses') void connection.applyPose(itemId);
+    else if (src === 'sounds') void connection.playSound(itemId);
     else void activatePreset(itemId);
 }
 
@@ -643,8 +640,8 @@ export function useBindings() {
         // the source-aware trigger the panel UI calls on select.
         activePanelItems: computed<PanelItem[]>(() =>
             activePanel.value ? panelItems(activePanel.value) : []),
-        // 'animations' | 'poses' | null — lets the panel UI show the
-        // right loading/empty message for server-backed panels.
+        // 'animations' | 'poses' | 'sounds' | null — lets the panel UI
+        // show the right loading/empty message for server-backed panels.
         activePanelSource: computed(() =>
             activePanel.value ? panelSource(activePanel.value) : null),
         triggerActiveItem: (itemId: string) => {

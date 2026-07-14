@@ -308,3 +308,72 @@ class Pose:
         if not self.created:
             self.created = now
         self.modified = now
+
+
+@dataclass
+class Sound:
+    """A soundboard entry: an audio file that a specific node plays.
+
+    Node-scoped — ``file_path`` is an absolute path on ``node_id``'s own
+    storage (files are never shipped between nodes) and playback comes out
+    of that node's ``output_device`` (blank → the node's default ALSA
+    device). ``position`` gives the operator an explicit ordering within a
+    group (poses/animations are alpha-sorted; sounds are drag-ordered).
+    """
+    id: str
+    name: str
+    icon: str = ""            # material-icon name; default "volume_up" in UI
+    group: str = ""           # single-level group ("" → Ungrouped bucket)
+    node_id: str = ""         # which node plays this sound
+    file_path: str = ""       # absolute path on that node
+    output_device: str = ""   # ALSA device id ("" → node default)
+    volume: float = 1.0       # 0.0–1.0
+    start_time: float = 0.0   # seek offset in seconds at play
+    loop: bool = False
+    loop_count: int = 0       # repeats when loop on; 0 → infinite
+    position: int = 0         # explicit order within the list/group
+    created: str = ""
+    modified: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "icon": self.icon,
+            "group": self.group,
+            "node_id": self.node_id,
+            "file_path": self.file_path,
+            "output_device": self.output_device,
+            "volume": self.volume,
+            "start_time": self.start_time,
+            "loop": self.loop,
+            "loop_count": self.loop_count,
+            "position": self.position,
+            "created": self.created,
+            "modified": self.modified,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Sound":
+        return cls(
+            id=str(d["id"]),
+            name=str(d.get("name", "")),
+            icon=str(d.get("icon", "")),
+            group=str(d.get("group", "")),
+            node_id=str(d.get("node_id", "")),
+            file_path=str(d.get("file_path", "")),
+            output_device=str(d.get("output_device", "")),
+            volume=float(d.get("volume", 1.0)),
+            start_time=float(d.get("start_time", 0.0)),
+            loop=bool(d.get("loop", False)),
+            loop_count=int(d.get("loop_count", 0)),
+            position=int(d.get("position", 0)),
+            created=str(d.get("created", "")),
+            modified=str(d.get("modified", "")),
+        )
+
+    def stamp(self) -> None:
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if not self.created:
+            self.created = now
+        self.modified = now

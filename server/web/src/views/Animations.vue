@@ -3,22 +3,27 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch 
 import { useRouter } from 'vue-router'
 import { useAnimationsStore } from '@/stores/animations'
 import { usePosesStore } from '@/stores/poses'
+import { useSoundsStore } from '@/stores/sounds'
 import { useWsStore } from '@/stores/ws'
 
-// Full-screen Animations & Poses management. Sidebar lists both
-// kinds (with their groups) and a "New" button per kind opens a
-// modal collecting base info; submitting routes into the editor.
+// Full-screen "Boards" management. Sidebar lists animations, poses, and
+// sounds (each with their groups) and a "New" button per kind opens a
+// modal collecting base info; submitting routes into the editor (for
+// animations) or reloads the list (poses/sounds).
 
 const NewAnimationModal = defineAsyncComponent(
   () => import('@/components/animation/NewAnimationModal.vue'))
 const NewPoseModal = defineAsyncComponent(
   () => import('@/components/animation/NewPoseModal.vue'))
+const NewSoundModal = defineAsyncComponent(
+  () => import('@/components/animation/NewSoundModal.vue'))
 const MaestroImportModal = defineAsyncComponent(
   () => import('@/components/animation/MaestroImportModal.vue'))
 
 const router = useRouter()
 const animations = useAnimationsStore()
 const poses = usePosesStore()
+const sounds = useSoundsStore()
 const ws = useWsStore()
 
 // Sidebar selection: which kind is highlighted, and which group
@@ -29,7 +34,16 @@ function selectView (kind, group) { view.value = { kind, group } }
 // Modals
 const newAnimOpen = ref(false)
 const newPoseOpen = ref(false)
+const newSoundOpen = ref(false)
 const importOpen = ref(false)
+
+// Audio-capable nodes, for resolving a sound's node_id to a label in
+// the list. Loaded on mount + refreshed when the sound modal opens.
+const audioNodes = ref([])
+function nodeName (id) {
+  const n = audioNodes.value.find(x => x.node_id === id)
+  return n ? n.name : (id || '—')
+}
 
 // Groups derived from the lists (sorted).
 const animationGroups = computed(() => {
@@ -40,6 +54,11 @@ const animationGroups = computed(() => {
 const poseGroups = computed(() => {
   const set = new Set()
   for (const p of poses.list || []) if (p.group) set.add(p.group)
+  return [...set].sort()
+})
+const soundGroups = computed(() => {
+  const set = new Set()
+  for (const s of sounds.list || []) if (s.group) set.add(s.group)
   return [...set].sort()
 })
 
@@ -57,13 +76,18 @@ const visiblePoses = computed(() =>
   (poses.list || []).filter(p => inGroup(p, view.value.group))
                     .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
 )
-const groupSuggestions = computed(() =>
-  view.value.kind === 'animations' ? animationGroups.value : poseGroups.value
+// Sounds keep the operator's explicit order (position); the store
+// already returns them sorted by (group, position, name).
+const visibleSounds = computed(() =>
+  (sounds.list || []).filter(s => inGroup(s, view.value.group))
+                     .sort((a, b) => (a.position || 0) - (b.position || 0)
+                                     || (a.name || '').localeCompare(b.name || ''))
 )
 
 // Title for the main toolbar.
 const viewTitle = computed(() => {
-  const kindLabel = view.value.kind === 'animations' ? 'Animations' : 'Poses'
+  const kindLabel = view.value.kind === 'animations'
+    ? 'Animations' : (view.value.kind === 'poses' ? 'Poses' : 'Sounds')
   const g = view.value.group
   if (g === null) return `All ${kindLabel}`
   if (g === '__ungrouped__') return `${kindLabel} / Ungrouped`
@@ -96,6 +120,12 @@ async function onCreatePose (payload) {
   }
 }
 
+async function onCreateSound (payload) {
+  newSoundOpen.value = false
+  await sounds.save({ id: '', position: 0, ...payload })
+  selectView('sounds', payload.group || '__ungrouped__')
+}
+
 // Inline editing for the row name field — click name to flip to input.
 const renamingId = ref(null)
 async function patchAnimation (id, patch) {
@@ -114,6 +144,13 @@ async function patchPose (id, patch) {
   await ws.management('save_pose', { pose })
   await poses.reload()
 }
+async function patchSound (id, patch) {
+  const r = await ws.management('get_sound', { id })
+  const sound = r?.sound
+  if (!sound) return
+  Object.assign(sound, patch)
+  await sounds.save(sound)
+}
 
 async function deleteAnimation (a) {
   if (!confirm(`Delete "${a.name || a.id}"? This can't be undone.`)) return
@@ -122,6 +159,42 @@ async function deleteAnimation (a) {
 async function deletePose (p) {
   if (!confirm(`Delete "${p.name || p.id}"? This can't be undone.`)) return
   await poses.remove(p.id)
+}
+async function deleteSound (s) {
+  if (!confirm(`Delete "${s.name || s.id}"? This can't be undone.`)) return
+  await sounds.remove(s.id)
+}
+
+// Play/stop straight from the list. Playback is stop-and-replace per
+// node, so there's only ever one voice per node — `playingId` is the
+// last sound we asked to play (optimistic; there's no continuous
+// playback telemetry from the node). The play command's ok/error ack
+// returns async on soundboard_result but we surface only failures.
+const playingId = ref(null)
+const soundError = ref('')
+async function playSound (s) {
+  soundError.value = ''
+  playingId.value = s.id
+  const r = await sounds.play(s.id)
+  if (r == null && sounds.error) soundError.value = sounds.error
+}
+async function stopSound (s) {
+  if (playingId.value === s.id) playingId.value = null
+  await sounds.stop(s.node_id)
+}
+
+// Reorder within a group via up/down. Sounds are contiguous per group in
+// the store's (group, position, name) sort, so swapping adjacent
+// same-group entries in the global list and re-sending every id keeps
+// positions globally consistent while only moving within the group.
+async function moveSound (s, dir) {
+  const arr = [...(sounds.list || [])]
+  const i = arr.findIndex(x => x.id === s.id)
+  const j = dir === 'up' ? i - 1 : i + 1
+  if (i < 0 || j < 0 || j >= arr.length) return
+  if ((arr[j].group || '') !== (s.group || '')) return   // don't cross groups
+  ;[arr[i], arr[j]] = [arr[j], arr[i]]
+  await sounds.reorder(arr.map(x => x.id))
 }
 
 async function duplicateAnimation (a) {
@@ -260,9 +333,10 @@ async function togglePlayAnimation (a) {
 // transport indicator without hammering the management channel.
 let _playerPoll = null
 onMounted(async () => {
-  await Promise.all([animations.reload(), poses.reload(), loadWsInputs()])
+  await Promise.all([animations.reload(), poses.reload(), sounds.reload(), loadWsInputs()])
   animations.refreshPlayers()
   _playerPoll = setInterval(() => animations.refreshPlayers(), 1500)
+  sounds.listNodes().then(n => { audioNodes.value = n })
 })
 onBeforeUnmount(() => {
   if (_playerPoll) { clearInterval(_playerPoll); _playerPoll = null }
@@ -271,9 +345,11 @@ onBeforeUnmount(() => {
 // If the sidebar selection lands on an empty bucket (e.g. the last
 // item in that group was just deleted), bounce to the "All" view of
 // the same kind so the main pane never looks broken-empty.
-watch([animationGroups, poseGroups], () => {
+watch([animationGroups, poseGroups, soundGroups], () => {
   if (view.value.group === null) return
-  const list = view.value.kind === 'animations' ? animationGroups.value : poseGroups.value
+  const list = view.value.kind === 'animations'
+    ? animationGroups.value
+    : (view.value.kind === 'poses' ? poseGroups.value : soundGroups.value)
   if (view.value.group !== '__ungrouped__' && !list.includes(view.value.group)) {
     view.value = { kind: view.value.kind, group: null }
   }
@@ -295,6 +371,11 @@ watch([animationGroups, poseGroups], () => {
                   @click="newPoseOpen = true">
             <span class="material-icons icon-sm">add</span>
             New Pose
+          </button>
+          <button class="btn-sm w-full bg-violet-600/80 hover:bg-violet-500 text-fg-strong justify-center"
+                  @click="newSoundOpen = true">
+            <span class="material-icons icon-sm">add</span>
+            New Sound
           </button>
           <button class="btn-sm w-full bg-surface hover:bg-surface-2 text-fg-strong justify-center"
                   @click="importOpen = true">
@@ -359,6 +440,35 @@ watch([animationGroups, poseGroups], () => {
               {{ poses.list.filter(p => !p.group).length }}
             </span>
           </div>
+
+          <!-- Sounds section -->
+          <div class="px-3 pt-4 pb-1 text-[10px] uppercase tracking-wide text-fg-faint border-t border-line/40 mt-2">
+            Sounds
+          </div>
+          <div :class="['animations-sidebar-item', view.kind === 'sounds' && view.group === null ? 'active' : '']"
+               @click="selectView('sounds', null)">
+            <span class="material-icons icon-sm">volume_up</span>
+            <span class="flex-1 truncate">All Sounds</span>
+            <span class="text-[10px] text-fg-faint tabular-nums">{{ sounds.list.length }}</span>
+          </div>
+          <div v-for="g in soundGroups" :key="`s-${g}`"
+               :class="['animations-sidebar-item', view.kind === 'sounds' && view.group === g ? 'active' : '']"
+               @click="selectView('sounds', g)">
+            <span class="material-icons icon-sm">folder</span>
+            <span class="flex-1 truncate">{{ g }}</span>
+            <span class="text-[10px] text-fg-faint tabular-nums">
+              {{ sounds.list.filter(s => s.group === g).length }}
+            </span>
+          </div>
+          <div v-if="(sounds.list || []).some(s => !s.group)"
+               :class="['animations-sidebar-item', view.kind === 'sounds' && view.group === '__ungrouped__' ? 'active' : '']"
+               @click="selectView('sounds', '__ungrouped__')">
+            <span class="material-icons icon-sm">folder_open</span>
+            <span class="flex-1 truncate text-fg-muted italic">Ungrouped</span>
+            <span class="text-[10px] text-fg-faint tabular-nums">
+              {{ sounds.list.filter(s => !s.group).length }}
+            </span>
+          </div>
         </div>
       </aside>
 
@@ -368,9 +478,12 @@ watch([animationGroups, poseGroups], () => {
           <div class="flex-1 min-w-0">
             <h2 class="text-base font-semibold text-fg-strong truncate">{{ viewTitle }}</h2>
             <p class="text-xs text-fg-muted">
-              {{ view.kind === 'animations' ? visibleAnimations.length : visiblePoses.length }}
-              {{ view.kind === 'animations' ? 'animation' : 'pose' }}{{
-                (view.kind === 'animations' ? visibleAnimations.length : visiblePoses.length) === 1 ? '' : 's' }}
+              {{ view.kind === 'animations' ? visibleAnimations.length
+                 : (view.kind === 'poses' ? visiblePoses.length : visibleSounds.length) }}
+              {{ view.kind === 'animations' ? 'animation'
+                 : (view.kind === 'poses' ? 'pose' : 'sound') }}{{
+                (view.kind === 'animations' ? visibleAnimations.length
+                 : (view.kind === 'poses' ? visiblePoses.length : visibleSounds.length)) === 1 ? '' : 's' }}
             </p>
           </div>
         </div>
@@ -445,7 +558,7 @@ watch([animationGroups, poseGroups], () => {
           </template>
 
           <!-- Poses table -->
-          <template v-else>
+          <template v-else-if="view.kind === 'poses'">
             <div v-if="!visiblePoses.length" class="text-center text-sm text-fg-faint py-10">
               No poses in this group yet. Click <span class="text-cyan-300">New Pose</span> to start.
             </div>
@@ -569,6 +682,74 @@ watch([animationGroups, poseGroups], () => {
               </template>
             </div>
           </template>
+
+          <!-- Sounds table -->
+          <template v-else>
+            <div v-if="!visibleSounds.length" class="text-center text-sm text-fg-faint py-10">
+              No sounds in this group yet. Click <span class="text-violet-300">New Sound</span> to start.
+            </div>
+            <div v-else class="rounded-lg border border-line/50 bg-panel/30 divide-y divide-line/40">
+              <div v-for="(s, idx) in visibleSounds" :key="s.id"
+                   class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors">
+                <div class="anim-icon-cell">
+                  <span class="material-icons">{{ s.icon || 'volume_up' }}</span>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <input v-if="renamingId === s.id"
+                         class="input-field w-full text-sm py-1"
+                         :value="s.name"
+                         autofocus
+                         @blur="(e) => { patchSound(s.id, { name: e.target.value }); renamingId = null }"
+                         @keydown.enter="(e) => e.target.blur()"
+                         @keydown.escape="renamingId = null" />
+                  <div v-else class="text-sm font-medium text-fg-strong truncate cursor-text"
+                       @click="renamingId = s.id">{{ s.name || s.id }}</div>
+                  <div class="text-xs text-fg-faint truncate font-mono" :title="s.file_path">
+                    {{ nodeName(s.node_id) }} · {{ s.file_path || '(no file)' }}
+                  </div>
+                </div>
+                <input class="input-field text-xs py-1 w-32"
+                       list="sound-group-suggest"
+                       :value="s.group || ''"
+                       placeholder="(group)"
+                       @change="(e) => patchSound(s.id, { group: e.target.value })" />
+                <div class="text-xs text-fg-faint w-16 text-right tabular-nums shrink-0">
+                  {{ Math.round((s.volume ?? 1) * 100) }}%
+                </div>
+                <div class="text-xs w-16 text-right shrink-0"
+                     :class="s.loop ? 'text-cyan-300' : 'text-fg-faint'">
+                  <span class="material-icons icon-sm align-middle">{{ s.loop ? 'repeat' : 'repeat_one' }}</span>
+                  <span v-if="s.loop && s.loop_count">×{{ s.loop_count }}</span>
+                  <span v-else-if="s.loop">∞</span>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                  <div class="flex flex-col">
+                    <button class="reorder-btn" title="Move up"
+                            :disabled="idx === 0" @click="moveSound(s, 'up')">
+                      <span class="material-icons">arrow_drop_up</span>
+                    </button>
+                    <button class="reorder-btn" title="Move down"
+                            :disabled="idx === visibleSounds.length - 1" @click="moveSound(s, 'down')">
+                      <span class="material-icons">arrow_drop_down</span>
+                    </button>
+                  </div>
+                  <button class="btn-sm bg-emerald-500/80 hover:bg-emerald-500 text-fg-strong"
+                          title="Play" @click="playSound(s)">
+                    <span class="material-icons icon-sm">play_arrow</span>
+                  </button>
+                  <button class="btn-sm bg-surface hover:bg-red-600/80 text-fg-strong"
+                          title="Stop this node" @click="stopSound(s)">
+                    <span class="material-icons icon-sm">stop</span>
+                  </button>
+                  <button class="btn-sm bg-surface hover:bg-red-600 text-fg hover:text-fg-strong"
+                          title="Delete" @click="deleteSound(s)">
+                    <span class="material-icons icon-sm">delete</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p v-if="soundError" class="text-xs text-amber-300 italic mt-2">{{ soundError }}</p>
+          </template>
         </div>
       </div>
     </div>
@@ -578,6 +759,9 @@ watch([animationGroups, poseGroups], () => {
     </datalist>
     <datalist id="pose-group-suggest">
       <option v-for="g in poseGroups" :key="g" :value="g" />
+    </datalist>
+    <datalist id="sound-group-suggest">
+      <option v-for="g in soundGroups" :key="g" :value="g" />
     </datalist>
 
     <NewAnimationModal v-if="newAnimOpen"
@@ -590,6 +774,11 @@ watch([animationGroups, poseGroups], () => {
                   :default-group="view.kind === 'poses' && view.group && view.group !== '__ungrouped__' ? view.group : ''"
                   @close="newPoseOpen = false"
                   @create="onCreatePose" />
+    <NewSoundModal v-if="newSoundOpen"
+                   :groups="soundGroups"
+                   :default-group="view.kind === 'sounds' && view.group && view.group !== '__ungrouped__' ? view.group : ''"
+                   @close="newSoundOpen = false"
+                   @create="onCreateSound" />
     <MaestroImportModal v-if="importOpen" @close="importOpen = false" />
   </section>
 </template>
@@ -608,4 +797,15 @@ watch([animationGroups, poseGroups], () => {
 }
 .anim-icon-cell:hover { border-color: var(--color-cyan-500); color: var(--color-fg-strong); }
 .anim-icon-cell .material-icons { font-size: 22px; }
+
+.reorder-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 14px; width: 20px;
+  color: var(--color-fg-faint);
+  cursor: pointer;
+  transition: color 0.1s;
+}
+.reorder-btn:hover:not(:disabled) { color: var(--color-cyan-300); }
+.reorder-btn:disabled { opacity: 0.3; cursor: default; }
+.reorder-btn .material-icons { font-size: 18px; }
 </style>

@@ -558,6 +558,17 @@ impl WebSocketClient {
             .map_err(|e| format!("Failed to send list_poses: {}", e))
     }
 
+    /// Request the saved-sound list. Response forwarded on `library-sounds`.
+    pub fn request_list_sounds(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::list_sounds())
+            .map_err(|e| format!("Failed to send list_sounds: {}", e))
+    }
+
     /// Play a saved animation by id (fire-and-forget).
     pub fn start_animation(&self, id: &str) -> Result<(), String> {
         let tx = self
@@ -578,6 +589,17 @@ impl WebSocketClient {
             .ok_or_else(|| "Not connected".to_string())?;
         tx.blocking_send(OutgoingMessage::apply_pose(id))
             .map_err(|e| format!("Failed to send apply_pose: {}", e))
+    }
+
+    /// Play a saved soundboard sound by id (fire-and-forget).
+    pub fn play_sound(&self, id: &str) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::play_sound(id))
+            .map_err(|e| format!("Failed to send play_sound: {}", e))
     }
 
     /// Send emergency stop command (bypasses throttling)
@@ -869,6 +891,12 @@ async fn handle_connection<R: Runtime>(
                                     if data.get("poses").is_some() {
                                         if let Err(e) = app_handle.emit("library-poses", data) {
                                             tracing::error!("Failed to emit library-poses: {}", e);
+                                        }
+                                    }
+                                    // Response to list_sounds — { sounds: [{id, name, icon, …}] }.
+                                    if data.get("sounds").is_some() {
+                                        if let Err(e) = app_handle.emit("library-sounds", data) {
+                                            tracing::error!("Failed to emit library-sounds: {}", e);
                                         }
                                     }
                                     // Response to our get_estop_state bootstrap.

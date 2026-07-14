@@ -15,6 +15,22 @@ vi.mock('@tauri-apps/plugin-log', () => ({
     trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
 }));
 
+// The Sounds panel is server-backed (source: 'sounds'), so its grid is
+// empty until the server library streams in. Mock useLibrary so the
+// panel has 6 items — enough to exercise the grid-navigation math the
+// way the old static presets did.
+vi.mock('../useLibrary', () => {
+    const items = Array.from({ length: 6 }, (_, i) => ({ id: `s${i}`, name: `S${i}` }));
+    const box = (v: unknown) => ({ value: v });
+    return {
+        useLibrary: () => ({
+            animations: box([]), poses: box([]), sounds: box(items),
+            animationsLoaded: box(true), posesLoaded: box(true), soundsLoaded: box(true),
+            refresh: () => Promise.resolve(),
+        }),
+    };
+});
+
 import {
     useBindings,
     targetDisplayName,
@@ -41,7 +57,7 @@ describe('useBindings target helpers', () => {
 describe('useBindings panel navigation', () => {
     it('navigates the default "sounds" grid within bounds', () => {
         const b = useBindings();
-        b.showPanel('sounds'); // 6 presets, 4 columns, 8 per page
+        b.showPanel('sounds'); // 6 items (mocked library), 4 columns, 8 per page
         expect(b.activePanelState.value.activePanelId).toBe('sounds');
         expect(b.activePanelState.value.selectedIndex).toBe(0);
 

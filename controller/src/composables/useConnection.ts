@@ -227,6 +227,11 @@ async function applyPose(id: string): Promise<void> {
     await invoke('apply_pose', { id });
 }
 
+/** Play a saved soundboard sound on the server by id. */
+async function playSound(id: string): Promise<void> {
+    await invoke('play_sound', { id });
+}
+
 // ─── Composable export ───────────────────────────────────────────────
 
 export function useConnection() {
@@ -254,6 +259,7 @@ export function useConnection() {
         emergencyStop,
         startAnimation,
         applyPose,
+        playSound,
 
         // Discovery requests (responses arrive via Tauri events
         // consumed by useDiscovery).

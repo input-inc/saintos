@@ -5,7 +5,7 @@ const links = [
   { to: '/routes',     icon: 'bolt',         label: 'Routes' },
   { to: '/control',    icon: 'tune',         label: 'Control' },
   { to: '/inputs',     icon: 'sensors',      label: 'Inputs' },
-  { to: '/animations', icon: 'animation',    label: 'Animations & Poses' },
+  { to: '/boards',     icon: 'animation',    label: 'Boards' },
   { to: '/settings',   icon: 'settings',     label: 'Settings' },
   { to: '/logs',       icon: 'description',  label: 'Logs' },
   { to: '/terminal',   icon: 'terminal',     label: 'Terminal' },

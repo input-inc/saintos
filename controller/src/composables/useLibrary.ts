@@ -2,13 +2,15 @@
  * Server library composable — the controller's view of the animations
  * and poses saved on the SAINT.OS server.
  *
- * The preset panels marked `source: 'animations'` / `'poses'` render
- * from these lists (names + icons), and selecting an item fires
- * start_animation / apply_pose (see useBindings.triggerActiveItem).
+ * The preset panels marked `source: 'animations'` / `'poses'` /
+ * `'sounds'` render from these lists (names + icons), and selecting an
+ * item fires start_animation / apply_pose / play_sound (see
+ * useBindings.triggerActiveItem).
  *
  * Data path (over the existing WS):
- *   connect → invoke('list_animations') / invoke('list_poses')
- *           → 'library-animations' / 'library-poses' events → refs.
+ *   connect → invoke('list_animations') / list_poses / list_sounds
+ *           → 'library-animations' / 'library-poses' / 'library-sounds'
+ *             events → refs.
  *
  * Module-scoped singleton (same pattern as useConnection/useBatteries)
  * so one fetch feeds every caller.
@@ -27,10 +29,12 @@ export interface LibraryItem {
 
 const animationsRef = ref<LibraryItem[]>([]);
 const posesRef = ref<LibraryItem[]>([]);
+const soundsRef = ref<LibraryItem[]>([]);
 // Whether a list response has been received since connect — lets the UI
 // tell "still loading" apart from "loaded but genuinely empty".
 const animationsLoadedRef = ref(false);
 const posesLoadedRef = ref(false);
+const soundsLoadedRef = ref(false);
 
 let initialized = false;
 const unlistenFns: UnlistenFn[] = [];
@@ -55,6 +59,8 @@ async function refresh(): Promise<void> {
             console.error('[useLibrary] list_animations failed:', e)),
         invoke('list_poses').catch(e =>
             console.error('[useLibrary] list_poses failed:', e)),
+        invoke('list_sounds').catch(e =>
+            console.error('[useLibrary] list_sounds failed:', e)),
     ]);
 }
 
@@ -74,6 +80,12 @@ async function ensureInit(): Promise<void> {
             posesLoadedRef.value = true;
         }),
     );
+    unlistenFns.push(
+        await listen<{ sounds?: unknown }>('library-sounds', event => {
+            soundsRef.value = toItems(event.payload?.sounds);
+            soundsLoadedRef.value = true;
+        }),
+    );
 
     // Fetch on connect, and re-fetch on every reconnect (a server
     // restart drops our view). Clear on disconnect so a stale list
@@ -87,8 +99,10 @@ async function ensureInit(): Promise<void> {
             // the UI shows "not connected" rather than "empty".
             animationsRef.value = [];
             posesRef.value = [];
+            soundsRef.value = [];
             animationsLoadedRef.value = false;
             posesLoadedRef.value = false;
+            soundsLoadedRef.value = false;
         }
     }, { immediate: true });
 }
@@ -98,8 +112,10 @@ export function useLibrary() {
     return {
         animations: computed(() => animationsRef.value),
         poses: computed(() => posesRef.value),
+        sounds: computed(() => soundsRef.value),
         animationsLoaded: computed(() => animationsLoadedRef.value),
         posesLoaded: computed(() => posesLoadedRef.value),
+        soundsLoaded: computed(() => soundsLoadedRef.value),
         refresh,
     };
 }

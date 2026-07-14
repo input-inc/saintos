@@ -270,6 +270,12 @@ pub fn list_poses(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.ws_client.request_list_poses()
 }
 
+/// Request the saved-sound list. Result arrives on `library-sounds`.
+#[tauri::command]
+pub fn list_sounds(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_list_sounds()
+}
+
 /// Play a saved animation by id.
 #[tauri::command]
 pub fn start_animation(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
@@ -280,6 +286,12 @@ pub fn start_animation(state: State<'_, Arc<AppState>>, id: String) -> Result<()
 #[tauri::command]
 pub fn apply_pose(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.ws_client.apply_pose(&id)
+}
+
+/// Play a saved soundboard sound by id.
+#[tauri::command]
+pub fn play_sound(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    state.ws_client.play_sound(&id)
 }
 
 /// Check if a gamepad is connected

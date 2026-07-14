@@ -228,6 +228,18 @@ impl OutgoingMessage {
         }
     }
 
+    /// List saved soundboard sounds. Server replies with
+    /// `{ sounds: [{id, name, icon, …}] }`. Forwarded on `library-sounds`.
+    pub fn list_sounds() -> Self {
+        Self {
+            id: next_id(),
+            msg_type: "management".to_string(),
+            action: "list_sounds".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
     /// Start (play) a saved animation by id.
     pub fn start_animation(id: &str) -> Self {
         Self {
@@ -245,6 +257,17 @@ impl OutgoingMessage {
             id: next_id(),
             msg_type: "management".to_string(),
             action: "apply_pose".to_string(),
+            params: Some(serde_json::json!({ "id": id })),
+            password: None,
+        }
+    }
+
+    /// Play a saved soundboard sound by id.
+    pub fn play_sound(id: &str) -> Self {
+        Self {
+            id: next_id(),
+            msg_type: "management".to_string(),
+            action: "play_sound".to_string(),
             params: Some(serde_json::json!({ "id": id })),
             password: None,
         }
@@ -501,8 +524,10 @@ mod tests {
         assert_eq!(OutgoingMessage::list_websocket_inputs().action, "list_websocket_inputs");
         assert_eq!(OutgoingMessage::list_animations().action, "list_animations");
         assert_eq!(OutgoingMessage::list_poses().action, "list_poses");
+        assert_eq!(OutgoingMessage::list_sounds().action, "list_sounds");
         assert_eq!(OutgoingMessage::start_animation("anim1").params.unwrap()["id"], "anim1");
         assert_eq!(OutgoingMessage::apply_pose("pose1").params.unwrap()["id"], "pose1");
+        assert_eq!(OutgoingMessage::play_sound("snd1").params.unwrap()["id"], "snd1");
     }
 
     #[test]

@@ -296,6 +296,7 @@ class SaintServerNode(Node):
         self._node_log_subs: Dict[str, Any] = {}     # node_id -> log subscription
         self._node_ble_scan_subs: Dict[str, Any] = {}  # node_id -> ble_scan_results subscription
         self._node_update_progress_subs: Dict[str, Any] = {}  # node_id -> update_progress subscription
+        self._node_soundboard_subs: Dict[str, Any] = {}  # node_id -> [soundboard_fs/devices/result subs]
 
         # Sync-ACK signal carried in /announce. Maps node_id to the most
         # recent value of last_config_save_{ok,fail}_ms we've already
@@ -423,6 +424,10 @@ class SaintServerNode(Node):
                 # operator triggers a scan; other targets never
                 # publish here, but the subscription is free.
                 self._ensure_node_ble_scan_subscriber(announced_node_id)
+                # Soundboard reply topics (filesystem browse, audio-device
+                # enumeration, play acks). Cheap idle subscriptions on
+                # non-Pi nodes that never publish here.
+                self._ensure_node_soundboard_subscribers(announced_node_id)
                 # Set up the OTA progress subscriber eagerly too. We
                 # used to create it lazily from send_firmware_update_command
                 # right before publishing, but DDS subscription matching
@@ -930,6 +935,67 @@ class SaintServerNode(Node):
             return
         topic = f'update_progress/{node_id}'
         self._broadcast_ws_state(topic, data)
+
+    def _ensure_node_soundboard_subscribers(self, node_id: str):
+        """Subscribe to a node's three soundboard reply topics and forward
+        each frame to WebSocket clients. All three carry a ``request_id``
+        the frontend matches against its pending browse / device / play
+        request (same async pattern as ble_scan_results)."""
+        if node_id in self._node_soundboard_subs:
+            return
+        sanitized_id = self._sanitize_topic_name(node_id)
+        subs = []
+        for suffix, ws_prefix in (
+            ("soundboard_fs", "soundboard_fs"),
+            ("soundboard_devices", "soundboard_devices"),
+            ("soundboard_result", "soundboard_result"),
+        ):
+            topic = f'/saint/nodes/{sanitized_id}/{suffix}'
+
+            def make_cb(prefix):
+                def callback(msg: String):
+                    self._on_node_soundboard(prefix, node_id, msg)
+                return callback
+
+            subs.append(self.create_subscription(
+                String, topic, make_cb(ws_prefix), TELEMETRY_QOS,
+                callback_group=self.callback_group,
+            ))
+        self._node_soundboard_subs[node_id] = subs
+        self.get_logger().info(f'Subscribed to soundboard topics for {node_id}')
+
+    def _on_node_soundboard(self, ws_prefix: str, node_id: str, msg: String):
+        """Forward a soundboard reply frame to WebSocket subscribers as
+        ``<ws_prefix>/<node_id>``."""
+        try:
+            data = json.loads(msg.data)
+        except Exception:
+            self.get_logger().warning(
+                f'{ws_prefix}: invalid JSON from {node_id}: {msg.data!r}')
+            return
+        self._broadcast_ws_state(f'{ws_prefix}/{node_id}', data)
+
+    def send_soundboard_command(self, node_id: str, action: str,
+                                args: Optional[dict] = None,
+                                request_id: str = "") -> None:
+        """Push a soundboard control action to a node.
+
+        ``action`` is one of ``soundboard_list_dir`` /
+        ``soundboard_list_devices`` / ``soundboard_play`` /
+        ``soundboard_stop``. Replies (except stop) come back on the
+        node's soundboard reply topics keyed by ``request_id``.
+        """
+        import json as _json
+        pub = self._ensure_node_control_publisher(node_id)
+        self._ensure_node_soundboard_subscribers(node_id)
+        payload = {"action": action, "request_id": str(request_id)}
+        if args:
+            payload["args"] = dict(args)
+        msg = String()
+        msg.data = _json.dumps(payload)
+        pub.publish(msg)
+        self.get_logger().info(
+            f'Sent {action} to {node_id} (request_id={request_id!r})')
 
     def send_ble_scan_command(self, node_id: str, duration_s: float = 8.0,
                               filter_jbd: bool = True,
@@ -1990,6 +2056,11 @@ class SaintServerNode(Node):
                     lambda node_id, duration_s, filter_jbd, request_id:
                         self.send_ble_scan_command(
                             node_id, duration_s, filter_jbd, request_id)
+                )
+                self.web_server.ws_handler.set_soundboard_callback(
+                    lambda node_id, sb_action, args, request_id:
+                        self.send_soundboard_command(
+                            node_id, sb_action, args, request_id)
                 )
 
                 # Initialize ROS Bridge for WebSocket-ROS communication

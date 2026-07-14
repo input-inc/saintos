@@ -110,6 +110,8 @@ See [INSTALL.md](INSTALL.md) for detailed installation instructions.
 
 - [docs/SAINT_OS_SPEC.md](docs/SAINT_OS_SPEC.md) — Full system specification
 - [docs/HARDWARE.md](docs/HARDWARE.md) — Hardware requirements and supported platforms
+- [docs/SOUNDBOARD.md](docs/SOUNDBOARD.md) — Soundboard: register and trigger
+  per-node audio clips (operator setup + architecture)
 - [INSTALL.md](INSTALL.md) — Source-build installation guide (dev machines)
 - [server/docs/SERVER_GUIDE.md](server/docs/SERVER_GUIDE.md) — Operator
   guide: install, flash initial nodes, apply OTA updates, add peripherals,
