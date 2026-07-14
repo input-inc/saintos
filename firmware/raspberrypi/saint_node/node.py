@@ -39,6 +39,7 @@ from .peripherals.kangaroo import KangarooDriver
 from .peripherals.pathfinder_bms import PathfinderBMSDriver
 from .peripherals.fas100 import FAS100Driver
 from .peripherals.audio_player import PiAudioPlayerDriver
+from .peripherals.audio_mixer import AlsaMixerDriver
 from .peripherals.console_display import ConsoleDisplayDriver
 from .pi_model import detect_pi_model
 from . import ble_transport
@@ -138,6 +139,10 @@ class SaintNode(Node):
         # entry. libVLC is loaded lazily — a missing system package
         # logs an error but doesn't crash the node.
         self._peripherals.register(PiAudioPlayerDriver)
+        # Built-in audio output mixer: controls the host card's master
+        # volume + L/R balance + mute (the whole output, not one player).
+        # Auto-seeded by the board YAML; pyalsaaudio is loaded lazily.
+        self._peripherals.register(AlsaMixerDriver)
         # Console kiosk: configures the Pi as an HDMI dashboard
         # appliance pointing at a Console view URL on the server.
         # Not a built-in — operator opts a given Pi in by adopting

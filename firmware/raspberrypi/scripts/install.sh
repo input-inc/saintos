@@ -209,6 +209,25 @@ else
     echo -e "         The audio_player peripheral will self-disable on first sync; everything else still works.${NC}"
 fi
 
+# Optional ALSA mixer binding — backs the built-in audio_mixer peripheral
+# (host output volume + L/R balance + mute). alsa-utils is already in
+# CORE_PKGS above; this is just the Python binding. Same best-effort
+# treatment as VLC: if python3-pyalsaaudio isn't in the repo the
+# audio_mixer driver self-disables (lazy import) and the node keeps
+# running. python3-pyalsaaudio is a small C-extension wrapper over
+# libasound2 (already present on any Pi that plays audio).
+if pkg_available python3-pyalsaaudio; then
+    apt-get install -y python3-pyalsaaudio
+else
+    echo -e "${YELLOW}Warning: python3-pyalsaaudio not available in apt."
+    if [ "$LOCAL_REPO_ENABLED" -eq 1 ]; then
+        echo -e "         Offline install: this .deb isn't in the bundled deps/ repo."
+        echo -e "         Re-run firmware/raspberrypi/scripts/bundle-debs.sh --force on the dev box,"
+        echo -e "         then re-package — bundle-debs.sh's RUNTIME_DEB_LIST already lists it."
+    fi
+    echo -e "         The audio_mixer peripheral will self-disable on first sync; everything else still works.${NC}"
+fi
+
 echo ""
 echo "Step 1b: Installing ROS2 runtime libraries..."
 # The source-built ROS install tree dlopens these at runtime — Trixie's

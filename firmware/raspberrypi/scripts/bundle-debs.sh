@@ -83,6 +83,7 @@ python3-libgpiod
 vlc-bin
 python3-vlc
 alsa-utils
+python3-pyalsaaudio
 ca-certificates
 curl
 rsync

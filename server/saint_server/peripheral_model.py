@@ -996,6 +996,75 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             ),
         ],
     ),
+    # Audio output mixer — controls the host sound card's *output*
+    # (master volume + L/R balance + mute), unlike audio_player which
+    # sets one media player's application volume. The Raspberry Pi
+    # backend drives an ALSA mixer control via pyalsaaudio. Pinless,
+    # one instance per node; auto-seeded as a built-in on Pi hosts.
+    "audio_mixer": PeripheralType(
+        id="audio_mixer", label="Audio Output (Volume / Mix)",
+        description=(
+            "System audio-output control for the host sound card. Route "
+            "signals into volume (master 0–1), balance (−1 full-left … "
+            "+1 full-right), or mute; the left/right/muted read-back "
+            "channels report the mixer's live state. The Raspberry Pi "
+            "backend drives an ALSA mixer control (Master/PCM/Digital/…) "
+            "via pyalsaaudio and affects everything the card emits — the "
+            "audio player, system sounds, all of it."
+        ),
+        pin_kind="builtin",
+        channels=[
+            PeripheralChannel("volume",  "Volume (0–1)",      "out", "analog"),
+            PeripheralChannel("balance", "Balance (−1…+1)",   "out", "analog"),
+            PeripheralChannel("mute",    "Mute (trigger)",    "out", "digital_out"),
+            PeripheralChannel("left",    "Left level (0–1)",  "in",  "analog"),
+            PeripheralChannel("right",   "Right level (0–1)", "in",  "analog"),
+            PeripheralChannel("muted",   "Muted",             "in",  "digital_in"),
+        ],
+        params=[
+            PeripheralTypeParam(
+                "backend", "Backend", "string", "alsa",
+                choices=[
+                    {"value": "alsa", "label": "Raspberry Pi (pyalsaaudio / ALSA)"},
+                ],
+                help=(
+                    "Mixer backend implementation. Today only the Pi ALSA "
+                    "backend ships; future PulseAudio/PipeWire backends "
+                    "will appear here without a catalog change."
+                ),
+            ),
+            PeripheralTypeParam(
+                "card", "ALSA card index", "int", 0, min=0,
+                help=(
+                    "ALSA card index the mixer control lives on. Run "
+                    "`aplay -l` on the host to list cards; 0 is the "
+                    "default output on most Pis."
+                ),
+            ),
+            PeripheralTypeParam(
+                "mixer_control", "Mixer control", "string", "Master",
+                help=(
+                    "Name of the ALSA mixer element to drive. Run "
+                    "`amixer -c <card> scontrols` to list them; common "
+                    "choices are Master, PCM, Digital, Headphone, Speaker."
+                ),
+            ),
+            PeripheralTypeParam(
+                "default_volume", "Default volume (0–1)", "float", 0.8,
+                min=0.0, max=1.0,
+                help="Master level applied on boot / config apply.",
+            ),
+            PeripheralTypeParam(
+                "default_balance", "Default balance (−1…+1)", "float", 0.0,
+                min=-1.0, max=1.0,
+                help="L/R balance applied on boot. 0 = centered.",
+            ),
+            PeripheralTypeParam(
+                "default_mute", "Start muted", "bool", False,
+                help="When true, the output starts muted on boot.",
+            ),
+        ],
+    ),
     # Console display — configures a Pi node as an HDMI kiosk pointing
     # at a Console view URL on this server. The peripheral has no I/O
     # channels: applying it makes the Pi's saint_node write a Chromium

@@ -89,10 +89,11 @@ def test_derive_capabilities_intersects_chip_and_board(board_manager):
     assert caps["board_id"] == "raspberrypi"
     # Every available pin must come back with its chip-level cap list.
     assert all("capabilities" in p for p in caps["pins"])
-    # Built-ins list the audio_player entry.
+    # Built-ins list the audio_player + audio_mixer entries.
     builtins = caps["builtin_peripherals"]
     types_seen = {b["type"] for b in builtins}
     assert "audio_player" in types_seen
+    assert "audio_mixer" in types_seen
 
 
 # ── catalog entry ─────────────────────────────────────────────────
@@ -159,6 +160,67 @@ def test_audio_player_catalog_params():
     assert iv.max == 1.0
 
 
+def test_audio_mixer_catalog_entry_shape():
+    entry = DEFAULT_CATALOG.get("audio_mixer")
+    assert entry is not None
+    assert entry.pin_kind == "builtin"
+
+    # Channel order is the contract with the Pi-side SUB_CHANNEL_NAMES
+    # list — set_channel_value translates channel names → sub-channel
+    # indexes, so a silent reorder here would misroute writes.
+    channel_ids = [c.id for c in entry.channels]
+    assert channel_ids == [
+        "volume", "balance", "mute", "left", "right", "muted",
+    ]
+
+    by_id = {c.id: c for c in entry.channels}
+    # volume / balance are analog controls (server → driver).
+    for name in ("volume", "balance"):
+        assert by_id[name].dir == "out"
+        assert by_id[name].cap == "analog"
+    # mute is a logic-driven control.
+    assert by_id["mute"].dir == "out"
+    assert by_id["mute"].cap == "digital_out"
+    # left / right are analog read-back telemetry.
+    for name in ("left", "right"):
+        assert by_id[name].dir == "in"
+        assert by_id[name].cap == "analog"
+    # muted is digital read-back.
+    assert by_id["muted"].dir == "in"
+    assert by_id["muted"].cap == "digital_in"
+
+
+def test_audio_mixer_catalog_params():
+    entry = DEFAULT_CATALOG.get("audio_mixer")
+    by_id = {p.id: p for p in entry.params}
+
+    # backend defaults to the only shipped option so adoption needs no
+    # operator input.
+    assert by_id["backend"].default == "alsa"
+
+    # card is a non-negative ALSA card index.
+    assert by_id["card"].type == "int"
+    assert by_id["card"].min == 0
+
+    # mixer_control names the ALSA element; Master is the common default.
+    assert by_id["mixer_control"].type == "string"
+    assert by_id["mixer_control"].default == "Master"
+
+    # Default level bounded 0..1 so a YAML typo can't blast the speakers.
+    dv = by_id["default_volume"]
+    assert dv.type == "float"
+    assert 0.0 <= float(dv.default) <= 1.0
+    assert dv.min == 0.0 and dv.max == 1.0
+
+    # Balance bounded -1..1, centered by default.
+    db = by_id["default_balance"]
+    assert db.type == "float"
+    assert db.min == -1.0 and db.max == 1.0
+    assert float(db.default) == 0.0
+
+    assert by_id["default_mute"].type == "bool"
+
+
 # ── seeding behavior ─────────────────────────────────────────────
 
 
@@ -173,6 +235,19 @@ def test_onboard_audio_is_in_board_builtin_peripherals(board_manager):
     p = by_id["onboard_audio"].params
     assert p.get("backend") == "pi_alsa"
     assert p.get("alsa_device")  # any non-empty string
+
+
+def test_onboard_volume_is_in_board_builtin_peripherals(board_manager):
+    board = board_manager.get_board("raspberrypi")
+    by_id = {b.id: b for b in board.builtin_peripherals}
+    assert "onboard_volume" in by_id, \
+        "raspberrypi board must declare an onboard_volume audio_mixer"
+    assert by_id["onboard_volume"].type == "audio_mixer"
+    # Params carry sensible defaults so adoption needs no operator input.
+    p = by_id["onboard_volume"].params
+    assert p.get("backend") == "alsa"
+    assert p.get("mixer_control")  # any non-empty string
+    assert 0.0 <= float(p.get("default_volume", 0.8)) <= 1.0
 
 
 def test_builtin_peripheral_refuses_removal():

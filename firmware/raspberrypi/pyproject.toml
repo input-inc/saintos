@@ -34,6 +34,12 @@ dependencies = [
     # logs an error and disables the audio_player — the rest of the
     # node keeps running.
     "python-vlc>=3.0",
+    # pyalsaaudio backs the built-in audio_mixer peripheral (host output
+    # volume + L/R balance + mute). Wraps ALSA's mixer API; ALSA itself
+    # ships with Raspberry Pi OS. The Python import is lazy in the
+    # driver, so a host without pyalsaaudio just logs an error and
+    # disables the audio_mixer — the rest of the node keeps running.
+    "pyalsaaudio>=0.9",
     # bleak is the cross-platform BLE central client. Used by the
     # ble_transport for JBD-protocol BMSes (and any future BLE
     # peripherals). On Linux/Pi it talks to BlueZ over D-Bus; the

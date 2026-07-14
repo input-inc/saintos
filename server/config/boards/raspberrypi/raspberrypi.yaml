@@ -15,6 +15,12 @@
 #     pick a specific output (HDMI, USB DAC, I²S HAT). One instance
 #     per node — the saint-node host can drive exactly one ALSA
 #     output card at a time through this driver.
+#   - audio_mixer: system output control for the host sound card —
+#     master volume, L/R balance, and mute via an ALSA mixer control
+#     (pyalsaaudio). Defaults target card 0 / the `Master` control;
+#     set `card` + `mixer_control` to match the board's output (run
+#     `amixer -c <card> scontrols` on the host). Affects the whole
+#     card, not just the audio_player.
 
 board_id: raspberrypi
 display_name: "Raspberry Pi 5 (40-pin header)"
@@ -72,3 +78,14 @@ builtin_peripherals:
       backend: "pi_alsa"
       alsa_device: "default"
       initial_volume: 0.8
+  - id: onboard_volume
+    type: audio_mixer
+    label: "Audio Output"
+    pins: {}
+    params:
+      backend: "alsa"
+      card: 0
+      mixer_control: "Master"
+      default_volume: 0.8
+      default_balance: 0.0
+      default_mute: false
