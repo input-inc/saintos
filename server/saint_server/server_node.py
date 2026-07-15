@@ -164,6 +164,11 @@ class SaintServerNode(Node):
         # node (currently: JBD BMSes). Created once the async loop is
         # up — see _run_async_loop.
         self._host_peripheral_manager: Optional[HostPeripheralManager] = None
+        # In-process VLC player for soundboard clips targeting the
+        # host_controller node. Lazy — created on first host play, and
+        # shared with the host audio_player driver. See
+        # _dispatch_host_soundboard / host_peripherals.soundboard.
+        self._host_soundboard_player = None
 
         # State manager - shared with web server
         self.state_manager = StateManager(
@@ -741,6 +746,21 @@ class SaintServerNode(Node):
 
     def send_config_to_node(self, node_id: str, config_json: str):
         """Send pin configuration to a node via ROS2."""
+        # host_controller is a synthetic in-process node — there's no
+        # firmware subscribed to /saint/nodes/host_controller/config, so
+        # publishing there would leave sync_status stuck at "pending"
+        # forever. Its peripherals are already applied in-process the
+        # moment they're edited (state_manager._maybe_notify_host_
+        # peripheral_change → HostPeripheralManager.reconcile), so the
+        # Sync button just has to settle the status here.
+        if node_id == HOST_CONTROLLER_NODE_ID:
+            self.state_manager.mark_node_synced(node_id, success=True)
+            self.get_logger().info('Applied host_controller config in-process (no ROS push)')
+            self.state_manager.log_node_event(
+                node_id, "Applied peripheral config (host, in-process)", "info")
+            self._broadcast_sync_status(node_id)
+            return
+
         pub = self._ensure_node_config_publisher(node_id)
         self._ensure_node_capabilities_subscriber(node_id)
 
@@ -985,6 +1005,13 @@ class SaintServerNode(Node):
         ``soundboard_stop``. Replies (except stop) come back on the
         node's soundboard reply topics keyed by ``request_id``.
         """
+        # host_controller has no firmware on the wire — play in-process
+        # on the server host and broadcast the reply on the same
+        # soundboard_*/<node_id> topics, exactly like the BLE-scan path.
+        if node_id == HOST_CONTROLLER_NODE_ID:
+            self._dispatch_host_soundboard(action, args or {}, str(request_id))
+            return
+
         import json as _json
         pub = self._ensure_node_control_publisher(node_id)
         self._ensure_node_soundboard_subscribers(node_id)
@@ -996,6 +1023,71 @@ class SaintServerNode(Node):
         pub.publish(msg)
         self.get_logger().info(
             f'Sent {action} to {node_id} (request_id={request_id!r})')
+
+    def _ensure_host_soundboard_player(self):
+        """Lazily create the in-process host VLC player (shared with the
+        host audio_player driver)."""
+        if self._host_soundboard_player is None:
+            from saint_server.host_peripherals import soundboard as host_sb
+            self._host_soundboard_player = host_sb.SoundboardPlayer(
+                logger=self.get_logger())
+        return self._host_soundboard_player
+
+    def _dispatch_host_soundboard(self, action: str, args: dict,
+                                  request_id: str) -> None:
+        """Run a soundboard action in-process on the server host and
+        broadcast the reply on the same soundboard_*/host_controller
+        topics a firmware node would publish to. Blocking work (fs walk,
+        `aplay -l`, VLC play) runs on a short worker thread; the ROS
+        callback thread returns immediately. Mirrors _dispatch_host_ble_scan."""
+        from saint_server.host_peripherals import soundboard as host_sb
+        node = HOST_CONTROLLER_NODE_ID
+
+        def work():
+            if action == 'soundboard_list_dir':
+                r = host_sb.list_directory(str(args.get('path', '/') or '/'))
+                r['request_id'] = request_id
+                return f'soundboard_fs/{node}', r
+            if action == 'soundboard_list_devices':
+                r = host_sb.list_audio_devices()
+                r['request_id'] = request_id
+                return f'soundboard_devices/{node}', r
+            if action == 'soundboard_play':
+                player = self._ensure_host_soundboard_player()
+                ok, message = player.play(
+                    path=str(args.get('path', '') or args.get('file_path', '')),
+                    device=str(args.get('device', '')
+                               or args.get('output_device', '') or 'default'),
+                    volume=float(args.get('volume', 1.0)),
+                    start_time_s=float(args.get('start_time_s',
+                                                args.get('start_time', 0.0))),
+                    loop=bool(args.get('loop', False)),
+                    loop_count=int(args.get('loop_count', 0)))
+                return f'soundboard_result/{node}', {
+                    "status": "ok" if ok else "error",
+                    "message": message, "request_id": request_id}
+            if action == 'soundboard_stop':
+                if self._host_soundboard_player is not None:
+                    self._host_soundboard_player.stop()
+                return f'soundboard_result/{node}', {
+                    "status": "ok", "message": "stopped",
+                    "request_id": request_id}
+            return f'soundboard_result/{node}', {
+                "status": "error", "message": f"unknown action {action}",
+                "request_id": request_id}
+
+        def run_and_broadcast():
+            try:
+                topic, payload = work()
+            except Exception as e:
+                self.get_logger().warning(f'host soundboard {action} failed: {e}')
+                topic, payload = (f'soundboard_result/{node}',
+                                  {"status": "error", "message": str(e),
+                                   "request_id": request_id})
+            self._broadcast_ws_state(topic, payload)
+
+        threading.Thread(target=run_and_broadcast,
+                         name="saint-host-soundboard", daemon=True).start()
 
     def send_ble_scan_command(self, node_id: str, duration_s: float = 8.0,
                               filter_jbd: bool = True,
@@ -1285,6 +1377,15 @@ class SaintServerNode(Node):
         """
         import json
 
+        # host_controller peripherals run in-process — route the write to
+        # the host driver (e.g. audio_mixer volume) instead of publishing
+        # to the dead /saint/nodes/host_controller/control topic.
+        if node_id == HOST_CONTROLLER_NODE_ID:
+            if self._host_peripheral_manager is not None:
+                self._host_peripheral_manager.handle_channel(
+                    peripheral_id, channel_id, float(value))
+            return
+
         pub = self._ensure_node_control_publisher(node_id)
         self._ensure_node_state_subscriber(node_id)
 
@@ -1322,6 +1423,14 @@ class SaintServerNode(Node):
         doesn't silently lose a one-shot trigger.
         """
         import json
+
+        # host_controller peripherals run in-process (e.g. audio_player
+        # play_file on the server host); dispatch to the host driver.
+        if node_id == HOST_CONTROLLER_NODE_ID:
+            if self._host_peripheral_manager is not None:
+                self._host_peripheral_manager.handle_command(
+                    peripheral_id, command, args or {})
+            return
 
         pub = self._ensure_node_command_publisher(node_id)
 

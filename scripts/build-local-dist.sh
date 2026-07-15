@@ -469,6 +469,14 @@ avahi-daemon
 libnss-mdns
 dnsmasq
 zstd
+# Audio: the host_controller plays soundboard clips in-process on the
+# SERVER host via VLC→ALSA (see saint_server/host_peripherals/soundboard.py),
+# and enumerates outputs with `aplay -l`. python3-alsaaudio backs host
+# master-volume control.
+vlc-bin
+python3-vlc
+alsa-utils
+python3-alsaaudio
 DEB_LIST
 
 DEB_LIST_HASH=$(printf '%s' "$RUNTIME_DEB_LIST" | shasum -a 256 | awk '{print $1}' | cut -c1-12)
@@ -609,6 +617,17 @@ FROM debian:${DEBIAN_RELEASE}
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends ${BUILDER_APT} && python3 -m pip install --break-system-packages -U ${BUILDER_PIP} && apt-get clean && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
+    # The builder tag is content-hashed, so a spec change mints a NEW
+    # tag and leaves the previous saint-os-builder:<oldhash> behind —
+    # still tagged (not dangling), so `docker image prune` won't reap it.
+    # Drop every other saint-os-builder tag now that the current one is
+    # built, so stale toolchain images don't accumulate ~825MB apiece.
+    docker images --filter=reference='saint-os-builder:*' --format '{{.Repository}}:{{.Tag}}' \
+        | grep -vxF "$BUILDER_IMAGE" \
+        | while read -r stale; do
+            log "Removing superseded builder image ${stale}"
+            docker image rm "$stale" >/dev/null 2>&1 || true
+          done
 fi
 
 # Mount the extracted ROS2 install tree READ-ONLY straight to /opt/ros

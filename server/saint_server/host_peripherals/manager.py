@@ -29,6 +29,7 @@ import asyncio
 import subprocess
 from typing import Any, Callable, Dict, List, Optional
 
+from .audio import AUDIO_DRIVERS
 from .jbd_bms import JBD_BLE_SERVICE_UUID, JbdBleDriver
 from .scanner import scan_jbd_devices
 
@@ -36,7 +37,10 @@ from .scanner import scan_jbd_devices
 # Catalog type ids the manager knows how to drive. Anything else in
 # the host_controller peripheral list is ignored (e.g. system_monitor,
 # which the state_manager handles directly).
-HANDLED_TYPES = frozenset({"pathfinder_bms"})
+BMS_TYPES = frozenset({"pathfinder_bms"})
+# Audio peripherals run synchronously (ALSA / VLC), not on the BLE loop.
+AUDIO_TYPES = frozenset(AUDIO_DRIVERS.keys())
+HANDLED_TYPES = BMS_TYPES | AUDIO_TYPES
 
 # Used by flush_stale_connections to identify JBD radios among the
 # BlueZ-Connected device set. Short form is what `bluetoothctl info`
@@ -58,8 +62,15 @@ class HostPeripheralManager:
         self._loop = loop
         self._state_cb = state_cb
         self._log_cb = log_cb
-        # Drivers keyed by peripheral_id (operator-visible name).
+        # BLE drivers keyed by peripheral_id (operator-visible name).
         self._drivers: Dict[str, JbdBleDriver] = {}
+        # Audio drivers (audio_mixer / audio_player) keyed the same way.
+        # Synchronous (ALSA/VLC) — driven by handle_channel/handle_command
+        # straight off the calling thread, not the BLE loop.
+        self._audio_drivers: Dict[str, Any] = {}
+        # Snapshot of last-applied audio params so reconcile can detect
+        # edits (control/card/volume) and recreate the driver.
+        self._audio_params: Dict[str, Dict[str, Any]] = {}
         # Snapshot of the last applied config keyed by peripheral_id
         # so reconcile can detect param-only edits (e.g. MAC change,
         # poll interval bump) without thrashing the connection.
@@ -116,6 +127,35 @@ class HostPeripheralManager:
                              filter_service=filter_jbd),
             self._loop)
 
+    def handle_channel(self, peripheral_id: str, channel_id: str,
+                       value: float) -> bool:
+        """Route a set_channel write to a host audio driver. Called off
+        the ROS thread; audio drivers are synchronous (ALSA/VLC) so we
+        invoke them directly. Returns True iff a driver handled it."""
+        drv = self._audio_drivers.get(peripheral_id)
+        if drv is None:
+            return False
+        try:
+            drv.set_channel(channel_id, float(value))
+            return True
+        except Exception as e:
+            self._log("warn", f"{peripheral_id}.{channel_id} set failed: {e}")
+            return False
+
+    def handle_command(self, peripheral_id: str, command: str,
+                       args: Dict[str, Any]) -> bool:
+        """Route an out-of-band command (e.g. audio_player play_file) to a
+        host audio driver. Returns True iff a driver handled it."""
+        drv = self._audio_drivers.get(peripheral_id)
+        if drv is None:
+            return False
+        try:
+            drv.handle_command(command, dict(args or {}))
+            return True
+        except Exception as e:
+            self._log("warn", f"{peripheral_id} command {command!r} failed: {e}")
+            return False
+
     def shutdown(self) -> None:
         """Stop every driver. Called from server_node.py during
         teardown. Synchronous from the caller's perspective; the loop
@@ -132,7 +172,10 @@ class HostPeripheralManager:
     # ── status queries ─────────────────────────────────────────
 
     def connected_peripheral_ids(self) -> List[str]:
-        return [pid for pid, drv in self._drivers.items() if drv.is_connected]
+        ids = [pid for pid, drv in self._drivers.items() if drv.is_connected]
+        ids += [pid for pid, drv in self._audio_drivers.items()
+                if drv.is_connected]
+        return ids
 
     # ── async internals (run on the shared loop) ─────────────────
 
@@ -147,11 +190,59 @@ class HostPeripheralManager:
 
     async def _reconcile_async_locked(self,
                                       peripherals: List[Dict[str, Any]]) -> None:
+        await self._reconcile_bms_locked(
+            [p for p in peripherals if p.get("type") in BMS_TYPES])
+        await self._reconcile_audio_locked(
+            [p for p in peripherals if p.get("type") in AUDIO_TYPES])
+
+    async def _reconcile_audio_locked(self,
+                                      peripherals: List[Dict[str, Any]]) -> None:
+        """Start/stop/refresh synchronous audio drivers (audio_mixer /
+        audio_player). A param edit recreates the driver — cheap, and
+        avoids per-field hot-update plumbing for a rarely-changed config."""
+        desired: Dict[str, Dict[str, Any]] = {}
+        for entry in peripherals:
+            pid = entry.get("id", "")
+            if pid:
+                desired[pid] = entry
+        # Stop drivers no longer wanted, or whose config changed.
+        for pid in list(self._audio_drivers.keys()):
+            want = desired.get(pid)
+            if want is None or want != self._audio_params.get(pid):
+                drv = self._audio_drivers.pop(pid, None)
+                self._audio_params.pop(pid, None)
+                if drv is not None:
+                    try:
+                        drv.stop()
+                    except Exception as e:
+                        self._log("warn", f"stopping audio {pid} raised: {e}")
+        # Start new / recreated drivers.
+        for pid, entry in desired.items():
+            if pid in self._audio_drivers:
+                continue
+            cls = AUDIO_DRIVERS.get(entry.get("type", ""))
+            if cls is None:
+                continue
+            self._log("info", f"starting audio driver for {pid} ({entry.get('type')})")
+            try:
+                drv = cls(peripheral_id=pid,
+                          params=entry.get("params") or {},
+                          state_cb=self._state_cb,
+                          log_cb=self._log_cb)
+                drv.start()
+            except Exception as e:
+                self._log("warn", f"starting audio {pid} raised: {e}")
+                continue
+            self._audio_drivers[pid] = drv
+            self._audio_params[pid] = entry
+
+    async def _reconcile_bms_locked(self,
+                                    peripherals: List[Dict[str, Any]]) -> None:
         # Index by peripheral_id, filter to types we drive.
         desired: Dict[str, Dict[str, Any]] = {}
         for entry in peripherals:
             type_id = entry.get("type", "")
-            if type_id not in HANDLED_TYPES:
+            if type_id not in BMS_TYPES:
                 continue
             pid = entry.get("id", "")
             params = entry.get("params") or {}
@@ -269,6 +360,15 @@ class HostPeripheralManager:
                 await drv.stop()
             except Exception as e:
                 self._log("warn", f"shutdown of {pid} raised: {e}")
+        # Audio drivers are synchronous.
+        audio = list(self._audio_drivers.items())
+        self._audio_drivers.clear()
+        self._audio_params.clear()
+        for pid, drv in audio:
+            try:
+                drv.stop()
+            except Exception as e:
+                self._log("warn", f"shutdown of audio {pid} raised: {e}")
 
     def _log(self, level: str, msg: str) -> None:
         if self._log_cb is not None:

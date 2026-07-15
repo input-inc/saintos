@@ -2453,22 +2453,35 @@ class StateManager:
                 "sounds": self.sound_store.reorder(ordered_ids or [])}
 
     def list_audio_nodes(self) -> List[Dict[str, Any]]:
-        """Adopted nodes that can play soundboard entries.
+        """Nodes that can play soundboard entries.
 
-        Audio playback is VLC/ALSA on the Pi node, so this is the set of
-        adopted ``raspberrypi`` nodes. Returns id + a display label for
-        the "pick a node" selector.
+        Two kinds of audio target:
+          - the synthetic ``host_controller`` — plays in-process on the
+            server host via VLC/ALSA (see server_node._dispatch_host_soundboard);
+          - adopted ``raspberrypi`` firmware nodes — play on the node via
+            its own VLC/ALSA stack.
+        The host controller is listed first so it's the obvious default.
         """
         out = []
+        host = self.state.adopted_nodes.get(HOST_CONTROLLER_NODE_ID)
+        if host is not None:
+            out.append({
+                "node_id": HOST_CONTROLLER_NODE_ID,
+                "name": host.display_name or "Host Controller",
+                "online": host.online,
+            })
+        rpi = []
         for node_id, node in self.state.adopted_nodes.items():
+            if node_id == HOST_CONTROLLER_NODE_ID:
+                continue
             if node.chip_family == "raspberrypi":
-                out.append({
+                rpi.append({
                     "node_id": node_id,
                     "name": node.display_name or node.hardware_model or node_id,
                     "online": node.online,
                 })
-        out.sort(key=lambda n: n["name"].lower())
-        return out
+        rpi.sort(key=lambda n: n["name"].lower())
+        return out + rpi
 
     def resolve_sound_play(self, sound_id: str) -> Optional[Dict[str, Any]]:
         """Resolve a saved sound into ``{node_id, args}`` for a play
