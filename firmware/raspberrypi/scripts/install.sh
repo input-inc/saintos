@@ -212,14 +212,14 @@ fi
 # Optional ALSA mixer binding — backs the built-in audio_mixer peripheral
 # (host output volume + L/R balance + mute). alsa-utils is already in
 # CORE_PKGS above; this is just the Python binding. Same best-effort
-# treatment as VLC: if python3-pyalsaaudio isn't in the repo the
+# treatment as VLC: if python3-alsaaudio isn't in the repo the
 # audio_mixer driver self-disables (lazy import) and the node keeps
-# running. python3-pyalsaaudio is a small C-extension wrapper over
+# running. python3-alsaaudio is a small C-extension wrapper over
 # libasound2 (already present on any Pi that plays audio).
-if pkg_available python3-pyalsaaudio; then
-    apt-get install -y python3-pyalsaaudio
+if pkg_available python3-alsaaudio; then
+    apt-get install -y python3-alsaaudio
 else
-    echo -e "${YELLOW}Warning: python3-pyalsaaudio not available in apt."
+    echo -e "${YELLOW}Warning: python3-alsaaudio not available in apt."
     if [ "$LOCAL_REPO_ENABLED" -eq 1 ]; then
         echo -e "         Offline install: this .deb isn't in the bundled deps/ repo."
         echo -e "         Re-run firmware/raspberrypi/scripts/bundle-debs.sh --force on the dev box,"
@@ -244,7 +244,6 @@ ROS_RUNTIME_PKGS=(
     liblttng-ust1
     liborocos-kdl1.5
     libyaml-0-2
-    libyaml-cpp0.8
     python3-yaml
     python3-numpy
     python3-lark
@@ -262,6 +261,16 @@ for cand in libtinyxml2-11 libtinyxml2-10 libtinyxml2-9; do
     fi
 done
 for cand in libpython3.13 libpython3.12 libpython3.11; do
+    if pkg_available "$cand"; then
+        ROS_RUNTIME_PKGS+=("$cand")
+        break
+    fi
+done
+# libyaml-cpp SO is release-versioned too (0.7 on Bookworm, 0.8 on
+# Trixie). Probe for whichever the local repo/apt resolves rather than
+# pinning one codename — the bundled deps/ ships the matching runtime SO
+# (bundle-debs.sh lists libyaml-cpp-dev, which Depends on it).
+for cand in libyaml-cpp0.8 libyaml-cpp0.7; do
     if pkg_available "$cand"; then
         ROS_RUNTIME_PKGS+=("$cand")
         break

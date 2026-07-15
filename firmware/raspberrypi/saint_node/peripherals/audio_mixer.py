@@ -8,7 +8,7 @@ control; mute uses the control's playback switch when it has one, and
 falls back to zeroing the level when it doesn't.
 
 Trade-off: the runtime depends on the `pyalsaaudio` Python module
-(`apt install python3-pyalsaaudio` or `pip install pyalsaaudio` on
+(`apt install python3-alsaaudio` or `pip install pyalsaaudio` on
 Raspberry Pi OS; ALSA itself ships with the OS). The driver imports
 `alsaaudio` lazily so a missing library only fails this driver, not the
 whole node.
@@ -41,7 +41,7 @@ class AlsaMixerDriver(AudioMixerDriver):
             self._log("error",
                 f"audio_mixer#{inst.instance_id}: pyalsaaudio not "
                 f"available ({_ALSA_IMPORT_ERROR!r}); install "
-                f"python3-pyalsaaudio on the host")
+                f"python3-alsaaudio on the host")
             return False
 
         control = str(inst.params.get("mixer_control") or "Master")

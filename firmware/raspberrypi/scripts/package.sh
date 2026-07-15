@@ -206,6 +206,41 @@ debs_src_for_release() {
     return 1
 }
 
+# bundle-debs.sh builds the per-release runtime deb cache. We invoke it
+# on demand so packaging never silently ships a bundle without deps/.
+BUNDLE_DEBS_SCRIPT="${SCRIPT_DIR}/bundle-debs.sh"
+# Set AUTO_FETCH_DEBS=0 to opt out (e.g. deliberately building an
+# online-install bundle on a host with no docker/network).
+AUTO_FETCH_DEBS="${AUTO_FETCH_DEBS:-1}"
+
+# Resolve a release's deb cache, fetching it first if it isn't there.
+# Echoes the cache path on success. Returns non-zero only when the cache
+# is absent AND we couldn't build it (auto-fetch off, or bundle-debs.sh
+# failed — e.g. no docker/network). All progress goes to stderr so the
+# command substitution captures only the resolved path.
+ensure_debs_for_release() {
+    local rel="$1"
+    local src
+    if src=$(debs_src_for_release "$rel"); then
+        echo "$src"; return 0
+    fi
+    if [ "$AUTO_FETCH_DEBS" != "1" ]; then
+        return 1
+    fi
+    if [ ! -x "$BUNDLE_DEBS_SCRIPT" ]; then
+        echo "Cannot auto-fetch debs: ${BUNDLE_DEBS_SCRIPT} missing" >&2
+        return 1
+    fi
+    echo "No runtime deb cache for ${rel} — fetching it (bundle-debs.sh)…" >&2
+    if DEBIAN_RELEASE="$rel" ROS_DISTRO="$ROS_DISTRO" "$BUNDLE_DEBS_SCRIPT" >&2; then
+        if src=$(debs_src_for_release "$rel"); then
+            echo "$src"; return 0
+        fi
+    fi
+    echo "bundle-debs.sh did not produce a usable cache for ${rel}" >&2
+    return 1
+}
+
 # Single-target layout: bundle tree+debs at PACKAGE_DIR/ros2_install/
 # and PACKAGE_DIR/deps/ — what every existing install.sh knows about.
 bundle_ros2() {
@@ -255,7 +290,7 @@ bundle_ros2_multi() {
 bundle_debs() {
     local src=""
     local from_server_fallback=0
-    if src=$(debs_src_for_release "$TARGET_RELEASE"); then
+    if src=$(ensure_debs_for_release "$TARGET_RELEASE"); then
         :
     elif [ -d "${REPO_ROOT}/_debs" ] && ls "${REPO_ROOT}/_debs"/*.deb >/dev/null 2>&1; then
         # Last-ditch: the shared server deb cache. Only safe when the Pi
@@ -283,9 +318,9 @@ bundle_debs() {
 bundle_debs_multi() {
     for rel in "${BUNDLED_RELEASES[@]}"; do
         local src
-        if ! src=$(debs_src_for_release "$rel"); then
-            echo "WARNING: ROS tree present for ${rel} but no _rpi_debs_${rel}/ cache." >&2
-            echo "  Run DEBIAN_RELEASE=${rel} firmware/raspberrypi/scripts/bundle-debs.sh first." >&2
+        if ! src=$(ensure_debs_for_release "$rel"); then
+            echo "WARNING: ROS tree present for ${rel} but no _rpi_debs_${rel}/ cache and auto-fetch failed." >&2
+            echo "  Ensure docker + network are available, or run DEBIAN_RELEASE=${rel} firmware/raspberrypi/scripts/bundle-debs.sh first." >&2
             continue
         fi
         echo "Bundling runtime apt debs (${rel}) from ${src} → deps/${rel}/"

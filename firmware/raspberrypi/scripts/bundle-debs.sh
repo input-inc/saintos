@@ -70,7 +70,7 @@ python3-typing-extensions
 python3-bleak
 libssl3
 libyaml-0-2
-libyaml-cpp0.8
+libyaml-cpp-dev
 libxml2
 libacl1
 libcurl4
@@ -78,12 +78,12 @@ libtinyxml2-dev
 libconsole-bridge1.0
 liblttng-ust1
 liborocos-kdl1.5
-libgpiod3
+libgpiod-dev
 python3-libgpiod
 vlc-bin
 python3-vlc
 alsa-utils
-python3-pyalsaaudio
+python3-alsaaudio
 ca-certificates
 curl
 rsync
@@ -151,6 +151,18 @@ gzip -kf Packages
 
 echo "Bundled $(ls -1 *.deb | wc -l) .deb files, $(du -sh . | cut -f1) total"
 CONTAINER_EOF
+
+# Verify on the host that debs actually persisted before stamping the
+# sentinel. The container reports its own count, but if the bind-mount
+# write-back didn't land (or nothing downloaded), we'd otherwise leave an
+# empty dir with a "fresh" sentinel — and the next build would treat that
+# empty cache as complete and silently ship a bundle with no deps/.
+deb_count=$(ls -1 "$OUTPUT_DIR"/*.deb 2>/dev/null | wc -l | tr -d ' ')
+if [ "$deb_count" -eq 0 ]; then
+    echo "ERROR: no .debs landed in ${OUTPUT_DIR} after the container run" >&2
+    echo "  (docker bind-mount write-back failed, or nothing downloaded)" >&2
+    exit 1
+fi
 
 printf '%s' "$INPUT_HASH" > "$SENTINEL"
 echo ""
