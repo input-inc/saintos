@@ -21,7 +21,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 IMAGE="${SAINT_CTRL_TEST_IMAGE:-saint-ctrl-linux-test}"
 
 echo "[run-linux-tests] building $IMAGE"
+# This runs on every invocation. When the Dockerfile/context changes,
+# `docker build` retags $IMAGE onto a new image id and orphans the old
+# one as a dangling <none> image (~1.7GB). Capture the prior id and drop
+# it after a successful build so local re-runs don't accumulate garbage.
+# (In CI the runner is fresh, so prev_image_id is empty and this no-ops.)
+prev_image_id="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
 docker build -t "$IMAGE" -f "$SCRIPT_DIR/Dockerfile.linux-test" "$SCRIPT_DIR"
+new_image_id="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
+if [ -n "$prev_image_id" ] && [ "$prev_image_id" != "$new_image_id" ]; then
+  echo "[run-linux-tests] removing superseded image ${prev_image_id#sha256:}"
+  docker image rm "$prev_image_id" >/dev/null 2>&1 || true
+fi
 
 # tauri-build (invoked by build.rs during `cargo test`) requires the
 # configured frontendDist (../dist) to exist. `cargo test` does NOT run

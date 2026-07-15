@@ -67,12 +67,22 @@ mkdir -p "$CACHE_ROOT"/{cargo,target,node_modules,npm-cache}
 
 if (( REBUILD_IMAGE )) || ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
     echo "==> Building Docker image $IMAGE_TAG (linux/amd64)"
+    # A rebuild retags $IMAGE_TAG onto a fresh image id and orphans the
+    # previous one as a dangling <none> image (~1.9GB each). Capture the
+    # old id so we can drop it after a successful rebuild — otherwise
+    # repeated --rebuild-image runs pile up multi-GB garbage.
+    prev_image_id="$(docker image inspect "$IMAGE_TAG" --format '{{.Id}}' 2>/dev/null || true)"
     docker buildx build \
         --platform=linux/amd64 \
         --load \
         --tag "$IMAGE_TAG" \
         --file "$DOCKERFILE" \
         "$SCRIPT_DIR"
+    new_image_id="$(docker image inspect "$IMAGE_TAG" --format '{{.Id}}' 2>/dev/null || true)"
+    if [ -n "$prev_image_id" ] && [ "$prev_image_id" != "$new_image_id" ]; then
+        echo "==> Removing superseded builder image ${prev_image_id#sha256:}"
+        docker image rm "$prev_image_id" >/dev/null 2>&1 || true
+    fi
 fi
 
 echo "==> Building controller AppImage in linux/amd64 container"

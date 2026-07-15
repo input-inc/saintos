@@ -16,6 +16,16 @@ exercises the same XRCE-DDS / DDS chain production uses.
 (cd firmware/rp2040 && ./build.sh sim && cd build_sim && make install_sim)
 
 # 2. Run.
+MODE=full firmware/simulation/docker/run-e2e.sh
+```
+
+`run-e2e.sh` is a thin wrapper over the compose command below: it runs
+the same invocation, then reaps the dangling `<none>` image that
+`--build` orphans on every rebuild (~1.3-1.8GB each — these pile up
+fast). It filters on the e2e compose service label, so it only removes
+this stack's orphans. The raw compose command still works if you prefer:
+
+```bash
 MODE=full docker compose -f firmware/simulation/docker/docker-compose.e2e.yml up \
     --build --abort-on-container-exit --exit-code-from e2e
 ```
@@ -37,19 +47,19 @@ trap so they survive the container shutdown.
 
 ```bash
 # Default. Renode + real firmware + agent + server + harness.
-MODE=full   docker compose -f ... up --build --abort-on-container-exit --exit-code-from e2e
+MODE=full   firmware/simulation/docker/run-e2e.sh
 
 # Python fake firmware (no Renode). Sanity-checks the server/harness
 # chain without depending on the sim. Useful when you've broken Renode
 # and want to confirm the rest still works.
-MODE=fake   docker compose -f ... up --build --abort-on-container-exit --exit-code-from e2e
+MODE=fake   firmware/simulation/docker/run-e2e.sh
 
 # Just the sim bring-up (no server, no DDS, no auto-reconcile assert).
 # Fast iteration when you're debugging Renode itself.
-MODE=smoke  docker compose -f ... up --build --abort-on-container-exit --exit-code-from e2e
+MODE=smoke  firmware/simulation/docker/run-e2e.sh
 
 # Drop into a debug shell with agent + server already running.
-MODE=shell  docker compose -f ... run --rm --service-ports e2e
+MODE=shell  firmware/simulation/docker/run-e2e.sh
 ```
 
 ## What the e2e exercises (MODE=full)
