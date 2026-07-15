@@ -1803,6 +1803,42 @@ class StateManager:
             "peripheral_type": peripheral.type,
         }
 
+    def channel_idle_disengage_ms(self, node_id: str, peripheral_id: str,
+                                  channel_id: str) -> int:
+        """Per-channel idle-disengage window (ms) for a Maestro channel,
+        or 0 if none / not applicable.
+
+        The firmware releases PWM on a channel after this many ms with no
+        SET_TARGET (servo goes limp). The control change-filter uses this
+        to expire its "identical value already sent" dedupe once the
+        channel has likely disengaged, so a repeat of the held value
+        (State slider re-touch, pose) re-engages it instead of being
+        silently swallowed. 0 = always-on / non-Maestro → dedupe stands."""
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.peripheral_config:
+            return 0
+        peripheral = node.peripheral_config.get(peripheral_id)
+        if not peripheral:
+            return 0
+        channels = (peripheral.params or {}).get("channels")
+        if not isinstance(channels, list):
+            return 0
+        # Maestro channel ids are "ch0".."ch23" (see peripheral_model
+        # catalog); params["channels"] is indexed by the bare number.
+        cid = str(channel_id)
+        if cid.startswith("ch"):
+            cid = cid[2:]
+        try:
+            idx = int(cid)
+        except (TypeError, ValueError):
+            return 0
+        if 0 <= idx < len(channels) and isinstance(channels[idx], dict):
+            try:
+                return max(0, int(channels[idx].get("idle_disengage_ms", 0)))
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
     def upsert_node_peripheral(
         self, node_id: str, peripheral_payload: Dict[str, Any]
     ) -> Dict[str, Any]:

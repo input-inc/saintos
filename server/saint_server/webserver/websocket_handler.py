@@ -2104,11 +2104,23 @@ class WebSocketHandler:
             # the operator is actively dialing). Covers the held-position
             # AND repeated-stop floods; the first transition still differs
             # from the last sent value, so it always goes through.
+            #
+            # BUT: the dedupe only holds while the channel is still
+            # engaged. A Maestro channel idle-disengages (drops PWM, goes
+            # limp) after its idle_disengage_ms with no SET_TARGET; once
+            # that window has elapsed the firmware needs a fresh target to
+            # re-engage, so a repeat of the held value MUST go through to
+            # wake it — otherwise a State slider (or pose) can never revive
+            # a slept channel. Expire the dedupe at idle_disengage_ms;
+            # 0 (always-on / non-Maestro) keeps the original behavior.
             if raw_us is None and value is not None:
                 last_value = self._control_last_value.get(throttle_key)
                 if (last_value is not None
                         and abs(value - last_value) < CONTROL_CHANGE_EPSILON):
-                    return {"status": "ok", "data": {"unchanged": True}}
+                    idle_ms = self.state_manager.channel_idle_disengage_ms(
+                        node_id, peripheral_id, channel_id)
+                    if idle_ms <= 0 or (now - last_send) < idle_ms:
+                        return {"status": "ok", "data": {"unchanged": True}}
 
             if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
                 self.log('debug', f'[Control] THROTTLED {node_id} '
