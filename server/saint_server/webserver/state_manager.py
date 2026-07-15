@@ -2483,6 +2483,25 @@ class StateManager:
         rpi.sort(key=lambda n: n["name"].lower())
         return out + rpi
 
+    def host_default_audio_device(self) -> str:
+        """Resolve the host's default soundboard output from its
+        ``audio_mixer`` peripheral — the operator-designated output card.
+
+        The audio_mixer is the single place the operator picks *which*
+        card the host plays out of (and controls its volume/mute), so a
+        sound left on ``default`` follows it. Returns an ALSA device
+        string like ``hw:3,0``; falls back to ``default`` when no
+        audio_mixer is configured (then it's plain ALSA default)."""
+        node = self.state.adopted_nodes.get(HOST_CONTROLLER_NODE_ID)
+        if node and node.peripheral_config:
+            for p in node.peripheral_config.peripherals:
+                if p.type == "audio_mixer":
+                    try:
+                        return f"hw:{int((p.params or {}).get('card'))},0"
+                    except (TypeError, ValueError):
+                        break
+        return "default"
+
     def resolve_sound_play(self, sound_id: str) -> Optional[Dict[str, Any]]:
         """Resolve a saved sound into ``{node_id, args}`` for a play
         command, or ``None`` if the sound doesn't exist."""

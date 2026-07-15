@@ -149,6 +149,16 @@ COMMON_DEPS=(
     # imports lazily and just logs "bleak not installed" — the
     # rest of the server keeps running.
     python3-bleak
+    # Audio: host_controller plays soundboard clips + drives system
+    # volume in-process (saint_server/host_peripherals/{soundboard,audio}.py).
+    # vlc-bin/python3-vlc = the VLC→ALSA player; alsa-utils = `aplay -l`
+    # device enumeration; python3-alsaaudio = the audio_mixer binding.
+    # All import lazily, so a host without them still starts — the audio
+    # path is just dark. (Also needs the `audio` group — added below.)
+    vlc-bin
+    python3-vlc
+    alsa-utils
+    python3-alsaaudio
     # mDNS — so clients on the SAINT-OS AP can reach opensaint.local
     # without knowing the assigned IP. libnss-mdns lets the Pi itself
     # resolve .local hostnames (useful for any local tooling).
@@ -302,7 +312,11 @@ fi
 #               (saint_server/host_peripherals). Skipped silently if
 #               bluez isn't installed — the rest of the server still
 #               starts; only the BLE peripheral path is dark.
-for grp in dialout gpio video bluetooth; do
+#   audio     — /dev/snd access so host_controller's audio_player /
+#               audio_mixer (VLC/ALSA soundboard + system volume) can open
+#               the sound card. Without it the devices are root:audio 0660
+#               and every play/volume call fails to open the ALSA device.
+for grp in dialout gpio video bluetooth audio; do
     if getent group "$grp" >/dev/null; then
         run usermod -aG "$grp" "${SERVICE_USER}"
     fi

@@ -439,6 +439,13 @@ DEB_CACHE_DIR="${CACHE_ROOT}/debs-${DEBIAN_RELEASE}-${ARCH}"
 # to the container and (b) hash it to detect when it's changed. If you
 # edit this list, the cache invalidates automatically on next run — no
 # need for callers to remember --rebundle-debs.
+#
+# BARE PACKAGE NAMES ONLY — the list is expanded UNQUOTED into
+# `apt-get install ... ${RUNTIME_DEB_LIST}`, so a `#` line is not a
+# comment; it becomes an apt argument and breaks the bundle.
+# The vlc-bin / python3-vlc / alsa-utils / python3-alsaaudio tail lets the
+# host_controller play soundboard clips + drive system volume in-process
+# (saint_server/host_peripherals/{soundboard,audio}.py).
 read -r -d '' RUNTIME_DEB_LIST <<'DEB_LIST' || true
 libssl3
 libtinyxml2-9
@@ -469,10 +476,6 @@ avahi-daemon
 libnss-mdns
 dnsmasq
 zstd
-# Audio: the host_controller plays soundboard clips in-process on the
-# SERVER host via VLC→ALSA (see saint_server/host_peripherals/soundboard.py),
-# and enumerates outputs with `aplay -l`. python3-alsaaudio backs host
-# master-volume control.
 vlc-bin
 python3-vlc
 alsa-utils

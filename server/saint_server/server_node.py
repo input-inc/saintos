@@ -1054,10 +1054,18 @@ class SaintServerNode(Node):
                 return f'soundboard_devices/{node}', r
             if action == 'soundboard_play':
                 player = self._ensure_host_soundboard_player()
+                device = str(args.get('device', '')
+                             or args.get('output_device', '') or 'default')
+                # "default"/blank follows the host audio_mixer's chosen
+                # card (the operator's designated output), since ALSA's
+                # own "default" routes through the desktop's PipeWire —
+                # unreachable by this service. Falls back to "default"
+                # when no audio_mixer is configured.
+                if device in ('', 'default'):
+                    device = self.state_manager.host_default_audio_device()
                 ok, message = player.play(
                     path=str(args.get('path', '') or args.get('file_path', '')),
-                    device=str(args.get('device', '')
-                               or args.get('output_device', '') or 'default'),
+                    device=device,
                     volume=float(args.get('volume', 1.0)),
                     start_time_s=float(args.get('start_time_s',
                                                 args.get('start_time', 0.0))),
