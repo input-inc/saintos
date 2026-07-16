@@ -99,6 +99,30 @@ function previewChannelUs (us) {
   else _previewTimer = setTimeout(() => fire(us), wait)
 }
 
+// Same live jog for a NATIVE servo's extent dial in the add/edit modal.
+// The Maestro path (previewChannelUs) targets a per-channel id (chN); a
+// native servo is a single channel ("angle") addressed by the peripheral
+// id. Only works once the servo has been synced to the node (edit mode);
+// a brand-new, unsynced servo has no pin_config entry to jog yet, so we
+// no-op rather than emit a "not in pin_config" warning on every drag.
+function previewServoUs (us) {
+  if (!modalEditingId.value) return
+  const fire = (pulse) => {
+    _previewLast = Date.now()
+    ws.control('set_channel_value', {
+      node_id: props.nodeId,
+      peripheral_id: modalEditingId.value,
+      channel_id: 'angle',
+      us: Math.round(pulse),
+    }).catch(() => {})
+  }
+  const now = Date.now()
+  const wait = 50 - (now - _previewLast)
+  clearTimeout(_previewTimer)
+  if (wait <= 0) fire(us)
+  else _previewTimer = setTimeout(() => fire(us), wait)
+}
+
 // Whether the peripheral edit modal's "Advanced" section is expanded.
 // Reset to closed on each modal open. Only meaningful for types that
 // declare advanced params (Maestro today).
@@ -746,6 +770,7 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
                 home_us:   modalParams.home_us   ?? 1500,
               }"
               @update:model-value="(v) => Object.assign(modalParams, v)"
+              @preview="previewServoUs"
             />
           </div>
           <template v-for="p in modalType.params" :key="p.id">

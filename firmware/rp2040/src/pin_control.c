@@ -587,11 +587,11 @@ static bool apply_set_channel(const char* json)
         saint_log_publish("warn", "set_channel: missing 'channel' field");
         return false;
     }
-    // RP2040 has no Maestro/USB-host preview path, so it requires a
-    // numeric "value" (the inline parse this replaced returned false
-    // when "value" was absent). A us-only message is rejected exactly
-    // as before — preserving existing behavior.
-    if (!cmd.has_value) return false;
+    // A message must carry at least a numeric "value" or an absolute
+    // "us". us-only is the extent-dial preview jog (see below); it used
+    // to be rejected here as "Maestro-only", which is why dragging a
+    // native servo's extent handles did nothing.
+    if (!cmd.has_value && !cmd.has_us) return false;
 
     const char* peripheral_id   = cmd.peripheral;
     const char* channel_id      = cmd.channel;
@@ -602,9 +602,11 @@ static bool apply_set_channel(const char* json)
     // logical_name walk below would unconditionally fail for it.
     // Prefer explicit type when present; otherwise match by id
     // substring so "neopixel", "onboard_neopixel", "neopixel_strip_1",
-    // etc. route to the same status-LED override path.
+    // etc. route to the same status-LED override path. It takes a color
+    // value, not a us jog.
     if (strcmp(peripheral_type, "neopixel") == 0
         || strstr(peripheral_id, "neopixel") != NULL) {
+        if (!cmd.has_value) return false;
         return apply_neopixel_channel(channel_id, value);
     }
 
@@ -660,6 +662,23 @@ static bool apply_set_channel(const char* json)
     // of by GPIO offset — bigger refactor, separate change. Plan:
     // docs/PERIPHERAL_FIRST_MIGRATION.md (Phase 3).
     uint8_t target_gpio = (uint8_t)(base_gpio + offset);
+
+    // Absolute-µs extent-dial preview for a native servo: jog straight to
+    // the raw pulse while the operator drags the start/end/center/home
+    // handles (same live feedback as the Maestro config). Drive the pulse
+    // directly, bypassing the −1…+1 → start/center/end map — that IS the
+    // point of the preview, since the operator is defining those extents
+    // and can't map through them yet. A us jog to a non-servo has no
+    // meaning here, so it falls through to the value path (and is
+    // rejected below if no value came with it).
+    if (cmd.has_us && mode == PIN_MODE_SERVO) {
+        saint_log_publish("debug",
+            "set_channel %s/%s = %ldus (extent jog)",
+            peripheral_id, channel_id, cmd.us);
+        return pin_control_drive_servo_pulse(target_gpio, (uint16_t)cmd.us);
+    }
+    if (!cmd.has_value) return false;
+
     // Per-tick line: with the Tier-1 DifferentialDrive heartbeat
     // resending 0 every 500 ms, every adopted channel emits 2 of
     // these per second forever. That floods the dashboard Logs feed
