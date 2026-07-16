@@ -2479,6 +2479,54 @@ class StateManager:
         saved = self.sound_store.save(snd)
         return {"success": True, "sound": saved.to_dict()}
 
+    def bulk_add_sounds(self, node_id: str, files: List[str],
+                        output_device: str = "default", group: str = "",
+                        volume: float = 1.0, start_time: float = 0.0,
+                        loop: bool = False, loop_count: int = 0,
+                        icon: str = "volume_up") -> Dict[str, Any]:
+        """Create one soundboard entry per file, skipping any already
+        added. "Already added" = an existing sound with the same
+        (node_id, file_path) — so re-running on a folder only adds the
+        new files. Each entry's name/id derives from the filename;
+        ids are de-duplicated with a numeric suffix so distinct files
+        that slugify alike don't clobber each other. Returns
+        {added, skipped, sounds}."""
+        from saint_server.animation.models import Sound
+        from saint_server.animation.store import slugify
+
+        existing = self.sound_store.list()
+        have_paths = {(s.get("node_id"), s.get("file_path")) for s in existing}
+        used_ids = {s.get("id") for s in existing}
+
+        added: List[str] = []
+        skipped: List[str] = []
+        for raw in files or []:
+            path = str(raw).strip()
+            if not path:
+                continue
+            if (node_id, path) in have_paths:
+                skipped.append(path)
+                continue
+            base = path.rsplit("/", 1)[-1]
+            name = base.rsplit(".", 1)[0] or base
+            root = slugify(name) or "sound"
+            sid = root
+            n = 2
+            while sid in used_ids:
+                sid = f"{root}-{n}"
+                n += 1
+            saved = self.sound_store.save(Sound(
+                id=sid, name=name, icon=icon, group=group,
+                node_id=node_id, file_path=path,
+                output_device=output_device or "default",
+                volume=float(volume), start_time=float(start_time),
+                loop=bool(loop), loop_count=int(loop_count)))
+            used_ids.add(saved.id)
+            have_paths.add((node_id, path))
+            added.append(path)
+        return {"success": True, "added": len(added),
+                "skipped": len(skipped), "sounds": self.sound_store.list()}
+
     def delete_sound(self, sound_id: str) -> Dict[str, Any]:
         if not self.sound_store.delete(sound_id):
             return {"success": False, "message": "Sound not found"}

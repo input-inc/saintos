@@ -67,6 +67,41 @@ export const useSoundsStore = defineStore('sounds', () => {
     }
   }
 
+  // Add one sound per file in a folder, skipping already-added ones.
+  // Enumerates the folder here (reusing the browse round-trip) so it
+  // works for both the host and firmware nodes, then hands the file list
+  // to the server, which dedupes by (node, path) and assigns ids.
+  // Returns { added, skipped } or null on error.
+  async function bulkAddFromFolder (nodeId, folder, opts = {}) {
+    error.value = ''
+    try {
+      const data = await browseDir(nodeId, folder)
+      if (data.status !== 'ok') {
+        error.value = data.message || 'Could not read folder'
+        return null
+      }
+      const base = String(data.path || folder).replace(/\/$/, '')
+      const files = (data.entries || [])
+        .filter(e => !e.is_dir && (opts.includeAll || e.is_audio))
+        .map(e => `${base}/${e.name}`)
+      const r = await ws.management('add_sounds_from_folder', {
+        node_id: nodeId,
+        files,
+        output_device: opts.output_device || 'default',
+        group: opts.group || '',
+        volume: opts.volume ?? 1.0,
+        loop: !!opts.loop,
+        loop_count: opts.loop_count || 0,
+      })
+      list.value = r?.sounds || list.value
+      return { added: r?.added || 0, skipped: r?.skipped || 0,
+               scanned: files.length }
+    } catch (e) {
+      error.value = e.message || String(e)
+      return null
+    }
+  }
+
   async function listNodes () {
     try {
       const r = await ws.management('sound_list_nodes', {})
@@ -136,7 +171,7 @@ export const useSoundsStore = defineStore('sounds', () => {
 
   return {
     list, loading, error,
-    reload, save, remove, reorder, listNodes,
+    reload, save, remove, reorder, listNodes, bulkAddFromFolder,
     browseDir, listDevices, play, stop,
   }
 })

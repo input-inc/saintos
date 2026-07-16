@@ -11,6 +11,9 @@ import { useSoundsStore } from '@/stores/sounds'
 const props = defineProps({
   nodeId: { type: String, required: true },
   start: { type: String, default: '/' },
+  // Folder mode: navigate into directories and pick the current one
+  // ("Use this folder"); files are shown for context but not selectable.
+  pickFolder: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close', 'select'])
 
@@ -45,12 +48,17 @@ async function browse (target) {
 function open (entry) {
   if (entry.is_dir) {
     browse(path.value.replace(/\/$/, '') + '/' + entry.name)
-  } else if (entry.is_audio || showAll.value) {
+  } else if (!props.pickFolder && (entry.is_audio || showAll.value)) {
     emit('select', {
       path: path.value.replace(/\/$/, '') + '/' + entry.name,
       name: entry.name,
     })
   }
+}
+
+function useThisFolder () {
+  const p = path.value.replace(/\/$/, '') || '/'
+  emit('select', { path: p, name: p.split('/').pop() || p, is_folder: true })
 }
 
 function fmtSize (bytes) {
@@ -65,7 +73,8 @@ onMounted(() => browse(props.start || '/'))
 </script>
 
 <template>
-  <AppModal title="Pick a file on the node" width="max-w-lg" @close="emit('close')">
+  <AppModal :title="pickFolder ? 'Pick a folder on the node' : 'Pick a file on the node'"
+            width="max-w-lg" @close="emit('close')">
     <div class="space-y-2">
       <div class="flex items-center gap-2">
         <button class="btn-sm bg-surface hover:bg-surface-2 text-fg-strong"
@@ -77,7 +86,7 @@ onMounted(() => browse(props.start || '/'))
         <div class="flex-1 min-w-0 text-xs font-mono text-fg-muted truncate" :title="path">
           {{ path }}
         </div>
-        <label class="flex items-center gap-1 text-xs text-fg-muted shrink-0 cursor-pointer">
+        <label v-if="!pickFolder" class="flex items-center gap-1 text-xs text-fg-muted shrink-0 cursor-pointer">
           <input type="checkbox" v-model="showAll" class="accent-cyan-500" />
           Show all files
         </label>
@@ -89,9 +98,9 @@ onMounted(() => browse(props.start || '/'))
       <div v-if="!loading" class="rounded-lg border border-line/50 bg-panel/30 divide-y divide-line/40 max-h-[50vh] overflow-y-auto">
         <button v-for="e in entries" :key="e.name"
                 type="button"
-                :disabled="!e.is_dir && !e.is_audio && !showAll"
+                :disabled="pickFolder ? !e.is_dir : (!e.is_dir && !e.is_audio && !showAll)"
                 :class="['w-full flex items-center gap-2 px-3 py-1.5 text-left text-sm transition-colors',
-                         (e.is_dir || e.is_audio || showAll)
+                         (e.is_dir || (!pickFolder && (e.is_audio || showAll)))
                            ? 'hover:bg-panel/60 text-fg-strong'
                            : 'text-fg-faint cursor-not-allowed']"
                 @click="open(e)">
@@ -110,6 +119,10 @@ onMounted(() => browse(props.start || '/'))
     </div>
     <template #actions>
       <button class="btn-secondary" @click="emit('close')">Cancel</button>
+      <button v-if="pickFolder" class="btn-primary" :disabled="loading"
+              @click="useThisFolder">
+        Use this folder
+      </button>
     </template>
   </AppModal>
 </template>

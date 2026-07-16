@@ -17,6 +17,8 @@ const NewPoseModal = defineAsyncComponent(
   () => import('@/components/animation/NewPoseModal.vue'))
 const NewSoundModal = defineAsyncComponent(
   () => import('@/components/animation/NewSoundModal.vue'))
+const AddSoundsFromFolderModal = defineAsyncComponent(
+  () => import('@/components/animation/AddSoundsFromFolderModal.vue'))
 const MaestroImportModal = defineAsyncComponent(
   () => import('@/components/animation/MaestroImportModal.vue'))
 
@@ -35,6 +37,7 @@ function selectView (kind, group) { view.value = { kind, group } }
 const newAnimOpen = ref(false)
 const newPoseOpen = ref(false)
 const newSoundOpen = ref(false)
+const newSoundFolderOpen = ref(false)
 const importOpen = ref(false)
 
 // Audio-capable nodes, for resolving a sound's node_id to a label in
@@ -126,6 +129,28 @@ async function onCreateSound (payload) {
   selectView('sounds', payload.group || '__ungrouped__')
 }
 
+async function onCreateSoundFolder (payload) {
+  newSoundFolderOpen.value = false
+  soundError.value = ''
+  soundInfo.value = 'Adding sounds from folder…'
+  const r = await sounds.bulkAddFromFolder(payload.node_id, payload.folder, {
+    output_device: payload.output_device,
+    group: payload.group,
+    volume: payload.volume,
+    loop: payload.loop,
+    loop_count: payload.loop_count,
+  })
+  selectView('sounds', payload.group || '__ungrouped__')
+  if (r) {
+    soundInfo.value = `Added ${r.added} sound${r.added === 1 ? '' : 's'}`
+      + (r.skipped ? `, skipped ${r.skipped} already added` : '')
+      + ` (${r.scanned} audio file${r.scanned === 1 ? '' : 's'} scanned).`
+  } else {
+    soundInfo.value = ''
+    soundError.value = sounds.error || 'Failed to add sounds from folder'
+  }
+}
+
 // Inline editing for the row name field — click name to flip to input.
 const renamingId = ref(null)
 async function patchAnimation (id, patch) {
@@ -172,6 +197,7 @@ async function deleteSound (s) {
 // returns async on soundboard_result but we surface only failures.
 const playingId = ref(null)
 const soundError = ref('')
+const soundInfo = ref('')
 async function playSound (s) {
   soundError.value = ''
   playingId.value = s.id
@@ -376,6 +402,11 @@ watch([animationGroups, poseGroups, soundGroups], () => {
                   @click="newSoundOpen = true">
             <span class="material-icons icon-sm">add</span>
             New Sound
+          </button>
+          <button class="btn-sm w-full bg-violet-600/60 hover:bg-violet-500 text-fg-strong justify-center"
+                  @click="newSoundFolderOpen = true">
+            <span class="material-icons icon-sm">create_new_folder</span>
+            Sounds from Folder
           </button>
           <button class="btn-sm w-full bg-surface hover:bg-surface-2 text-fg-strong justify-center"
                   @click="importOpen = true">
@@ -749,6 +780,7 @@ watch([animationGroups, poseGroups, soundGroups], () => {
               </div>
             </div>
             <p v-if="soundError" class="text-xs text-amber-300 italic mt-2">{{ soundError }}</p>
+            <p v-if="soundInfo" class="text-xs text-emerald-300 italic mt-2">{{ soundInfo }}</p>
           </template>
         </div>
       </div>
@@ -779,6 +811,11 @@ watch([animationGroups, poseGroups, soundGroups], () => {
                    :default-group="view.kind === 'sounds' && view.group && view.group !== '__ungrouped__' ? view.group : ''"
                    @close="newSoundOpen = false"
                    @create="onCreateSound" />
+    <AddSoundsFromFolderModal v-if="newSoundFolderOpen"
+                   :groups="soundGroups"
+                   :default-group="view.kind === 'sounds' && view.group && view.group !== '__ungrouped__' ? view.group : ''"
+                   @close="newSoundFolderOpen = false"
+                   @create="onCreateSoundFolder" />
     <MaestroImportModal v-if="importOpen" @close="importOpen = false" />
   </section>
 </template>

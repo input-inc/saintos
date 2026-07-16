@@ -1502,6 +1502,26 @@ class WebSocketHandler:
             return {"status": "ok",
                     "data": self.state_manager.save_sound(payload)}
 
+        elif action == 'add_sounds_from_folder':
+            # Bulk-add one sound per file (client enumerates the folder and
+            # passes the audio-file paths); skips any already added.
+            node_id = params.get('node_id')
+            files = params.get('files')
+            if not node_id or not isinstance(files, list):
+                return {"status": "error",
+                        "message": "Missing node_id or files"}
+            return {"status": "ok",
+                    "data": self.state_manager.bulk_add_sounds(
+                        node_id=node_id,
+                        files=files,
+                        output_device=params.get('output_device') or 'default',
+                        group=str(params.get('group', '')),
+                        volume=float(params.get('volume', 1.0)),
+                        start_time=float(params.get('start_time', 0.0)),
+                        loop=bool(params.get('loop', False)),
+                        loop_count=int(params.get('loop_count', 0)),
+                        icon=str(params.get('icon', 'volume_up')))}
+
         elif action == 'delete_sound':
             sound_id = params.get('id')
             if not sound_id:
