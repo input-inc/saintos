@@ -4,7 +4,13 @@
 const overrides = {
   'roboclaw/motor':      { kind: 'slider', min: -1, max: 1,   step: 0.01, neutral: 0,   format: v => `${(v * 100).toFixed(0)}%`, hint: '-100% reverse · 0 stop · +100% forward' },
   'syren/motor':         { kind: 'slider', min: -1, max: 1,   step: 0.01, neutral: 0,   format: v => `${(v * 100).toFixed(0)}%`, hint: '-100% reverse · 0 stop · +100% forward' },
-  'servo/angle':         { kind: 'slider', min: 0,  max: 180, step: 1,    neutral: 90,  format: v => `${v.toFixed(0)}°` },
+  // Native (direct-PWM) servo. Bipolar −1…+1 exactly like Maestro: the
+  // firmware (pin_control_set_servo) maps −1 → start_us, 0 → center_us,
+  // +1 → end_us using the extents stored in the node's flash. The old
+  // 0–180° range sent raw degrees the firmware clamped to +1, so every
+  // command slammed the servo to end_us and the extents never took —
+  // keep this in lock-step with the maestro branch below.
+  'servo/angle':         { kind: 'slider', min: -1, max: 1,   step: 0.01, neutral: 0,   format: v => Number(v).toFixed(2), hint: '−1 start · 0 center · +1 end' },
   'led/on':              { kind: 'toggle' },
   // Firmware routes neopixel/color through pin_control.c's
   // apply_set_channel → led_set_override_color. The picker emits a

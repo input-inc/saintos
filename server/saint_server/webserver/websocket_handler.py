@@ -1213,6 +1213,18 @@ class WebSocketHandler:
                 return {"status": "error", "message": "No peripheral configuration to sync"}
             if self._sync_config_callback:
                 self._sync_config_callback(node_id, config_json)
+                # Drop the control change-filter / throttle state for this
+                # node. A sync re-applies extents on the node and re-homes
+                # its servos, so the last value the operator commanded no
+                # longer reflects where the hardware sits. Without this,
+                # the dedupe (which never expires for a non-Maestro servo,
+                # idle_disengage_ms == 0) would swallow a re-command of the
+                # same normalized position — the exact case when someone
+                # edits an extent and drags the slider back to test it.
+                stale = [k for k in self._control_last_value if k[0] == node_id]
+                for k in stale:
+                    self._control_last_value.pop(k, None)
+                    self._control_throttle.pop(k, None)
                 await self.broadcast_activity(f'Syncing peripherals to node {node_id}', 'info')
                 return {"status": "ok", "data": {"message": "Sync initiated", "success": True}}
             return {"status": "error", "message": "Config sync not available"}
