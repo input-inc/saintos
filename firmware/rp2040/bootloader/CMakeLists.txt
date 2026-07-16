@@ -25,6 +25,15 @@ cmake_minimum_required(VERSION 3.13)
 set(SAINT_OTA_BL_DIR ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "")
 set(BL_DIR ${SAINT_OTA_BL_DIR})
 
+# Lengthen the XOSC startup-delay counter for the bootloader too. This is
+# the CRITICAL copy of the fix: the bootloader runs first on every cold
+# power-up and does the first crystal/PLL bring-up — if it freezes on a
+# slow-starting crystal, the app never runs. The parent CMakeLists sets
+# this before add_subdirectory(bootloader) so we'd inherit it, but we set
+# it explicitly here so the fix can't be lost to a future reordering.
+# See tools/xosc_boot_test and the parent CMakeLists for the full story.
+add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
+
 # -----------------------------------------------------------------------------
 # picowota_reboot — small static lib the APP links against
 # -----------------------------------------------------------------------------

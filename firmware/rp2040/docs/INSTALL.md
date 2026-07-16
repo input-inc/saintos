@@ -221,8 +221,9 @@ The pin definitions in `include/saint_node.h` match the Feather RP2040 + Etherne
 #define ETH_PIN_SCK     18
 #define ETH_PIN_MOSI    19
 #define ETH_PIN_MISO    20
-#define ETH_PIN_CS      10
-#define ETH_PIN_RST     11
+#define ETH_PIN_CS      10   // default CS; auto-falls back to ETH_PIN_CS_ALT (24)
+#define ETH_PIN_CS_ALT  24   // silk D24, for boards that repurpose pin 10
+// No hardware reset pin: the W5500 is reset in software over SPI at init.
 
 // Available GPIO for peripherals
 #define GPIO_A0         26  // ADC0

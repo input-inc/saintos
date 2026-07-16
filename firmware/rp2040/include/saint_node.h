@@ -18,8 +18,12 @@
 #define ETH_PIN_SCK     18
 #define ETH_PIN_MOSI    19
 #define ETH_PIN_MISO    20
-#define ETH_PIN_CS      10
-#define ETH_PIN_RST     11
+#define ETH_PIN_CS      10   // default chip-select (standard Feather + Ethernet FeatherWing)
+#define ETH_PIN_CS_ALT  24   // alternate CS (silk D24) for boards where pin 10 is repurposed
+// NOTE: no hardware RST pin. The W5500 is reset in software over SPI during
+// init (ioLibrary CW_INIT_WIZCHIP -> wizchip_sw_reset -> MR_RST), so a
+// dedicated reset GPIO is unnecessary. The active CS is auto-detected at
+// boot from {ETH_PIN_CS_ALT, ETH_PIN_CS} — see transport/wizchip_port.c.
 
 // Onboard NeoPixel (WS2812)
 #define NEOPIXEL_PIN    16

@@ -53,6 +53,23 @@ project(saint_node C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# Lengthen the XOSC startup-delay counter. The SDK default (multiplier 1)
+# assumes a fast-starting crystal; on the Adafruit Feather RP2040 the
+# 12 MHz crystal starts oscillating later on a cold/slow-ramp power-up
+# than that counter allows, so the SDK switches the system clock onto a
+# not-yet-running crystal and the chip freezes before main() — the board
+# stays dark on a cold plug-in but boots fine on a warm reset (crystal
+# already oscillating). Verified in tools/xosc_boot_test: multiplier 1
+# reproduces the dark cold-boot, 64 boots reliably.
+#
+# MUST be set BEFORE pico_sdk_init() so it reaches the SDK's own
+# hardware_xosc/xosc.c (where the macro is read). A
+# target_compile_definitions() on saint_node would silently NOT
+# propagate into the SDK sources. Placed before add_subdirectory(bootloader)
+# (below) so the bootloader inherits it too; the bootloader also sets it
+# explicitly for robustness.
+add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
+
 # Initialize the Pico SDK
 pico_sdk_init()
 
