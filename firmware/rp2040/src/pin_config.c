@@ -195,6 +195,74 @@ static bool apply_one_peripheral(const char* obj_start, const char* obj_end)
         return false;
     }
 
+    // Native servo / PWM aren't peripheral drivers — they're built-in
+    // per-pin modes on a real GPIO. driver_for_type_id has no entry for
+    // them (that's why they used to be skipped with "No driver for type
+    // 'servo'"). Handle them directly: pull the physical GPIO out of the
+    // pins object and the extents/frequency out of params, then write a
+    // PIN_MODE_SERVO / PIN_MODE_PWM entry keyed by the peripheral id.
+    // pin_config_apply_hardware() (called by apply_peripherals_json after
+    // us) sets up the PWM slice + drives the home pulse; set_channel
+    // ("angle"/"duty") resolves this pin by logical_name.
+    if (strcmp(type_id, "servo") == 0 || strcmp(type_id, "pwm") == 0) {
+        char sid[PIN_CONFIG_MAX_NAME_LEN];
+        sid[0] = '\0';
+        extract_string_field(obj_start, obj_end, "\"id\"", sid, sizeof(sid));
+
+        // GPIO lives in pins:{"gpio": N}.
+        int gpio = -1;
+        const char* g = strstr(obj_start, "\"gpio\"");
+        if (g && g < obj_end) {
+            g = strchr(g, ':');
+            if (g && g < obj_end) { g++; while (*g == ' ') g++; gpio = atoi(g); }
+        }
+        if (gpio < 0 || gpio > 29) {
+            saint_log_publish("warn",
+                "%s '%s': missing/invalid gpio in pins — skipping", type_id, sid);
+            return false;
+        }
+
+        pin_mode_t smode = (strcmp(type_id, "servo") == 0)
+                           ? PIN_MODE_SERVO : PIN_MODE_PWM;
+        if (!pin_config_set((uint8_t)gpio, smode, sid)) {
+            // pin_config_set already logged the reason (reserved/in-use).
+            return false;
+        }
+
+        if (smode == PIN_MODE_SERVO) {
+            uint16_t start_us  = PIN_CONFIG_SERVO_START_US;
+            uint16_t end_us    = PIN_CONFIG_SERVO_END_US;
+            uint16_t center_us = PIN_CONFIG_SERVO_CENTER_US;
+            uint16_t home_us   = PIN_CONFIG_SERVO_HOME_US;
+            struct { const char* key; uint16_t* out; } fields[] = {
+                { "\"start_us\"",  &start_us  },
+                { "\"end_us\"",    &end_us    },
+                { "\"center_us\"", &center_us },
+                { "\"home_us\"",   &home_us   },
+            };
+            for (size_t f = 0; f < sizeof(fields)/sizeof(fields[0]); f++) {
+                const char* k = strstr(obj_start, fields[f].key);
+                if (!k || k >= obj_end) continue;
+                k = strchr(k, ':'); if (!k) continue;
+                k++; while (*k == ' ') k++;
+                *fields[f].out = (uint16_t)atoi(k);
+            }
+            pin_config_set_servo_params((uint8_t)gpio, start_us, end_us,
+                                        center_us, home_us);
+            saint_log_publish("info", "Configured servo '%s' on GPIO %d", sid, gpio);
+        } else {
+            uint32_t freq = PIN_CONFIG_DEFAULT_PWM_FREQ;
+            const char* k = strstr(obj_start, "\"frequency_hz\"");
+            if (k && k < obj_end) {
+                k = strchr(k, ':');
+                if (k) { k++; while (*k == ' ') k++; freq = (uint32_t)atoi(k); }
+            }
+            pin_config_set_pwm_params((uint8_t)gpio, freq, 0);
+            saint_log_publish("info", "Configured pwm '%s' on GPIO %d", sid, gpio);
+        }
+        return true;
+    }
+
     const peripheral_driver_t* drv = driver_for_type_id(type_id);
     if (!drv) {
         saint_log_publish("warn", "No driver for type '%s' — skipping", type_id);
