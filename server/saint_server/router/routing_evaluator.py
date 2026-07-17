@@ -130,6 +130,15 @@ class RoutingEvaluator:
         # republishing stale operator input that would resume motion
         # the moment estop releases.
         self._estop_active: bool = False
+        # Last value actually pushed to each peripheral channel, keyed by
+        # (node_id, peripheral_id, channel_id). A sheet re-dispatches ALL
+        # its peripheral sinks on every evaluation, so without this a
+        # 60 fps animation republishes every static channel 60×/s and
+        # floods /control (depth-1, newest-wins) — clobbering the one
+        # channel that's actually moving. We gate on change so only moving
+        # channels hit the wire. Reset on reconcile (wiring changed) and
+        # on estop release (so held values re-arm the hardware).
+        self._last_channel_sent: Dict[Tuple[str, str, str], float] = {}
         # Hot-path log sampling state (see _hot_log).
         self._hot_log_count = 0
         self._hot_log_last_ms = 0.0
@@ -146,6 +155,11 @@ class RoutingEvaluator:
         prev = self._estop_active
         self._estop_active = bool(active)
         if prev != self._estop_active:
+            # Drop the change-gate cache on any transition. On release the
+            # held values must re-send to re-arm the hardware (the gate
+            # would otherwise swallow them as "unchanged" vs the pre-estop
+            # send); on engage it just clears stale state.
+            self._last_channel_sent.clear()
             self._log("warn",
                       f"Routing evaluator estop gate: "
                       f"{'ENGAGED — suppressing peripheral/output writes' if self._estop_active else 'RELEASED'}")
@@ -174,6 +188,9 @@ class RoutingEvaluator:
             # valid against the new operator/leaf set.
             self._op_persist = {}
             self._leaf_persist = {}
+            # Rewiring can move/rename channels; force a fresh send to
+            # every peripheral sink on the next eval.
+            self._last_channel_sent = {}
             to_add = needed - self._subscribed_topics
             to_drop = self._subscribed_topics - needed
             self._subscribed_topics = set(needed)
@@ -721,13 +738,27 @@ class RoutingEvaluator:
             if len(sink.parts) < 3:
                 return
             node_id, peripheral_id, channel_id = sink.parts[0], sink.parts[1], sink.parts[2]
+            # Change-gate (see _last_channel_sent). A sheet re-dispatches
+            # every peripheral sink on every evaluation; during a 60 fps
+            # animation that republishes each holding channel 60×/s and
+            # floods /control (depth-1 newest-wins), clobbering the one
+            # channel that's moving — the servo then only catches sparse
+            # updates ("moves only at the keyframe"). Send only when this
+            # channel's commanded value actually changed. Also lets the
+            # firmware's idle_disengage fire, since a held channel now
+            # stops getting SET_TARGET instead of being re-armed each tick.
+            fval = float(value)
+            gkey = (node_id, peripheral_id, channel_id)
+            if self._last_channel_sent.get(gkey) == fval:
+                return
             ptype = ""
             try:
                 ptype = self._peripheral_type_lookup(node_id, peripheral_id) or ""
             except Exception:
                 ptype = ""
             try:
-                self._send_channel(node_id, peripheral_id, channel_id, float(value), ptype)
+                self._send_channel(node_id, peripheral_id, channel_id, fval, ptype)
+                self._last_channel_sent[gkey] = fval
                 # Include node_id in the log: peripheral_ids are scoped
                 # per-node so e.g. "roboclaw-1" on the Left vs Right Track
                 # Drive nodes both render as "roboclaw-1/motor" without
