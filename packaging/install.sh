@@ -248,9 +248,19 @@ trap teardown_local_apt_repo EXIT
 setup_local_apt_repo
 
 log "Installing runtime dependencies via apt"
+# On the offline (bundled-repo) path, only install MISSING deps — never
+# upgrade ones already present. Without --no-upgrade, `apt-get install`
+# still sees the host's cached online source lists and will try to pull a
+# newer version of an already-installed package (e.g. VLC 3.0.18 → 3.0.23
+# from archive.raspberrypi.com, which also drags in new transitive deps
+# not in our bundle). On an air-gapped robot that fetch fails and aborts
+# the whole install. We only need these deps *present*, not latest, so
+# skip upgrades. The online path keeps normal upgrade behavior.
+INSTALL_OPTS=()
 if (( LOCAL_REPO_ENABLED )); then
     log "Using bundled .deb repo (no internet required)"
     run apt-get update "${APT_UPDATE_OPTS[@]}"
+    INSTALL_OPTS=(--no-upgrade)
 else
     run apt-get update
     if [[ "${OS_FAMILY}" == "ubuntu" ]]; then
@@ -259,7 +269,7 @@ else
         run apt-get update
     fi
 fi
-run apt-get install -y "${COMMON_DEPS[@]}" "${PY311_DEPS[@]}"
+run apt-get install -y "${INSTALL_OPTS[@]}" "${COMMON_DEPS[@]}" "${PY311_DEPS[@]}"
 
 # --- Extract bundled ROS2 ---------------------------------------------------
 
