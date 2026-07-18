@@ -68,15 +68,27 @@ function setKeyframeAtPlayhead (jointName, value) {
   const track = anim.value.value_tracks.find(t => t.id === trackId)
   if (!track) return null
   const t = Number(playerPos.value) || 0
-  const existing = track.curve.keys.findIndex(k => Math.abs(k.time - t) < 0.001)
-  const key = { time: t, value: Number(value), interp: 1,
-                arrive_tangent: 0, leave_tangent: 0 }
+  const keys = track.curve.keys
+  const existing = keys.findIndex(k => Math.abs(k.time - t) < 0.001)
   if (existing >= 0) {
-    track.curve.keys[existing] = key
+    // Editing an existing keyframe's value must NOT reset its easing.
+    // The old code replaced the whole key with a fresh interp:1 (LINEAR)
+    // object, so tweaking a value at the playhead (gizmo/slider) silently
+    // dropped whatever curve the operator had set — "the curve setting
+    // isn't retained." Update value in place; keep interp + tangents.
+    keys[existing].value = Number(value)
+    keys[existing].time = t
   } else {
-    const insertAt = track.curve.keys.findIndex(k => k.time > t)
-    if (insertAt === -1) track.curve.keys.push(key)
-    else track.curve.keys.splice(insertAt, 0, key)
+    // A new keyframe inherits the interpolation of the segment it lands
+    // in (the preceding key's interp), so adding a point to an eased
+    // curve continues that curve instead of forcing a linear kink.
+    const insertAt = keys.findIndex(k => k.time > t)
+    const prevIdx = insertAt === -1 ? keys.length - 1 : insertAt - 1
+    const inheritInterp = prevIdx >= 0 ? (keys[prevIdx].interp ?? 1) : 1
+    const key = { time: t, value: Number(value), interp: inheritInterp,
+                  arrive_tangent: 0, leave_tangent: 0 }
+    if (insertAt === -1) keys.push(key)
+    else keys.splice(insertAt, 0, key)
   }
   animations.markDirty()
   return trackId
