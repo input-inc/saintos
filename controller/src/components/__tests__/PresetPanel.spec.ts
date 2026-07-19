@@ -20,12 +20,17 @@ const m = vi.hoisted(() => ({
             columns: 4, itemsPerPage: 8, presets: [],
         } as any,
     },
-    state: { value: { activePanelId: 'sounds', selectedIndex: 1, currentPage: 0 } },
+    state: { value: { activePanelId: 'sounds', selectedIndex: 1, currentPage: 0, selectedGroup: 'All', keepOpen: false } },
     items: { value: [{ id: 'a', name: 'Alpha' }, { id: 'b', name: 'Bravo' }, { id: 'c', name: 'Charlie' }] as any[] },
     source: { value: null as string | null },
     connected: { value: true },
     animLoaded: { value: true },
     posesLoaded: { value: true },
+    soundsLoaded: { value: true },
+    groups: { value: [] as string[] },
+    selectedGroup: { value: 'All' },
+    setGroup: vi.fn(),
+    playing: { value: {} as Record<string, unknown> },
 }));
 
 vi.mock('../../composables/useBindings', () => ({
@@ -34,6 +39,9 @@ vi.mock('../../composables/useBindings', () => ({
         activePanelState: m.state,
         activePanelItems: m.items,
         activePanelSource: m.source,
+        activePanelGroups: m.groups,
+        activePanelSelectedGroup: m.selectedGroup,
+        setActiveGroup: m.setGroup,
         triggerActiveItem: m.trigger,
         hidePanel: m.hide,
         navigatePanel: m.nav,
@@ -43,7 +51,12 @@ vi.mock('../../composables/useConnection', () => ({
     useConnection: () => ({ isConnected: m.connected }),
 }));
 vi.mock('../../composables/useLibrary', () => ({
-    useLibrary: () => ({ animationsLoaded: m.animLoaded, posesLoaded: m.posesLoaded }),
+    useLibrary: () => ({
+        animationsLoaded: m.animLoaded,
+        posesLoaded: m.posesLoaded,
+        soundsLoaded: m.soundsLoaded,
+        playing: m.playing,
+    }),
 }));
 
 import PresetPanel from '../PresetPanel.vue';
@@ -88,10 +101,13 @@ describe('PresetPanel', () => {
         expect(m.hide).toHaveBeenCalledOnce();
     });
 
-    it('hides the panel from the header close button', async () => {
+    it('keeps the panel open after selecting when keepOpen is set', async () => {
+        m.state.value.keepOpen = true;
         const w = mount(PresetPanel);
-        await w.find('.panel-header button').trigger('click');
-        expect(m.hide).toHaveBeenCalledOnce();
+        await w.findAll('.preset-item')[0].trigger('click'); // Alpha
+        expect(m.trigger).toHaveBeenCalledWith('a');
+        expect(m.hide).not.toHaveBeenCalled();
+        m.state.value.keepOpen = false; // restore for other tests
     });
 
     it('shows a connect hint for a server-backed panel while disconnected', () => {

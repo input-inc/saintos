@@ -251,6 +251,18 @@ impl OutgoingMessage {
         }
     }
 
+    /// Stop (cancel) a currently-playing animation by id. Used to
+    /// toggle-stop looping animations from the preset panel.
+    pub fn stop_animation(id: &str) -> Self {
+        Self {
+            id: next_id(),
+            msg_type: "management".to_string(),
+            action: "stop_animation".to_string(),
+            params: Some(serde_json::json!({ "id": id })),
+            password: None,
+        }
+    }
+
     /// Apply (snap to) a saved pose by id.
     pub fn apply_pose(id: &str) -> Self {
         Self {

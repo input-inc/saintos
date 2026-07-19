@@ -580,6 +580,17 @@ impl WebSocketClient {
             .map_err(|e| format!("Failed to send start_animation: {}", e))
     }
 
+    /// Stop a currently-playing animation by id (fire-and-forget).
+    pub fn stop_animation(&self, id: &str) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::stop_animation(id))
+            .map_err(|e| format!("Failed to send stop_animation: {}", e))
+    }
+
     /// Apply a saved pose by id (fire-and-forget).
     pub fn apply_pose(&self, id: &str) -> Result<(), String> {
         let tx = self
@@ -780,6 +791,22 @@ async fn handle_connection<R: Runtime>(
         tracing::warn!("Failed to query initial estop state: {}", e);
     }
 
+    // Subscribe to animation playback state so the preset panel can show
+    // which animations are playing and toggle-stop looping ones. The
+    // server broadcasts this topic at ~1 Hz while animations run, plus a
+    // final frame when the last one stops.
+    let anim_subscribe = OutgoingMessage::subscribe(&["animation_state"]);
+    if let Err(e) = write.send(Message::Text(anim_subscribe.to_json())).await {
+        tracing::warn!("Failed to subscribe to animation_state topic: {}", e);
+    }
+
+    // Latency probe: send a WebSocket Ping every 2s and time the Pong the
+    // server echoes back (the Python `websockets` server auto-pongs). The
+    // round-trip is emitted on `connection-latency` for the UI's ping
+    // readout. Only one ping is outstanding at a time.
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(2));
+    let mut last_ping_sent: Option<Instant> = None;
+
     loop {
         tokio::select! {
             msg = read.next() => {
@@ -928,6 +955,22 @@ async fn handle_connection<R: Runtime>(
                                 }
                             }
 
+                            // Animation playback broadcast. Server sends
+                            //   { type: "state", node: "animation_state",
+                            //     data: { players: [{id,name,duration,t,running,loop,…}] } }
+                            // Forward the players list to the frontend so the
+                            // preset panel can show which animations are
+                            // playing and toggle-stop looping ones.
+                            if incoming.msg_type == "state"
+                                && incoming.node.as_deref() == Some("animation_state")
+                            {
+                                if let Some(ref data) = incoming.data {
+                                    if let Err(e) = app_handle.emit("animation-state", data) {
+                                        tracing::error!("Failed to emit animation-state: {}", e);
+                                    }
+                                }
+                            }
+
                             // Per-node telemetry broadcast. The battery
                             // panel subscribes to `pin_state/<node>` and
                             // sniffs BMS channels out of the frame. Forward
@@ -965,6 +1008,13 @@ async fn handle_connection<R: Runtime>(
                             return true;
                         }
                     }
+                    Some(Ok(Message::Pong(_))) => {
+                        // Response to our latency probe — emit the round-trip.
+                        if let Some(sent) = last_ping_sent.take() {
+                            let rtt_ms = sent.elapsed().as_millis() as u64;
+                            let _ = app_handle.emit("connection-latency", rtt_ms);
+                        }
+                    }
                     Some(Err(e)) => {
                         tracing::error!("WebSocket error: {}", e);
                         {
@@ -988,6 +1038,16 @@ async fn handle_connection<R: Runtime>(
                         return true;
                     }
                     tracing::debug!("Command sent successfully");
+                }
+            }
+
+            _ = ping_interval.tick() => {
+                // Fire a latency probe. Stamp the send time first so the
+                // Pong handler can measure the round-trip.
+                last_ping_sent = Some(Instant::now());
+                if let Err(e) = write.send(Message::Ping(Vec::new())).await {
+                    tracing::error!("Failed to send ping: {}", e);
+                    return true;
                 }
             }
 

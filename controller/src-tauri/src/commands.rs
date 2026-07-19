@@ -282,6 +282,12 @@ pub fn start_animation(state: State<'_, Arc<AppState>>, id: String) -> Result<()
     state.ws_client.start_animation(&id)
 }
 
+/// Stop a currently-playing animation by id (used to toggle-stop looping ones).
+#[tauri::command]
+pub fn stop_animation(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    state.ws_client.stop_animation(&id)
+}
+
 /// Apply a saved pose by id.
 #[tauri::command]
 pub fn apply_pose(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {

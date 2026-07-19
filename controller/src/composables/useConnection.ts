@@ -53,6 +53,11 @@ const errorRef = ref<string | undefined>(undefined);
  *  this same value so this ref is purely for visual feedback. */
 const estopActiveRef = ref<boolean>(false);
 
+/** Last measured WebSocket round-trip to the server, in ms (null until
+ *  the first probe returns). Driven by the `connection-latency` event the
+ *  Rust client emits every ~2s. Shown in the connection dropdown. */
+const pingMsRef = ref<number | null>(null);
+
 let initialized = false;
 const unlistenFns: UnlistenFn[] = [];
 
@@ -72,7 +77,15 @@ async function ensureInit(): Promise<void> {
             // authoritative server-side value.
             if (state.status === ConnectionStatus.Disconnected) {
                 estopActiveRef.value = false;
+                pingMsRef.value = null;
             }
+        }),
+    );
+
+    // Round-trip latency probe results from the Rust WS client (~2s cadence).
+    unlistenFns.push(
+        await listen<number>('connection-latency', event => {
+            pingMsRef.value = event.payload;
         }),
     );
 
@@ -152,9 +165,22 @@ async function disconnect(): Promise<void> {
         await invoke('disconnect');
         statusRef.value = ConnectionStatus.Disconnected;
         errorRef.value = undefined;
+        pingMsRef.value = null;
     } catch (err) {
         console.error('[useConnection] Disconnect error:', err);
     }
+}
+
+/** Drop the current connection and immediately reconnect with the saved
+ *  config — the "Reconnect" action in the connection dropdown. */
+async function reconnect(): Promise<void> {
+    await disconnect();
+    const config = getSavedConfig();
+    if (!config || !config.password) {
+        console.warn('[useConnection] reconnect: no saved credentials');
+        return;
+    }
+    await connect(config);
 }
 
 // ─── Server-side command invocations ─────────────────────────────────
@@ -222,6 +248,11 @@ async function startAnimation(id: string): Promise<void> {
     await invoke('start_animation', { id });
 }
 
+/** Stop a currently-playing animation on the server by id. */
+async function stopAnimation(id: string): Promise<void> {
+    await invoke('stop_animation', { id });
+}
+
 /** Apply a saved pose on the server by id. */
 async function applyPose(id: string): Promise<void> {
     await invoke('apply_pose', { id });
@@ -246,10 +277,12 @@ export function useConnection() {
         error: computed(() => errorRef.value),
         isConnected: computed(() => statusRef.value === ConnectionStatus.Connected),
         estopActive: computed(() => estopActiveRef.value),
+        pingMs: computed(() => pingMsRef.value),
 
         // Connection lifecycle
         connect,
         disconnect,
+        reconnect,
         autoConnect,
         getSavedConfig,
 
@@ -258,6 +291,7 @@ export function useConnection() {
         sendTopicChannelValue,
         emergencyStop,
         startAnimation,
+        stopAnimation,
         applyPose,
         playSound,
 

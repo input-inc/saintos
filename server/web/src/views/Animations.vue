@@ -5,6 +5,7 @@ import { useAnimationsStore } from '@/stores/animations'
 import { usePosesStore } from '@/stores/poses'
 import { useSoundsStore } from '@/stores/sounds'
 import { useWsStore } from '@/stores/ws'
+import IconPicker from '@/components/animation/IconPicker.vue'
 
 // Full-screen "Boards" management. Sidebar lists animations, poses, and
 // sounds (each with their groups) and a "New" button per kind opens a
@@ -209,18 +210,57 @@ async function stopSound (s) {
   await sounds.stop(s.node_id)
 }
 
-// Reorder within a group via up/down. Sounds are contiguous per group in
-// the store's (group, position, name) sort, so swapping adjacent
-// same-group entries in the global list and re-sending every id keeps
-// positions globally consistent while only moving within the group.
-async function moveSound (s, dir) {
-  const arr = [...(sounds.list || [])]
-  const i = arr.findIndex(x => x.id === s.id)
-  const j = dir === 'up' ? i - 1 : i + 1
-  if (i < 0 || j < 0 || j >= arr.length) return
-  if ((arr[j].group || '') !== (s.group || '')) return   // don't cross groups
-  ;[arr[i], arr[j]] = [arr[j], arr[i]]
-  await sounds.reorder(arr.map(x => x.id))
+// Reorder sounds by drag-and-drop. Sounds are contiguous per group in the
+// store's (group, position, name) sort, so we only reorder WITHIN a group
+// (dragging across groups is ignored, matching the old up/down behavior)
+// and re-send every id so global positions stay consistent.
+//
+// Handle-gated: a row is only `draggable` while the operator is pressing
+// its drag handle, so clicking the name/group inputs and the action
+// buttons still works normally.
+const dragSoundId = ref(null)     // id currently being dragged
+const dragOverSoundId = ref(null) // id of the row under the cursor
+const dragHandleSoundId = ref(null) // gates :draggable to handle presses
+
+function draggedSoundGroup () {
+  const d = (sounds.list || []).find(x => x.id === dragSoundId.value)
+  return d ? (d.group || '') : null
+}
+function onSoundDragStart (s, e) {
+  dragSoundId.value = s.id
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    try { e.dataTransfer.setData('text/plain', s.id) } catch { /* IE guard */ }
+  }
+}
+function onSoundDragOver (s) {
+  if (dragSoundId.value == null || s.id === dragSoundId.value) return
+  if ((s.group || '') !== draggedSoundGroup()) return   // same group only
+  dragOverSoundId.value = s.id
+}
+function onSoundDragEnd () {
+  dragSoundId.value = null
+  dragOverSoundId.value = null
+  dragHandleSoundId.value = null
+}
+async function onSoundDrop (target) {
+  const from = dragSoundId.value
+  onSoundDragEnd()
+  if (from == null || from === target.id) return
+  const vis = [...visibleSounds.value]
+  const fi = vis.findIndex(x => x.id === from)
+  const ti = vis.findIndex(x => x.id === target.id)
+  if (fi < 0 || ti < 0) return
+  if ((vis[fi].group || '') !== (vis[ti].group || '')) return   // don't cross groups
+  const [moved] = vis.splice(fi, 1)
+  vis.splice(ti, 0, moved)
+  // Splice the reordered group slice back into the full list in place:
+  // group members are contiguous, so replacing each group slot in order
+  // with the new sequence reorders within the group and leaves the rest.
+  const visIds = new Set(vis.map(x => x.id))
+  const queue = [...vis]
+  const merged = (sounds.list || []).map(it => visIds.has(it.id) ? queue.shift() : it)
+  await sounds.reorder(merged.map(x => x.id))
 }
 
 async function duplicateAnimation (a) {
@@ -528,9 +568,8 @@ watch([animationGroups, poseGroups, soundGroups], () => {
             <div v-else class="rounded-lg border border-line/50 bg-panel/30 divide-y divide-line/40">
               <div v-for="a in visibleAnimations" :key="a.id"
                    class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors">
-                <button class="anim-icon-cell" title="Open in editor" @click="openAnimation(a)">
-                  <span class="material-icons">{{ a.icon || 'animation' }}</span>
-                </button>
+                <IconPicker :model-value="a.icon || ''" fallback="animation"
+                            @update:model-value="(v) => patchAnimation(a.id, { icon: v })" />
                 <div class="flex-1 min-w-0">
                   <input v-if="renamingId === a.id"
                          class="input-field w-full text-sm py-1"
@@ -596,9 +635,8 @@ watch([animationGroups, poseGroups, soundGroups], () => {
             <div v-else class="rounded-lg border border-line/50 bg-panel/30 divide-y divide-line/40">
               <template v-for="p in visiblePoses" :key="p.id">
                 <div class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors">
-                  <div class="anim-icon-cell">
-                    <span class="material-icons">{{ p.icon || 'accessibility' }}</span>
-                  </div>
+                  <IconPicker :model-value="p.icon || ''" fallback="accessibility"
+                              @update:model-value="(v) => patchPose(p.id, { icon: v })" />
                   <div class="flex-1 min-w-0">
                     <input v-if="renamingId === p.id"
                            class="input-field w-full text-sm py-1"
@@ -720,11 +758,21 @@ watch([animationGroups, poseGroups, soundGroups], () => {
               No sounds in this group yet. Click <span class="text-violet-300">New Sound</span> to start.
             </div>
             <div v-else class="rounded-lg border border-line/50 bg-panel/30 divide-y divide-line/40">
-              <div v-for="(s, idx) in visibleSounds" :key="s.id"
-                   class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors">
-                <div class="anim-icon-cell">
-                  <span class="material-icons">{{ s.icon || 'volume_up' }}</span>
-                </div>
+              <div v-for="s in visibleSounds" :key="s.id"
+                   class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors"
+                   :class="{ 'sound-dragging': dragSoundId === s.id, 'sound-drop-target': dragOverSoundId === s.id }"
+                   :draggable="dragHandleSoundId === s.id"
+                   @dragstart="onSoundDragStart(s, $event)"
+                   @dragover.prevent="onSoundDragOver(s)"
+                   @drop.prevent="onSoundDrop(s)"
+                   @dragend="onSoundDragEnd">
+                <button class="drag-handle" title="Drag to reorder"
+                        @mousedown="dragHandleSoundId = s.id"
+                        @mouseup="dragHandleSoundId = null">
+                  <span class="material-icons">drag_indicator</span>
+                </button>
+                <IconPicker :model-value="s.icon || ''" fallback="volume_up"
+                            @update:model-value="(v) => patchSound(s.id, { icon: v })" />
                 <div class="flex-1 min-w-0">
                   <input v-if="renamingId === s.id"
                          class="input-field w-full text-sm py-1"
@@ -754,16 +802,6 @@ watch([animationGroups, poseGroups, soundGroups], () => {
                   <span v-else-if="s.loop">∞</span>
                 </div>
                 <div class="flex items-center gap-1 shrink-0">
-                  <div class="flex flex-col">
-                    <button class="reorder-btn" title="Move up"
-                            :disabled="idx === 0" @click="moveSound(s, 'up')">
-                      <span class="material-icons">arrow_drop_up</span>
-                    </button>
-                    <button class="reorder-btn" title="Move down"
-                            :disabled="idx === visibleSounds.length - 1" @click="moveSound(s, 'down')">
-                      <span class="material-icons">arrow_drop_down</span>
-                    </button>
-                  </div>
                   <button class="btn-sm bg-emerald-500/80 hover:bg-emerald-500 text-fg-strong"
                           title="Play" @click="playSound(s)">
                     <span class="material-icons icon-sm">play_arrow</span>
@@ -821,28 +859,23 @@ watch([animationGroups, poseGroups, soundGroups], () => {
 </template>
 
 <style scoped>
-.anim-icon-cell {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 36px; height: 36px;
-  background: rgba(15, 23, 42, 0.6);
-  border: 1px solid var(--color-surface);
-  border-radius: 6px;
-  color: var(--color-fg);
-  cursor: pointer;
-  transition: border-color 0.1s, color 0.1s;
-  flex-shrink: 0;
-}
-.anim-icon-cell:hover { border-color: var(--color-cyan-500); color: var(--color-fg-strong); }
-.anim-icon-cell .material-icons { font-size: 22px; }
 
-.reorder-btn {
+/* Drag-to-reorder: a grip handle gates row dragging so the inline
+   inputs and action buttons still respond to normal clicks. */
+.drag-handle {
   display: inline-flex; align-items: center; justify-content: center;
-  height: 14px; width: 20px;
   color: var(--color-fg-faint);
-  cursor: pointer;
+  cursor: grab;
   transition: color 0.1s;
+  flex-shrink: 0;
+  touch-action: none;
 }
-.reorder-btn:hover:not(:disabled) { color: var(--color-cyan-300); }
-.reorder-btn:disabled { opacity: 0.3; cursor: default; }
-.reorder-btn .material-icons { font-size: 18px; }
+.drag-handle:hover { color: var(--color-cyan-300); }
+.drag-handle:active { cursor: grabbing; }
+.drag-handle .material-icons { font-size: 20px; }
+
+.anim-row { transition: background-color 0.1s, box-shadow 0.1s, opacity 0.1s; }
+/* The row being dragged fades; the row under the cursor shows a drop line. */
+.anim-row.sound-dragging { opacity: 0.4; }
+.anim-row.sound-drop-target { box-shadow: inset 0 2px 0 0 var(--color-cyan-400); }
 </style>

@@ -5,6 +5,7 @@ import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useDisplayStore } from '@/stores/display'
 import { useChannelHistory } from '@/composables/useChannelHistory'
 import Sparkline from '@/components/Sparkline.vue'
+import { decodeRoboclawFaults } from '@/composables/roboclawFaults'
 
 // Mockup-faithful Vue port of the legacy `_renderRoboClawCard` widget.
 // Five rows (motor / encoder / voltage / current / temperature). Each
@@ -78,6 +79,10 @@ const subscribedTopics = computed(() => {
     const k = upstreamKeyParts(inp.id)
     if (k) out.add(`pin_state/${k.nodeId}`)
   }
+  // error_flags isn't a telemetry ROW, so include its node explicitly
+  // (normally the same node as the other rows — Set dedupes it).
+  const ek = upstreamKeyParts('error_flags')
+  if (ek) out.add(`pin_state/${ek.nodeId}`)
   return [...out]
 })
 
@@ -256,6 +261,15 @@ function sourceLabel (inputId) {
   if (src.kind === 'signal') return src.parts.join('/')
   return `${src.kind}:${(src.parts || []).join('/')}`
 }
+
+// Fault status: the `error_flags` input carries the firmware's canonical
+// ROBOCLAW_FAULT_* bitmask. It isn't a telemetry ROW (no bar/sparkline),
+// so we read it separately and render a decoded badge strip. Empty (and
+// hidden) when the input is unrouted or the controller is healthy.
+const faults = computed(() => {
+  const last = lastSampleFor('error_flags')
+  return (last && typeof last.value === 'number') ? decodeRoboclawFaults(last.value) : []
+})
 </script>
 
 <template>
@@ -270,6 +284,19 @@ function sourceLabel (inputId) {
       </span>
     </div>
     <div class="h-0.5 bg-violet-500 rounded-full mb-3"></div>
+
+    <!-- Fault badge strip — decoded from the routed error_flags input.
+         Error-severity faults render red, warnings amber. Hidden when
+         healthy or when error_flags isn't routed. -->
+    <div v-if="faults.length" class="mb-3 flex flex-wrap gap-1.5">
+      <span v-for="f in faults" :key="f.label"
+            class="px-2 py-0.5 text-xs rounded-full border"
+            :class="f.severity === 'error'
+              ? 'bg-red-500/20 text-red-300 border-red-500/30'
+              : 'bg-amber-500/20 text-amber-300 border-amber-500/30'">
+        {{ f.label }}
+      </span>
+    </div>
 
     <div>
       <div

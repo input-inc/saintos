@@ -5,9 +5,12 @@
  * currently-active preset panel state.
  *
  * Profiles are persisted on the Rust side via `get_binding_profiles`
- * and `set_binding_profiles`. Action events from the input mapper
- * arrive on the `action-event` Tauri event and drive panel navigation
- * + preset activation.
+ * and `set_binding_profiles`. Panel navigation + preset activation are
+ * driven from the frontend button path (App.vue: handleHardwareButton /
+ * onVirtualButtonDown → executeDigitalAction), which owns panel state.
+ * The Rust mapper's `action-event` stream is intentionally NOT consumed
+ * here — doing so double-handled every press (see ensureInit). Commands,
+ * analog control, and E-Stop are still executed Rust-side directly.
  *
  * The shape mirrors BindingsService 1:1 so the components mostly
  * translate verbatim — `signal` becomes `ref`, `computed` keeps its
@@ -17,7 +20,6 @@
 
 import { computed, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useLibrary } from './useLibrary';
 import { useConnection } from './useConnection';
 
@@ -101,7 +103,7 @@ export type AnalogAction =
     | { type: 'modifier'; effect: ModifierEffect };
 
 export type DigitalAction =
-    | { type: 'show_panel'; panel_id: string }
+    | { type: 'show_panel'; panel_id: string; default_group?: string; keep_open?: boolean }
     | { type: 'hide_panel' }
     | { type: 'activate_preset'; preset_id: string }
     | { type: 'navigate_panel'; direction: NavigateDirection }
@@ -197,6 +199,9 @@ export interface PanelItem {
     name: string;
     icon?: string;
     color?: string;
+    // Server-library items may carry a group (sounds) used by the panel's
+    // group filter. Absent for local presets.
+    group?: string;
 }
 
 // ─── Profile + settings ──────────────────────────────────────────────
@@ -232,7 +237,7 @@ export interface MappedCommand {
 
 export type ActionEvent =
     | { type: 'command'; data: MappedCommand }
-    | { type: 'show_panel'; panel_id: string }
+    | { type: 'show_panel'; panel_id: string; default_group?: string }
     | { type: 'hide_panel' }
     | { type: 'navigate_panel'; direction: NavigateDirection }
     | { type: 'select_panel_item' }
@@ -245,6 +250,13 @@ export interface PanelState {
     activePanelId: string | null;
     selectedIndex: number;
     currentPage: number;
+    // Group filter for server-backed panels (currently sounds). 'All'
+    // shows everything; otherwise only items whose group matches.
+    selectedGroup: string;
+    // When true, selecting an item does NOT close the panel — lets the
+    // operator fire several presets (e.g. sounds) in a row. Comes from the
+    // opening show_panel binding's keep_open flag.
+    keepOpen: boolean;
 }
 
 // ─── Default profile ─────────────────────────────────────────────────
@@ -353,20 +365,33 @@ const panelStateRef = ref<PanelState>({
     activePanelId: null,
     selectedIndex: 0,
     currentPage: 0,
+    selectedGroup: 'All',
+    keepOpen: false,
 });
 
+// Last item the operator activated in each panel, keyed by panel id. On
+// reopen we restore the highlight to it (if still present in the current
+// group filter) so the selection reflects the real last choice instead of
+// a meaningless index-0 default. Session-scoped (not persisted).
+const lastSelectedByPanel = ref<Record<string, string>>({});
+
 let initialized = false;
-const unlistenFns: UnlistenFn[] = [];
 
 async function ensureInit(): Promise<void> {
     if (initialized) return;
     initialized = true;
     await loadProfiles();
-    unlistenFns.push(
-        await listen<ActionEvent>('action-event', event => {
-            handleActionEvent(event.payload);
-        }),
-    );
+    // We deliberately do NOT subscribe to the Rust 'action-event' stream.
+    // Physical button presses already drive panel/navigate/select/activate
+    // through the frontend path (App.vue: handleHardwareButton →
+    // onVirtualButtonDown → executeDigitalAction), which is the same path
+    // the on-screen/touch buttons use. Applying the Rust mapper's
+    // action-events on top double-handled every press — most visibly
+    // toggling a panel open→closed on a single tap (the two toggles raced),
+    // which is why panels came up only intermittently. Commands, analog
+    // control, and E-Stop are still handled Rust-side directly (see
+    // src-tauri/src/lib.rs) and are unaffected by this. If hold/DoubleTap/
+    // release triggers are ever implemented, revisit ownership here.
 }
 
 // ─── Profile load / save ─────────────────────────────────────────────
@@ -393,26 +418,87 @@ function setActiveProfile(profileId: string): void {
 
 // ─── Panel state ─────────────────────────────────────────────────────
 
-function showPanel(panelId: string): void {
-    panelStateRef.value = {
-        activePanelId: panelId,
-        selectedIndex: 0,
-        currentPage: 0,
-    };
-    // Pull a fresh server list when opening a server-backed panel so the
-    // grid is current even if items changed since connect.
+// While a server-backed panel is open, poll the library on an interval so
+// a board left open picks up items added/removed on the server, and the
+// header sync spinner shows it's actively pulling. Cleared when the panel
+// closes so we don't poll in the background forever.
+const PANEL_POLL_MS = 10000;
+let panelPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopPanelPoll(): void {
+    if (panelPollTimer) {
+        clearInterval(panelPollTimer);
+        panelPollTimer = null;
+    }
+}
+
+function startPanelPoll(): void {
+    stopPanelPoll();
+    panelPollTimer = setInterval(() => { void library.refresh(); }, PANEL_POLL_MS);
+}
+
+// Where the highlight should land when (re)opening a panel: the last
+// item the operator activated, if it's still in the current group-filtered
+// list; otherwise the top. panelState isn't set yet here, so filter with
+// the `group` we're about to apply rather than reading panelStateRef.
+function restoreSelection(panelId: string, group: string): { index: number; page: number } {
     const profile = profilesRef.value.find(p => p.id === activeProfileIdRef.value);
     const panel = profile?.presetPanels.find(p => p.id === panelId);
-    if (panel && panelSource(panel)) void library.refresh();
+    const lastId = lastSelectedByPanel.value[panelId];
+    if (!panel || !lastId) return { index: 0, page: 0 };
+
+    let items = panelItemsRaw(panel);
+    if (group && group !== 'All') items = items.filter(it => (it.group ?? '') === group);
+    const idx = items.findIndex(it => it.id === lastId);
+    if (idx < 0) return { index: 0, page: 0 };
+    return { index: idx, page: Math.floor(idx / panel.itemsPerPage) };
+}
+
+function showPanel(panelId: string, defaultGroup?: string, keepOpen = false): void {
+    const group = defaultGroup || 'All';
+    const restored = restoreSelection(panelId, group);
+    panelStateRef.value = {
+        activePanelId: panelId,
+        selectedIndex: restored.index,
+        currentPage: restored.page,
+        // Start on the button's configured group, or 'All' when unset.
+        selectedGroup: group,
+        // Sticky panels stay open after each selection.
+        keepOpen,
+    };
+    // Pull a fresh server list when opening a server-backed panel so the
+    // grid is current even if items changed since connect, then keep it
+    // live with a background poll while the panel stays open. The panel
+    // itself already renders instantly from the persisted cache.
+    const profile = profilesRef.value.find(p => p.id === activeProfileIdRef.value);
+    const panel = profile?.presetPanels.find(p => p.id === panelId);
+    if (panel && panelSource(panel)) {
+        void library.refresh();
+        startPanelPoll();
+    } else {
+        stopPanelPoll();
+    }
 }
 
 function hidePanel(): void {
+    stopPanelPoll();
     panelStateRef.value = { ...panelStateRef.value, activePanelId: null };
 }
 
-function togglePanel(panelId: string): void {
+function togglePanel(panelId: string, defaultGroup?: string, keepOpen = false): void {
     if (panelStateRef.value.activePanelId === panelId) hidePanel();
-    else showPanel(panelId);
+    else showPanel(panelId, defaultGroup, keepOpen);
+}
+
+// Change the active panel's group filter (from the header dropdown).
+// Resets selection/page since the visible set changes.
+function setActiveGroup(group: string): void {
+    panelStateRef.value = {
+        ...panelStateRef.value,
+        selectedGroup: group,
+        selectedIndex: 0,
+        currentPage: 0,
+    };
 }
 
 function navigatePanel(direction: NavigateDirection): void {
@@ -491,6 +577,9 @@ function selectCurrentItem(): void {
     if (!panel) return;
     const item = panelItems(panel)[state.selectedIndex];
     if (item) triggerPanelItem(panel, item.id);
+    // Dismiss after selecting unless the panel is sticky (keep_open),
+    // matching the touch path (PresetPanel.selectPreset).
+    if (!state.keepOpen) hidePanel();
 }
 
 async function activatePreset(presetId: string): Promise<void> {
@@ -514,9 +603,9 @@ function panelSource(panel: PresetPanel): 'animations' | 'poses' | 'sounds' | nu
     return null;
 }
 
-// Items shown for a panel. Server-backed panels stream live from the
-// server library; static panels use their stored presets.
-function panelItems(panel: PresetPanel): PanelItem[] {
+// Raw (unfiltered) items for a panel. Server-backed panels stream live
+// from the server library; static panels use their stored presets.
+function panelItemsRaw(panel: PresetPanel): PanelItem[] {
     const src = panelSource(panel);
     if (src === 'animations') return library.animations.value;
     if (src === 'poses') return library.poses.value;
@@ -524,11 +613,58 @@ function panelItems(panel: PresetPanel): PanelItem[] {
     return panel.presets;
 }
 
+// Items shown for a panel, after the active group filter. Only one panel
+// is open at a time, so the global panelState.selectedGroup applies to it.
+function panelItems(panel: PresetPanel): PanelItem[] {
+    const items = panelItemsRaw(panel);
+    const group = panelStateRef.value.selectedGroup;
+    if (!group || group === 'All') return items;
+    return items.filter(it => (it.group ?? '') === group);
+}
+
+// Distinct, sorted group names present in a panel's items (unfiltered).
+// Drives the header group dropdown; empty when nothing is grouped.
+function panelGroups(panel: PresetPanel): string[] {
+    const groups = new Set<string>();
+    for (const it of panelItemsRaw(panel)) {
+        if (it.group) groups.add(it.group);
+    }
+    return Array.from(groups).sort();
+}
+
+// Groups available for a panel by id — used by the bindings editor to
+// populate the "default group" dropdown for a show_panel button.
+function groupsForPanel(panelId: string): string[] {
+    const profile = profilesRef.value.find(p => p.id === activeProfileIdRef.value);
+    const panel = profile?.presetPanels.find(p => p.id === panelId);
+    return panel ? panelGroups(panel) : [];
+}
+
 // Fire the right action for a selected item: play/apply for the
 // server-backed panels, the local preset path otherwise.
+//
+// Animations toggle: tapping one that's already playing AND loops stops
+// it, so a looping animation is dismissed with the same button that
+// started it. One-shots (and idle animations) just (re)start. We update
+// the playing map optimistically so the badge flips instantly; the next
+// server broadcast reconciles.
 function triggerPanelItem(panel: PresetPanel, itemId: string): void {
+    // Remember this as the panel's last selection so reopening restores
+    // the highlight to it.
+    lastSelectedByPanel.value = { ...lastSelectedByPanel.value, [panel.id]: itemId };
+
     const src = panelSource(panel);
-    if (src === 'animations') void connection.startAnimation(itemId);
+    if (src === 'animations') {
+        const playing = library.playing.value[itemId];
+        if (playing && playing.loop) {
+            void connection.stopAnimation(itemId);
+            library.noteStopped(itemId);
+        } else {
+            const item = library.animations.value.find(a => a.id === itemId);
+            void connection.startAnimation(itemId);
+            library.noteStarted(itemId, item?.loop === true);
+        }
+    }
     else if (src === 'poses') void connection.applyPose(itemId);
     else if (src === 'sounds') void connection.playSound(itemId);
     else void activatePreset(itemId);
@@ -602,21 +738,6 @@ function updateProfileSettings(settings: ProfileSettings): void {
     mutateActive(p => ({ ...p, settings }));
 }
 
-// ─── Action event handler ───────────────────────────────────────────
-
-function handleActionEvent(event: ActionEvent): void {
-    switch (event.type) {
-        case 'show_panel':       showPanel(event.panel_id); break;
-        case 'hide_panel':       hidePanel(); break;
-        case 'navigate_panel':   navigatePanel(event.direction); break;
-        case 'select_panel_item': selectCurrentItem(); break;
-        case 'activate_preset':  void activatePreset(event.preset_id); break;
-        // 'command' / 'toggle_output' / 'cycle_output' / 'e_stop' are
-        // already handled Rust-side (mapper → ws_client) and don't
-        // need a frontend bounce.
-    }
-}
-
 // ─── Composable export ───────────────────────────────────────────────
 
 export function useBindings() {
@@ -644,6 +765,21 @@ export function useBindings() {
         // show the right loading/empty message for server-backed panels.
         activePanelSource: computed(() =>
             activePanel.value ? panelSource(activePanel.value) : null),
+        // Group filter for the active panel: available groups, the current
+        // selection, and a setter for the header dropdown.
+        activePanelGroups: computed<string[]>(() =>
+            activePanel.value ? panelGroups(activePanel.value) : []),
+        activePanelSelectedGroup: computed(() => panelStateRef.value.selectedGroup),
+        // Total pages for the active panel's (group-filtered) items — used
+        // by the main header's page indicator now that it owns the panel chrome.
+        activePanelTotalPages: computed(() => {
+            const p = activePanel.value;
+            if (!p) return 0;
+            return Math.max(1, Math.ceil(panelItems(p).length / p.itemsPerPage));
+        }),
+        setActiveGroup,
+        // Groups available for a panel by id (for the bindings editor).
+        groupsForPanel,
         triggerActiveItem: (itemId: string) => {
             const p = activePanel.value;
             if (p) triggerPanelItem(p, itemId);

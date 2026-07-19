@@ -699,6 +699,15 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralChannel("voltage", "Bus voltage",    "in",  "analog"),
             PeripheralChannel("current", "Motor current",  "in",  "analog"),
             PeripheralChannel("temp",    "Temperature",    "in",  "analog"),
+            # Status telemetry (firmware Read Status, cmd 90), emitted on
+            # the peripheral-first state channel — mirrors the Maestro:
+            #   connected   — 1 while the unit answers polls.
+            #   error_flags — canonical ROBOCLAW_FAULT_* bitmask the UI
+            #                 decodes into fault badges (over-current,
+            #                 over-temp, over/under-voltage, E-Stop,
+            #                 driver fault, ...). 0 = no faults.
+            PeripheralChannel("connected",   "Connected",   "in", "digital_in"),
+            PeripheralChannel("error_flags", "Error flags", "in", "analog"),
         ],
         params=[
             PeripheralTypeParam("address",        "Address",         "int", 128, min=128, max=135),
@@ -2110,15 +2119,20 @@ DEFAULT_WIDGET_CATALOG: Dict[str, WidgetType] = {
     "roboclaw_monitor": WidgetType(
         id="roboclaw_monitor", label="RoboClaw Motor Monitor",
         description="RoboClaw motor controller telemetry: commanded duty, "
-                    "encoder, bus voltage, motor current, and controller "
-                    "temperature. Rendered as the dashboard's violet-"
-                    "accented motor card with per-row sparklines.",
+                    "encoder, bus voltage, motor current, controller "
+                    "temperature, and fault status. Rendered as the "
+                    "dashboard's violet-accented motor card with per-row "
+                    "sparklines and a fault badge strip.",
         inputs=[
             WidgetInputSpec("motor",   "Motor Duty",     "analog"),
             WidgetInputSpec("encoder", "Encoder",        "analog"),
             WidgetInputSpec("voltage", "Bus Voltage",    "analog"),
             WidgetInputSpec("current", "Motor Current",  "analog"),
             WidgetInputSpec("temp",    "Temperature",    "analog"),
+            # Canonical ROBOCLAW_FAULT_* bitmask — the widget decodes it
+            # into a red fault-badge row (overcurrent, over-temp, E-Stop,
+            # driver fault, ...). 0 = healthy.
+            WidgetInputSpec("error_flags", "Fault Status", "analog"),
         ],
     ),
     "bms_monitor": WidgetType(

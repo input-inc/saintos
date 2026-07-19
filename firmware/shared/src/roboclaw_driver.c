@@ -84,6 +84,17 @@ typedef struct {
     uint8_t  uart_swap;
     uint8_t  invert_direction;
     uint32_t last_duty_send_ms;
+    /* Fault status (Read Status, cmd 90). fault_flags is the canonical
+     * ROBOCLAW_FAULT_* set, normalized from whichever raw word the
+     * controller returns. prev_fault_flags drives edge-triggered logging;
+     * status_len caches the auto-detected response length (2 or 4 bytes,
+     * 0 = not yet detected). peripheral_id labels this unit's records on
+     * the peripheral-first state_emit path (no virtual GPIO involved). */
+    uint16_t fault_flags;
+    uint16_t prev_fault_flags;
+    bool     status_valid;
+    uint8_t  status_len;
+    char     peripheral_id[32];
 } roboclaw_unit_t;
 
 /* ── Driver State ───────────────────────────────────────────────── */
@@ -920,6 +931,160 @@ void roboclaw_init(void)
 
 static bool maybe_send_duty_keepalive(void);
 
+/* ── Fault status (Read Status, cmd 90) ─────────────────────────── */
+
+/* Raw 16-bit status word bits (older RoboClaw firmware). */
+#define RC16_M1_OVERCURRENT    0x0001
+#define RC16_M2_OVERCURRENT    0x0002
+#define RC16_ESTOP             0x0004
+#define RC16_TEMP_ERROR        0x0008
+#define RC16_TEMP2_ERROR       0x0010
+#define RC16_MAIN_BATT_HIGH    0x0020
+#define RC16_LOGIC_BATT_HIGH   0x0040
+#define RC16_LOGIC_BATT_LOW    0x0080
+#define RC16_M1_DRIVER_FAULT   0x0100
+#define RC16_M2_DRIVER_FAULT   0x0200
+#define RC16_MAIN_BATT_HI_WARN 0x0400
+#define RC16_MAIN_BATT_LO_WARN 0x0800
+#define RC16_TEMP_WARN         0x1000
+#define RC16_TEMP2_WARN        0x2000
+/* 0x4000/0x8000 = M1/M2 Home — not faults. */
+
+static uint16_t normalize_status_16(uint16_t s)
+{
+    uint16_t f = 0;
+    if (s & RC16_ESTOP)                                    f |= ROBOCLAW_FAULT_ESTOP;
+    if (s & (RC16_M1_OVERCURRENT | RC16_M2_OVERCURRENT))   f |= ROBOCLAW_FAULT_OVERCURRENT;
+    if (s & (RC16_TEMP_ERROR | RC16_TEMP2_ERROR))          f |= ROBOCLAW_FAULT_TEMP_ERROR;
+    if (s & (RC16_TEMP_WARN | RC16_TEMP2_WARN))            f |= ROBOCLAW_FAULT_TEMP_WARN;
+    if (s & (RC16_MAIN_BATT_HIGH | RC16_MAIN_BATT_HI_WARN)) f |= ROBOCLAW_FAULT_MAIN_BATT_HI;
+    if (s & RC16_MAIN_BATT_LO_WARN)                        f |= ROBOCLAW_FAULT_MAIN_BATT_LO;
+    if (s & (RC16_LOGIC_BATT_HIGH | RC16_LOGIC_BATT_LOW))  f |= ROBOCLAW_FAULT_LOGIC_BATT;
+    if (s & (RC16_M1_DRIVER_FAULT | RC16_M2_DRIVER_FAULT)) f |= ROBOCLAW_FAULT_DRIVER_FAULT;
+    return f;
+}
+
+/* Raw 32-bit status word bits (newer RoboClaw firmware, 4.1.34+). */
+#define RC32_ESTOP             0x00000001UL
+#define RC32_TEMP_ERROR        0x00000002UL
+#define RC32_TEMP2_ERROR       0x00000004UL
+#define RC32_MAIN_VOLT_HIGH    0x00000008UL
+#define RC32_LOGIC_VOLT_HIGH   0x00000010UL
+#define RC32_LOGIC_VOLT_LOW    0x00000020UL
+#define RC32_M1_DRIVER_FAULT   0x00000040UL
+#define RC32_M2_DRIVER_FAULT   0x00000080UL
+#define RC32_M1_SPEED_ERROR    0x00000100UL
+#define RC32_M2_SPEED_ERROR    0x00000200UL
+#define RC32_M1_POS_ERROR      0x00000400UL
+#define RC32_M2_POS_ERROR      0x00000800UL
+#define RC32_M1_CURRENT_ERROR  0x00001000UL
+#define RC32_M2_CURRENT_ERROR  0x00002000UL
+#define RC32_M1_OC_WARN        0x00010000UL
+#define RC32_M2_OC_WARN        0x00020000UL
+#define RC32_MAIN_VOLT_HI_WARN 0x00040000UL
+#define RC32_MAIN_VOLT_LO_WARN 0x00080000UL
+#define RC32_TEMP_WARN         0x00100000UL
+#define RC32_TEMP2_WARN        0x00200000UL
+
+static uint16_t normalize_status_32(uint32_t s)
+{
+    uint16_t f = 0;
+    if (s & RC32_ESTOP)                                     f |= ROBOCLAW_FAULT_ESTOP;
+    if (s & (RC32_M1_CURRENT_ERROR | RC32_M2_CURRENT_ERROR |
+             RC32_M1_OC_WARN | RC32_M2_OC_WARN))            f |= ROBOCLAW_FAULT_OVERCURRENT;
+    if (s & (RC32_TEMP_ERROR | RC32_TEMP2_ERROR))           f |= ROBOCLAW_FAULT_TEMP_ERROR;
+    if (s & (RC32_TEMP_WARN | RC32_TEMP2_WARN))             f |= ROBOCLAW_FAULT_TEMP_WARN;
+    if (s & (RC32_MAIN_VOLT_HIGH | RC32_MAIN_VOLT_HI_WARN)) f |= ROBOCLAW_FAULT_MAIN_BATT_HI;
+    if (s & RC32_MAIN_VOLT_LO_WARN)                         f |= ROBOCLAW_FAULT_MAIN_BATT_LO;
+    if (s & (RC32_LOGIC_VOLT_HIGH | RC32_LOGIC_VOLT_LOW))   f |= ROBOCLAW_FAULT_LOGIC_BATT;
+    if (s & (RC32_M1_DRIVER_FAULT | RC32_M2_DRIVER_FAULT))  f |= ROBOCLAW_FAULT_DRIVER_FAULT;
+    if (s & (RC32_M1_SPEED_ERROR | RC32_M2_SPEED_ERROR))    f |= ROBOCLAW_FAULT_SPEED_ERROR;
+    if (s & (RC32_M1_POS_ERROR | RC32_M2_POS_ERROR))        f |= ROBOCLAW_FAULT_POSITION_ERR;
+    return f;
+}
+
+/* Render active canonical fault names into buf, comma-separated. */
+static void fault_names(uint16_t f, char* buf, size_t cap)
+{
+    static const struct { uint16_t bit; const char* name; } NAMES[] = {
+        { ROBOCLAW_FAULT_ESTOP,        "E-Stop" },
+        { ROBOCLAW_FAULT_OVERCURRENT,  "over-current" },
+        { ROBOCLAW_FAULT_TEMP_ERROR,   "over-temperature" },
+        { ROBOCLAW_FAULT_TEMP_WARN,    "temperature warning" },
+        { ROBOCLAW_FAULT_MAIN_BATT_HI, "main battery high" },
+        { ROBOCLAW_FAULT_MAIN_BATT_LO, "main battery low" },
+        { ROBOCLAW_FAULT_LOGIC_BATT,   "logic battery out of range" },
+        { ROBOCLAW_FAULT_DRIVER_FAULT, "driver fault" },
+        { ROBOCLAW_FAULT_SPEED_ERROR,  "speed error limit" },
+        { ROBOCLAW_FAULT_POSITION_ERR, "position error limit" },
+    };
+    size_t n = 0; bool first = true;
+    buf[0] = '\0';
+    for (size_t i = 0; i < sizeof(NAMES)/sizeof(NAMES[0]); i++) {
+        if (!(f & NAMES[i].bit)) continue;
+        int w = snprintf(buf + n, cap - n, "%s%s", first ? "" : ", ", NAMES[i].name);
+        if (w < 0 || (size_t)w >= cap - n) break;
+        n += (size_t)w; first = false;
+    }
+    if (first) snprintf(buf, cap, "none");
+}
+
+/* Edge-triggered: log only when the canonical fault set changes, so a
+ * standing fault doesn't spam the log every poll. */
+static void log_fault_transition(uint8_t u)
+{
+    uint16_t now = units[u].fault_flags;
+    if (now == units[u].prev_fault_flags) return;
+    units[u].prev_fault_flags = now;
+    const char* id = units[u].peripheral_id[0] ? units[u].peripheral_id : "roboclaw";
+    if (now == ROBOCLAW_FAULT_NONE) {
+        saint_log_publish("info", "RoboClaw '%s' (unit %u): faults cleared",
+                          id, (unsigned)u);
+        return;
+    }
+    char buf[128];
+    fault_names(now, buf, sizeof(buf));
+    saint_log_publish((now & ROBOCLAW_FAULT_ERROR_MASK) ? "error" : "warn",
+        "RoboClaw '%s' (unit %u) FAULT: %s (0x%04X)",
+        id, (unsigned)u, buf, (unsigned)now);
+}
+
+/* Poll the status register, auto-detecting 16- vs 32-bit response length.
+ * Drains stray RX around the exchange so a wrong-length probe can't
+ * corrupt the next telemetry read. Best-effort: a failed read leaves the
+ * last-known fault_flags untouched and does NOT count as a missed poll
+ * (connection tracking stays on the four data reads). */
+static bool read_status(uint8_t u)
+{
+    uint8_t addr = units[u].address;
+    uint8_t resp[8];
+    uint8_t lens[2]; uint8_t nlens;
+    if (units[u].status_len == 2)      { lens[0] = 2; nlens = 1; }
+    else if (units[u].status_len == 4) { lens[0] = 4; nlens = 1; }
+    else                               { lens[0] = 4; lens[1] = 2; nlens = 2; }
+
+    for (uint8_t k = 0; k < nlens; k++) {
+        while (wire_has_byte()) (void)wire_getc();          /* drain before send */
+        send_command(addr, ROBOCLAW_CMD_GETSTATUS, NULL, 0);
+        if (read_response(resp, lens[k], addr, ROBOCLAW_CMD_GETSTATUS)) {
+            units[u].status_len = lens[k];
+            if (lens[k] == 4) {
+                uint32_t raw = ((uint32_t)resp[0] << 24) | ((uint32_t)resp[1] << 16) |
+                               ((uint32_t)resp[2] << 8) | resp[3];
+                units[u].fault_flags = normalize_status_32(raw);
+            } else {
+                uint16_t raw = ((uint16_t)resp[0] << 8) | resp[1];
+                units[u].fault_flags = normalize_status_16(raw);
+            }
+            units[u].status_valid = true;
+            log_fault_transition(u);
+            return true;
+        }
+        while (wire_has_byte()) (void)wire_getc();          /* drain leftovers */
+    }
+    return false;
+}
+
 void roboclaw_update(void)
 {
     if (!port_initialized || unit_count == 0) return;
@@ -986,12 +1151,21 @@ void roboclaw_update(void)
             success = true;
         }
         break;
+
+    case 4:
+        /* Fault/status register — best-effort, does not gate connection
+         * (a controller can be perfectly healthy on an older firmware we
+         * can't yet parse). Skips mark_unit_response below. */
+        read_status(u);
+        break;
     }
-    mark_unit_response(u, success);
+    if (poll_register != 4) {
+        mark_unit_response(u, success);
+    }
 
 next_poll:
     poll_register++;
-    if (poll_register > 3) {
+    if (poll_register > 4) {
         poll_register = 0;
         poll_unit++;
         if (poll_unit >= unit_count) {
@@ -1172,6 +1346,15 @@ static bool roboclaw_drv_apply_config(uint8_t channel, const pin_config_t* confi
 {
     uint8_t unit = channel / ROBOCLAW_CHANNELS_PER_UNIT;
     if (unit >= ROBOCLAW_MAX_UNITS) return false;
+
+    /* Remember the operator's instance id so the peripheral-first
+     * state_emit path can label this unit's "connected"/"error_flags"
+     * records with (peripheral_id, channel_id) — no virtual GPIO. */
+    if (config->logical_name[0]) {
+        strncpy(units[unit].peripheral_id, config->logical_name,
+                sizeof(units[unit].peripheral_id) - 1);
+        units[unit].peripheral_id[sizeof(units[unit].peripheral_id) - 1] = '\0';
+    }
 
     /* Address == 0 is the boot-reload fingerprint (apply_hardware sweep
      * with zero params). If we see it AND units[] already has a
@@ -1412,6 +1595,32 @@ static bool roboclaw_drv_load(const void* storage_ptr)
     return true;
 }
 
+/* Peripheral-first telemetry: emit each configured unit's connection +
+ * fault status keyed by (peripheral_id, channel_id) — this is the same
+ * path the Maestro uses and needs no virtual GPIO. The motor/encoder/
+ * voltage/current/temp readings still flow through the runtime-value
+ * path; this adds the status the UI decodes into fault badges. */
+static int roboclaw_state_emit_channels(char* buf, size_t cap, bool* first)
+{
+    int total = 0;
+    for (uint8_t u = 0; u < unit_count && u < ROBOCLAW_MAX_UNITS; u++) {
+        if (!units[u].peripheral_id[0]) continue;   /* not configured */
+        int n = peripheral_state_append_channel(
+            buf + total, cap - (size_t)total, first,
+            units[u].peripheral_id, "connected",
+            units[u].connected ? 1.0f : 0.0f);
+        if (n < 0) return -1;
+        total += n;
+        n = peripheral_state_append_channel(
+            buf + total, cap - (size_t)total, first,
+            units[u].peripheral_id, "error_flags",
+            units[u].status_valid ? (float)units[u].fault_flags : 0.0f);
+        if (n < 0) return -1;
+        total += n;
+    }
+    return total;
+}
+
 static const peripheral_driver_t roboclaw_peripheral = {
     .name              = "roboclaw",
     .mode_string       = "roboclaw_motor",
@@ -1423,6 +1632,7 @@ static const peripheral_driver_t roboclaw_peripheral = {
     .init              = roboclaw_drv_init,
     .update            = roboclaw_update,
     .is_connected      = roboclaw_is_connected,
+    .state_emit_channels = roboclaw_state_emit_channels,
     .set_value         = roboclaw_drv_set_value,
     .get_value         = roboclaw_drv_get_value,
     .set_defaults      = roboclaw_drv_set_defaults,

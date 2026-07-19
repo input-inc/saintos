@@ -9,7 +9,7 @@
     zoom and renders tiny on a Deck at any scale above 1×.
 -->
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import SaintSelect from '../components/SaintSelect.vue';
 import {
     useBindings,
@@ -137,6 +137,11 @@ const digitalForm = reactive({
     trigger: 'press' as ButtonTrigger,
     actionType: 'show_panel',
     panelId: '',
+    // show_panel: optionally open the panel filtered to a group.
+    useDefaultGroup: false,
+    defaultGroup: '',
+    // show_panel (press trigger): keep the panel up after selecting an item.
+    keepPanelOpen: false,
     presetId: '',
     direction: 'next_item' as NavigateDirection,
     targetId: '',
@@ -190,6 +195,18 @@ const channelOptionsDigital = computed(() => {
 });
 const panelOptions = computed(() =>
     presetPanels.value.map(p => ({ value: p.id, label: p.name })));
+// Groups available for the panel currently selected in the show_panel
+// form — populates the "default group" dropdown. Empty when the panel
+// has no groups (then the toggle is hidden).
+const defaultGroupOptions = computed(() =>
+    bindings.groupsForPanel(digitalForm.panelId).map(g => ({ value: g, label: g })));
+// When the operator flips the toggle on, pre-select the first group so
+// the dropdown isn't blank (empty would silently save as "All").
+watch(() => digitalForm.useDefaultGroup, (on) => {
+    if (on && !digitalForm.defaultGroup) {
+        digitalForm.defaultGroup = defaultGroupOptions.value[0]?.value ?? '';
+    }
+});
 const analogInputOptions = ANALOG_INPUTS;
 const digitalInputOptions = DIGITAL_INPUTS;
 const buttonTriggerOptions = BUTTON_TRIGGERS;
@@ -407,6 +424,9 @@ function resetDigitalForm(): void {
     digitalForm.trigger = 'press';
     digitalForm.actionType = 'show_panel';
     digitalForm.panelId = panels[0]?.id ?? '';
+    digitalForm.useDefaultGroup = false;
+    digitalForm.defaultGroup = '';
+    digitalForm.keepPanelOpen = false;
     digitalForm.presetId = '';
     digitalForm.direction = 'next_item';
     digitalForm.targetId = '';
@@ -422,7 +442,12 @@ function loadDigitalForm(binding: DigitalBinding): void {
     digitalForm.actionType = binding.action.type;
 
     switch (binding.action.type) {
-        case 'show_panel':      digitalForm.panelId = binding.action.panel_id; break;
+        case 'show_panel':
+            digitalForm.panelId = binding.action.panel_id;
+            digitalForm.useDefaultGroup = !!binding.action.default_group;
+            digitalForm.defaultGroup = binding.action.default_group ?? '';
+            digitalForm.keepPanelOpen = !!binding.action.keep_open;
+            break;
         case 'activate_preset': digitalForm.presetId = binding.action.preset_id; break;
         case 'navigate_panel':  digitalForm.direction = binding.action.direction; break;
         case 'toggle_output':   digitalForm.targetId = binding.action.target_id; break;
@@ -450,7 +475,21 @@ function saveDigitalBinding(): void {
     let action: DigitalAction;
     switch (digitalForm.actionType) {
         case 'show_panel':
-            action = { type: 'show_panel', panel_id: digitalForm.panelId }; break;
+            action = {
+                type: 'show_panel',
+                panel_id: digitalForm.panelId,
+                // Only persist a default group when toggled on and set;
+                // otherwise the panel opens on "All".
+                ...(digitalForm.useDefaultGroup && digitalForm.defaultGroup
+                    ? { default_group: digitalForm.defaultGroup }
+                    : {}),
+                // keep_open only applies to press-trigger panels; don't
+                // persist it for other triggers.
+                ...(digitalForm.trigger === 'press' && digitalForm.keepPanelOpen
+                    ? { keep_open: true }
+                    : {}),
+            };
+            break;
         case 'hide_panel':
             action = { type: 'hide_panel' }; break;
         case 'activate_preset':
@@ -891,6 +930,27 @@ onMounted(() => {
                     <div v-if="digitalForm.actionType === 'show_panel'">
                         <label class="block text-sm text-saint-text-muted mb-1">Panel</label>
                         <SaintSelect v-model="digitalForm.panelId" :options="panelOptions" />
+
+                        <!-- Default group: only offered when the chosen
+                             panel actually has groups (e.g. sounds). -->
+                        <template v-if="defaultGroupOptions.length > 0">
+                            <label class="flex items-center gap-2 mt-3 text-sm text-saint-text cursor-pointer">
+                                <input type="checkbox" v-model="digitalForm.useDefaultGroup">
+                                Open in a specific group
+                            </label>
+                            <SaintSelect v-if="digitalForm.useDefaultGroup"
+                                         v-model="digitalForm.defaultGroup"
+                                         :options="defaultGroupOptions"
+                                         class="mt-2" />
+                        </template>
+
+                        <!-- Keep-open: only meaningful for a press (toggle)
+                             trigger — a hold trigger closes on release. -->
+                        <label v-if="digitalForm.trigger === 'press'"
+                               class="flex items-center gap-2 mt-3 text-sm text-saint-text cursor-pointer">
+                            <input type="checkbox" v-model="digitalForm.keepPanelOpen">
+                            Keep panel open after selecting
+                        </label>
                     </div>
                     <div v-if="digitalForm.actionType === 'activate_preset'">
                         <label class="block text-sm text-saint-text-muted mb-1">Preset ID</label>

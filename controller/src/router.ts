@@ -12,11 +12,13 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router';
 import ControllerView from './views/ControllerView.vue';
 import SettingsView from './views/SettingsView.vue';
+import DashboardView from './views/DashboardView.vue';
 
 const BindingsView = () => import('./views/BindingsView.vue');
 
 const routes: RouteRecordRaw[] = [
-    { path: '/',           redirect: '/controller' },
+    { path: '/',           redirect: '/dashboard' },
+    { path: '/dashboard',  component: DashboardView,  meta: { title: 'Dashboard' } },
     { path: '/controller', component: ControllerView, meta: { title: 'Controller' } },
     { path: '/bindings',   component: BindingsView,   meta: { title: 'Bindings' } },
     { path: '/settings',   component: SettingsView,   meta: { title: 'Settings' } },

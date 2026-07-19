@@ -124,6 +124,22 @@ static const roboclaw_transport_ops_t* roboclaw_get_transport(void) { return NUL
  * no-ops via this flag. */
 #define SAINT_ROBOCLAW_NO_ESTOP_GPIO 1
 
+/* Stub for the peripheral-manager helper the driver's
+ * state_emit_channels callback appends through (lives in
+ * peripheral_manager.cpp, not part of this host test). Minimal
+ * functional version so the driver links and emits parseable JSON. */
+int peripheral_state_append_channel(char* buf, size_t cap, bool* first,
+                                    const char* peripheral_id,
+                                    const char* channel_id, float value)
+{
+    int n = snprintf(buf, cap,
+                     "%s{\"peripheral_id\":\"%s\",\"channel_id\":\"%s\",\"value\":%.4f}",
+                     *first ? "" : ",", peripheral_id, channel_id, (double)value);
+    if (n < 0 || (size_t)n >= cap) return -1;
+    *first = false;
+    return n;
+}
+
 /* ============================================================================
  * Pull in the shared driver. Hardware paths under #ifndef SIMULATION
  * drop out; everything else (state machine, config plumbing, JSON

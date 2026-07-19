@@ -149,6 +149,7 @@ pub fn run() {
             commands::list_poses,
             commands::list_sounds,
             commands::start_animation,
+            commands::stop_animation,
             commands::apply_pose,
             commands::play_sound,
             commands::is_gamepad_connected,

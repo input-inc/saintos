@@ -145,6 +145,12 @@ class WebSocketHandler:
         self._lock = asyncio.Lock()
         self._broadcast_task: Optional[asyncio.Task] = None
 
+        # Whether the last broadcast tick had active animations — lets the
+        # broadcast loop stay quiet while idle but still send one final
+        # (empty) animation_state frame so clients clear their "playing"
+        # indicators when the last animation stops.
+        self._had_active_animations = False
+
         # Role manager for pin configuration
         self.role_manager = RoleManager(logger=logger)
 
@@ -2836,6 +2842,16 @@ class WebSocketHandler:
                 if self._livelink_get_status:
                     livelink_status = self._livelink_get_status()
                     await self.broadcast_state('livelink', livelink_status)
+
+                # Broadcast active-animation playback state so controllers
+                # can show which animations are playing (and progress), and
+                # toggle-stop looping ones. Emit while anything is playing,
+                # plus one final frame after the last one stops so clients
+                # clear their indicators; stay silent while idle.
+                players = self.state_manager.animation_state()
+                if players or self._had_active_animations:
+                    await self.broadcast_state('animation_state', {'players': players})
+                    self._had_active_animations = bool(players)
 
             except asyncio.CancelledError:
                 break

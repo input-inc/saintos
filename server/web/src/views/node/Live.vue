@@ -7,6 +7,7 @@ import { useChannelHistory } from '@/composables/useChannelHistory'
 import Sparkline from '@/components/Sparkline.vue'
 import BMSCard from '@/components/peripherals/BMSCard.vue'
 import MaestroCard from '@/components/peripherals/MaestroCard.vue'
+import RoboClawCard from '@/components/peripherals/RoboClawCard.vue'
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -146,6 +147,14 @@ function sparkSamples (nodeId, peripheralId, channelId) {
            channel table for the actual servo target values. -->
       <MaestroCard
         v-else-if="p.type === 'maestro'"
+        :peripheral="p"
+        :channels="values[p.id] || {}"
+        :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"
+      />
+      <!-- RoboClaw: online dot, decoded fault badges, and the telemetry
+           table (motor/encoder/voltage/current/temp) with sparklines. -->
+      <RoboClawCard
+        v-else-if="p.type === 'roboclaw'"
         :peripheral="p"
         :channels="values[p.id] || {}"
         :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"

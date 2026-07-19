@@ -15,6 +15,10 @@ const bindings = useBindings();
 const conn = useConnection();
 const library = useLibrary();
 
+// The panel's title/icon, group filter, and page indicator now live in
+// the app's main header (see App.vue) — this component renders just the
+// grid + footer hints.
+
 // For server-backed panels (Animations/Poses/Sounds), explain WHY the
 // grid is empty instead of the generic "no presets": not connected vs
 // still loading vs genuinely empty on the server.
@@ -63,12 +67,25 @@ function isSelected(pageIndex: number): boolean {
     return globalIndex === selectedIndex.value;
 }
 
-function selectPreset(item: PanelItem): void {
-    bindings.triggerActiveItem(item.id);
-    bindings.hidePanel();
+// Animation playback state (only meaningful on the animations panel).
+// `isPlaying` drives the "playing" highlight/badge; `isLooping` picks the
+// loop badge so the operator knows tapping again will stop it.
+function isPlaying(itemId: string): boolean {
+    return bindings.activePanelSource.value === 'animations'
+        && !!library.playing.value[itemId];
 }
 
-function close(): void { bindings.hidePanel(); }
+function isLooping(itemId: string): boolean {
+    return isPlaying(itemId) && !!library.playing.value[itemId]?.loop;
+}
+
+function selectPreset(item: PanelItem): void {
+    bindings.triggerActiveItem(item.id);
+    // Sticky panels (keep_open) stay up so several presets can be fired
+    // in a row; otherwise selecting dismisses the panel.
+    if (!bindings.activePanelState.value.keepOpen) bindings.hidePanel();
+}
+
 function prevPage(): void { bindings.navigatePanel('prev_page'); }
 function nextPage(): void { bindings.navigatePanel('next_page'); }
 </script>
@@ -77,41 +94,29 @@ function nextPage(): void { bindings.navigatePanel('next_page'); }
     <div v-if="panel" class="h-full flex flex-col"
          :style="{ '--panel-color': panel.color }">
 
-        <!-- Header -->
-        <div class="panel-header px-6 py-4 flex items-center justify-between"
-             :style="{ background: panel.color }">
-            <div class="flex items-center gap-3">
-                <span class="material-symbols-outlined text-2xl text-white">{{ panel.icon }}</span>
-                <h2 class="text-xl font-semibold text-white">{{ panel.name }}</h2>
-            </div>
-            <div class="flex items-center gap-4">
-                <div class="text-white/80 text-sm">
-                    Page {{ currentPage + 1 }}/{{ totalPages }}
-                </div>
-                <button class="p-1.5 rounded hover:bg-white/20 transition-colors text-white"
-                        @click="close">
-                    <span class="material-symbols-outlined">close</span>
-                </button>
-            </div>
-        </div>
-
-        <!-- Grid Content -->
+        <!-- Grid Content (title/group/page live in the app header now) -->
         <div class="panel-content flex-1 bg-saint-background p-6 overflow-auto">
-            <div class="grid gap-4 max-w-4xl mx-auto"
-                 :style="{ gridTemplateColumns: `repeat(${panel.columns}, 1fr)` }">
+            <div class="grid gap-3"
+                 :style="{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }">
                 <button v-for="(preset, i) in visiblePresets" :key="preset.id"
-                        class="preset-item group relative flex flex-col items-center justify-center
-                               p-6 rounded-xl transition-all duration-150"
-                        :class="{ 'preset-selected': isSelected(i) }"
+                        class="preset-item group relative flex items-center gap-3 px-4 py-3 rounded-xl
+                               transition-all duration-150 text-left"
+                        :class="{ 'preset-selected': isSelected(i), 'preset-playing': isPlaying(preset.id) }"
                         :style="{ '--preset-color': preset.color || panel.color }"
                         @click="selectPreset(preset)">
-                    <span class="material-symbols-outlined text-4xl mb-3 transition-transform
-                                 group-hover:scale-110"
+                    <span class="material-symbols-outlined text-2xl shrink-0 transition-transform group-hover:scale-110"
                           :style="{ color: preset.color || panel.color }">
                         {{ preset.icon || 'radio_button_unchecked' }}
                     </span>
-                    <span class="text-base font-medium text-saint-text text-center">
+                    <span class="flex-1 min-w-0 text-base font-medium text-saint-text truncate">
                         {{ preset.name }}
+                    </span>
+                    <!-- Playing badge: pulsing equalizer for a playing
+                         animation; loopers add a loop glyph ("tap to stop"). -->
+                    <span v-if="isPlaying(preset.id)"
+                          class="shrink-0 flex items-center gap-1 text-saint-success">
+                        <span class="material-symbols-outlined text-lg animate-pulse">graphic_eq</span>
+                        <span v-if="isLooping(preset.id)" class="material-symbols-outlined text-sm">loop</span>
                     </span>
                     <div v-if="isSelected(i)" class="absolute inset-0 rounded-xl border-2 pointer-events-none"
                          :style="{ borderColor: preset.color || panel.color }"></div>
@@ -179,5 +184,9 @@ function nextPage(): void { bindings.navigatePanel('next_page'); }
 }
 .preset-selected {
     background: color-mix(in srgb, var(--preset-color) 15%, var(--saint-surface, #1e293b));
+}
+.preset-playing {
+    background: color-mix(in srgb, #22c55e 12%, var(--saint-surface, #1e293b));
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, #22c55e 55%, transparent);
 }
 </style>

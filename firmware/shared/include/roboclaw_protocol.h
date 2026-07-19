@@ -34,6 +34,40 @@ extern "C" {
 #define ROBOCLAW_CMD_GETMBATT       24  // 16-bit voltage (value/10 = volts)
 #define ROBOCLAW_CMD_GETCURRENTS    49  // 16-bit M1 current + 16-bit M2 current
 #define ROBOCLAW_CMD_GETTEMP        82  // 16-bit temp (value/10 = C)
+#define ROBOCLAW_CMD_GETSTATUS      90  // Unit status/fault register — 16-bit on
+                                        // older firmware, 32-bit on newer. The
+                                        // two use DIFFERENT bit layouts, so the
+                                        // driver auto-detects the length and
+                                        // normalizes both into the canonical
+                                        // ROBOCLAW_FAULT_* bitmask below.
+
+// =============================================================================
+// Canonical fault flags (driver-normalized, format-independent)
+// =============================================================================
+//
+// The firmware maps whichever raw status word the controller returns (16- or
+// 32-bit) into this stable set, emits it on the "error_flags" telemetry
+// channel, and logs transitions. The web UI decodes the SAME bits — so the
+// wire meaning never depends on the RoboClaw firmware revision.
+#define ROBOCLAW_FAULT_NONE          0x0000
+#define ROBOCLAW_FAULT_ESTOP         0x0001  // E-Stop asserted
+#define ROBOCLAW_FAULT_OVERCURRENT   0x0002  // M1/M2 over-current
+#define ROBOCLAW_FAULT_TEMP_ERROR    0x0004  // over-temperature (fault)
+#define ROBOCLAW_FAULT_TEMP_WARN     0x0008  // temperature warning
+#define ROBOCLAW_FAULT_MAIN_BATT_HI  0x0010  // main battery over-voltage
+#define ROBOCLAW_FAULT_MAIN_BATT_LO  0x0020  // main battery under-voltage
+#define ROBOCLAW_FAULT_LOGIC_BATT    0x0040  // logic battery out of range
+#define ROBOCLAW_FAULT_DRIVER_FAULT  0x0080  // M1/M2 driver fault
+#define ROBOCLAW_FAULT_SPEED_ERROR   0x0100  // speed error limit (32-bit fw)
+#define ROBOCLAW_FAULT_POSITION_ERR  0x0200  // position error limit (32-bit fw)
+
+// Bits that are hard ERRORS (log at error level); the rest are warnings.
+#define ROBOCLAW_FAULT_ERROR_MASK \
+    (ROBOCLAW_FAULT_ESTOP | ROBOCLAW_FAULT_OVERCURRENT | \
+     ROBOCLAW_FAULT_TEMP_ERROR | ROBOCLAW_FAULT_MAIN_BATT_HI | \
+     ROBOCLAW_FAULT_MAIN_BATT_LO | ROBOCLAW_FAULT_LOGIC_BATT | \
+     ROBOCLAW_FAULT_DRIVER_FAULT | ROBOCLAW_FAULT_SPEED_ERROR | \
+     ROBOCLAW_FAULT_POSITION_ERR)
 
 // Address range
 #define ROBOCLAW_ADDRESS_MIN        0x80
