@@ -58,8 +58,6 @@ const headerSelectedGroup = computed<string>({
     get: () => bindings.activePanelSelectedGroup.value,
     set: (v) => bindings.setActiveGroup(v),
 });
-const headerPage = computed(() => bindings.activePanelState.value.currentPage);
-const headerTotalPages = computed(() => bindings.activePanelTotalPages.value);
 
 function connDotClass(): string {
     switch (conn.status.value) {
@@ -221,13 +219,10 @@ onBeforeUnmount(() => {
                 </template>
             </div>
 
-            <!-- Center: group filter + page indicator (panel open only) -->
-            <div v-if="presetPanelActive" class="flex items-center gap-3 shrink-0">
-                <SaintSelect v-if="headerHasGroups"
-                             v-model="headerSelectedGroup" :options="headerGroupOptions" />
-                <div v-if="headerTotalPages > 1" class="text-sm text-white/80 font-mono whitespace-nowrap">
-                    {{ headerPage + 1 }}/{{ headerTotalPages }}
-                </div>
+            <!-- Center: group filter (panel open only). Page count lives
+                 in the panel's footer nav. -->
+            <div v-if="presetPanelActive && headerHasGroups" class="flex items-center gap-3 shrink-0">
+                <SaintSelect v-model="headerSelectedGroup" :options="headerGroupOptions" />
             </div>
 
             <!-- Right: sync spinner, connection icon+dropdown, E-Stop -->

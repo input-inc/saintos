@@ -31,6 +31,8 @@ const m = vi.hoisted(() => ({
     selectedGroup: { value: 'All' },
     setGroup: vi.fn(),
     playing: { value: {} as Record<string, unknown> },
+    itemsPerPage: { value: 8 },
+    setItemsPerPage: vi.fn(),
 }));
 
 vi.mock('../../composables/useBindings', () => ({
@@ -42,6 +44,8 @@ vi.mock('../../composables/useBindings', () => ({
         activePanelGroups: m.groups,
         activePanelSelectedGroup: m.selectedGroup,
         setActiveGroup: m.setGroup,
+        activePanelItemsPerPage: m.itemsPerPage,
+        setPanelItemsPerPage: m.setItemsPerPage,
         triggerActiveItem: m.trigger,
         hidePanel: m.hide,
         navigatePanel: m.nav,
@@ -122,9 +126,10 @@ describe('PresetPanel', () => {
         // 10 items / 8 per page = 2 pages → footer pager appears.
         m.items.value = Array.from({ length: 10 }, (_, i) => ({ id: `i${i}`, name: `Item ${i}` }));
         const w = mount(PresetPanel);
-        const pager = w.findAll('.panel-footer button');
-        expect(pager.length).toBeGreaterThanOrEqual(2);
-        await pager[pager.length - 1].trigger('click'); // next
+        const buttons = w.findAll('.panel-footer button');
+        const next = buttons.find(b => b.text().includes('chevron_right'));
+        expect(next).toBeTruthy();
+        await next!.trigger('click');
         expect(m.nav).toHaveBeenCalledWith('next_page');
     });
 });

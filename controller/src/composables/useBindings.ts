@@ -22,6 +22,7 @@ import { computed, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useLibrary } from './useLibrary';
 import { useConnection } from './useConnection';
+import { useDisplayPrefs } from './useDisplayPrefs';
 
 // ─── Input sources ───────────────────────────────────────────────────
 
@@ -375,6 +376,29 @@ const panelStateRef = ref<PanelState>({
 // a meaningless index-0 default. Session-scoped (not persisted).
 const lastSelectedByPanel = ref<Record<string, string>>({});
 
+// Runtime override for items-per-page, measured by the panel to fill the
+// visible grid (rows that fit at the current UI scale) instead of the
+// fixed panel default. null = use the panel's configured itemsPerPage.
+// Shared here so navigation + pagination math agree with what's rendered.
+const panelItemsPerPageRef = ref<number | null>(null);
+
+function effectiveItemsPerPage(panel: PresetPanel): number {
+    return panelItemsPerPageRef.value ?? panel.itemsPerPage;
+}
+
+// Called by the panel after measuring how many rows fit. Keeps the
+// highlighted item visible by recomputing its page under the new size.
+function setPanelItemsPerPage(count: number): void {
+    const n = Math.max(1, Math.floor(count));
+    if (panelItemsPerPageRef.value === n) return;
+    panelItemsPerPageRef.value = n;
+    const state = panelStateRef.value;
+    panelStateRef.value = {
+        ...state,
+        currentPage: Math.floor(state.selectedIndex / n),
+    };
+}
+
 let initialized = false;
 
 async function ensureInit(): Promise<void> {
@@ -451,7 +475,7 @@ function restoreSelection(panelId: string, group: string): { index: number; page
     if (group && group !== 'All') items = items.filter(it => (it.group ?? '') === group);
     const idx = items.findIndex(it => it.id === lastId);
     if (idx < 0) return { index: 0, page: 0 };
-    return { index: idx, page: Math.floor(idx / panel.itemsPerPage) };
+    return { index: idx, page: Math.floor(idx / effectiveItemsPerPage(panel)) };
 }
 
 function showPanel(panelId: string, defaultGroup?: string, keepOpen = false): void {
@@ -509,8 +533,8 @@ function navigatePanel(direction: NavigateDirection): void {
     if (!panel) return;
 
     const totalItems = panelItems(panel).length;
-    const columns = panel.columns;
-    const itemsPerPage = panel.itemsPerPage;
+    const columns = displayPrefs.prefsFor(panel.id).columns;
+    const itemsPerPage = effectiveItemsPerPage(panel);
     const totalPages = Math.ceil(totalItems / itemsPerPage);
 
     let { selectedIndex, currentPage } = state;
@@ -591,6 +615,7 @@ async function activatePreset(presetId: string): Promise<void> {
 // is opened, and panelItems can return stable computed refs.
 const library = useLibrary();
 const connection = useConnection();
+const displayPrefs = useDisplayPrefs();
 
 // Classify a panel's server backing. Honors the explicit `source`
 // field, and also falls back to the built-in panel id so profiles
@@ -775,8 +800,13 @@ export function useBindings() {
         activePanelTotalPages: computed(() => {
             const p = activePanel.value;
             if (!p) return 0;
-            return Math.max(1, Math.ceil(panelItems(p).length / p.itemsPerPage));
+            return Math.max(1, Math.ceil(panelItems(p).length / effectiveItemsPerPage(p)));
         }),
+        // Effective items-per-page for the active panel (measured to fill
+        // the grid). The panel uses this for slicing; setter below.
+        activePanelItemsPerPage: computed(() =>
+            activePanel.value ? effectiveItemsPerPage(activePanel.value) : 0),
+        setPanelItemsPerPage,
         setActiveGroup,
         // Groups available for a panel by id (for the bindings editor).
         groupsForPanel,
