@@ -61,6 +61,10 @@ class LoggingConfig:
 class ServerConfig:
     """Complete server configuration."""
     name: str = "SAINT-01"
+    # Active robot manifest id (config/robots/<id>.yaml). None → the
+    # RobotManager auto-selects the only/first manifest. Operators pick
+    # it in Settings → Robot when several manifests are present.
+    active_robot: Optional[str] = None
     websocket: WebSocketConfig = field(default_factory=WebSocketConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     ros_bridge: ROSBridgeConfig = field(default_factory=ROSBridgeConfig)
@@ -120,6 +124,7 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
         server_data = data.get('server', {})
         if server_data:
             config.name = server_data.get('name', config.name)
+            config.active_robot = server_data.get('active_robot') or None
 
         # WebSocket settings
         ws_data = data.get('websocket', {})
@@ -267,6 +272,10 @@ def save_config(config: Optional[ServerConfig] = None) -> bool:
     if config.network.websocket_port:
         data['network']['websocket_port'] = config.network.websocket_port
 
+    # Only persist active_robot when explicitly chosen; absent = auto.
+    if config.active_robot:
+        data['server']['active_robot'] = config.active_robot
+
     try:
         # Make sure the dir exists. /etc/saint-os should always be there
         # under a normal install (packaging/install.sh creates it) but
@@ -308,6 +317,7 @@ def config_to_dict(config: Optional[ServerConfig] = None) -> dict:
     return {
         'server': {
             'name': config.name,
+            'active_robot': config.active_robot,
         },
         'websocket': {
             'password': config.websocket.password,
@@ -351,6 +361,8 @@ def update_config_from_dict(data: dict) -> ServerConfig:
         server = data['server']
         if 'name' in server:
             _config.name = server['name']
+        if 'active_robot' in server:
+            _config.active_robot = server['active_robot'] or None
 
     # WebSocket settings
     if 'websocket' in data:

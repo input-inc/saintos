@@ -94,7 +94,6 @@ from saint_server.webserver.state_manager import (
     StateManager, HOST_CONTROLLER_NODE_ID)
 from saint_server.host_peripherals import HostPeripheralManager
 from saint_server.peripheral_logger import PeripheralLogger
-from saint_server.roles import RoleManager
 from saint_server.livelink import LiveLinkReceiver, LiveLinkRouter
 from saint_server.livelink.receiver import LiveLinkConfig
 from saint_server.livelink.router import LiveLinkRoute, OutputMapping, MappingType
@@ -274,9 +273,6 @@ class SaintServerNode(Node):
 
         # Web server components (set during start_async_services)
         self.web_server = None
-
-        # Role manager
-        self.role_manager = RoleManager(logger=self.get_logger())
 
         # LiveLink components
         self.livelink_receiver: Optional[LiveLinkReceiver] = None

@@ -23,12 +23,12 @@ def get_data_files():
         if config_files:
             data_files.append((f'share/{package_name}/config', config_files))
 
-        # Role definitions
-        roles_dir = os.path.join(config_dir, 'roles')
-        if os.path.isdir(roles_dir):
-            role_files = glob(os.path.join(roles_dir, '*.yaml'))
-            if role_files:
-                data_files.append((f'share/{package_name}/config/roles', role_files))
+        # Robot manifests (platform identity + node role names)
+        robots_dir = os.path.join(config_dir, 'robots')
+        if os.path.isdir(robots_dir):
+            robot_files = glob(os.path.join(robots_dir, '*.yaml'))
+            if robot_files:
+                data_files.append((f'share/{package_name}/config/robots', robot_files))
 
     # Vite build output — the production UI. Walk recursively to
     # preserve the assets/ subdir Vite emits. Built on the host (or

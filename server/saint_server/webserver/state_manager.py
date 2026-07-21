@@ -1294,7 +1294,7 @@ class StateManager:
             for node in self.state.unadopted_nodes.values()
         ]
 
-    def adopt_node(self, node_id: str, role: str,
+    def adopt_node(self, node_id: str, role: str = "",
                     display_name: Optional[str] = None,
                     board_id: Optional[str] = None,
                     chip_family: Optional[str] = None) -> Dict[str, Any]:
@@ -1313,8 +1313,11 @@ class StateManager:
             return {"success": False, "message": f"Node {node_id} not found"}
 
         node = self.state.unadopted_nodes.pop(node_id)
-        node.role = role
-        node.display_name = display_name or f"{role.title()} Node"
+        # role is now an optional human label chosen from the active
+        # robot manifest's role list; the node's display_name is its
+        # real identity. Fall back to a role-derived name, then node_id.
+        node.role = role or ""
+        node.display_name = display_name or (f"{role} Node" if role else node_id)
         node.online = True
 
         # Operator's explicit chip choice wins over the firmware-announced
@@ -3471,16 +3474,6 @@ class StateManager:
             return None
 
         return runtime_state.to_dict()
-
-    def get_node_by_role(self, role: str) -> Optional[NodeInfo]:
-        """Look up an adopted node by role tag (still used for adoption flow)."""
-        for node in self.state.adopted_nodes.values():
-            if node.role == role:
-                return node
-        return None
-
-    def get_nodes_by_role(self, role: str) -> List[NodeInfo]:
-        return [node for node in self.state.adopted_nodes.values() if node.role == role]
 
     # =========================================================================
     # Firmware Management Methods

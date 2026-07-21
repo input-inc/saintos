@@ -15,7 +15,8 @@ const ws = useWsStore()
 
 const chips = ref([])
 const boards = ref([])
-const roles = ref([])
+const robotRoles = ref([])
+const robotName = ref('')
 
 const chipFamily = ref('')
 const boardId = ref('')
@@ -46,16 +47,23 @@ async function loadBoards (preselect) {
     console.warn('list_boards failed:', e)
   }
 }
-async function loadRoles () {
+async function loadRobot () {
   try {
-    const r = await ws.management('get_roles')
-    roles.value = r?.roles || []
+    const r = await ws.management('get_robot')
+    robotRoles.value = r?.roles || []
+    robotName.value = r?.name || ''
   } catch (e) {
-    roles.value = ['head', 'arms', 'tracks', 'console'].map(name => ({ role: name, display_name: name }))
+    robotRoles.value = []
   }
 }
-
-const roleDescription = computed(() => roles.value.find(r => r.role === role.value)?.description || '')
+// If the node's current role isn't in the active robot's list (e.g. a
+// manifest change or a legacy slug), still show it as a selectable
+// option so editing other fields doesn't silently drop it.
+const roleOptions = computed(() => {
+  const opts = [...robotRoles.value]
+  if (role.value && !opts.includes(role.value)) opts.unshift(role.value)
+  return opts
+})
 
 // Cascade — board list re-loads on chip change, mirroring vanilla.
 let initialBoardId = null
@@ -70,7 +78,7 @@ onMounted(async () => {
   initialBoardId    = props.node.board_id     || ''
   role.value        = props.node.role         || ''
   displayName.value = props.node.display_name || ''
-  await Promise.all([loadChips(), loadRoles()])
+  await Promise.all([loadChips(), loadRobot()])
   await loadBoards(initialBoardId)
 })
 
@@ -110,12 +118,14 @@ async function refreshBuiltins () {
 
 async function submit () {
   error.value = ''
-  if (!role.value)       { error.value = 'Please select a role'; return }
+  if (!displayName.value.trim()) { error.value = 'Give the node a name'; return }
   if (!chipFamily.value) { error.value = 'Please select a chip'; return }
   if (!boardId.value)    { error.value = 'Please select a board'; return }
 
   const params = {
     node_id: props.node.node_id,
+    // role is an optional label; always send it (may be empty) so the
+    // operator can clear it, mirroring the display_name behavior.
     role: role.value,
     chip_family: chipFamily.value,
     board_id: boardId.value,
@@ -195,21 +205,21 @@ async function submit () {
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-fg mb-2">Role</label>
-        <select v-model="role" class="input-field w-full">
-          <option value="">-- Select Role --</option>
-          <option v-for="r in roles" :key="r.role" :value="r.role">
-            {{ r.display_name || r.role }}
-          </option>
-        </select>
-        <p v-if="roleDescription" class="text-xs text-fg-faint mt-1">{{ roleDescription }}</p>
+        <label class="block text-sm font-medium text-fg mb-2">Name</label>
+        <input v-model="displayName" type="text" class="input-field w-full" placeholder="e.g., Left Arm Controller" />
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-fg mb-2">
-          Display Name <span class="text-fg-faint">(optional)</span>
-        </label>
-        <input v-model="displayName" type="text" class="input-field w-full" placeholder="e.g., Left Arm Controller" />
+        <label class="block text-sm font-medium text-fg mb-2">Role <span class="text-fg-faint">(optional)</span></label>
+        <select v-model="role" class="input-field w-full">
+          <option value="">-- No role --</option>
+          <option v-for="r in roleOptions" :key="r" :value="r">{{ r }}</option>
+        </select>
+        <p class="text-xs text-fg-faint mt-1">
+          {{ robotRoles.length
+            ? `Node categories defined by ${robotName || 'the active robot'}.`
+            : 'No roles defined by the active robot.' }}
+        </p>
       </div>
     </div>
 

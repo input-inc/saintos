@@ -17,7 +17,7 @@ from typing import Dict, Set, Any, Optional, Callable, Awaitable
 from aiohttp import web, WSMsgType
 
 from saint_server.webserver.state_manager import StateManager
-from saint_server.roles import RoleManager
+from saint_server.robots import RobotManager
 
 # Type checking imports
 from typing import TYPE_CHECKING
@@ -151,8 +151,14 @@ class WebSocketHandler:
         # indicators when the last animation stops.
         self._had_active_animations = False
 
-        # Role manager for pin configuration
-        self.role_manager = RoleManager(logger=logger)
+        # Robot manifest manager — supplies the active platform's node
+        # role names (adoption dropdown) + identity (Settings display).
+        try:
+            from saint_server.config import get_config
+            _active = get_config().active_robot
+        except Exception:
+            _active = None
+        self.robot_manager = RobotManager(active_id=_active, logger=logger)
 
         # Callback for syncing config to nodes (set by server_node)
         self._sync_config_callback: Optional[Callable[[str, str], None]] = None
@@ -857,20 +863,24 @@ class WebSocketHandler:
 
         elif action == 'adopt_node':
             node_id = params.get('node_id')
-            role = params.get('role')
+            # role is an optional label chosen from the active robot
+            # manifest's role list; the node's display name is required-
+            # by-convention in the UI and is the node's real identity.
+            role = params.get('role') or ""
             display_name = params.get('display_name')
             board_id = params.get('board_id')   # new: operator picks board on adoption
             chip_family = params.get('chip_family') or None  # operator override
 
-            if not node_id or not role:
-                return {"status": "error", "message": "Missing node_id or role"}
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
 
             result = self.state_manager.adopt_node(
                 node_id, role, display_name, board_id, chip_family=chip_family)
             if result['success']:
                 board_note = f", board {result.get('board_id')}" if result.get('board_id') else ""
+                role_note = f' as {role}' if role else ''
                 await self.broadcast_activity(
-                    f'Node {node_id} adopted as {role}{board_note}', 'info'
+                    f'Node {node_id} adopted{role_note}{board_note}', 'info'
                 )
                 # Push an initial configure to the node so it transitions
                 # out of UNADOPTED into ACTIVE. Without this, adopt_node
@@ -1091,21 +1101,50 @@ class WebSocketHandler:
             self._roboclaw_debug_callback(node_id, payload)
             return {"status": "ok", "data": {"message": f"roboclaw_debug {op} dispatched"}}
 
-        # Pin Configuration Actions
-        elif action == 'get_roles':
-            roles = self.role_manager.get_roles_summary()
-            return {"status": "ok", "data": {"roles": roles}}
+        # Robot manifest actions
+        elif action == 'get_robot':
+            # Active platform identity + its node role names (adoption
+            # dropdown), plus the list of available manifests for the
+            # Settings selector. Sync the active id from config each call
+            # so a set_settings elsewhere is reflected.
+            try:
+                from saint_server.config import get_config
+                self.robot_manager.set_active(get_config().active_robot)
+            except Exception:
+                pass
+            active = self.robot_manager.get_active()
+            data = active.to_dict() if active else {
+                "id": None, "name": "", "description": "", "homepage": "", "roles": [],
+            }
+            data["available"] = [
+                {"id": m.id, "name": m.name}
+                for m in self.robot_manager.list_manifests()
+            ]
+            return {"status": "ok", "data": data}
 
-        elif action == 'get_role_definition':
-            role_name = params.get('role')
-            if not role_name:
-                return {"status": "error", "message": "Missing role parameter"}
+        elif action == 'set_active_robot':
+            robot_id = params.get('robot_id') or None
+            if robot_id and not self.robot_manager.get(robot_id):
+                return {"status": "error", "message": f"Unknown robot manifest: {robot_id}"}
+            try:
+                from saint_server.config import get_config, save_config
+                cfg = get_config()
+                cfg.active_robot = robot_id
+                save_config(cfg)
+            except Exception as e:
+                return {"status": "error", "message": f"Failed to persist active robot: {e}"}
+            self.robot_manager.set_active(robot_id)
+            active = self.robot_manager.get_active()
+            return {"status": "ok", "data": active.to_dict() if active else {}}
 
-            role_def = self.role_manager.get_role(role_name)
-            if not role_def:
-                return {"status": "error", "message": f"Unknown role: {role_name}"}
-
-            return {"status": "ok", "data": role_def.to_dict()}
+        elif action == 'reload_robots':
+            # Re-scan the robots directory (operator dropped in a new
+            # manifest without restarting the server).
+            self.robot_manager.reload()
+            active = self.robot_manager.get_active()
+            return {"status": "ok",
+                    "data": {"count": len(self.robot_manager.robots),
+                             "active": active.id if active else None}}
 
         elif action == 'get_node_capabilities':
             node_id = params.get('node_id')
@@ -2234,77 +2273,15 @@ class WebSocketHandler:
             return {"status": "error", "message": f"Unknown control action: {action}"}
 
     async def _handle_discovery(self, client: WebSocketClient, action: str, params: dict) -> dict:
+        """Discovery message handler.
+
+        Formerly served role/logical-function discovery
+        (get_roles/get_role/get_active_roles/get_controllable_functions),
+        all of which were unused by any client and depended on the
+        retired per-role YAML scaffolding. Robot identity + role names
+        now come from the `get_robot` management action.
         """
-        Handle discovery messages for roles and functions.
-
-        This allows the controller to discover available roles and their
-        logical functions without hardcoding node IDs or GPIO pins.
-        """
-        if action == 'get_roles':
-            # Return all available role definitions
-            roles = []
-            for role_def in self.role_manager.get_all_roles():
-                roles.append(role_def.to_dict())
-            return {"status": "ok", "data": {"roles": roles}}
-
-        elif action == 'get_role':
-            # Return a specific role definition
-            role_name = params.get('role')
-            if not role_name:
-                return {"status": "error", "message": "Missing role parameter"}
-
-            role_def = self.role_manager.get_role(role_name)
-            if not role_def:
-                return {"status": "error", "message": f"Role not found: {role_name}"}
-
-            return {"status": "ok", "data": role_def.to_dict()}
-
-        elif action == 'get_active_roles':
-            # Return roles that are currently assigned to adopted nodes
-            active_roles = []
-            for node in self.state_manager.state.adopted_nodes.values():
-                if node.role:
-                    role_def = self.role_manager.get_role(node.role)
-                    if role_def:
-                        active_roles.append({
-                            "role": node.role,
-                            "node_id": node.node_id,
-                            "display_name": node.display_name or node.node_id,
-                            "online": node.online,
-                            "definition": role_def.to_dict(),
-                        })
-            return {"status": "ok", "data": {"active_roles": active_roles}}
-
-        elif action == 'get_controllable_functions':
-            # Return functions that are currently configured on adopted nodes
-            # This is what the controller needs to know what it can actually control
-            controllable = []
-            for node in self.state_manager.state.adopted_nodes.values():
-                if not node.role or not node.pin_config:
-                    continue
-
-                node_functions = []
-                for gpio, config in node.pin_config.pins.items():
-                    if config.logical_name and config.mode in ('pwm', 'servo', 'digital_out'):
-                        node_functions.append({
-                            "function": config.logical_name,
-                            "mode": config.mode,
-                            "gpio": gpio,  # Include for debugging, controller doesn't need this
-                        })
-
-                if node_functions:
-                    controllable.append({
-                        "role": node.role,
-                        "node_id": node.node_id,
-                        "display_name": node.display_name or node.node_id,
-                        "online": node.online,
-                        "functions": node_functions,
-                    })
-
-            return {"status": "ok", "data": {"controllable": controllable}}
-
-        else:
-            return {"status": "error", "message": f"Unknown discovery action: {action}"}
+        return {"status": "error", "message": f"Unknown discovery action: {action}"}
 
     async def _handle_livelink(self, client: WebSocketClient, action: str, params: dict) -> dict:
         """Handle LiveLink management messages."""

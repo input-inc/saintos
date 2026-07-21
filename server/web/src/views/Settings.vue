@@ -119,7 +119,23 @@ onMounted(async () => {
   reloadBuilds()
   reloadBoards()
   loadWifi()
+  loadRobot()
 })
+
+// Active robot manifest (platform identity + node role names). Shown
+// read-only; the selector below switches the active manifest when more
+// than one is present in config/robots/.
+const robot = ref(null)
+async function loadRobot () {
+  try { robot.value = await ws.management('get_robot') || null }
+  catch (_) { robot.value = null }
+}
+async function setActiveRobot (id) {
+  try {
+    await ws.management('set_active_robot', { robot_id: id })
+    await loadRobot()
+  } catch (_) {}
+}
 
 async function reloadClients () {
   try { const r = await ws.management('list_clients'); clients.value = r?.clients || [] }
@@ -352,6 +368,45 @@ const tabs = [
           <button class="btn-primary" @click="saveConn">Save</button>
           <button class="btn-secondary" @click="reconnect">Reconnect</button>
           <span v-if="connMessage" class="text-xs text-fg-muted ml-2">{{ connMessage }}</span>
+        </div>
+      </div>
+
+      <!-- Robot manifest: platform identity + node role names. Read-only
+           metadata; the selector switches the active manifest when more
+           than one config/robots/*.yaml is present. -->
+      <div v-if="robot" class="card">
+        <h3 class="text-lg font-semibold text-fg-strong mb-4 flex items-center gap-2">
+          <span class="material-icons text-cyan-400">smart_toy</span>
+          Robot
+        </h3>
+        <div class="space-y-2">
+          <div>
+            <span class="text-sm font-medium text-fg-strong">{{ robot.name || '—' }}</span>
+            <span v-if="robot.id" class="text-xs text-fg-faint font-mono ml-2">{{ robot.id }}</span>
+          </div>
+          <p v-if="robot.description" class="text-sm text-fg-muted">{{ robot.description }}</p>
+          <a v-if="robot.homepage" :href="robot.homepage" target="_blank" rel="noopener"
+             class="text-sm text-cyan-300 hover:underline inline-flex items-center gap-1">
+            <span class="material-icons icon-sm">open_in_new</span>{{ robot.homepage }}
+          </a>
+          <div v-if="robot.roles && robot.roles.length" class="pt-1">
+            <div class="text-xs text-fg-faint mb-1">Node roles ({{ robot.roles.length }})</div>
+            <div class="flex flex-wrap gap-1.5">
+              <span v-for="r in robot.roles" :key="r"
+                    class="px-2 py-0.5 text-xs rounded-full bg-surface text-fg-muted">{{ r }}</span>
+            </div>
+          </div>
+          <div v-if="robot.available && robot.available.length > 1" class="pt-2">
+            <label class="block text-sm font-medium text-fg mb-1">Active robot</label>
+            <select class="input-field w-full max-w-xs"
+                    :value="robot.id || ''"
+                    @change="setActiveRobot($event.target.value)">
+              <option v-for="m in robot.available" :key="m.id" :value="m.id">{{ m.name }}</option>
+            </select>
+          </div>
+          <p class="text-xs text-fg-faint pt-1">
+            Defined in <span class="font-mono">config/robots/</span>. Drop in your own manifest to run SAINT.OS on a different robot.
+          </p>
         </div>
       </div>
 

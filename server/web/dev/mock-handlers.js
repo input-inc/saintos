@@ -99,7 +99,14 @@ export const managementHandlers = {
     st.boards.splice(idx, 1)
     return ok({ success: true })
   },
-  get_roles:           () => ok({ roles: st.roles }),
+  get_robot:           () => ok({
+    id: 'opensaint', name: 'OpenSAINT',
+    description: 'Open-source animatronic robot platform built on SAINT.OS.',
+    homepage: 'https://github.com/OpenSAINT/SaintOS',
+    roles: ['Cradle Base', 'Upper Torso', 'Neck', 'Head', 'Left Arm', 'Right Arm', 'Track Drive', 'Console'],
+    available: [{ id: 'opensaint', name: 'OpenSAINT' }],
+  }),
+  set_active_robot:    ({ robot_id }) => ok({ id: robot_id || 'opensaint', name: 'OpenSAINT' }),
 
   // Capabilities + per-node peripherals ────────────────────────────
   get_node_capabilities: ({ node_id }) => {

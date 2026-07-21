@@ -12,7 +12,8 @@ const emit = defineEmits(['close', 'adopted'])
 const ws = useWsStore()
 const chips = ref([])
 const boards = ref([])
-const roles = ref([])
+const robotRoles = ref([])   // role-name strings from the active robot manifest
+const robotName = ref('')
 
 const chipFamily = ref('')
 const boardId = ref('')
@@ -37,18 +38,19 @@ async function loadBoards () {
     else if (!boards.value.find(b => b.board_id === boardId.value)) boardId.value = ''
   } catch (e) { console.warn('list_boards failed:', e) }
 }
-async function loadRoles () {
+async function loadRobot () {
   try {
-    const r = await ws.management('get_roles')
-    roles.value = r?.roles || []
+    const r = await ws.management('get_robot')
+    robotRoles.value = r?.roles || []
+    robotName.value = r?.name || ''
   } catch (e) {
-    roles.value = ['head', 'arms', 'tracks', 'console'].map(name => ({ role: name, display_name: name }))
+    robotRoles.value = []
   }
 }
 
 watch(chipFamily, loadBoards)
 
-onMounted(() => { loadChips().then(loadBoards); loadRoles() })
+onMounted(() => { loadChips().then(loadBoards); loadRobot() })
 
 const chipHint = computed(() => {
   if (!props.announcedChip) return 'Firmware did not report a chip — please choose.'
@@ -58,15 +60,18 @@ const chipHint = computed(() => {
     : `Firmware reported '${props.announcedChip}' (not a known chip — please choose).`
 })
 
-const roleDescription = computed(() => roles.value.find(r => r.role === role.value)?.description || '')
-
 async function submit () {
   error.value = ''
-  if (!role.value)        { error.value = 'Pick a role'; return }
+  if (!displayName.value.trim()) { error.value = 'Give the node a name'; return }
   if (!chipFamily.value)  { error.value = 'Pick a chip'; return }
   if (!boardId.value)     { error.value = 'Pick a board'; return }
-  const params = { node_id: props.nodeId, role: role.value, chip_family: chipFamily.value, board_id: boardId.value }
-  if (displayName.value) params.display_name = displayName.value
+  const params = {
+    node_id: props.nodeId,
+    display_name: displayName.value.trim(),
+    chip_family: chipFamily.value,
+    board_id: boardId.value,
+  }
+  if (role.value) params.role = role.value   // role is an optional label
   try {
     const r = await ws.management('adopt_node', params)
     if (r?.success === false) { error.value = r.message || 'Adoption failed'; return }
@@ -112,19 +117,22 @@ async function submit () {
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-fg mb-1">Role</label>
-        <select v-model="role" class="input-field w-full">
-          <option value="">-- Select Role --</option>
-          <option v-for="r in roles" :key="r.role" :value="r.role">
-            {{ r.display_name || r.role }}
-          </option>
-        </select>
-        <p v-if="roleDescription" class="text-xs text-fg-faint mt-1">{{ roleDescription }}</p>
+        <label class="block text-sm font-medium text-fg mb-1">Name</label>
+        <input v-model="displayName" type="text" class="input-field w-full" placeholder="e.g., Left Arm Controller" />
+        <p class="text-xs text-fg-faint mt-1">This is how the node is identified everywhere in the app.</p>
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-fg mb-1">Display name (optional)</label>
-        <input v-model="displayName" type="text" class="input-field w-full" placeholder="e.g., Left Arm Controller" />
+        <label class="block text-sm font-medium text-fg mb-1">Role <span class="text-fg-faint">(optional)</span></label>
+        <select v-model="role" class="input-field w-full">
+          <option value="">-- No role --</option>
+          <option v-for="r in robotRoles" :key="r" :value="r">{{ r }}</option>
+        </select>
+        <p class="text-xs text-fg-faint mt-1">
+          {{ robotRoles.length
+            ? `Node categories defined by ${robotName || 'the active robot'}.`
+            : 'No roles defined by the active robot — leave blank.' }}
+        </p>
       </div>
     </div>
 

@@ -1,0 +1,39 @@
+# SAINT.OS Robot Definition — OpenSAINT
+#
+# A robot manifest describes ONE physical platform: its identity and the
+# set of node roles its builder expects to adopt. The server loads every
+# *.yaml in this directory; the active one is chosen by the
+# `active_robot` server setting (defaults to the only/first file).
+#
+# To run SAINT.OS on a different robot, drop your own manifest in this
+# folder (or in $SAINT_CONFIG_DIR/robots on an installed system) and
+# select it in Settings → Robot. Nothing else is platform-specific.
+#
+# Fields:
+#   id          stable slug (filename-independent); referenced by the
+#               active_robot setting.
+#   name        display name of the platform.
+#   description one-line summary shown in Settings.
+#   homepage    project URL (rendered as a link in Settings).
+#   roles       node role names offered in the adoption dropdown. Free
+#               text — a role is just a human label categorizing a node
+#               (the node's own display name is its instance identity).
+
+id: opensaint
+name: OpenSAINT
+description: Replica of the robot from 'Short Circuit'.
+homepage: https://github.com/input-inc/opensaint
+
+roles:
+  - Head
+  - Upper Torso
+  - Left Arm
+  - Right Arm
+  - Accessory
+  - Tool Arm
+  - Middle Torso
+  - Lower Torso
+  - Console
+  - Cradle Base
+  - Track Drive
+
