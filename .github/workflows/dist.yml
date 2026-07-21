@@ -52,23 +52,44 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            cmake ninja-build build-essential \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
-            python3 git
+          # Only the small host tools. The heavy ARM toolchain (gcc-arm-none-eabi
+          # + newlib + libstdc++, ~450 MB every run and prone to stalling on the
+          # Azure apt mirror) is now provided by the cached, pinned
+          # arm-none-eabi-gcc action below. ccache speeds the recompile.
+          sudo apt-get install -y cmake build-essential python3 git ccache
+
+      - name: Install ARM toolchain (pinned + cached)
+        # Same GCC as the old apt package (10.3-2021.07), but fetched once and
+        # cached by the action — no 450 MB apt download, no mirror stalls, and
+        # the version is pinned instead of whatever apt happens to serve.
+        uses: carlosperate/arm-none-eabi-gcc-action@v1.13.0
+        with:
+          release: '10.3-2021.07'
 
       - name: Cache Pico SDK
         id: pico-sdk-cache
         uses: actions/cache@v5
         with:
           path: ~/pico-sdk
-          key: pico-sdk-2.1.0
+          # 2.2.0 to match CMakeLists.txt's PICO_SDK_FETCH_VERSION (the CI
+          # clone used to be 2.1.0 — an inconsistency, since PICO_SDK_PATH
+          # made the build silently use the CI copy).
+          key: pico-sdk-2.2.0
 
       - name: Clone Pico SDK
         if: steps.pico-sdk-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch 2.1.0 https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
+          git clone --depth 1 --branch 2.2.0 https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
           git -C ~/pico-sdk submodule update --init --recursive --depth 1
+
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          # Roll the object cache forward each commit, restoring the newest
+          # prior cache as the base (exact-key misses fall back to the prefix).
+          key: ccache-rp2040-${{ github.sha }}
+          restore-keys: ccache-rp2040-
 
       - name: Build firmware (hardware)
         env:
