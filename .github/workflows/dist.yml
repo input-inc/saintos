@@ -115,7 +115,12 @@ jobs:
           if [[ ! -x "$HOME/.platformio/penv/bin/pio" ]]; then
             mkdir -p "$HOME/.platformio"
             python3 -m venv "$HOME/.platformio/penv"
-            "$HOME/.platformio/penv/bin/pip" install --upgrade pip platformio
+            "$HOME/.platformio/penv/bin/pip" install --upgrade pip
+            # Pin PlatformIO so a cold cache can't pull a newer core that
+            # resolves `platform = teensy` to a drifted GCC toolchain and
+            # breaks the micro-ROS build. Bump deliberately with the
+            # platform pin in firmware/teensy41/platformio.ini.
+            "$HOME/.platformio/penv/bin/pip" install 'platformio==6.1.16'
           fi
           echo "$HOME/.platformio/penv/bin" >> "$GITHUB_PATH"
 

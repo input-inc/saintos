@@ -60,4 +60,27 @@ def _patch_library_builder():
     print("patch_microros: applied rmw_test_fixture skip to {}".format(target))
 
 
+def _soften_toolchain_flags():
+    """Belt-and-suspenders for compiler drift.
+
+    micro-ROS bundles POSIX sources (e.g. rcutils/time_unix.c) that call
+    `clock_gettime` under an implicit declaration. GCC < 14 treated that
+    as a warning and linked against the symbol micro-ROS provides; GCC 14+
+    makes implicit-function-declaration a hard *error* and the build dies.
+    The platform pin (teensy@5.0.0 → GCC 11.3) is the primary fix; this
+    demotes the error back to a warning via CFLAGS/CXXFLAGS so a future
+    toolchain bump can't silently reintroduce the break. CMake seeds
+    CMAKE_C[XX]_FLAGS from these env vars, and colcon inherits our env, so
+    the flag reaches the micro-ROS sub-build without editing its scripts.
+    Harmless on GCC 11 (the option has existed since long before)."""
+    soften = "-Wno-error=implicit-function-declaration"
+    for var in ("CFLAGS", "CXXFLAGS"):
+        cur = os.environ.get(var, "")
+        if soften in cur:
+            continue
+        os.environ[var] = (cur + " " + soften).strip()
+    print("patch_microros: softened implicit-function-declaration in C/CXX flags")
+
+
 _patch_library_builder()
+_soften_toolchain_flags()
