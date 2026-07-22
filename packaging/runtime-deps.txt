@@ -1,0 +1,72 @@
+# SAINT.OS server runtime apt dependencies — SINGLE SOURCE OF TRUTH.
+#
+# Consumed by all three of:
+#   - packaging/install.sh          installs these on the target
+#   - scripts/build-local-dist.sh   bundles them into a local dist
+#   - .github/workflows/dist.yml    bundles them into the CI release
+#
+# One package per line. Blank lines and `#`-comment lines are ignored by
+# the parsers (grep -vE '^[[:space:]]*#|^[[:space:]]*$'); do NOT put a
+# trailing comment after a package name. Declaring the set here — and ONLY
+# here — is what stops the three consumers from drifting, which once
+# shipped a release missing the whole audio stack (229 MB vs ~600 MB).
+#
+# Names must resolve on Debian Bookworm (the target + the bundling
+# container) and, where install.sh runs on Ubuntu noble, there too.
+
+# Core C / Python libraries the ROS 2 + server runtime link or import.
+libssl3
+libtinyxml2-9
+libyaml-0-2
+libxml2
+libacl1
+libcurl4
+python3
+python3-yaml
+python3-numpy
+python3-aiohttp
+python3-websockets
+python3-psutil
+
+# ROS 2 Python runtime deps that ros2cli / ros2launch / rclpy import eagerly.
+python3-packaging
+python3-lark
+python3-empy
+python3-catkin-pkg
+python3-importlib-metadata
+python3-argcomplete
+
+# bleak: BLE client for host_controller's in-process BMS driver. Imports
+# lazily, so a host without it still starts (the BLE path just goes dark).
+python3-bleak
+
+# Audio: host_controller soundboard (VLC -> ALSA) + system volume.
+# vlc-bin / python3-vlc = the player; alsa-utils = `aplay -l` device
+# enumeration; python3-alsaaudio = the audio_mixer binding. All import lazily.
+vlc-bin
+python3-vlc
+alsa-utils
+python3-alsaaudio
+
+# mDNS so clients reach opensaint.local without knowing the assigned IP.
+avahi-daemon
+libnss-mdns
+
+# DHCP + DNS server for the internal node network (eth0).
+dnsmasq
+
+# zstd: dist tarballs ship as .tar.zst; apply-update.sh needs zstd to unpack.
+zstd
+
+# WiFi access-point support. Bundled so an air-gapped install can bring up
+# the AP offline. NetworkManager is already present on Pi OS (a no-op there);
+# wireless-regdb + rfkill + iw let the Pi enter AP mode.
+network-manager
+wireless-regdb
+rfkill
+iw
+
+# Python 3.11: the bundled ROS 2 was built against libpython3.11. Default on
+# Bookworm; on Ubuntu noble apt pulls it from universe alongside.
+libpython3.11
+python3.11

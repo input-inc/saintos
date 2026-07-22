@@ -435,52 +435,15 @@ fi
 
 DEB_CACHE_DIR="${CACHE_ROOT}/debs-${DEBIAN_RELEASE}-${ARCH}"
 
-# The runtime deb list lives here as a heredoc so we can both (a) feed it
-# to the container and (b) hash it to detect when it's changed. If you
-# edit this list, the cache invalidates automatically on next run — no
-# need for callers to remember --rebundle-debs.
-#
-# BARE PACKAGE NAMES ONLY — the list is expanded UNQUOTED into
-# `apt-get install ... ${RUNTIME_DEB_LIST}`, so a `#` line is not a
-# comment; it becomes an apt argument and breaks the bundle.
-# The vlc-bin / python3-vlc / alsa-utils / python3-alsaaudio tail lets the
-# host_controller play soundboard clips + drive system volume in-process
-# (saint_server/host_peripherals/{soundboard,audio}.py).
-read -r -d '' RUNTIME_DEB_LIST <<'DEB_LIST' || true
-libssl3
-libtinyxml2-9
-libyaml-0-2
-libxml2
-libacl1
-libcurl4
-python3
-python3-yaml
-python3-numpy
-python3-aiohttp
-python3-websockets
-python3-psutil
-python3-packaging
-python3-lark
-python3-empy
-python3-catkin-pkg
-python3-importlib-metadata
-python3-argcomplete
-python3-bleak
-libpython3.11
-python3.11
-network-manager
-wireless-regdb
-rfkill
-iw
-avahi-daemon
-libnss-mdns
-dnsmasq
-zstd
-vlc-bin
-python3-vlc
-alsa-utils
-python3-alsaaudio
-DEB_LIST
+# The runtime deb list is the single source of truth in
+# packaging/runtime-deps.txt (shared with packaging/install.sh and
+# .github/workflows/dist.yml so the three can't drift). Strip comment /
+# blank lines into a space-separated list; it's expanded UNQUOTED into
+# `apt-get install ... ${RUNTIME_DEB_LIST}` in the container below, and
+# hashed so the cache invalidates automatically when the file changes.
+RUNTIME_DEPS_FILE="${REPO_ROOT}/packaging/runtime-deps.txt"
+[[ -f "$RUNTIME_DEPS_FILE" ]] || die "runtime-deps.txt not found at $RUNTIME_DEPS_FILE"
+RUNTIME_DEB_LIST=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$RUNTIME_DEPS_FILE" | tr '\n' ' ')
 
 DEB_LIST_HASH=$(printf '%s' "$RUNTIME_DEB_LIST" | shasum -a 256 | awk '{print $1}' | cut -c1-12)
 CACHE_SENTINEL="$DEB_CACHE_DIR/.deb-list.sha256"

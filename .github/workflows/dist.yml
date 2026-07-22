@@ -401,27 +401,27 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p _debs
+          # Single source of truth: packaging/runtime-deps.txt (shared with
+          # packaging/install.sh and scripts/build-local-dist.sh, so the
+          # bundled set can't drift from the installed set — which once
+          # dropped the audio stack: a 229 MB release vs the ~600 MB local
+          # build). Strip comment / blank lines and hand the set to the
+          # container via -e; the quoted heredoc keeps the runner shell from
+          # expanding $DEB_LIST, so the container's bash expands it at runtime.
+          DEB_LIST="$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' packaging/runtime-deps.txt | tr '\n' ' ')"
+          echo "Bundling: ${DEB_LIST}"
           docker run --rm -i --platform linux/arm64 \
             -v "${PWD}/_debs:/debs" \
+            -e DEB_LIST="${DEB_LIST}" \
             "debian:${DEBIAN_RELEASE}-slim" \
             bash -eo pipefail <<'CONTAINER_EOF'
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
 
-          # --reinstall forces re-download even when slim image happens to
+          # --reinstall forces re-download even when the slim image happens to
           # have a package already installed — so the bundled cache is
           # self-contained for any target Pi state.
-          apt-get install -y --download-only --reinstall \
-              libssl3 libtinyxml2-9 libyaml-0-2 libxml2 libacl1 libcurl4 \
-              python3 python3-yaml python3-numpy \
-              python3-aiohttp python3-websockets python3-psutil \
-              python3-packaging python3-lark python3-empy \
-              python3-catkin-pkg python3-importlib-metadata \
-              python3-argcomplete \
-              libpython3.11 python3.11 \
-              network-manager wireless-regdb rfkill iw \
-              avahi-daemon libnss-mdns \
-              dnsmasq
+          apt-get install -y --download-only --reinstall $DEB_LIST
 
           cp /var/cache/apt/archives/*.deb /debs/
 

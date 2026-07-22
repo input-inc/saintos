@@ -74,6 +74,9 @@ fi
 # Installer + systemd unit template + privilege wrapper.
 cp packaging/install.sh "${PKG_DIR}/install.sh"
 chmod +x "${PKG_DIR}/install.sh"
+# Runtime apt dependency list (single source of truth) — install.sh reads
+# it from alongside itself to know what to install on the target.
+cp packaging/runtime-deps.txt "${PKG_DIR}/runtime-deps.txt"
 if [[ -f packaging/apply-update.sh ]]; then
     cp packaging/apply-update.sh "${PKG_DIR}/apply-update.sh"
     chmod +x "${PKG_DIR}/apply-update.sh"

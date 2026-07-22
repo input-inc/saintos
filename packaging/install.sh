@@ -119,69 +119,20 @@ log "Installing SAINT.OS ${VERSION} (${ARCH}, ros-${ROS_DISTRO}) on ${OS_PRETTY}
 
 # --- Runtime apt dependencies -----------------------------------------------
 
-# Common deps that exist with the same name on both Debian Bookworm and
-# Ubuntu noble.
-COMMON_DEPS=(
-    libssl3
-    libtinyxml2-9
-    libyaml-0-2
-    libxml2
-    libacl1
-    libcurl4
-    python3
-    python3-yaml
-    python3-numpy
-    python3-aiohttp
-    python3-websockets
-    python3-psutil
-    # ROS2 Python runtime deps that ros2cli / ros2launch / rclpy import
-    # eagerly. Names match on both Debian Bookworm and Ubuntu noble.
-    python3-packaging
-    python3-lark
-    python3-empy
-    python3-catkin-pkg
-    python3-importlib-metadata
-    python3-argcomplete
-    # bleak: BLE client used by host_controller's in-process BMS
-    # driver (saint_server/host_peripherals). Bookworm ships 0.20;
-    # setup.py's floor is set to match. If the apt package is
-    # missing (Ubuntu noble, minimal distros), the driver still
-    # imports lazily and just logs "bleak not installed" — the
-    # rest of the server keeps running.
-    python3-bleak
-    # Audio: host_controller plays soundboard clips + drives system
-    # volume in-process (saint_server/host_peripherals/{soundboard,audio}.py).
-    # vlc-bin/python3-vlc = the VLC→ALSA player; alsa-utils = `aplay -l`
-    # device enumeration; python3-alsaaudio = the audio_mixer binding.
-    # All import lazily, so a host without them still starts — the audio
-    # path is just dark. (Also needs the `audio` group — added below.)
-    vlc-bin
-    python3-vlc
-    alsa-utils
-    python3-alsaaudio
-    # mDNS — so clients on the SAINT-OS AP can reach opensaint.local
-    # without knowing the assigned IP. libnss-mdns lets the Pi itself
-    # resolve .local hostnames (useful for any local tooling).
-    avahi-daemon
-    libnss-mdns
-    # DHCP + DNS server for the internal node network (eth0). Microcontroller
-    # nodes get IPs handed out from the configured range and can resolve
-    # the server's hostname even without mDNS.
-    dnsmasq
-    # zstd: distribution tarballs since 2026-05 ship as .tar.zst (the
-    # build step compresses ~3× faster than gzip and the archives are
-    # slightly smaller). apply-update.sh uses `tar -xaf` which calls
-    # zstd via the system path; without this package an OTA update of
-    # a zstd-compressed tarball would fail with "Cannot exec zstd".
-    # Pi OS Bookworm bundles it with dpkg already, but Ubuntu noble
-    # and minimal Debian images don't — listing it here closes the gap.
-    zstd
-)
-
-# Python 3.11 specifically: the bundled ROS2 was built against libpython3.11.
-# Bookworm has it as the default; Ubuntu noble (default 3.12) ships it in
-# universe and apt installs it alongside.
-PY311_DEPS=(libpython3.11 python3.11)
+# Single source of truth: packaging/runtime-deps.txt (shipped in the dist
+# next to this script; see it for per-package rationale). The same file
+# feeds scripts/build-local-dist.sh and .github/workflows/dist.yml so the
+# installed set can't drift from the bundled set. Strip comment / blank
+# lines into an array. This list INCLUDES the WiFi-AP packages
+# (network-manager, wireless-regdb, rfkill, iw) — the wifi setup below no
+# longer installs them separately; it just configures them.
+RUNTIME_DEPS=()
+_deps_file="${PAYLOAD_DIR}/runtime-deps.txt"
+[[ -f "${_deps_file}" ]] || die "runtime-deps.txt not found next to install.sh (${_deps_file})"
+while IFS= read -r _pkg; do
+    RUNTIME_DEPS+=("${_pkg}")
+done < <(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "${_deps_file}")
+[[ ${#RUNTIME_DEPS[@]} -gt 0 ]] || die "runtime-deps.txt parsed to an empty package list"
 
 # --- Local apt repo from bundled .debs (offline support) --------------------
 #
@@ -269,7 +220,7 @@ else
         run apt-get update
     fi
 fi
-run apt-get install -y "${INSTALL_OPTS[@]}" "${COMMON_DEPS[@]}" "${PY311_DEPS[@]}"
+run apt-get install -y "${INSTALL_OPTS[@]}" "${RUNTIME_DEPS[@]}"
 
 # --- Extract bundled ROS2 ---------------------------------------------------
 
@@ -613,18 +564,10 @@ setup_wifi_ap() {
     fi
     log "Configuring WiFi AP on ${wlan} (SSID=${WIFI_SSID})"
 
-    # Install NetworkManager + the regulatory DB (Pi WiFi refuses AP mode
-    # without a recognized country) + rfkill (Pi often soft-blocks WiFi by
-    # default until rfkill unblock is run).
-    local nm_pkgs=(network-manager wireless-regdb rfkill iw)
-    local need_install=0
-    for pkg in "${nm_pkgs[@]}"; do
-        dpkg -s "$pkg" >/dev/null 2>&1 || need_install=1
-    done
-    if (( need_install )); then
-        log "Installing NetworkManager + WiFi support packages"
-        run apt-get install -y "${nm_pkgs[@]}"
-    fi
+    # NetworkManager + regulatory DB (Pi WiFi refuses AP mode without a
+    # recognized country) + rfkill (Pi often soft-blocks WiFi until
+    # unblocked) are installed by the main runtime-deps step above (they're
+    # in runtime-deps.txt), so here we only need to enable + configure.
     run systemctl enable --now NetworkManager
 
     # Pi WiFi is frequently soft-blocked until explicitly unblocked.
