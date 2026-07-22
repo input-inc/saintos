@@ -164,14 +164,87 @@ jobs:
   # ---------------------------------------------------------------------------
   firmware-raspberrypi:
     needs: meta
-    runs-on: ubuntu-22.04
+    # Native arm64 runner. package.sh --multi-target invokes bundle-debs.sh,
+    # which apt-downloads arm64 debs inside a debian:<release> container. On
+    # the amd64 runner that container died with "exec format error" (no
+    # qemu), so the offline deb cache never built and the Pi bundle shipped
+    # bare (339 KB). arm64 runs it natively.
+    runs-on: ubuntu-22.04-arm
+    # ROS pins — KEEP IN SYNC with the package-server matrix and
+    # .github/workflows/ros2-build.yml. The hash computed below must match
+    # the tag ros2-build published, or `gh release download` finds nothing.
+    env:
+      ROS_DISTRO: kilted
+      ARCH: arm64
+      ROS2_REPOS_REF: release-kilted-20250728
+      MICRO_ROS_REF: 6.0.1
     steps:
       - uses: actions/checkout@v5
 
-      - name: Package Pi 5 node firmware
+      # Recompute the content hash ros2-build tagged its releases with
+      # (identical logic to package-server's "Resolve ROS2 release tag").
+      # Bookworm keeps the bare tag; trixie carries a -trixie segment.
+      - name: Resolve ROS2 release tags
+        id: ros2
+        run: |
+          set -eo pipefail
+          mkdir -p _ros2_src
+          curl -fsSL \
+            "https://raw.githubusercontent.com/ros2/ros2/${ROS2_REPOS_REF}/ros2.repos" \
+            -o _ros2_src/ros2.repos
+          MICRO_SHA=$(git ls-remote https://github.com/micro-ROS/micro_ros_setup.git \
+            "refs/tags/${MICRO_ROS_REF}" "refs/heads/${MICRO_ROS_REF}" "${MICRO_ROS_REF}" \
+            | head -n1 | awk '{print $1}')
+          [[ -n "${MICRO_SHA}" ]] || { echo "::error::Could not resolve MICRO_ROS_REF='${MICRO_ROS_REF}'"; exit 1; }
+          echo "micro_ros_setup_sha=${MICRO_SHA}" > _ros2_src/micro_ros.txt
+          HASH=$(cat _ros2_src/ros2.repos _ros2_src/micro_ros.txt \
+                     scripts/build-ros2-in-container.sh | sha256sum | cut -c1-12)
+          echo "bookworm_tag=ros2-${ROS_DISTRO}-${ARCH}-${HASH}" >> "$GITHUB_OUTPUT"
+          echo "trixie_tag=ros2-${ROS_DISTRO}-${ARCH}-trixie-${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Resolved: bookworm=ros2-${ROS_DISTRO}-${ARCH}-${HASH}  trixie=ros2-${ROS_DISTRO}-${ARCH}-trixie-${HASH}"
+
+      # Bookworm tree is required — it's the current Pi 5 fleet. package.sh
+      # resolves it at _ros2_bookworm/opt/ros/<distro>/install.
+      - name: Download bookworm ROS2 tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+          mkdir -p "_ros2_bookworm/opt/ros/${ROS_DISTRO}"
+          gh release download "${{ steps.ros2.outputs.bookworm_tag }}" \
+            --pattern 'ros2-install.tar.gz' --output ros2-bookworm.tar.gz
+          tar -xzf ros2-bookworm.tar.gz -C "_ros2_bookworm/opt/ros/${ROS_DISTRO}"
+          test -f "_ros2_bookworm/opt/ros/${ROS_DISTRO}/install/setup.bash"
+
+      # Trixie tree is BEST-EFFORT: until the trixie ros2-build release is
+      # published, this warns and the bundle is bookworm-only. package.sh
+      # --multi-target bundles whatever trees are present, so this job is
+      # safe to run before trixie exists and auto-upgrades once it does.
+      - name: Download trixie ROS2 tree (best-effort)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+          if gh release view "${{ steps.ros2.outputs.trixie_tag }}" >/dev/null 2>&1; then
+            mkdir -p "_ros2_trixie/opt/ros/${ROS_DISTRO}"
+            gh release download "${{ steps.ros2.outputs.trixie_tag }}" \
+              --pattern 'ros2-install.tar.gz' --output ros2-trixie.tar.gz
+            tar -xzf ros2-trixie.tar.gz -C "_ros2_trixie/opt/ros/${ROS_DISTRO}"
+            test -f "_ros2_trixie/opt/ros/${ROS_DISTRO}/install/setup.bash"
+            echo "Bundled trixie ROS2 tree."
+          else
+            echo "::warning::No trixie ROS2 release (${{ steps.ros2.outputs.trixie_tag }}) published yet — bundling bookworm only. Run the ros2-build workflow to publish it."
+          fi
+
+      # --multi-target bundles each present release's ROS2 tree + a matching
+      # offline deb cache (auto-built via bundle-debs.sh) under
+      # ros2_install/<rel>/ and deps/<rel>/. No version arg on purpose —
+      # package.sh falls back to the Pi firmware's own __version__ so the
+      # UI's "update available" check compares against what the Pi announces.
+      - name: Package Pi node firmware (multi-target, offline)
         run: |
           cd firmware/raspberrypi/scripts
-          ./package.sh "${{ needs.meta.outputs.version }}"
+          ./package.sh --multi-target
 
       - uses: actions/upload-artifact@v6
         with:

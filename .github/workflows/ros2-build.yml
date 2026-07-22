@@ -38,6 +38,15 @@ jobs:
   build:
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 180
+    strategy:
+      # Build one ROS 2 tree per target Debian release. bookworm matches the
+      # current Pi 5 fleet + the server dist; trixie is for Pi nodes on
+      # Debian 13. Each publishes a distinct release (see the tag logic
+      # below). fail-fast: false so a trixie build hiccup doesn't kill the
+      # (independent) bookworm build.
+      fail-fast: false
+      matrix:
+        debian_release: [bookworm, trixie]
     env:
       ROS_DISTRO: ${{ github.event.inputs.ros_distro || 'kilted' }}
 
@@ -64,7 +73,7 @@ jobs:
       MICRO_ROS_REF: 6.0.1
 
       ARCH: arm64
-      DEBIAN_RELEASE: bookworm
+      DEBIAN_RELEASE: ${{ matrix.debian_release }}
 
     steps:
       - uses: actions/checkout@v5
@@ -108,7 +117,17 @@ jobs:
           # binary output have changed.
           BUILD_SCRIPT="${GITHUB_WORKSPACE}/scripts/build-ros2-in-container.sh"
           HASH=$(cat ros2.repos micro_ros.txt "${BUILD_SCRIPT}" | sha256sum | cut -c1-12)
-          TAG="ros2-${ROS_DISTRO}-${ARCH}-${HASH}"
+          # Backward-compatible tag: bookworm keeps the original
+          # `ros2-<distro>-<arch>-<hash>` (so existing releases + every
+          # consumer that resolves it keep working unchanged); other Debian
+          # releases add a `-<release>` segment. The hash is the same across
+          # releases (same sources/script) — the release segment is what
+          # disambiguates the two trees.
+          if [[ "${DEBIAN_RELEASE}" == "bookworm" ]]; then
+            TAG="ros2-${ROS_DISTRO}-${ARCH}-${HASH}"
+          else
+            TAG="ros2-${ROS_DISTRO}-${ARCH}-${DEBIAN_RELEASE}-${HASH}"
+          fi
 
           echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}"   >> "$GITHUB_OUTPUT"

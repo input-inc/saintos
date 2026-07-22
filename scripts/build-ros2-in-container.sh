@@ -34,6 +34,7 @@ docker run --rm -i --platform linux/arm64 \
     -w /work \
     -e ROS_DISTRO \
     -e MICRO_ROS_REF \
+    -e DEBIAN_RELEASE \
     "debian:${DEBIAN_RELEASE}" \
     bash -eo pipefail <<'CONTAINER_EOF'
 
