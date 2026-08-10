@@ -441,7 +441,7 @@ const sheetCounts = computed(() => {
               </template>
             </p>
           </div>
-          <div class="flex gap-2 items-center">
+          <div class="flex gap-2 items-center flex-wrap justify-end">
             <button class="btn-secondary" :disabled="!activeSheetId" @click="openAddInput">
               <span class="material-icons icon-sm">login</span>
               Input

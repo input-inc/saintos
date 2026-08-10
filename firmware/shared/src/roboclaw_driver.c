@@ -57,6 +57,36 @@
 #define ROBOCLAW_REPROBE_INTERVAL_MS 2000
 #define ROBOCLAW_DUTY_KEEPALIVE_MS  400
 
+/* Dead-man: if a unit is running (duty != 0) and no fresh setpoint has
+ * arrived within this window, zero the motor. The server re-asserts a
+ * held stick's unchanged motor value every ~500 ms (evaluator
+ * _MOTOR_REASSERT_MS + controller heartbeat), so 1250 ms tolerates one
+ * lost re-assert on the BEST_EFFORT /control stream before stopping.
+ * Without this, the duty keepalive below re-fed the RoboClaw's own
+ * serial watchdog forever and a lost release-zero meant indefinite
+ * run-on. */
+#define ROBOCLAW_DEADMAN_MS         1250
+
+/* Status-poll (cmd 90) failure backoff: after this many consecutive
+ * failed cycles, pause the poll per-unit. An unresponsive unit
+ * otherwise burns up to 2 blocking response timeouts (length
+ * auto-detect) every round-robin cycle on the same UART the duty
+ * writes use. */
+#define ROBOCLAW_STATUS_FAIL_LIMIT   3
+#define ROBOCLAW_STATUS_BACKOFF_MS   10000
+
+/* Fire-and-forget duty ACK collection: how many un-drained duty ACKs
+ * may be outstanding (each duty write queues one 0xFF from the unit),
+ * and how long before outstanding ones are written off as timeouts.
+ * The RoboClaw's serial watchdog feeds on INCOMING bytes, so the
+ * write itself is what keeps the motor alive — the ACK is only a
+ * connection-health observation and must never block the control
+ * path (it used to busy-wait ROBOCLAW_RESPONSE_TIMEOUT_MS inside the
+ * executor callback: 50 ms per control message on a struggling
+ * unit). */
+#define ROBOCLAW_PENDING_ACK_MAX     8
+#define ROBOCLAW_PENDING_ACK_TIMEOUT_MS ROBOCLAW_RESPONSE_TIMEOUT_MS
+
 static uint8_t roboclaw_tx_pin = ROBOCLAW_DEFAULT_TX_PIN;
 static uint8_t roboclaw_rx_pin = ROBOCLAW_DEFAULT_RX_PIN;
 
@@ -95,6 +125,14 @@ typedef struct {
     bool     status_valid;
     uint8_t  status_len;
     char     peripheral_id[32];
+    /* Dead-man bookkeeping: wallclock of the last EXTERNAL setpoint
+     * (roboclaw_set_duty — control message, estop, or dead-man's own
+     * zero). The keepalive deliberately does not stamp this: it is
+     * the thing the dead-man exists to bound. */
+    uint32_t last_setpoint_ms;
+    /* Status-poll failure backoff (see ROBOCLAW_STATUS_FAIL_LIMIT). */
+    uint8_t  status_fail_streak;
+    uint32_t status_backoff_until_ms;
 } roboclaw_unit_t;
 
 /* ── Driver State ───────────────────────────────────────────────── */
@@ -128,6 +166,16 @@ static uint32_t wire_resp_crc_bad = 0;
 static uint8_t  wire_ack_last     = 0;
 static uint32_t wire_stats_last_dump_ms = 0;
 #define WIRE_STATS_DUMP_MS  5000
+
+/* Fire-and-forget duty ACK state (see ROBOCLAW_PENDING_ACK_MAX).
+ * Acks are bare 0xFF bytes and not unit-attributable once several are
+ * in flight; last_duty_unit is the best-effort attribution for
+ * connection tracking (duty writes are >=20 ms apart per channel while
+ * acks return in ~1-2 ms, so it's almost always right — and
+ * mark_unit_response smooths occasional misattribution anyway). */
+static uint8_t  pending_duty_acks = 0;
+static uint8_t  last_duty_unit = 0;
+static uint32_t last_duty_wire_send_ms = 0;
 
 static const roboclaw_transport_ops_t* transport(void)
 {
@@ -294,26 +342,9 @@ static bool read_response(uint8_t* buffer, uint8_t expected_len,
     return false;
 }
 
-static bool read_ack(void)
-{
-    if (!wire_ready()) return false;
-
-    uint32_t start = PLATFORM_MILLIS();
-    while (!wire_has_byte()) {
-        if (PLATFORM_MILLIS() - start > ROBOCLAW_RESPONSE_TIMEOUT_MS) {
-            wire_ack_timeout++;
-            return false;
-        }
-    }
-    uint8_t got = wire_getc();
-    if (got == ROBOCLAW_ACK_BYTE) {
-        wire_ack_ok++;
-        return true;
-    }
-    wire_ack_wrong++;
-    wire_ack_last = got;
-    return false;
-}
+/* NOTE: the old blocking read_ack() was removed with the 2026-08
+ * deadstick fix — duty ACKs are now collected asynchronously by
+ * drain_duty_acks() (fire-and-forget writes; see roboclaw_set_duty). */
 
 /* ── Standalone GETTEMP diagnostic ──────────────────────────────── */
 /* See the rationale in firmware/rp2040/src/roboclaw_driver.c (this is
@@ -1077,22 +1108,108 @@ static bool read_status(uint8_t u)
                 units[u].fault_flags = normalize_status_16(raw);
             }
             units[u].status_valid = true;
+            units[u].status_fail_streak = 0;
             log_fault_transition(u);
             return true;
         }
         while (wire_has_byte()) (void)wire_getc();          /* drain leftovers */
     }
+
+    /* Failure backoff: an unresponsive/unsupported unit costs up to
+     * two full response timeouts per attempt (length auto-detect) on
+     * the same UART the duty writes use. After a few consecutive
+     * failures, pause this unit's status poll so the fault read can't
+     * keep stealing wire time from control. */
+    if (units[u].status_fail_streak < 255) units[u].status_fail_streak++;
+    if (units[u].status_fail_streak == ROBOCLAW_STATUS_FAIL_LIMIT) {
+        saint_log_publish("warn",
+            "RoboClaw '%s' (unit %u): status poll (cmd 90) failed %u "
+            "cycles — backing off to one attempt per %u ms",
+            units[u].peripheral_id[0] ? units[u].peripheral_id : "roboclaw",
+            (unsigned)u, (unsigned)units[u].status_fail_streak,
+            (unsigned)ROBOCLAW_STATUS_BACKOFF_MS);
+    }
+    if (units[u].status_fail_streak >= ROBOCLAW_STATUS_FAIL_LIMIT) {
+        units[u].status_backoff_until_ms =
+            PLATFORM_MILLIS() + ROBOCLAW_STATUS_BACKOFF_MS;
+    }
     return false;
+}
+
+/* Collect ACK bytes from fire-and-forget duty writes. Non-blocking:
+ * consumes only what has already arrived. Runs at the top of every
+ * update() tick — and telemetry defers while any ack is still
+ * outstanding (see roboclaw_update) so a late duty ACK can never be
+ * mistaken for the first byte of a telemetry response. */
+static void drain_duty_acks(void)
+{
+    if (!wire_ready()) return;
+    while (pending_duty_acks > 0 && wire_has_byte()) {
+        uint8_t b = wire_getc();
+        if (b == ROBOCLAW_ACK_BYTE) {
+            pending_duty_acks--;
+            wire_ack_ok++;
+            mark_unit_response(last_duty_unit, true);
+        } else {
+            wire_ack_wrong++;
+            wire_ack_last = b;
+        }
+    }
+}
+
+/* Write off outstanding duty ACKs that never came, so a silent unit
+ * can't wedge pending_duty_acks high and starve telemetry forever. */
+static void expire_pending_acks(uint32_t now)
+{
+    if (pending_duty_acks == 0) return;
+    if (now - last_duty_wire_send_ms <= ROBOCLAW_PENDING_ACK_TIMEOUT_MS) return;
+    wire_ack_timeout += pending_duty_acks;
+    pending_duty_acks = 0;
+    mark_unit_response(last_duty_unit, false);
+}
+
+/* Dead-man: zero any unit still running without a fresh setpoint.
+ * The server re-asserts held non-neutral motor values (~500 ms), so
+ * silence past ROBOCLAW_DEADMAN_MS means the control link is dead —
+ * not that the operator is holding steady. Stopping here also stops
+ * the duty keepalive (duty == 0), which re-arms the RoboClaw's own
+ * serial watchdog as the final backstop. */
+static void deadman_check(uint32_t now)
+{
+    for (uint8_t i = 0; i < unit_count && i < ROBOCLAW_MAX_UNITS; i++) {
+        if (units[i].duty == 0) continue;
+        if (now - units[i].last_setpoint_ms <= ROBOCLAW_DEADMAN_MS) continue;
+        saint_log_publish("warn",
+            "RoboClaw '%s' (unit %u) DEAD-MAN: no setpoint for %lu ms "
+            "at duty %d — stopping motor (control link lost?)",
+            units[i].peripheral_id[0] ? units[i].peripheral_id : "roboclaw",
+            (unsigned)i,
+            (unsigned long)(now - units[i].last_setpoint_ms),
+            (int)units[i].duty);
+        roboclaw_set_duty(i, 0);
+    }
 }
 
 void roboclaw_update(void)
 {
     if (!port_initialized || unit_count == 0) return;
 
-    temp_probe_diagnostic(PLATFORM_MILLIS());
-    wire_stats_maybe_dump(PLATFORM_MILLIS());
+    uint32_t now_ms = PLATFORM_MILLIS();
+    drain_duty_acks();
+    expire_pending_acks(now_ms);
+    deadman_check(now_ms);
+    wire_stats_maybe_dump(now_ms);
 
     if (maybe_send_duty_keepalive()) return;
+
+    /* A duty ACK is still in flight (they arrive in ~1-2 ms; the next
+     * tick collects it). Don't start a telemetry exchange on the same
+     * wire — its response would interleave with the ACK. This also
+     * naturally deprioritizes telemetry under heavy control streaming,
+     * which is exactly the right trade. */
+    if (pending_duty_acks > 0) return;
+
+    temp_probe_diagnostic(now_ms);
 
     uint8_t u = poll_unit;
     uint8_t addr = units[u].address;
@@ -1155,8 +1272,12 @@ void roboclaw_update(void)
     case 4:
         /* Fault/status register — best-effort, does not gate connection
          * (a controller can be perfectly healthy on an older firmware we
-         * can't yet parse). Skips mark_unit_response below. */
-        read_status(u);
+         * can't yet parse). Skips mark_unit_response below. Honors the
+         * per-unit failure backoff so a unit that never answers cmd 90
+         * can't burn 2 response timeouts every cycle. */
+        if ((int32_t)(PLATFORM_MILLIS() - units[u].status_backoff_until_ms) >= 0) {
+            read_status(u);
+        }
         break;
     }
     if (poll_register != 4) {
@@ -1204,6 +1325,10 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
     if (duty < ROBOCLAW_DUTY_MIN) duty = ROBOCLAW_DUTY_MIN;
 
     units[unit].duty = duty;
+    /* External setpoint — feeds the dead-man. Deliberately outside the
+     * SIMULATION guard so host tests and Renode e2e exercise the same
+     * timing logic as hardware. */
+    units[unit].last_setpoint_ms = PLATFORM_MILLIS();
 
 #ifndef SIMULATION
     if (!wire_ready()) {
@@ -1231,9 +1356,19 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
             (int)duty, (double)duty * 100.0 / (double)ROBOCLAW_DUTY_MAX);
     }
 
+    /* Fire-and-forget (2026-08 deadstick fix): the old blocking
+     * read_ack() here busy-waited up to ROBOCLAW_RESPONSE_TIMEOUT_MS
+     * inside the executor callback — 50 ms per control message on a
+     * struggling unit, which stalled the whole main loop under stick
+     * bursts. The ACK is collected asynchronously in roboclaw_update()
+     * (drain_duty_acks); the write alone is what feeds the RoboClaw's
+     * serial watchdog. Collect any already-arrived ACK first so
+     * back-to-back duty writes can't overflow the pending window. */
+    drain_duty_acks();
     send_command(units[unit].address, ROBOCLAW_CMD_M1DUTY, data, 2);
-    bool ack_ok = read_ack();
-    mark_unit_response(unit, ack_ok);
+    if (pending_duty_acks < ROBOCLAW_PENDING_ACK_MAX) pending_duty_acks++;
+    last_duty_unit = unit;
+    last_duty_wire_send_ms = PLATFORM_MILLIS();
     units[unit].last_duty_send_ms = PLATFORM_MILLIS();
 #endif
     return true;
@@ -1261,9 +1396,13 @@ static bool maybe_send_duty_keepalive(void)
             uint8_t data[2];
             data[0] = (uint8_t)((uint16_t)wire_duty >> 8);
             data[1] = (uint8_t)((uint16_t)wire_duty & 0xFF);
+            /* Fire-and-forget, same as roboclaw_set_duty — the ACK is
+             * collected in the next update() tick's drain. */
+            drain_duty_acks();
             send_command(u->address, ROBOCLAW_CMD_M1DUTY, data, 2);
-            bool ack_ok = read_ack();
-            mark_unit_response(i, ack_ok);
+            if (pending_duty_acks < ROBOCLAW_PENDING_ACK_MAX) pending_duty_acks++;
+            last_duty_unit = i;
+            last_duty_wire_send_ms = now;
         }
 #endif
         u->last_duty_send_ms = now;

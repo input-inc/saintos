@@ -8,6 +8,7 @@ import Sparkline from '@/components/Sparkline.vue'
 import BMSCard from '@/components/peripherals/BMSCard.vue'
 import MaestroCard from '@/components/peripherals/MaestroCard.vue'
 import RoboClawCard from '@/components/peripherals/RoboClawCard.vue'
+import PimoroniServo2040Card from '@/components/peripherals/PimoroniServo2040Card.vue'
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -155,6 +156,15 @@ function sparkSamples (nodeId, peripheralId, channelId) {
            table (motor/encoder/voltage/current/temp) with sparklines. -->
       <RoboClawCard
         v-else-if="p.type === 'roboclaw'"
+        :peripheral="p"
+        :channels="values[p.id] || {}"
+        :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"
+      />
+      <!-- Pimoroni Servo 2040: online dot, aggregate current readout,
+           over-current/failsafe badges, onboard-LED swatches, and the
+           per-servo target table. -->
+      <PimoroniServo2040Card
+        v-else-if="p.type === 'pimoroni_servo2040'"
         :peripheral="p"
         :channels="values[p.id] || {}"
         :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"

@@ -52,10 +52,10 @@ function formatLastSeen (ts) {
           Edit
         </button>
       </div>
-      <div class="grid grid-cols-2 gap-4">
-        <div class="stat-item">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="stat-item min-w-0">
           <span class="stat-label">Node ID</span>
-          <span class="stat-value text-sm font-mono">{{ nodeId }}</span>
+          <span class="stat-value text-sm font-mono break-all">{{ nodeId }}</span>
         </div>
         <div class="stat-item">
           <span class="stat-label">Role</span>

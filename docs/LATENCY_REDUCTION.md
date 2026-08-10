@@ -12,6 +12,15 @@ on-hardware verification. Item 8 is PARKED — see its section; removing
 the throttle without a mapper-side rate cap would put ~250 Hz per
 active axis on the socket.
 
+**2026-08-10 second round — see "Round 2" at the bottom.** With all of
+the above flashed and deployed, RoboClaw deadstick still ran 1-2 s when
+the stick was rotated in circles. Root causes were two FIFO queues the
+release-zero could not jump (controller shared mpsc(100); server's
+sequential router/set_input receive path, which never got the July
+protections) plus no dead-man anywhere — the firmware duty keepalive
+actively re-fed the RoboClaw's serial watchdog with the last non-zero
+duty forever. All three layers fixed in source, locally tested.
+
 ## The pipeline (where latency can hide)
 
 ```
@@ -207,3 +216,86 @@ After flashing/deploying each tier:
    send-side (controller log) and the receive-side (firmware
    `set_channel` log) with timestamps, then look at the wall-clock
    delta on the same printout for the same value. Aim for <80 ms p99.
+
+---
+
+# Round 2 — 2026-08-10: the circle-stick 1-2 s run-on
+
+With everything above flashed, RoboClaw deadstick still ran on 1-2 s,
+worst when the stick was rotated in circles. Circles defeat every
+dedup/throttle in the chain (both axes change every 4 ms tick on
+multiple targets ≈ 200 msg/s) — and the release-zero had two FIFO
+queues it could not jump, plus no dead-man behind it.
+
+## Diagnosis
+
+1. **Controller shared FIFO (primary).** All streaming sends went
+   through one `mpsc::channel(100)` drained one-at-a-time by the same
+   tokio task that services inbound telemetry. The stop bypassed the
+   20 ms throttle but NOT the queue; under Wi-Fi backpressure it either
+   waited behind up to 100 stale deflection frames or — because the
+   channel drops **newest** when full — the stop itself was discarded.
+2. **Server router path never got the July protections.** The gamepad
+   path is `router/set_input` (not `control`): no throttle, no neutral
+   bypass, an unsampled per-tick INFO log line, and an awaited JSON ack
+   back to the Deck for every axis tick, all inside the strictly
+   sequential `async for` receive loop.
+3. **No dead-man + keepalive worked against the stop.** Nothing zeroed
+   motors on control silence, and the firmware re-sent the last
+   NON-zero duty every 400 ms forever, defeating the RoboClaw's own
+   ~1 s serial watchdog. A lost zero frame = indefinite run-on.
+4. **Secondary: blocking serial.** Every duty write busy-waited up to
+   50 ms for its ACK inside the executor callback (audit open item 5),
+   and the 2026-07-19 fault poll (cmd 90) burned up to 2×50 ms per
+   cycle on units that don't answer it — same UART as the duty writes.
+
+## Fixes (all in source, all locally tested)
+
+- **Controller — latest-wins send slots**
+  (`controller/src-tauri/src/protocol/client.rs`): streaming sends now
+  coalesce into one slot per target (`StreamCoalescer`) with a token
+  channel waking the writer. Max queue depth = number of active
+  targets; a stop replaces its target's stale value instantly and can
+  never be dropped by backlog. One-shots (estop, discovery, wifi,
+  library) keep the reliable FIFO. 8 new cargo tests.
+- **Server — router path cheapened + motor re-assert**
+  (`webserver/websocket_handler.py`, `router/routing_evaluator.py`):
+  `router/set_input` logs at debug; successful set_input no longer
+  sends a per-tick ack (handler returns None; errors still respond).
+  The evaluator change-gate re-asserts unchanged NON-neutral values
+  every 300 ms for motor types only (`roboclaw`, `syren`) — the
+  liveness feed for the firmware dead-man; servos stay fully
+  change-gated (idle_disengage). 14 new pytest tests
+  (`test_router_drive_path_semantics.py`).
+- **Firmware — fire-and-forget duty ACK, status-poll backoff, dead-man**
+  (`firmware/shared/src/roboclaw_driver.c`): duty writes no longer
+  block on the ACK; `drain_duty_acks()` collects them in update() and
+  telemetry defers while one is in flight (control > telemetry). The
+  cmd-90 fault poll backs off 10 s per unit after 3 failed cycles.
+  **Dead-man:** a unit at duty ≠ 0 with no external setpoint for
+  1250 ms (`ROBOCLAW_DEADMAN_MS`) is zeroed and logged; this runs
+  BEFORE the keepalive, so a dead link now stops the motor instead of
+  keeping it alive. Same dead-man mirrored in the Pi driver
+  (`ROBOCLAW_DEADMAN_S`). 9 new C tests + 3 new Pi tests.
+
+Sizing note: the dead-man window (1250 ms) > server re-assert cadence
+under a held stick (~500 ms, gated by the controller heartbeat) with
+one lost BEST_EFFORT frame of margin. If the heartbeat or re-assert
+constants change, re-check this inequality — tripping mid-hold is the
+failure mode to avoid.
+
+Worst-case run-on after these fixes: normal path stops within one
+send-slot drain (<~50 ms); a lost zero is bounded by heartbeat retry
+(500 ms, now unclogged); total link death is bounded by the firmware
+dead-man (1.25 s) even though the keepalive exists — previously
+unbounded.
+
+## Round 2 verification
+
+- Local: controller `cargo test --lib` (66), server `python3 -m pytest
+  test` (306 net of 4 pre-existing servo2040-related failures),
+  `firmware/rp2040/tests/run_tests.sh` (46 roboclaw), Pi
+  `python3 -m pytest tests/` (241), all four firmware builds.
+- On hardware, repeat tests 2-3 above; additionally: drive, then kill
+  the server process mid-deflection — motors must stop within ~1.3 s
+  (dead-man) instead of running until reconnect.

@@ -20,6 +20,7 @@
 #include "saint_log.h"     // saint_log_publish (dashboard Logs tab)
 #include "fas100_driver.h" // fas100_get_diag (per-peripheral health in /state)
 #include "control_message.h" // shared set_channel parse (hop-5 decode)
+#include "pimoroni_servo2040_protocol.h" // Servo 2040 channel map (ch<N>/led<N>)
 
 // =============================================================================
 // Constants
@@ -511,6 +512,24 @@ static int channel_offset_for(pin_mode_t mode, const char* channel)
             if (strcmp(channel, "soc")          == 0) return 2;
             if (strcmp(channel, "temp_1")       == 0) return 4;
             if (strcmp(channel, "temp_2")       == 0) return 5;
+            return -1;
+        case PIN_MODE_PIMORONI_SERVO:
+            // Pimoroni Servo 2040: 18 servos "ch0".."ch17" (offset 0..17)
+            // then 6 onboard RGB LEDs "led0".."led5" (offset 18..23).
+            if (channel[0] == 'c' && channel[1] == 'h') {
+                const char* d = channel + 2;
+                if (*d < '0' || *d > '9') return -1;
+                int n = atoi(d);
+                if (n < 0 || n >= PIMORONI_SERVO2040_NUM_SERVOS) return -1;
+                return n;
+            }
+            if (strncmp(channel, "led", 3) == 0) {
+                const char* d = channel + 3;
+                if (*d < '0' || *d > '9') return -1;
+                int n = atoi(d);
+                if (n < 0 || n >= PIMORONI_SERVO2040_NUM_LEDS) return -1;
+                return PIMORONI_SERVO2040_LED_CHANNEL_BASE + n;
+            }
             return -1;
         case PIN_MODE_PWM:
         case PIN_MODE_SERVO:

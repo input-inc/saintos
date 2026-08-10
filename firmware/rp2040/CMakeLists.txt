@@ -183,6 +183,8 @@ set(SAINT_NODE_SOURCES
     ../shared/src/tmc2208_driver.c
     src/kangaroo_transport.c
     ../shared/src/kangaroo_driver.c
+    src/pimoroni_servo2040_transport.c
+    ../shared/src/pimoroni_servo2040_driver.c
     src/maestro_driver.c
     src/pio_uart.c
 )
@@ -234,6 +236,7 @@ target_link_libraries(saint_node
     hardware_pio
     hardware_flash
     hardware_sync
+    hardware_i2c
     microros
 )
 

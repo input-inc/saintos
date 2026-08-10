@@ -377,6 +377,110 @@ def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+# ── Pimoroni Servo 2040 ──────────────────────────────────────────────
+#
+# One catalog entry, one driver. 18 servo channels + 6 onboard RGB LEDs,
+# driven over I2C (the board is an I2C target on its Qwiic/STEMMA-QT
+# connector). Per-channel servo config mirrors the native `servo` type's
+# four-tuple extents (start/end/center/home) — extents live host-side and
+# the driver maps −1..+1 → pulse, exactly like the Maestro. HOME pulses
+# are pushed to the board and persisted to its flash so servos come up at
+# known positions on power-on (Maestro EEPROM HomeMode=Goto parity).
+#
+# Field names match the firmware pin_config_t.pimoroni_servo2040 struct
+# and the Python Pi driver so the server-to-firmware push needs no key
+# translation. Wire contract:
+# firmware/shared/include/pimoroni_servo2040_protocol.h.
+
+_PIMORONI_NUM_SERVOS = 18
+_PIMORONI_NUM_LEDS = 6
+_PIMORONI_CHANNEL_KEYS = ("start_us", "end_us", "center_us", "home_us")
+_PIMORONI_CHANNEL_DISPLAY_ONLY_KEYS = ("label", "icon")
+
+
+def _pimoroni_default_channel(idx: int, peripheral_params: Dict[str, Any]) -> Dict[str, Any]:
+    """A single default servo-channel entry. Matches the native `servo`
+    type's defaults (1000/2000/1500) so a fresh board behaves like a rack
+    of plain servos; home defaults to center so channels come up homed."""
+    return {
+        "label": f"Ch {idx}",
+        "icon": "",
+        "start_us": 1000,
+        "end_us": 2000,
+        "center_us": 1500,
+        # Home defaults to center so the board drives every servo to a
+        # known position on power-on. 0 = leave this channel relaxed at
+        # boot (firmware sentinel).
+        "home_us": 1500,
+    }
+
+
+def _pimoroni_sanitize_channel(
+    raw: Dict[str, Any], idx: int, peripheral_params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Clamp + sanitize one servo channel. Pulse fields are clamped to the
+    board's SDK hard limits [400, 2600] µs; unknown keys stripped."""
+    default = _pimoroni_default_channel(idx, peripheral_params)
+    out: Dict[str, Any] = {}
+    label = raw.get("label", default["label"])
+    out["label"] = str(label)[:32] if label else default["label"]
+    _icon_ok = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+    raw_icon = str(raw.get("icon", default.get("icon", "")) or "").lower()
+    out["icon"] = "".join(c for c in raw_icon if c in _icon_ok)[:40]
+    for key in _PIMORONI_CHANNEL_KEYS:
+        try:
+            v = int(raw.get(key, default[key]))
+        except (TypeError, ValueError):
+            v = default[key]
+        # home_us == 0 is a valid sentinel ("relaxed at boot"); everything
+        # else clamps to the hard servo envelope.
+        out[key] = 0 if (key == "home_us" and v == 0) else max(400, min(2600, v))
+    # Keep start ≤ end even if the operator flipped them.
+    if out["start_us"] > out["end_us"]:
+        out["start_us"], out["end_us"] = out["end_us"], out["start_us"]
+    return out
+
+
+def pimoroni_normalize_channels(params: Dict[str, Any]) -> None:
+    """Ensure params["channels"] is a length-18 list of sanitized servo
+    channel dicts. Called from upsert_node_peripheral, mirroring
+    maestro_normalize_channels. Modifies the dict in-place."""
+    raw_channels = params.get("channels")
+    if not isinstance(raw_channels, list):
+        raw_channels = []
+    normalized: List[Dict[str, Any]] = []
+    for i in range(_PIMORONI_NUM_SERVOS):
+        src = raw_channels[i] if i < len(raw_channels) and isinstance(raw_channels[i], dict) else {}
+        normalized.append(_pimoroni_sanitize_channel(src, i, params))
+    params["channels"] = normalized
+
+
+def pimoroni_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Per-field diff of each channel against its default so an all-default
+    board serializes tiny (empty {} per channel). Same trick + rationale as
+    maestro_slim_channels_for_wire — keeps the config push under the
+    XRCE-DDS ~2 KB reassembly cap. Pure function."""
+    if "channels" not in params or not isinstance(params["channels"], list):
+        return dict(params)
+    out = dict(params)
+    slim: List[Dict[str, Any]] = []
+    for i, ch in enumerate(params["channels"]):
+        if not isinstance(ch, dict):
+            slim.append({})
+            continue
+        default = _pimoroni_default_channel(i, params)
+        diff: Dict[str, Any] = {}
+        for k in _PIMORONI_CHANNEL_KEYS:
+            v = ch.get(k)
+            if v is None:
+                continue
+            if v != default[k]:
+                diff[k] = v
+        slim.append(diff)
+    out["channels"] = slim
+    return out
+
+
 # Default catalog. Mirrors the firmware's runtime drivers + adds generic
 # single-pin peripherals (Button, LED, AnalogInput, Servo) plus built-in
 # board peripherals (NeoPixel).
@@ -521,6 +625,52 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
         ],
         params=[],
         builtin_only=True,
+    ),
+    # Pimoroni Servo 2040 — RP2040-based servo controller driven over I2C
+    # (the board runs a fixed SAINT.OS image; see
+    # firmware/pimoroni_servo2040/). 18 servo channels "ch0".."ch17" plus
+    # 6 onboard RGB LEDs "led0".."led5". Per-channel extents + home mirror
+    # the Maestro; the `channels` list in params carries them (see
+    # pimoroni_normalize_channels / pimoroni_slim_channels_for_wire).
+    "pimoroni_servo2040": PeripheralType(
+        id="pimoroni_servo2040", label="Pimoroni Servo 2040",
+        description=(
+            "Pimoroni Servo 2040 servo controller (18 servos + 6 onboard "
+            "RGB LEDs) over I2C on its Qwiic/STEMMA-QT connector. Each "
+            "servo channel takes a normalized −1..+1 signal mapped through "
+            "its Start/Center/End extents; Home is driven on power-on and "
+            "persisted to the board so the rig comes up at known positions. "
+            "The led0..led5 channels set the onboard NeoPixel colors; "
+            "current draw and status come back as telemetry."
+        ),
+        pin_kind="i2c",
+        channels=[
+            PeripheralChannel(f"ch{i}", f"Channel {i}", "out", "analog")
+            for i in range(_PIMORONI_NUM_SERVOS)
+        ] + [
+            PeripheralChannel(f"led{i}", f"LED {i}", "out", "rgb")
+            for i in range(_PIMORONI_NUM_LEDS)
+        ] + [
+            # Telemetry the firmware driver emits via state_emit_channels:
+            #   connected   — 1 when the board answers the I2C WHOAMI poll.
+            #   current_a   — aggregate servo current draw (amps).
+            #   error_flags — board status bitmask (overcurrent / failsafe).
+            PeripheralChannel("connected",   "Connected",   "in", "digital_in"),
+            PeripheralChannel("current_a",   "Current (A)", "in", "analog"),
+            PeripheralChannel("error_flags", "Error flags", "in", "analog"),
+        ],
+        params=[
+            # I2C SDA/SCL pins on the controller node's Qwiic bus. gpio-typed
+            # so the modal renders pin dropdowns; the firmware reads
+            # sda_pin/scl_pin out of the config push.
+            PeripheralTypeParam("sda_pin", "I2C SDA pin", "gpio", 0,
+                                help="Controller GPIO wired to the board's Qwiic SDA."),
+            PeripheralTypeParam("scl_pin", "I2C SCL pin", "gpio", 0,
+                                help="Controller GPIO wired to the board's Qwiic SCL."),
+            PeripheralTypeParam(
+                "led_brightness", "LED brightness", "int", 255, min=0, max=255,
+                help="Global brightness for the 6 onboard RGB LEDs (0–255)."),
+        ],
     ),
     "fas100": PeripheralType(
         id="fas100", label="FAS100",

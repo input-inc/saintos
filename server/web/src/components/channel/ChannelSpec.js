@@ -40,6 +40,21 @@ export function specFor (peripheralType, channel) {
     return { kind: 'slider', min: -1, max: 1, step: 0.01, neutral: 0,
              format: v => Number(v).toFixed(2) }
   }
+  // Pimoroni Servo 2040: 18 servo channels chN are bipolar (same
+  // −1..+1 → start/center/end mapping as the native servo + Maestro),
+  // and the 6 onboard RGB LEDs ledN ARE driven by firmware (the I2C
+  // driver forwards the packed uint24 to the board), so they get a
+  // supported color picker rather than the "no control path" rgb
+  // fallback below.
+  if (peripheralType === 'pimoroni_servo2040') {
+    if (channel.id.startsWith('led')) {
+      return { kind: 'color', hint: 'Onboard NeoPixel color.' }
+    }
+    if (channel.id.startsWith('ch')) {
+      return { kind: 'slider', min: -1, max: 1, step: 0.01, neutral: 0,
+               format: v => Number(v).toFixed(2), hint: '−1 start · 0 center · +1 end' }
+    }
+  }
   if (channel.cap === 'digital_out') return { kind: 'toggle' }
   if (channel.cap === 'rgb')         return { kind: 'color', unsupported: true, note: 'No firmware control path yet.' }
   return { kind: 'slider', min: 0, max: 1, step: 0.01, neutral: 0, format: v => v.toFixed(2) }

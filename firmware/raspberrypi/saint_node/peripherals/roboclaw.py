@@ -146,6 +146,12 @@ ROBOCLAW_MAX_UNITS             = 8
 ROBOCLAW_DUTY_MAX              = 32767
 ROBOCLAW_DUTY_KEEPALIVE_S      = 0.4
 ROBOCLAW_RESPONSE_TIMEOUT_S    = 0.05
+# Dead-man: a running motor with no fresh setpoint inside this window
+# is zeroed. The server re-asserts held non-neutral motor values every
+# ~500 ms specifically to feed this; silence means the control link is
+# dead, not that the operator is holding steady. Matches
+# ROBOCLAW_DEADMAN_MS in the shared C driver.
+ROBOCLAW_DEADMAN_S             = 1.25
 
 # Commands (Solo = M1 only)
 ROBOCLAW_CMD_M1DUTY            = 32
@@ -206,6 +212,11 @@ class RoboClawDriver(PeripheralDriver):
         self._duties: Dict[int, int] = {}        # signed int (-32767..+32767)
         self._invert: Dict[int, bool] = {}
         self._last_duty_send: Dict[int, float] = {}
+        # Last EXTERNAL setpoint per instance (set_value — control
+        # message, estop, or the dead-man's own zero). The keepalive
+        # deliberately does not stamp this: it is what the dead-man
+        # exists to bound.
+        self._last_setpoint: Dict[int, float] = {}
         # estop_pin GPIO outputs, keyed by instance_id. Only populated
         # for units whose params specified an estop_pin.
         self._estop_pins: Dict[int, _EstopPin] = {}
@@ -287,7 +298,25 @@ class RoboClawDriver(PeripheralDriver):
             return
 
         now = time.monotonic()
-        # Keepalive first — the RoboClaw watchdog is the safety-
+        # Dead-man before keepalive: a unit still running without a
+        # fresh setpoint gets zeroed, which also silences its keepalive
+        # (duty == 0) and re-arms the RoboClaw's own serial watchdog as
+        # the final backstop. Without this, the keepalive re-fed that
+        # watchdog forever and a lost release-zero meant indefinite
+        # run-on.
+        for inst_id, duty in list(self._duties.items()):
+            if duty == 0:
+                continue
+            since = now - self._last_setpoint.get(inst_id, now)
+            if since <= ROBOCLAW_DEADMAN_S:
+                continue
+            self._log("warn",
+                f"RoboClaw: DEAD-MAN — unit {inst_id} at duty {duty} with "
+                f"no setpoint for {since:.2f}s; stopping motor "
+                f"(control link lost?)")
+            self.set_value(inst_id, ROBOCLAW_SUB_MOTOR, 0.0)
+
+        # Keepalive next — the RoboClaw watchdog is the safety-
         # critical concern.
         for inst_id, duty in self._duties.items():
             if duty == 0:
@@ -320,6 +349,7 @@ class RoboClawDriver(PeripheralDriver):
         duty = int(round(value * ROBOCLAW_DUTY_MAX))
         duty = max(-ROBOCLAW_DUTY_MAX, min(ROBOCLAW_DUTY_MAX, duty))
         self._duties[instance_id] = duty
+        self._last_setpoint[instance_id] = time.monotonic()
         self._send_duty(instance_id, duty)
         self._instances[instance_id].last_values[ROBOCLAW_SUB_MOTOR] = value
         return True
@@ -372,6 +402,7 @@ class RoboClawDriver(PeripheralDriver):
         self._duties.clear()
         self._invert.clear()
         self._last_duty_send.clear()
+        self._last_setpoint.clear()
         self._poll_unit = 0
         self._poll_reg = 0
         super().reset()

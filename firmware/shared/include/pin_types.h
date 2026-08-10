@@ -33,6 +33,7 @@
 #define PIN_CAP_TIC_STEPPER     0x4000
 #define PIN_CAP_TMC2208_STEPPER 0x8000
 #define PIN_CAP_KANGAROO        0x10000
+#define PIN_CAP_PIMORONI_SERVO  0x20000
 
 // Convenience combinations
 #define PIN_CAP_GPIO            (PIN_CAP_DIGITAL_IN | PIN_CAP_DIGITAL_OUT)
@@ -62,7 +63,8 @@ typedef enum {
     PIN_MODE_PATHFINDER_BMS,
     PIN_MODE_TIC_STEPPER,
     PIN_MODE_TMC2208_STEPPER,
-    PIN_MODE_KANGAROO
+    PIN_MODE_KANGAROO,
+    PIN_MODE_PIMORONI_SERVO
 } pin_mode_t;
 
 // =============================================================================
@@ -252,6 +254,19 @@ typedef struct {
             int32_t  max_position;     /* default 10000 units      */
             int32_t  max_speed;        /* default 1000 units/sec   */
         } kangaroo;
+        struct {
+            /* Per-servo-channel extents for the Pimoroni Servo 2040.
+             * Four-tuple pulse model shared with the native servo path
+             * and the dashboard's ServoExtentsControl: −1 → start_us,
+             * 0 → center_us, +1 → end_us, home_us on connect/reset
+             * (0 = leave the channel relaxed). LED channels of the same
+             * peripheral carry no extents (this struct is ignored for
+             * channel index >= PIMORONI_SERVO2040_NUM_SERVOS). */
+            uint16_t start_us;
+            uint16_t end_us;
+            uint16_t center_us;
+            uint16_t home_us;
+        } pimoroni_servo2040;
     } params;
 } pin_config_t;
 

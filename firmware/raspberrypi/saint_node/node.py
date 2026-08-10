@@ -38,6 +38,7 @@ from .peripherals.tic import TicDriver
 from .peripherals.kangaroo import KangarooDriver
 from .peripherals.pathfinder_bms import PathfinderBMSDriver
 from .peripherals.fas100 import FAS100Driver
+from .peripherals.pimoroni_servo2040 import PimoroniServo2040Driver
 from .peripherals.audio_player import PiAudioPlayerDriver
 from .peripherals.audio_mixer import AlsaMixerDriver
 from .peripherals.console_display import ConsoleDisplayDriver
@@ -135,6 +136,7 @@ class SaintNode(Node):
         self._peripherals.register(KangarooDriver)
         self._peripherals.register(PathfinderBMSDriver)
         self._peripherals.register(FAS100Driver)
+        self._peripherals.register(PimoroniServo2040Driver)
         # Built-in audio playback: lives on every Pi-host saint-node,
         # auto-seeded by the raspberrypi board YAML's builtin_peripherals
         # entry. libVLC is loaded lazily — a missing system package

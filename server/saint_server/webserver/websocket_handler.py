@@ -666,9 +666,15 @@ class WebSocketHandler:
         # Log incoming messages (excluding high-frequency control messages at debug level)
         msg_type = message.get('type')
         msg_action = message.get('action')
-        if msg_type == 'control':
-            # Log control messages at debug level to avoid spam
-            self.log('debug', f'[WS] Control: {msg_action} params={message.get("params")}')
+        if msg_type == 'control' or (msg_type == 'router' and msg_action == 'set_input'):
+            # Streaming hot paths — control writes and the gamepad's
+            # router/set_input axis ticks (~50 Hz per axis during stick
+            # motion) — log at debug only. An INFO line here runs
+            # synchronous file I/O inside the sequential receive loop
+            # and directly slows the drain that keeps deadstick fast.
+            # (The evaluator's sampled _hot_log covers operator-facing
+            # visibility for these streams.)
+            self.log('debug', f'[WS] {msg_type}: {msg_action} params={message.get("params")}')
         elif msg_type != 'auth':
             # Log other messages at info level
             self.log('info', f'[WS] Received: type={msg_type} action={msg_action}')
@@ -724,8 +730,15 @@ class WebSocketHandler:
         if handler:
             try:
                 response = await handler(client, action, params)
-                response['id'] = msg_id
-                await self._send_to_client(client, response)
+                # A handler may return None to suppress the per-message
+                # ack. Used by the streaming router/set_input path: its
+                # only caller (the controller) is fire-and-forget, and
+                # awaiting a JSON write back to a congested Deck for
+                # every axis tick slowed the receive loop's drain — the
+                # backlog a release-zero then had to wait behind.
+                if response is not None:
+                    response['id'] = msg_id
+                    await self._send_to_client(client, response)
             except Exception as e:
                 self.log('error', f'Handler error for {msg_type}/{action}: {e}')
                 await self._send_to_client(client, {
@@ -2043,7 +2056,11 @@ class WebSocketHandler:
             if not ok:
                 return {"status": "error",
                         "message": f"No WS input {sheet_id}/{input_id} (or evaluator offline)"}
-            return {"status": "ok"}
+            # No ack on success (see _handle_message): this runs at up
+            # to 50 Hz per axis and the controller never reads it —
+            # errors above still respond so a mis-bound axis stays
+            # diagnosable.
+            return None
 
         return {"status": "error", "message": f"Unknown router action: {action}"}
 

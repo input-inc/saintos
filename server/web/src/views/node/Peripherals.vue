@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useChannelHistory } from '@/composables/useChannelHistory'
+import { useWsTopic } from '@/composables/useWsTopic'
 import AppModal from '@/components/AppModal.vue'
 import ServoExtentsControl from '@/components/peripherals/ServoExtentsControl.vue'
 
@@ -43,6 +44,61 @@ const ws = useWsStore()
 const catalog = usePeripheralCatalog()
 const history = useChannelHistory()
 const peripherals = ref([])
+
+// Live per-channel telemetry for this node (same feed the Live view
+// uses). Powers the extent dial's current-draw bar. Shaped
+// { peripheral_id: { channel_id: value } } from the topic's channels[].
+const pinState = useWsTopic(() => `pin_state/${props.nodeId}`)
+const liveChannels = computed(() => {
+  const out = {}
+  for (const ch of (pinState.value?.channels || [])) {
+    if (!ch.peripheral_id || !ch.channel_id) continue
+    if (typeof ch.value !== 'number') continue
+    ;(out[ch.peripheral_id] ??= {})[ch.channel_id] = ch.value
+  }
+  return out
+})
+const peripheralLabels = computed(() => {
+  const out = {}
+  for (const p of peripherals.value) out[p.id] = p.label || p.id
+  return out
+})
+
+// Channel ids that carry an electrical-current reading, across the
+// current-monitoring peripheral types (FAS100 uses `amps`; RoboClaw /
+// BMS use `current`). A servo driver that senses its own current would
+// expose one of these too.
+const CURRENT_CHANNEL_IDS = ['current', 'amps']
+
+// Resolve a live current reading (amps) for the servo/channel being
+// dialed in. Prefer the servo peripheral's OWN current channel if its
+// driver reports one; otherwise fall back to the first separate
+// current-monitor peripheral on the node that's reporting. Returns
+// { current: Number|null, source: String } for the extent dial.
+function currentForServo (peripheralId) {
+  const live = liveChannels.value
+  const pick = (pid) => {
+    const chans = live[pid]
+    if (!chans) return null
+    for (const cid of CURRENT_CHANNEL_IDS) {
+      if (typeof chans[cid] === 'number') return { pid, cid, value: chans[cid] }
+    }
+    return null
+  }
+  let hit = peripheralId ? pick(peripheralId) : null
+  if (!hit) {
+    for (const pid of Object.keys(live)) {
+      if (pid === peripheralId) continue
+      hit = pick(pid)
+      if (hit) break
+    }
+  }
+  if (!hit) return { current: null, source: '' }
+  const label = peripheralLabels.value[hit.pid] || hit.pid
+  return { current: hit.value, source: `${label} · ${hit.cid}` }
+}
+const channelCurrent = computed(() => currentForServo(channelModalPeripheralId.value))
+const servoCurrent   = computed(() => currentForServo(modalEditingId.value))
 const syncStatus  = ref('unknown')
 const capabilities = ref(null)        // { pins, uart_pairs, reserved_pins }
 const logErrors = ref({})              // peripheral_id -> inline error message
@@ -82,14 +138,20 @@ const channelModalError = ref('')
 // flood the control topic but the final resting position always lands.
 let _previewLast = 0
 let _previewTimer = null
+// Last pulse actually commanded on each live-jog path, so Stop can
+// re-assert it (freeze the servo where it is) after cancelling any
+// pending queued jog. Null until the dial has moved the servo once.
+let _lastChannelUs = null
+let _lastServoUs = null
 function previewChannelUs (us) {
   const fire = (pulse) => {
     _previewLast = Date.now()
+    _lastChannelUs = Math.round(pulse)
     ws.control('set_channel_value', {
       node_id: props.nodeId,
       peripheral_id: channelModalPeripheralId.value,
       channel_id: `ch${channelModalIdx.value}`,
-      us: Math.round(pulse),
+      us: _lastChannelUs,
     }).catch(() => {})
   }
   const now = Date.now()
@@ -109,11 +171,12 @@ function previewServoUs (us) {
   if (!modalEditingId.value) return
   const fire = (pulse) => {
     _previewLast = Date.now()
+    _lastServoUs = Math.round(pulse)
     ws.control('set_channel_value', {
       node_id: props.nodeId,
       peripheral_id: modalEditingId.value,
       channel_id: 'angle',
-      us: Math.round(pulse),
+      us: _lastServoUs,
     }).catch(() => {})
   }
   const now = Date.now()
@@ -121,6 +184,34 @@ function previewServoUs (us) {
   clearTimeout(_previewTimer)
   if (wait <= 0) fire(us)
   else _previewTimer = setTimeout(() => fire(us), wait)
+}
+
+// Stop = freeze the servo at its last commanded pulse. Cancel any
+// pending throttled jog, then re-assert the last µs so no further
+// motion is queued and the channel holds where it is. (The firmware
+// doesn't report live position back, so this captures the last
+// commanded target — near-exact unless a speed/accel ramp is mid-flight;
+// the auto-move toggle avoids ramps in the first place.) No-op if the
+// dial never jogged this servo.
+function stopChannel () {
+  clearTimeout(_previewTimer)
+  if (_lastChannelUs == null || !channelModalPeripheralId.value) return
+  ws.control('set_channel_value', {
+    node_id: props.nodeId,
+    peripheral_id: channelModalPeripheralId.value,
+    channel_id: `ch${channelModalIdx.value}`,
+    us: _lastChannelUs,
+  }).catch(() => {})
+}
+function stopServo () {
+  clearTimeout(_previewTimer)
+  if (_lastServoUs == null || !modalEditingId.value) return
+  ws.control('set_channel_value', {
+    node_id: props.nodeId,
+    peripheral_id: modalEditingId.value,
+    channel_id: 'angle',
+    us: _lastServoUs,
+  }).catch(() => {})
 }
 
 // Whether the peripheral edit modal's "Advanced" section is expanded.
@@ -251,6 +342,7 @@ function openAdd () {
   modalParams.value = {}
   modalError.value = ''
   advancedOpen.value = false
+  _lastServoUs = null
   applyDefaults()
   modalOpen.value = true
 }
@@ -263,6 +355,7 @@ function openEdit (p) {
   modalParams.value = { ...p.params }
   modalError.value = ''
   advancedOpen.value = false
+  _lastServoUs = null
   modalOpen.value = true
 }
 function applyDefaults () {
@@ -309,6 +402,10 @@ const pinsVisible = computed(() => {
   const t = modalType.value
   if (!t) return false
   if (t.pin_kind === 'builtin') return false
+  // I2C peripherals (e.g. Pimoroni Servo 2040) declare their SDA/SCL as
+  // dedicated gpio-typed params instead of the generic single-pin /
+  // UART-pair picker, so suppress the primary picker for them.
+  if (t.pin_kind === 'i2c') return false
   // If the type declares a `transport` param and the operator has
   // picked a non-uart transport, pins don't apply.
   const transportParam = (t.params || []).find(p => p.id === 'transport')
@@ -527,6 +624,7 @@ function openChannelEdit (peripheral, channelIdx) {
   channelModalPeripheralId.value = peripheral.id
   channelModalIdx.value = channelIdx
   channelModalError.value = ''
+  _lastChannelUs = null      // fresh channel — no held pulse to re-assert yet
   channelModalOpen.value = true
 }
 
@@ -639,9 +737,9 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
 
 <template>
   <div class="space-y-4">
-    <div class="flex items-center justify-between">
+    <div class="flex items-center justify-between gap-2 flex-wrap">
       <h3 class="text-lg font-semibold text-fg-strong">Peripherals</h3>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
         <span :class="['px-2 py-1 text-xs font-medium rounded-full', syncBadge.cls]">{{ syncBadge.label }}</span>
         <button class="btn-secondary text-sm" @click="sync"><span class="material-icons icon-sm">sync</span>Sync</button>
         <button class="btn-primary" @click="openAdd"><span class="material-icons icon-sm">add</span>Add peripheral</button>
@@ -771,6 +869,10 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
               }"
               @update:model-value="(v) => Object.assign(modalParams, v)"
               @preview="previewServoUs"
+              :live-jog="!!modalEditingId"
+              :current="servoCurrent.current"
+              :current-source="servoCurrent.source"
+              @stop="stopServo"
             />
           </div>
           <template v-for="p in modalType.params" :key="p.id">
@@ -1034,6 +1136,10 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
               channelModalDraft.home_us      = v.home_us
             }"
             @preview="previewChannelUs"
+            :live-jog="true"
+            :current="channelCurrent.current"
+            :current-source="channelCurrent.source"
+            @stop="stopChannel"
           />
           <p class="text-xs text-fg-faint">
             Min/max are the pulse-width limits this channel can be commanded to.

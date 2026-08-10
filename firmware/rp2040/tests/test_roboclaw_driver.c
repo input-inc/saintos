@@ -206,6 +206,14 @@ static void reset_state(void)
     poll_unit = 0;
     poll_register = 0;
 
+    /* Fire-and-forget ACK + wire-counter state (2026-08 deadstick fix). */
+    pending_duty_acks = 0;
+    last_duty_unit = 0;
+    last_duty_wire_send_ms = 0;
+    wire_ack_ok = 0;
+    wire_ack_timeout = 0;
+    wire_ack_wrong = 0;
+
     use_pio_uart = false;
 
     log_count = 0;
@@ -1065,6 +1073,171 @@ static int test_set_duty_refreshes_keepalive_timestamp(void)
 }
 
 /* ============================================================================
+ * Dead-man (2026-08 deadstick fix)
+ *
+ * If a unit is running (duty != 0) and no external setpoint has arrived
+ * within ROBOCLAW_DEADMAN_MS, roboclaw_update() must zero it. The server
+ * re-asserts held non-neutral motor values (~500 ms) specifically to feed
+ * this timer, so silence == dead control link, not a held stick.
+ * ============================================================================ */
+
+static int test_deadman_zeroes_stale_running_unit(void)
+{
+    reset_state();
+    setup_running_unit(0, 5000);
+    units[0].last_setpoint_ms = test_now_ms;
+    test_now_ms += ROBOCLAW_DEADMAN_MS + 1;
+    deadman_check(test_now_ms);
+    CHECK_EQ(units[0].duty, 0);
+    CHECK_LOG("DEAD-MAN");
+    return 1;
+}
+
+static int test_deadman_respects_fresh_setpoint(void)
+{
+    reset_state();
+    setup_running_unit(0, 5000);
+    units[0].last_setpoint_ms = test_now_ms;
+    test_now_ms += ROBOCLAW_DEADMAN_MS - 10;
+    deadman_check(test_now_ms);
+    CHECK_EQ(units[0].duty, 5000);
+    return 1;
+}
+
+static int test_deadman_ignores_stopped_unit(void)
+{
+    reset_state();
+    setup_running_unit(0, 0);
+    units[0].last_setpoint_ms = test_now_ms;
+    test_now_ms += ROBOCLAW_DEADMAN_MS * 10;
+    deadman_check(test_now_ms);
+    CHECK(!log_contains("DEAD-MAN"));
+    return 1;
+}
+
+/* set_duty stamps the setpoint clock even in SIMULATION builds — the
+ * dead-man logic must behave identically on host tests, Renode, and
+ * hardware. */
+static int test_set_duty_stamps_setpoint_clock(void)
+{
+    reset_state();
+    setup_running_unit(0, 0);
+    test_now_ms = 5000;
+    CHECK(roboclaw_set_duty(0, 3000));
+    CHECK_EQ(units[0].last_setpoint_ms, 5000);
+    /* A refresh inside the window holds the dead-man off... */
+    test_now_ms += ROBOCLAW_DEADMAN_MS - 100;
+    CHECK(roboclaw_set_duty(0, 3200));
+    test_now_ms += ROBOCLAW_DEADMAN_MS - 100;
+    deadman_check(test_now_ms);
+    CHECK_EQ(units[0].duty, 3200);
+    /* ...and silence past the window trips it. */
+    test_now_ms += 201;
+    deadman_check(test_now_ms);
+    CHECK_EQ(units[0].duty, 0);
+    return 1;
+}
+
+/* Full-path: roboclaw_update() runs the dead-man BEFORE the keepalive,
+ * so a stale unit is zeroed rather than kept alive one more window.
+ * This ordering is the entire point of the fix — keepalive used to
+ * re-feed the RoboClaw's serial watchdog forever. */
+static int test_update_deadman_preempts_keepalive(void)
+{
+    reset_state();
+    setup_running_unit(0, 4000);
+    units[0].last_setpoint_ms = test_now_ms;
+    /* Well past both the keepalive window and the dead-man. */
+    test_now_ms += ROBOCLAW_DEADMAN_MS + ROBOCLAW_DUTY_KEEPALIVE_MS;
+    roboclaw_update();
+    CHECK_EQ(units[0].duty, 0);
+    CHECK_LOG("DEAD-MAN");
+    /* Subsequent updates: no keepalive resurrection (duty stays 0). */
+    test_now_ms += ROBOCLAW_DUTY_KEEPALIVE_MS * 3;
+    roboclaw_update();
+    CHECK_EQ(units[0].duty, 0);
+    return 1;
+}
+
+/* ============================================================================
+ * Status-poll (cmd 90) failure backoff
+ * ============================================================================ */
+
+static int test_status_backoff_after_repeated_failures(void)
+{
+    reset_state();
+    setup_running_unit(0, 0);
+    /* NULL transport → every read fails immediately; each read_status
+     * call is one failed cycle. */
+    for (int i = 0; i < ROBOCLAW_STATUS_FAIL_LIMIT - 1; i++) {
+        CHECK(!read_status(0));
+        CHECK_EQ(units[0].status_backoff_until_ms, 0);   /* not yet */
+    }
+    CHECK(!read_status(0));
+    CHECK_EQ(units[0].status_fail_streak, ROBOCLAW_STATUS_FAIL_LIMIT);
+    CHECK_EQ(units[0].status_backoff_until_ms,
+             test_now_ms + ROBOCLAW_STATUS_BACKOFF_MS);
+    CHECK_LOG("backing off");
+    return 1;
+}
+
+static int test_status_backoff_gates_update_poll(void)
+{
+    reset_state();
+    setup_running_unit(0, 0);
+    units[0].status_fail_streak = ROBOCLAW_STATUS_FAIL_LIMIT;
+    units[0].status_backoff_until_ms = test_now_ms + ROBOCLAW_STATUS_BACKOFF_MS;
+    poll_register = 4;
+    roboclaw_update();
+    /* Gated: read_status must not have run (streak unchanged). */
+    CHECK_EQ(units[0].status_fail_streak, ROBOCLAW_STATUS_FAIL_LIMIT);
+    /* After the backoff expires, the poll runs (and fails) again. */
+    test_now_ms += ROBOCLAW_STATUS_BACKOFF_MS + 1;
+    poll_register = 4;
+    roboclaw_update();
+    CHECK_EQ(units[0].status_fail_streak, ROBOCLAW_STATUS_FAIL_LIMIT + 1);
+    return 1;
+}
+
+/* ============================================================================
+ * Fire-and-forget duty ACK bookkeeping
+ * ============================================================================ */
+
+static int test_pending_acks_expire_as_timeouts(void)
+{
+    reset_state();
+    setup_running_unit(0, 2000);
+    pending_duty_acks = 3;
+    last_duty_unit = 0;
+    last_duty_wire_send_ms = test_now_ms;
+    /* Inside the window: nothing expires. */
+    expire_pending_acks(test_now_ms + ROBOCLAW_PENDING_ACK_TIMEOUT_MS);
+    CHECK_EQ(pending_duty_acks, 3);
+    /* Past the window: all written off, one miss recorded. */
+    uint8_t misses_before = units[0].consecutive_misses;
+    expire_pending_acks(test_now_ms + ROBOCLAW_PENDING_ACK_TIMEOUT_MS + 1);
+    CHECK_EQ(pending_duty_acks, 0);
+    CHECK_EQ(wire_ack_timeout, 3);
+    CHECK_EQ(units[0].consecutive_misses, misses_before + 1);
+    return 1;
+}
+
+/* update() defers telemetry while a duty ACK is outstanding so the two
+ * exchanges can't interleave on the wire. */
+static int test_update_defers_telemetry_while_ack_pending(void)
+{
+    reset_state();
+    setup_running_unit(0, 0);
+    units[0].connected = true;
+    pending_duty_acks = 1;
+    last_duty_wire_send_ms = test_now_ms;   /* fresh — not expired */
+    uint8_t reg_before = poll_register;
+    roboclaw_update();
+    CHECK_EQ(poll_register, reg_before);    /* round-robin did not advance */
+    return 1;
+}
+
+/* ============================================================================
  * Test runner
  * ============================================================================ */
 
@@ -1127,6 +1300,21 @@ static const test_entry_t TESTS[] = {
     { "keepalive_stops_when_duty_returns_to_zero", test_keepalive_stops_when_duty_returns_to_zero },
     { "keepalive_multi_unit_one_per_call",       test_keepalive_multi_unit_one_per_call },
     { "set_duty_refreshes_keepalive_timestamp",  test_set_duty_refreshes_keepalive_timestamp },
+
+    /* Dead-man (2026-08 deadstick fix) */
+    { "deadman_zeroes_stale_running_unit",       test_deadman_zeroes_stale_running_unit },
+    { "deadman_respects_fresh_setpoint",         test_deadman_respects_fresh_setpoint },
+    { "deadman_ignores_stopped_unit",            test_deadman_ignores_stopped_unit },
+    { "set_duty_stamps_setpoint_clock",          test_set_duty_stamps_setpoint_clock },
+    { "update_deadman_preempts_keepalive",       test_update_deadman_preempts_keepalive },
+
+    /* Status-poll failure backoff */
+    { "status_backoff_after_repeated_failures",  test_status_backoff_after_repeated_failures },
+    { "status_backoff_gates_update_poll",        test_status_backoff_gates_update_poll },
+
+    /* Fire-and-forget duty ACKs */
+    { "pending_acks_expire_as_timeouts",         test_pending_acks_expire_as_timeouts },
+    { "update_defers_telemetry_while_ack_pending", test_update_defers_telemetry_while_ack_pending },
 };
 
 int main(void)

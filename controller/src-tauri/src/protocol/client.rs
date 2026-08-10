@@ -52,6 +52,64 @@ fn is_stop_value(value: &Value) -> bool {
 /// visible in the one line that does land.
 const DROP_WARN_INTERVAL_MS: u64 = 5000;
 
+/// Capacity of the stream-token channel. Tokens are deduplicated per
+/// target (at most one in flight per key), so this bounds the number of
+/// *distinct* streaming targets with pending data — not the message
+/// rate. 256 is far above any realistic binding sheet.
+const STREAM_TOKEN_CAPACITY: usize = 256;
+
+/// Latest-wins coalescing slots for streaming control values.
+///
+/// The old design pushed every streaming send into the shared FIFO
+/// command queue (cap 100). Under a burst — e.g. rotating the stick in
+/// circles, which changes both axes on every tick — the queue filled
+/// with stale deflection frames faster than a congested link could
+/// drain them, and a stick-release zero either sat behind up to 100
+/// stale values or was try_send-dropped outright (drop-newest: the
+/// stop was exactly what got lost). That was the primary cause of the
+/// 1-2 s motor run-on after deadstick.
+///
+/// Now each target key holds only its freshest value. A producer
+/// replaces the slot and enqueues a token only when the key wasn't
+/// already pending, so the writer drains at most one message per
+/// active target and a stop can never queue behind stale frames for
+/// the same target.
+struct StreamCoalescer {
+    slots: parking_lot::Mutex<HashMap<String, OutgoingMessage>>,
+}
+
+impl StreamCoalescer {
+    fn new() -> Self {
+        Self { slots: parking_lot::Mutex::new(HashMap::new()) }
+    }
+
+    /// Store the freshest message for `key`. Returns true when the key
+    /// was NOT already pending — i.e. the caller must enqueue a wake-up
+    /// token for the writer. When it returns false the value simply
+    /// replaced a not-yet-sent one and the existing token covers it.
+    fn offer(&self, key: &str, msg: OutgoingMessage) -> bool {
+        self.slots.lock().insert(key.to_string(), msg).is_none()
+    }
+
+    /// Take the pending message for `key`, if any. Called by the writer
+    /// when it consumes that key's token.
+    fn take(&self, key: &str) -> Option<OutgoingMessage> {
+        self.slots.lock().remove(key)
+    }
+
+    /// Drop all pending values. Called on (re)connect so a value staged
+    /// while disconnected can't replay stale motion onto a fresh link —
+    /// the mapper's 500 ms heartbeat re-asserts current stick state.
+    fn clear(&self) {
+        self.slots.lock().clear();
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.slots.lock().len()
+    }
+}
+
 /// Book-keeping for writes dropped because the outgoing command queue
 /// was full. These were TRACE-only before — invisible in release
 /// builds, so a backlogged link silently ate stick input.
@@ -67,6 +125,10 @@ struct DropStats {
 pub struct WebSocketClient {
     state: Arc<RwLock<ConnectionState>>,
     command_tx: Arc<RwLock<Option<mpsc::Sender<OutgoingMessage>>>>,
+    /// Wake-up tokens for the streaming writer: one key per target with
+    /// a pending value in `coalescer`. Never carries payloads.
+    stream_tx: Arc<RwLock<Option<mpsc::Sender<String>>>>,
+    coalescer: Arc<StreamCoalescer>,
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
     /// Per-target throttle timers (key = "role:function")
     last_command_times: Arc<RwLock<HashMap<String, Instant>>>,
@@ -78,9 +140,50 @@ impl WebSocketClient {
         Self {
             state: Arc::new(RwLock::new(ConnectionState::default())),
             command_tx: Arc::new(RwLock::new(None)),
+            stream_tx: Arc::new(RwLock::new(None)),
+            coalescer: Arc::new(StreamCoalescer::new()),
             shutdown_tx: Arc::new(RwLock::new(None)),
             last_command_times: Arc::new(RwLock::new(HashMap::new())),
             drop_stats: Arc::new(RwLock::new(DropStats::default())),
+        }
+    }
+
+    /// Stage a streaming message on its latest-wins slot and wake the
+    /// writer. Shared tail of every streaming send path so the
+    /// coalescing protocol can't drift between them. Returns Ok even
+    /// when the token channel is full (the value stays staged; the
+    /// drop-warn keeps the condition visible) — matching the old
+    /// fire-and-forget semantics.
+    fn stage_stream_send(&self, key: &str, msg: OutgoingMessage, drop_label: &str)
+        -> Result<(), String>
+    {
+        let tx = self
+            .stream_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+
+        if !self.coalescer.offer(key, msg) {
+            // Key already pending — freshest value replaced the stale
+            // one and the in-flight token covers it.
+            return Ok(());
+        }
+        match tx.try_send(key.to_string()) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // >STREAM_TOKEN_CAPACITY distinct pending targets —
+                // pathological. Un-stage the value so the slot doesn't
+                // strand token-less (offer() would report it as already
+                // pending and never re-token it); the mapper's per-tick
+                // re-emit / 500 ms heartbeat retries it. Surface like
+                // the old queue-full drop.
+                self.coalescer.take(key);
+                self.note_dropped_write(drop_label);
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err("Connection closed".to_string())
+            }
         }
     }
 
@@ -129,7 +232,9 @@ impl WebSocketClient {
         let password = password.to_string();
         let state = self.state.clone();
         let command_tx_holder = self.command_tx.clone();
+        let stream_tx_holder = self.stream_tx.clone();
         let shutdown_tx_holder = self.shutdown_tx.clone();
+        let coalescer = self.coalescer.clone();
 
         // Update state
         {
@@ -140,14 +245,19 @@ impl WebSocketClient {
         emit_state(&app_handle, &state.read());
 
         // Fresh drop counters per connection so the warn line's "since
-        // connect" number means what it says.
+        // connect" number means what it says. Clear staged streaming
+        // values too — a slot staged against the previous connection
+        // must not replay stale motion onto the new link.
         *self.drop_stats.write() = DropStats::default();
+        self.coalescer.clear();
 
         // Create channels
         let (command_tx, command_rx) = mpsc::channel::<OutgoingMessage>(100);
+        let (stream_tx, stream_rx) = mpsc::channel::<String>(STREAM_TOKEN_CAPACITY);
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
 
         *command_tx_holder.write() = Some(command_tx);
+        *stream_tx_holder.write() = Some(stream_tx);
         *shutdown_tx_holder.write() = Some(shutdown_tx);
 
         // Spawn connection task using std::thread + tokio runtime
@@ -160,6 +270,8 @@ impl WebSocketClient {
                     state,
                     app_handle,
                     command_rx,
+                    stream_rx,
+                    coalescer,
                     shutdown_rx,
                 )
                 .await;
@@ -174,6 +286,8 @@ impl WebSocketClient {
             let _ = tx.blocking_send(());
         }
         *self.command_tx.write() = None;
+        *self.stream_tx.write() = None;
+        self.coalescer.clear();
 
         let mut s = self.state.write();
         s.status = ConnectionStatus::Disconnected;
@@ -201,7 +315,7 @@ impl WebSocketClient {
                     return Ok(());
                 }
             }
-            times.insert(throttle_key, now);
+            times.insert(throttle_key.clone(), now);
         }
 
         let tx = self
@@ -233,29 +347,11 @@ impl WebSocketClient {
                     return Ok(());
                 }
             }
-            times.insert(throttle_key, now);
+            times.insert(throttle_key.clone(), now);
         }
-
-        let tx = self
-            .command_tx
-            .read()
-            .clone()
-            .ok_or_else(|| "Not connected".to_string())?;
 
         let msg = OutgoingMessage::control_function(role, function, value);
-
-        // Use try_send to avoid blocking - drop command if channel is full
-        match tx.try_send(msg) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // Channel full, drop this command (next one will go through)
-                self.note_dropped_write(&format!("control {}:{}", role, function));
-                Ok(())
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err("Connection closed".to_string())
-            }
-        }
+        self.stage_stream_send(&throttle_key, msg, &format!("control {}:{}", role, function))
     }
 
     /// Request discovery of available roles
@@ -386,27 +482,16 @@ impl WebSocketClient {
                     return Ok(());
                 }
             }
-            times.insert(throttle_key, now);
+            times.insert(throttle_key.clone(), now);
         }
         log::debug!("→ set_ws_input {}::{} = {}", sheet_id, input_id, value);
 
-        let tx = self
-            .command_tx
-            .read()
-            .clone()
-            .ok_or_else(|| "Not connected".to_string())?;
-
         let msg = OutgoingMessage::set_ws_input(sheet_id, input_id, value);
-        match tx.try_send(msg) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                self.note_dropped_write(&format!("ws_input {}::{}", sheet_id, input_id));
-                Ok(())
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err("Connection closed".to_string())
-            }
-        }
+        self.stage_stream_send(
+            &throttle_key,
+            msg,
+            &format!("ws_input {}::{}", sheet_id, input_id),
+        )
     }
 
     /// Push a single scalar onto a ROS topic channel. Used by the
@@ -442,27 +527,12 @@ impl WebSocketClient {
                     return Ok(());
                 }
             }
-            times.insert(throttle_key, now);
+            times.insert(throttle_key.clone(), now);
         }
         log::debug!("→ set_topic_channel {}::{} = {}", topic, channel, value);
 
-        let tx = self
-            .command_tx
-            .read()
-            .clone()
-            .ok_or_else(|| "Not connected".to_string())?;
-
         let msg = OutgoingMessage::set_topic_channel(topic, channel, value);
-        match tx.try_send(msg) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                self.note_dropped_write(&format!("topic {}::{}", topic, channel));
-                Ok(())
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err("Connection closed".to_string())
-            }
-        }
+        self.stage_stream_send(&throttle_key, msg, &format!("topic {}::{}", topic, channel))
     }
 
     /// Ask the server for the adopted-node list. Response is forwarded
@@ -634,6 +704,8 @@ async fn run_connection_loop<R: Runtime>(
     state: Arc<RwLock<ConnectionState>>,
     app_handle: AppHandle<R>,
     mut command_rx: mpsc::Receiver<OutgoingMessage>,
+    mut stream_rx: mpsc::Receiver<String>,
+    coalescer: Arc<StreamCoalescer>,
     mut shutdown_rx: mpsc::Receiver<()>,
 ) {
     let mut reconnect_delay = RECONNECT_DELAY_MS;
@@ -648,6 +720,8 @@ async fn run_connection_loop<R: Runtime>(
                     &state,
                     &app_handle,
                     &mut command_rx,
+                    &mut stream_rx,
+                    &coalescer,
                     &mut shutdown_rx,
                 )
                 .await;
@@ -770,6 +844,8 @@ async fn handle_connection<R: Runtime>(
     state: &Arc<RwLock<ConnectionState>>,
     app_handle: &AppHandle<R>,
     command_rx: &mut mpsc::Receiver<OutgoingMessage>,
+    stream_rx: &mut mpsc::Receiver<String>,
+    coalescer: &Arc<StreamCoalescer>,
     shutdown_rx: &mut mpsc::Receiver<()>,
 ) -> bool {
     let (mut write, mut read) = ws_stream.split();
@@ -1041,6 +1117,27 @@ async fn handle_connection<R: Runtime>(
                 }
             }
 
+            key = stream_rx.recv() => {
+                if let Some(key) = key {
+                    // Take whatever is freshest for this target right
+                    // now — later sends may have replaced the value the
+                    // token was minted for, and that's the point.
+                    // (None only when connect()'s clear() raced a
+                    // stale token; nothing to send then.)
+                    if let Some(msg) = coalescer.take(&key) {
+                        let json = msg.to_json();
+                        // debug, not info: this is the 50 Hz-per-target
+                        // hot path — per-send info logging would slow
+                        // the very drain this design exists to keep fast.
+                        tracing::debug!("Sending stream value to server: {}", json);
+                        if let Err(e) = write.send(Message::Text(json)).await {
+                            tracing::error!("Failed to send stream value: {}", e);
+                            return true;
+                        }
+                    }
+                }
+            }
+
             _ = ping_interval.tick() => {
                 // Fire a latency probe. Stamp the send time first so the
                 // Pong handler can measure the round-trip.
@@ -1227,5 +1324,136 @@ mod tests {
         // deflected stick doesn't pour dead traffic into the socket.
         assert!(c.send_ws_input_value("sheet", "input", json!(0.5)).is_ok());
         assert!(c.send_topic_channel_value("/tracks", "left", json!(0.5)).is_ok());
+    }
+
+    // ── latest-wins stream coalescing (2026-08 deadstick run-on fix) ───
+    //
+    // The old shared FIFO(100) queued every streaming frame; under a
+    // stick-circle burst on a congested link the release-zero either
+    // waited behind up to 100 stale values or was drop-newest-discarded.
+    // These tests pin the replacement protocol: one slot per target
+    // holding only the freshest value, one wake-up token per pending
+    // target, stop values physically unable to queue behind stale ones.
+
+    /// Attach a live token channel to a disconnected client so the
+    /// staging protocol is exercisable without a socket.
+    fn client_with_stream_channel(cap: usize) -> (WebSocketClient, mpsc::Receiver<String>) {
+        let c = WebSocketClient::new();
+        let (tx, rx) = mpsc::channel::<String>(cap);
+        *c.stream_tx.write() = Some(tx);
+        (c, rx)
+    }
+
+    /// action+params of a serialized message — the id field is a
+    /// per-process counter, so full-JSON equality is meaningless.
+    fn essence(msg: &OutgoingMessage) -> (Value, Value) {
+        let v: Value = serde_json::from_str(&msg.to_json()).unwrap();
+        (v["action"].clone(), v["params"].clone())
+    }
+
+    #[test]
+    fn coalescer_burst_keeps_only_freshest_value_per_target() {
+        let co = StreamCoalescer::new();
+        assert!(co.offer("k", OutgoingMessage::set_topic_channel("/t", "c", json!(0.1))));
+        for i in 2..100 {
+            // Every subsequent offer replaces in place — no token, no growth.
+            assert!(!co.offer("k", OutgoingMessage::set_topic_channel("/t", "c", json!(i as f64 / 100.0))));
+        }
+        assert!(!co.offer("k", OutgoingMessage::set_topic_channel("/t", "c", json!(0.0))));
+        assert_eq!(co.pending_len(), 1, "a 100-frame burst must occupy exactly one slot");
+        let took = co.take("k").expect("slot must hold a value");
+        assert_eq!(essence(&took), essence(&OutgoingMessage::set_topic_channel("/t", "c", json!(0.0))),
+            "the stop (last offer) must be the only thing left to send");
+        assert!(co.take("k").is_none(), "slot is consumed by take");
+    }
+
+    #[test]
+    fn coalescer_slots_are_per_target() {
+        let co = StreamCoalescer::new();
+        assert!(co.offer("left", OutgoingMessage::set_topic_channel("/tracks", "left", json!(0.5))));
+        assert!(co.offer("right", OutgoingMessage::set_topic_channel("/tracks", "right", json!(-0.5))));
+        assert!(!co.offer("left", OutgoingMessage::set_topic_channel("/tracks", "left", json!(0.0))));
+        assert_eq!(co.pending_len(), 2);
+        // Right track's stale value is untouched by left's update.
+        assert!(co.take("right").is_some());
+        assert!(co.take("left").is_some());
+    }
+
+    #[test]
+    fn stream_send_mints_one_token_per_pending_target() {
+        let (c, mut rx) = client_with_stream_channel(STREAM_TOKEN_CAPACITY);
+        // Stop values bypass the throttle, so back-to-back sends all
+        // reach the staging layer — but only the FIRST mints a token.
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.0)).is_ok());
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.005)).is_ok());
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(-0.005)).is_ok());
+        let key = rx.try_recv().expect("first send must wake the writer");
+        assert!(rx.try_recv().is_err(), "replacement sends must not mint extra tokens");
+        // The writer sees the freshest value, not the token-minting one.
+        let msg = c.coalescer.take(&key).expect("staged value present");
+        assert_eq!(essence(&msg),
+            essence(&OutgoingMessage::set_topic_channel("/tracks", "left", json!(-0.005))));
+    }
+
+    #[test]
+    fn stop_after_burst_is_next_out_not_queued_behind_stale_frames() {
+        let (c, mut rx) = client_with_stream_channel(STREAM_TOKEN_CAPACITY);
+        // A second target with pending data — the worst the stop can
+        // wait behind is one frame per OTHER active target.
+        assert!(c.send_topic_channel_value("/tracks", "right", json!(0.7)).is_ok());
+        // Burst on the left track (stops bypass the throttle; the burst
+        // simulates a circle's continuous value changes), then release.
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.004)).is_ok());
+        for _ in 0..500 {
+            let _ = c.send_topic_channel_value("/tracks", "left", json!(0.009));
+        }
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.0)).is_ok());
+        // Exactly two pending frames total — never 500.
+        assert_eq!(c.coalescer.pending_len(), 2);
+        // Drain as the writer would: every token yields the freshest
+        // value; the left track's yield IS the stop.
+        let mut drained = Vec::new();
+        while let Ok(key) = rx.try_recv() {
+            if let Some(msg) = c.coalescer.take(&key) {
+                drained.push(essence(&msg));
+            }
+        }
+        assert_eq!(drained.len(), 2);
+        assert!(drained.contains(
+            &essence(&OutgoingMessage::set_topic_channel("/tracks", "left", json!(0.0)))));
+        assert_eq!(c.coalescer.pending_len(), 0);
+        assert_eq!(c.drop_stats.read().total, 0, "nothing may be dropped on this path");
+    }
+
+    #[test]
+    fn token_channel_full_unstages_and_counts_a_drop() {
+        // Capacity-1 token channel: the second distinct target can't
+        // token. Its slot must be reverted (no token-less stranding —
+        // offer() would otherwise report "pending" forever and the
+        // heartbeat's retry would never re-token it) and the drop
+        // must be counted.
+        let (c, mut rx) = client_with_stream_channel(1);
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.0)).is_ok());
+        assert!(c.send_topic_channel_value("/tracks", "right", json!(0.0)).is_ok());
+        assert_eq!(c.drop_stats.read().total, 1);
+        assert_eq!(c.coalescer.pending_len(), 1, "failed target must be un-staged");
+        // The retry (mapper re-emit / heartbeat) succeeds once the
+        // writer drains the token backlog.
+        let key = rx.try_recv().unwrap();
+        assert!(c.coalescer.take(&key).is_some());
+        assert!(c.send_topic_channel_value("/tracks", "right", json!(0.0)).is_ok());
+        assert_eq!(c.drop_stats.read().total, 1, "retry must not count a second drop");
+    }
+
+    #[test]
+    fn disconnect_clears_staged_values() {
+        let (c, _rx) = client_with_stream_channel(STREAM_TOKEN_CAPACITY);
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.5)).is_ok());
+        assert_eq!(c.coalescer.pending_len(), 1);
+        c.disconnect();
+        assert_eq!(c.coalescer.pending_len(), 0,
+            "staged motion must not survive into the next connection");
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.0)).is_err(),
+            "sends after disconnect fail at the connection check again");
     }
 }

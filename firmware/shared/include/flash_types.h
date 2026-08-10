@@ -20,7 +20,7 @@ extern "C" {
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   12
+#define FLASH_STORAGE_VERSION   13
 // Bump history:
 //   v8: added uart_pins block.
 //   v9: added estop_pin + uart_swap to flash_roboclaw_config_t units.
@@ -58,6 +58,14 @@ extern "C" {
 //        BEFORE it keeps its offset. The v11→v12 migration zeros
 //        kangaroo_config + uart_pins; pre-existing peripheral configs
 //        survive untouched but operators must re-sync UART pin pairs.
+//   v13: added flash_pimoroni_servo2040_config_t for the Pimoroni Servo
+//        2040 servo-controller board, AND added pimoroni_tx_pin/
+//        pimoroni_rx_pin to flash_uart_pins_t (which grows 2 bytes —
+//        reserved_u was exhausted at v12). The Pimoroni block lives
+//        AFTER kangaroo_config so every block BEFORE it keeps its
+//        offset. The v12→v13 migration zeros pimoroni_servo2040_config
+//        + uart_pins; pre-existing peripheral configs survive untouched
+//        but operators must re-sync UART pin pairs.
 
 #define FLASH_PIN_CONFIG_MAX_PINS     16
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
@@ -251,6 +259,32 @@ typedef struct __attribute__((packed)) {
 } flash_kangaroo_config_t;
 
 // =============================================================================
+// Pimoroni Servo 2040 Servo-Controller Configuration
+// =============================================================================
+//
+// 18 servo channels; per-channel four-tuple pulse extents matching the
+// native-servo model. LED color state is not persisted (it's transient
+// operator output), but the global LED brightness is. The UART pin pair
+// lives in flash_uart_pins_t (pimoroni_tx_pin/rx_pin) like every other
+// serial peripheral. channel_count == 0 / 0xFF means "no Servo 2040 ever
+// saved on this node" (the driver's drv_load bails on those sentinels).
+
+#define FLASH_PIMORONI_SERVO2040_MAX_CHANNELS 18
+
+typedef struct __attribute__((packed)) {
+    uint8_t channel_count;
+    uint8_t serial_port;    // Which UART (0-1 RP2040, 1-8 Teensy)
+    uint8_t led_brightness; // Global onboard-LED brightness 0..255
+    uint8_t reserved_p;
+    struct __attribute__((packed)) {
+        uint16_t start_us;   // pulse at normalized −1
+        uint16_t end_us;     // pulse at normalized +1
+        uint16_t center_us;  // pulse at normalized  0
+        uint16_t home_us;    // startup/safe-reset pulse (0 = relaxed)
+    } channels[FLASH_PIMORONI_SERVO2040_MAX_CHANNELS];
+} flash_pimoroni_servo2040_config_t;
+
+// =============================================================================
 // UART Pin Assignments (added v8)
 // =============================================================================
 //
@@ -276,6 +310,8 @@ typedef struct __attribute__((packed)) {
     uint8_t tmc2208_rx_pin;
     uint8_t kangaroo_tx_pin;   // added v12 (stolen from reserved_u)
     uint8_t kangaroo_rx_pin;
+    uint8_t pimoroni_tx_pin;   // added v13 (grows the struct 2 bytes)
+    uint8_t pimoroni_rx_pin;
 } flash_uart_pins_t;
 
 // =============================================================================
@@ -315,6 +351,8 @@ typedef struct __attribute__((packed)) {
     flash_tmc2208_config_t tmc2208_config;
 
     flash_kangaroo_config_t kangaroo_config;
+
+    flash_pimoroni_servo2040_config_t pimoroni_servo2040_config;
 
     flash_uart_pins_t uart_pins;
 

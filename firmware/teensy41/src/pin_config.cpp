@@ -55,6 +55,11 @@ static const char* mode_strings[] = {
     [PIN_MODE_RESERVED]      = "reserved",
     [PIN_MODE_MAESTRO_SERVO] = "maestro_servo",
     [PIN_MODE_SYREN_MOTOR]   = "syren_motor",
+    // PIN_MODE_PIMORONI_SERVO (and every peripheral-driver mode past
+    // SYREN) intentionally isn't listed here — pin_mode_to_string /
+    // pin_mode_from_string fall back to the driver registry
+    // (peripheral_find_by_mode*), and a sparse designated initializer
+    // past this point isn't valid C++ anyway.
 };
 
 #define MODE_STRING_COUNT (sizeof(mode_strings) / sizeof(mode_strings[0]))
@@ -147,6 +152,7 @@ static const struct {
     {"tic",            "tic_stepper"},
     {"tmc2208",        "tmc2208_stepper"},
     {"kangaroo",       "kangaroo_motion"},
+    {"pimoroni_servo2040", "pimoroni_servo"},
 };
 
 static const peripheral_driver_t* driver_for_type_id(const char* type_id)

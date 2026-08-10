@@ -126,6 +126,14 @@ bool flash_storage_load(flash_storage_data_t* data)
             memset(&mutable_data->uart_pins, 0,
                    sizeof(mutable_data->uart_pins));
         }
+        // v12 -> v13: inserted flash_pimoroni_servo2040_config_t between
+        // kangaroo_config and uart_pins, grew uart_pins by 2 bytes.
+        if (mutable_data->version <= 12) {
+            memset(&mutable_data->pimoroni_servo2040_config, 0,
+                   sizeof(mutable_data->pimoroni_servo2040_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+        }
         mutable_data->version = FLASH_STORAGE_VERSION;
     }
 
@@ -242,6 +250,11 @@ bool flash_storage_load(flash_storage_data_t* data)
         }
         if (data->version <= 11) {
             memset(&data->kangaroo_config, 0, sizeof(data->kangaroo_config));
+            memset(&data->uart_pins, 0, sizeof(data->uart_pins));
+        }
+        if (data->version <= 12) {
+            memset(&data->pimoroni_servo2040_config, 0,
+                   sizeof(data->pimoroni_servo2040_config));
             memset(&data->uart_pins, 0, sizeof(data->uart_pins));
         }
         data->version = FLASH_STORAGE_VERSION;

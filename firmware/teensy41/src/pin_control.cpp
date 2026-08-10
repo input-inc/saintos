@@ -16,6 +16,7 @@ extern "C" {
 #include "pin_config.h"
 #include "peripheral_driver.h"
 #include "maestro_driver.h"   // maestro_set_target_preview (live extent-dial jog)
+#include "pimoroni_servo2040_protocol.h" // Servo 2040 channel map (ch<N>/led<N>)
 #include "saint_types.h"   // led_set_override_color / led_set_override_brightness / led_clear_override
 #include "neopixel_strip.h" // operator-added WS2812 strips on arbitrary pins
 #include "control_message.h" // shared set_channel parse (hop-5 decode)
@@ -622,6 +623,26 @@ static bool apply_set_channel(const char* json)
             return false;
         }
         offset = atoi(digits);
+    } else if (mode == PIN_MODE_PIMORONI_SERVO) {
+        /* Servo 2040: 18 servos "ch0".."ch17" (offset 0..17) then 6
+         * onboard RGB LEDs "led0".."led5" (offset 18..23). */
+        if (channel_id[0] == 'c' && channel_id[1] == 'h') {
+            const char* d = channel_id + 2;
+            if (*d < '0' || *d > '9') return false;
+            int n = atoi(d);
+            if (n < 0 || n >= PIMORONI_SERVO2040_NUM_SERVOS) return false;
+            offset = n;
+        } else if (strncmp(channel_id, "led", 3) == 0) {
+            const char* d = channel_id + 3;
+            if (*d < '0' || *d > '9') return false;
+            int n = atoi(d);
+            if (n < 0 || n >= PIMORONI_SERVO2040_NUM_LEDS) return false;
+            offset = PIMORONI_SERVO2040_LED_CHANNEL_BASE + n;
+        } else {
+            Serial.printf("set_channel: Servo2040 channel '%s' not 'chN'/'ledN'\n",
+                           channel_id);
+            return false;
+        }
     } else if (mode == PIN_MODE_PWM || mode == PIN_MODE_SERVO
             || mode == PIN_MODE_DIGITAL_OUT) {
         offset = 0;

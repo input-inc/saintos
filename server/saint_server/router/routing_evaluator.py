@@ -39,6 +39,23 @@ from saint_server.peripheral_model import (
 _HOT_LOG_SAMPLE_N = 20      # log 1-of-N during steady streams
 _HOT_LOG_IDLE_MS = 500.0    # also log if this much wallclock has passed
 
+# Motor-channel liveness re-assert (2026-08 deadstick work). The
+# change-gate below suppresses unchanged values entirely, which means a
+# HELD stick produces zero /control traffic — so firmware cannot tell
+# "held steady" from "link dead" and could never run a dead-man timer.
+# For motor-type peripherals only, an unchanged NON-neutral value is
+# re-sent every _MOTOR_REASSERT_MS so the firmware dead-man
+# (ROBOCLAW_DEADMAN_MS) has a liveness signal to feed on. Servos are
+# deliberately excluded: their idle_disengage depends on held channels
+# going quiet (see the change-gate comment in _dispatch_sink).
+# Cadence note: with a held stick the evaluator only runs on the
+# controller's 500 ms heartbeat pushes, so the effective re-assert
+# period is max(_MOTOR_REASSERT_MS, heartbeat) ≈ 500 ms — the firmware
+# dead-man window is sized to tolerate one lost heartbeat on top.
+_MOTOR_REASSERT_TYPES = frozenset({"roboclaw", "syren"})
+_MOTOR_REASSERT_MS = 300.0
+_MOTOR_NEUTRAL_EPSILON = 0.02
+
 
 # (topic, field) → most recent scalar value, or None if no message yet.
 SourceKey = Tuple[str, str]
@@ -139,6 +156,9 @@ class RoutingEvaluator:
         # channels hit the wire. Reset on reconcile (wiring changed) and
         # on estop release (so held values re-arm the hardware).
         self._last_channel_sent: Dict[Tuple[str, str, str], float] = {}
+        # Wallclock (ms) of the last actual send per channel — drives
+        # the motor re-assert window (_MOTOR_REASSERT_MS).
+        self._last_channel_sent_ms: Dict[Tuple[str, str, str], float] = {}
         # Hot-path log sampling state (see _hot_log).
         self._hot_log_count = 0
         self._hot_log_last_ms = 0.0
@@ -160,6 +180,7 @@ class RoutingEvaluator:
             # would otherwise swallow them as "unchanged" vs the pre-estop
             # send); on engage it just clears stale state.
             self._last_channel_sent.clear()
+            self._last_channel_sent_ms.clear()
             self._log("warn",
                       f"Routing evaluator estop gate: "
                       f"{'ENGAGED — suppressing peripheral/output writes' if self._estop_active else 'RELEASED'}")
@@ -191,6 +212,7 @@ class RoutingEvaluator:
             # Rewiring can move/rename channels; force a fresh send to
             # every peripheral sink on the next eval.
             self._last_channel_sent = {}
+            self._last_channel_sent_ms = {}
             to_add = needed - self._subscribed_topics
             to_drop = self._subscribed_topics - needed
             self._subscribed_topics = set(needed)
@@ -724,6 +746,16 @@ class RoutingEvaluator:
         # peripheral / widget sources are not supported as wire sources today.
         return None
 
+    def _lookup_peripheral_type(self, node_id: str, peripheral_id: str) -> str:
+        """Peripheral catalog-type for a (node, peripheral) pair, ''
+        when unknown. Lookup failures must never break dispatch — the
+        type only refines firmware-side routing and the motor
+        re-assert decision."""
+        try:
+            return self._peripheral_type_lookup(node_id, peripheral_id) or ""
+        except Exception:
+            return ""
+
     def _dispatch_sink(self, sheet: NodeSheet, wire: Wire, value: float) -> None:
         sink = wire.sink
         # E-Stop gate: drop everything that would command actuators
@@ -747,18 +779,31 @@ class RoutingEvaluator:
             # channel's commanded value actually changed. Also lets the
             # firmware's idle_disengage fire, since a held channel now
             # stops getting SET_TARGET instead of being re-armed each tick.
+            #
+            # Motor exception: an unchanged NON-neutral motor value is
+            # re-asserted every _MOTOR_REASSERT_MS so the firmware
+            # dead-man can distinguish "held stick" (re-asserts keep
+            # arriving) from "dead link" (silence → firmware zeros the
+            # motor). Neutral values never re-assert — a stopped motor
+            # needs no liveness feed.
             fval = float(value)
             gkey = (node_id, peripheral_id, channel_id)
+            now_ms = time.monotonic() * 1000.0
+            ptype: Optional[str] = None
             if self._last_channel_sent.get(gkey) == fval:
-                return
-            ptype = ""
-            try:
-                ptype = self._peripheral_type_lookup(node_id, peripheral_id) or ""
-            except Exception:
-                ptype = ""
+                if abs(fval) <= _MOTOR_NEUTRAL_EPSILON:
+                    return
+                if now_ms - self._last_channel_sent_ms.get(gkey, 0.0) < _MOTOR_REASSERT_MS:
+                    return
+                ptype = self._lookup_peripheral_type(node_id, peripheral_id)
+                if ptype not in _MOTOR_REASSERT_TYPES:
+                    return
+            if ptype is None:
+                ptype = self._lookup_peripheral_type(node_id, peripheral_id)
             try:
                 self._send_channel(node_id, peripheral_id, channel_id, fval, ptype)
                 self._last_channel_sent[gkey] = fval
+                self._last_channel_sent_ms[gkey] = now_ms
                 # Include node_id in the log: peripheral_ids are scoped
                 # per-node so e.g. "roboclaw-1" on the Left vs Right Track
                 # Drive nodes both render as "roboclaw-1/motor" without

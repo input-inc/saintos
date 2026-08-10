@@ -47,6 +47,8 @@ from saint_server.peripheral_model import (
     detect_pin_conflicts,
     maestro_normalize_channels,
     maestro_slim_channels_for_wire,
+    pimoroni_normalize_channels,
+    pimoroni_slim_channels_for_wire,
 )
 from saint_server.board_config import BoardConfigManager, derive_capabilities
 
@@ -1900,6 +1902,11 @@ class StateManager:
         if peripheral.type == "maestro":
             maestro_normalize_channels(peripheral.params)
 
+        # Pimoroni Servo 2040: normalize the 18-entry per-channel extents
+        # list (same rationale as Maestro above).
+        if peripheral.type == "pimoroni_servo2040":
+            pimoroni_normalize_channels(peripheral.params)
+
         # Validate pin assignments don't conflict (call out to peripheral_model)
         node.peripheral_config.upsert(peripheral)
         conflicts = detect_pin_conflicts(
@@ -2044,6 +2051,10 @@ class StateManager:
             # docs/MAESTRO_BRINGUP.md for the wire-size analysis.
             if p.type == "maestro":
                 params = maestro_slim_channels_for_wire(params)
+            # Pimoroni Servo 2040: same slim trick for its 18-entry
+            # per-channel extents array.
+            if p.type == "pimoroni_servo2040":
+                params = pimoroni_slim_channels_for_wire(params)
             peripherals_out.append({
                 "id": p.id,
                 "type": p.type,

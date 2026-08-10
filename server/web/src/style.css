@@ -557,6 +557,11 @@ body { color: var(--color-fg); background-color: var(--color-canvas); }
   background: none;
   border-top: none; border-left: none; border-right: none;
   cursor: pointer;
+  /* Keep each tab on one line and let the row scroll horizontally
+     (parent has overflow-x-auto) rather than wrapping + cramping on
+     narrow screens. */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .node-tab:hover { color: var(--color-fg-strong); }
 .node-tab.router-link-active,
@@ -979,4 +984,69 @@ body.animations-fullwidth main {
   background: color-mix(in oklab, var(--color-cyan-500)    14%, var(--color-panel));
 }
 
+/* ── Responsive: master-detail pages on small screens ──────────────────
+ * Routes / Logs / Animations are desktop-first flex-row shells (fixed
+ * sidebar + fluid main). The inline nav collapses into the header
+ * drawer below lg, so these pages reclaim the nav-bar height; below md
+ * the sidebar stacks above a full-width main so nothing overflows the
+ * viewport on a phone. */
+
+/* Reclaim the nav-bar row once the inline nav becomes a drawer (< lg):
+ * only the 4rem header remains above <main>. */
+@media (max-width: 1023px) {
+  .routing-page { height: calc(100vh - 4rem); }
+  .logs-page    { height: calc(100vh - 4rem); min-height: 0; }
+}
+
+/* Phone: stack the sidebar over the main pane. The sidebar becomes a
+ * short, self-scrolling region at the top; the main pane takes the
+ * rest of the height. */
+@media (max-width: 767px) {
+  .routing-shell,
+  .logs-shell,
+  .animations-shell {
+    flex-direction: column;
+  }
+
+  .routing-sidebar,
+  .logs-sidebar,
+  .animations-sidebar {
+    width: 100%;
+    min-width: 0;
+    max-height: 9rem;
+    border-right: none;
+    border-bottom: 1px solid var(--color-panel);
+  }
+
+  /* Toolbars wrap their controls under the title instead of pushing
+     them off the right edge. */
+  .routing-toolbar,
+  .logs-toolbar,
+  .animations-toolbar {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .logs-toolbar > .flex { width: 100%; }
+
+  /* Log rows: the 3-column grid (time | source | msg) is too wide for a
+     phone. Put time + source on the first line and let the message wrap
+     full-width beneath them. */
+  .logs-row {
+    grid-template-columns: auto 1fr;
+    gap: 0.15rem 0.6rem;
+  }
+  .logs-row > .logs-summary { grid-column: 1 / -1; }
+
+  /* Animation builder: stack the preview/props split so each is usable
+     rather than crushed into a narrow column. */
+  .animations-props,
+  .editor-props {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    border-left: none;
+    border-top: 1px solid var(--color-panel);
+  }
+  .editor-preview-row { flex-direction: column; }
+}
 

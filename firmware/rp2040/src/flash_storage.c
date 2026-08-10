@@ -154,6 +154,17 @@ bool flash_storage_load(flash_storage_data_t* data)
             memset(&mutable_data->uart_pins, 0,
                    sizeof(mutable_data->uart_pins));
         }
+        // Version 12 -> 13: inserted flash_pimoroni_servo2040_config_t
+        // between kangaroo_config and uart_pins, and grew uart_pins by 2
+        // bytes. Zero the new block + uart_pins so shifted bytes aren't
+        // read as live config. All peripherals before pimoroni keep
+        // their offsets.
+        if (mutable_data->version <= 12) {
+            memset(&mutable_data->pimoroni_servo2040_config, 0,
+                   sizeof(mutable_data->pimoroni_servo2040_config));
+            memset(&mutable_data->uart_pins, 0,
+                   sizeof(mutable_data->uart_pins));
+        }
 
         mutable_data->version = FLASH_STORAGE_VERSION;
     }

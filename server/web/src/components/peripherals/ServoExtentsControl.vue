@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 // Radial servo-extent picker. Renders a 180° arc (the mechanical
 // sweep of a typical hobby servo) and four draggable handles:
@@ -30,12 +30,81 @@ const props = defineProps({
   // what the server will accept.
   minPulseUs: { type: Number, default: 500  },
   maxPulseUs: { type: Number, default: 2500 },
+
+  // ── Live dial-in section (current monitor + auto-move + stop) ──────
+  // Off by default so the peripheral-level defaults editor and the
+  // Histoire story stay minimal (no live servo bound there). Any
+  // servo-type editor that CAN jog a real channel (Maestro channel
+  // modal, native servo edit modal, and the upcoming Pimoroni editor)
+  // sets liveJog and feeds a live current reading in.
+  liveJog: { type: Boolean, default: false },
+  // Live current draw for the bound servo/channel, in AMPS, or null
+  // when no current source is resolvable on the node. Resolved by the
+  // parent from either the servo driver's own current channel (if it
+  // reports one) or a separate current-monitor peripheral.
+  current: { type: Number, default: null },
+  // Human label for where the reading comes from, e.g.
+  // "RoboClaw · current". Empty ⇒ "no current source on this node".
+  currentSource: { type: String, default: '' },
+  // Fixed full-scale for the bar in amps. 0 ⇒ auto-scale off the
+  // observed peak (with a small floor so a tiny reading isn't slammed
+  // to 100%).
+  currentFullScale: { type: Number, default: 0 },
 })
 // 'preview' fires with the absolute µs of the handle being moved so a
 // parent can jog the real servo there for live dial-in (see the
 // channel-edit modal in views/node/Peripherals.vue). Harmless to ignore
 // where no live channel is bound (the peripheral-level defaults editor).
-const emit = defineEmits(['update:modelValue', 'preview'])
+// 'stop' fires when the operator hits Stop — the parent freezes the
+// servo at its last commanded pulse.
+const emit = defineEmits(['update:modelValue', 'preview', 'stop'])
+
+// When auto-move is off, dragging/typing a handle still edits the
+// extents but does NOT jog the real servo — so an operator can set up
+// positions without the servo chasing every handle (and without loading
+// it against a mechanical limit while they read the current). Default
+// on: the whole point of the dial is live dial-in.
+const autoMove = ref(true)
+
+// Below this the servo is drawing essentially no holding current — it's
+// balanced/back-driven and needs no power to stay put. That's exactly
+// the "sweet spot" this bar exists to find.
+const HOLD_FREE_A = 0.05
+
+// Peak-hold so a transient spike (servo slamming into a hard stop as an
+// extent is dialed past its mechanical limit) stays visible after the
+// instantaneous reading falls back. Reset manually or when the section
+// (re)mounts via a fresh key from the parent.
+const peakCurrent = ref(0)
+watch(() => props.current, (a) => {
+  if (typeof a === 'number' && a > peakCurrent.value) peakCurrent.value = a
+})
+function resetPeak () { peakCurrent.value = typeof props.current === 'number' ? props.current : 0 }
+
+const hasCurrent = computed(() => typeof props.current === 'number')
+const holdingFree = computed(() => hasCurrent.value && props.current <= HOLD_FREE_A)
+
+// Bar scale: fixed full-scale if given, else auto off the peak with a
+// 0.5 A floor and ~15% headroom so the fill doesn't peg at the edge.
+const barScale = computed(() => {
+  if (props.currentFullScale > 0) return props.currentFullScale
+  return Math.max(0.5, peakCurrent.value * 1.15)
+})
+const barFrac = computed(() =>
+  hasCurrent.value ? Math.max(0, Math.min(1, props.current / barScale.value)) : 0)
+const peakFrac = computed(() =>
+  Math.max(0, Math.min(1, peakCurrent.value / barScale.value)))
+// Green when holding-free, ramping cyan → amber → rose as draw climbs.
+const barColor = computed(() => {
+  if (!hasCurrent.value) return '#475569'          // slate — no reading
+  if (holdingFree.value) return '#22c55e'          // green — free-holding
+  const f = barFrac.value
+  if (f < 0.5) return '#22d3ee'                    // cyan
+  if (f < 0.8) return '#f59e0b'                    // amber
+  return '#f43f5e'                                 // rose
+})
+const currentText = computed(() =>
+  hasCurrent.value ? `${props.current.toFixed(2)} A` : '—')
 
 // SVG geometry. The arc spans 180° (from 180° on the left, through
 // 90° at the top, to 0° on the right) — the upper half of a circle.
@@ -81,7 +150,10 @@ const dragging = ref(null)   // 'start_us' | 'end_us' | 'center_us' | 'home_us'
 
 function update (key, us) {
   emit('update:modelValue', { ...props.modelValue, [key]: us })
-  emit('preview', us)
+  // Only jog the real servo when auto-move is enabled. The extents still
+  // update either way — the toggle just decouples the physical servo
+  // from the handle so positions can be set without moving hardware.
+  if (autoMove.value) emit('preview', us)
 }
 
 function pointerToUs (evt) {
@@ -236,6 +308,67 @@ const sweepPath = computed(() => {
         />
         <span class="text-[10px] text-fg-faint">µs</span>
       </div>
+    </div>
+
+    <!-- ── Live dial-in: current monitor, auto-move toggle, stop ──────
+         Only shown when a real servo channel is bound (liveJog). Lets
+         the operator watch holding current while dialing an extent so
+         they can land on a position the servo holds with no power. -->
+    <div v-if="liveJog" class="pt-3 mt-1 border-t border-line space-y-2">
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <label class="inline-flex items-center gap-1.5 cursor-pointer select-none">
+            <input type="checkbox" v-model="autoMove" class="accent-cyan-500" />
+            <span class="text-xs text-fg-muted">Move servo to handle</span>
+          </label>
+        </div>
+        <button
+          type="button"
+          class="btn-secondary text-xs py-1 px-2 flex items-center gap-1"
+          title="Freeze the servo at its last commanded pulse"
+          @click="emit('stop')"
+        >
+          <span class="material-icons icon-sm">stop</span>
+          Stop
+        </button>
+      </div>
+
+      <!-- Current bar with peak-hold marker. -->
+      <div class="space-y-1">
+        <div class="flex items-baseline justify-between">
+          <span class="text-xs text-fg-muted">Current draw</span>
+          <span class="text-xs font-mono tabular-nums" :style="{ color: barColor }">
+            {{ currentText }}
+            <span v-if="holdingFree" class="ml-1 text-[10px] text-green-400 font-sans">holding-free</span>
+          </span>
+        </div>
+        <div class="relative h-2.5 rounded-full bg-slate-700/50 overflow-hidden">
+          <div
+            class="absolute inset-y-0 left-0 rounded-full transition-[width] duration-150"
+            :style="{ width: `${barFrac * 100}%`, backgroundColor: barColor }"
+          />
+          <!-- Peak-hold tick -->
+          <div
+            v-if="hasCurrent && peakCurrent > 0"
+            class="absolute inset-y-0 w-0.5 bg-white/70"
+            :style="{ left: `calc(${peakFrac * 100}% - 1px)` }"
+          />
+        </div>
+        <div class="flex items-center justify-between text-[10px] text-fg-faint">
+          <span>{{ currentSource || 'No current source on this node' }}</span>
+          <span v-if="hasCurrent">
+            peak {{ peakCurrent.toFixed(2) }} A
+            <button type="button" class="ml-1 underline hover:text-fg-muted" @click="resetPeak">reset</button>
+          </span>
+        </div>
+      </div>
+
+      <p class="text-[11px] text-fg-faint leading-snug">
+        Let the current reading settle before setting an extent — watch for
+        spikes as the servo loads against a mechanical limit. A near-zero,
+        steady draw (<span class="text-green-400">holding-free</span>) means the
+        servo holds this position with no power.
+      </p>
     </div>
   </div>
 </template>
