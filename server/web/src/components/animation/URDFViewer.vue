@@ -25,6 +25,7 @@ import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import URDFLoader from 'urdf-loader'
+import { resolveMeshUrl } from '@/utils/meshUrl'
 
 const props = defineProps({
   // Source URL for the URDF text. Null/empty disables loading.
@@ -541,21 +542,12 @@ function onResize () {
   renderer.setSize(w, h)
 }
 
-// URDF references meshes with either `package://pkg/path/foo.stl` or
-// plain relative paths. The server flattens everything to a single
-// `meshes/` dir, so we strip back to the basename and concat with the
-// base URL. If a URDF starts referencing the same filename across
-// multiple packages we'll need a smarter mapping; until then the flat
-// store is dramatically simpler than mirroring a `package://` layout.
-function resolveMeshUrl (path) {
-  const base = path.split('/').pop()
-  return props.meshesBase + encodeURIComponent(base)
-}
-
 function makeMeshLoader () {
   const manager = new THREE.LoadingManager()
   return (path, _manager, onComplete) => {
-    const url = resolveMeshUrl(path)
+    // Path-preserving resolution (see utils/meshUrl.js for the
+    // johnny5 same-basename story).
+    const url = resolveMeshUrl(path, props.urdfUrl, props.meshesBase)
     const ext = url.split('.').pop().split('?')[0].toLowerCase()
     let loader
     if (ext === 'stl') loader = new STLLoader(manager)

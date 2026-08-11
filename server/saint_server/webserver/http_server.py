@@ -188,7 +188,11 @@ class WebServer:
         self.app.router.add_post('/api/robot/urdf', self._handle_urdf_upload)
         self.app.router.add_delete('/api/robot/urdf', self._handle_urdf_delete)
         self.app.router.add_get('/api/robot/joints', self._handle_urdf_joints)
-        self.app.router.add_get('/api/robot/meshes/{filename}', self._handle_urdf_mesh)
+        # `:.+` lets the mesh path carry subdirectories — meshes are
+        # stored under their URDF-relative paths (Meshes/Foo/bar.stl)
+        # so same-named files in different folders stay distinct.
+        # Traversal safety lives in urdf_store.get_mesh_path.
+        self.app.router.add_get('/api/robot/meshes/{filename:.+}', self._handle_urdf_mesh)
 
         # Animation import — Pololu Maestro save-file conversion.
         self.app.router.add_post('/api/animations/import/maestro',

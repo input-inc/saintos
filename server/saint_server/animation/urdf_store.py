@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 import shutil
 import time
 import zipfile
@@ -38,7 +39,9 @@ class URDFMetadata:
     urdf_filename: str
     sha256: str
     uploaded_at: float            # unix timestamp
-    mesh_files: List[str]         # filenames (no path), as found under meshes/
+    mesh_files: List[str]         # URDF-relative paths under meshes/ (e.g.
+                                  # "Meshes/EyeMechanism/eye.stl"). Installs
+                                  # made before 2026-08 stored bare basenames.
     link_count: int               # parsed from URDF for quick UI display
     joint_count: int
 
@@ -87,18 +90,34 @@ class URDFStore:
         return self._find_urdf()
 
     def get_mesh_path(self, filename: str) -> Optional[str]:
-        """Resolve a mesh filename to an absolute path, or None.
+        """Resolve a URDF-relative mesh path to an absolute path, or None.
 
-        Rejects path-traversal attempts — only files directly under
-        ``meshes/`` are reachable.
+        Accepts nested paths ("Meshes/EyeMechanism/eye.stl") — meshes
+        are stored under their URDF-relative directories so two files
+        with the same basename in different folders stay distinct
+        (johnny5 regression: SimpleMouth/ and SimplifiedHead2/ both
+        ship a static_97a3da.stl). Rejects path-traversal attempts —
+        only files under ``meshes/`` are reachable.
+
+        Falls back to a flat basename lookup for models installed
+        before path preservation (they were flattened on upload).
         """
-        if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        if not filename:
             return None
-        candidate = os.path.join(self.meshes_dir, filename)
-        candidate_norm = os.path.normpath(candidate)
-        if not candidate_norm.startswith(os.path.normpath(self.meshes_dir) + os.sep):
+        rel = filename.replace("\\", "/").lstrip("/")
+        if not rel or any(part in ("..", "") for part in rel.split("/")):
             return None
-        return candidate_norm if os.path.isfile(candidate_norm) else None
+        root = os.path.normpath(self.meshes_dir)
+        candidate = os.path.normpath(os.path.join(root, *rel.split("/")))
+        if candidate != root and not candidate.startswith(root + os.sep):
+            return None
+        if os.path.isfile(candidate):
+            return candidate
+        # Legacy flat install: same file, path prefix stripped.
+        flat = os.path.normpath(os.path.join(root, posixpath.basename(rel)))
+        if flat.startswith(root + os.sep) and os.path.isfile(flat):
+            return flat
+        return None
 
     def install_from_zip(self, zip_bytes: bytes, original_filename: str) -> URDFMetadata:
         """Replace any existing model with the contents of a zip bundle.
@@ -153,15 +172,37 @@ class URDFStore:
         with open(urdf_target, "wb") as f:
             f.write(urdf_data)
 
+        # Store each mesh under its path RELATIVE TO THE URDF, mirroring
+        # how the URDF references it. The old behavior flattened to
+        # basename with last-write-wins, which silently collapsed
+        # distinct meshes sharing a filename across subfolders (e.g.
+        # johnny5's SimpleMouth/static_97a3da.stl vs
+        # SimplifiedHead2/static_97a3da.stl) — one geometry then
+        # rendered twice and the other vanished.
+        urdf_dir = posixpath.dirname(urdf_member[0])
         mesh_names: List[str] = []
+        seen_targets: dict = {}
         for member, base in mesh_members:
-            # Strip any path prefix — meshes live in a flat dir.
-            # Collisions across nested folders take the last write, which
-            # is fine for URDFs that already use unique mesh filenames.
-            target = os.path.join(tmp_dir, "meshes", base)
+            rel = posixpath.relpath(member, urdf_dir) if urdf_dir else member
+            if ".." in rel.split("/"):
+                # Mesh outside the URDF's directory — a URDF can't
+                # reference it without ".." (which we reject on the
+                # serving side anyway). Keep it reachable by its
+                # bundle-rooted path.
+                rel = member.lstrip("/")
+            key = rel.lower()   # macOS/Windows checkouts are case-insensitive
+            if key in seen_targets:
+                self._log("warning",
+                          f"URDF bundle: mesh path collision — '{member}' and "
+                          f"'{seen_targets[key]}' both install as '{rel}'; "
+                          "keeping the last one. Rename one file in the "
+                          "bundle to keep both.")
+            seen_targets[key] = member
+            target = os.path.join(tmp_dir, "meshes", *rel.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "wb") as f:
                 f.write(zf.read(member))
-            mesh_names.append(base)
+            mesh_names.append(rel)
 
         sha = hashlib.sha256(urdf_data).hexdigest()
         metadata = URDFMetadata(
