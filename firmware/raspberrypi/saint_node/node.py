@@ -39,6 +39,7 @@ from .peripherals.kangaroo import KangarooDriver
 from .peripherals.pathfinder_bms import PathfinderBMSDriver
 from .peripherals.fas100 import FAS100Driver
 from .peripherals.pimoroni_servo2040 import PimoroniServo2040Driver
+from .peripherals.neopixel import NeoPixelDriver
 from .peripherals.audio_player import PiAudioPlayerDriver
 from .peripherals.audio_mixer import AlsaMixerDriver
 from .peripherals.console_display import ConsoleDisplayDriver
@@ -137,6 +138,12 @@ class SaintNode(Node):
         self._peripherals.register(PathfinderBMSDriver)
         self._peripherals.register(FAS100Driver)
         self._peripherals.register(PimoroniServo2040Driver)
+        # External WS2812/NeoPixel strips (driver parity with the
+        # Teensy + RP2040 strip drivers). Backend is picked lazily:
+        # rpi_ws281x on Pi 3/4 (any PWM pin), WS2812-over-SPI on Pi 5
+        # (data must be GPIO 10 / SPI0 MOSI), log-only stub when
+        # neither lib is present.
+        self._peripherals.register(NeoPixelDriver)
         # Built-in audio playback: lives on every Pi-host saint-node,
         # auto-seeded by the raspberrypi board YAML's builtin_peripherals
         # entry. libVLC is loaded lazily — a missing system package

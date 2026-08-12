@@ -164,6 +164,7 @@ set(SAINT_NODE_SOURCES
     ../shared/src/control_message.c
     src/hardware.c
     src/led_status.c
+    src/neopixel_strip.c
     src/pico_clock.c
     src/flash_storage.c
     src/pin_config.c

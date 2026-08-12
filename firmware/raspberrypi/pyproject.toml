@@ -47,6 +47,14 @@ dependencies = [
     # Import is lazy — a host without bleak still loads the driver,
     # only BLE-mode instances fail to open.
     "bleak>=0.21",
+    # WS2812/NeoPixel backends for the neopixel peripheral. Both are
+    # lazily imported: rpi_ws281x drives arbitrary PWM pins on Pi 3/4
+    # (it does NOT support the Pi 5's RP1); spidev is the Pi 5-safe
+    # fallback (data pin must be GPIO 10 / SPI0 MOSI, and SPI must be
+    # enabled via raspi-config). A host with neither logs a stub line
+    # per write and the rest of the node keeps running.
+    "rpi_ws281x>=5.0; platform_machine != 'x86_64'",
+    "spidev>=3.5; platform_machine != 'x86_64'",
 ]
 
 [project.optional-dependencies]

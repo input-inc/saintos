@@ -20,6 +20,7 @@
 #include "saint_log.h"     // saint_log_publish (dashboard Logs tab)
 #include "fas100_driver.h" // fas100_get_diag (per-peripheral health in /state)
 #include "control_message.h" // shared set_channel parse (hop-5 decode)
+#include "neopixel_strip.h"  // operator-added WS2812 strips (PIO)
 #include "pimoroni_servo2040_protocol.h" // Servo 2040 channel map (ch<N>/led<N>)
 
 // =============================================================================
@@ -459,6 +460,10 @@ void pin_control_estop(void)
     peripheral_estop_all();
     printf("ESTOP: peripherals stopped\n");
 
+    // External WS2812 strips dark (they live outside pin_config and
+    // the driver table). Mirrors the Teensy estop path.
+    neopixel_strip_all_off();
+
     printf("ESTOP: Complete\n");
 }
 
@@ -617,12 +622,36 @@ static bool apply_set_channel(const char* json)
     const char* peripheral_type = cmd.type;   // "" when the server omits it
     float       value           = cmd.value;
 
-    // NeoPixel isn't a pin_config entry — special-case before the
-    // logical_name walk below would unconditionally fail for it.
+    /* Operator-added external strips FIRST — the strip table is the
+     * source of truth. This must run before the id-substring fallback
+     * below: an external strip named "neopixel-1" would otherwise
+     * match "neopixel" inside its id and route color/brightness to
+     * the ONBOARD status LED instead of the actual strip (same
+     * routing hijack the Teensy hit on 2026-06-20; see
+     * firmware/teensy41/src/pin_control.cpp). */
+    if (neopixel_strip_exists(peripheral_id)) {
+        if (!cmd.has_value) return false;
+        if (strcmp(channel_id, "color") == 0) {
+            return neopixel_strip_set_color(peripheral_id, (uint32_t)value);
+        }
+        if (strcmp(channel_id, "brightness") == 0) {
+            if (value < 0.0f) value = 0.0f;
+            if (value > 1.0f) value = 1.0f;
+            return neopixel_strip_set_brightness(
+                peripheral_id, (uint8_t)(value * 255.0f + 0.5f));
+        }
+        saint_log_publish("warn", "NeoPixel: strip '%s' unknown channel '%s'",
+                          peripheral_id, channel_id);
+        return false;
+    }
+
+    // Onboard NeoPixel isn't a pin_config entry — special-case before
+    // the logical_name walk below would unconditionally fail for it.
     // Prefer explicit type when present; otherwise match by id
-    // substring so "neopixel", "onboard_neopixel", "neopixel_strip_1",
-    // etc. route to the same status-LED override path. It takes a color
-    // value, not a us jog.
+    // substring so "neopixel", "onboard_neopixel", etc. route to the
+    // status-LED override path. External strips never reach here — the
+    // strip-exists check above catches them. It takes a color value,
+    // not a us jog.
     if (strcmp(peripheral_type, "neopixel") == 0
         || strstr(peripheral_id, "neopixel") != NULL) {
         if (!cmd.has_value) return false;
