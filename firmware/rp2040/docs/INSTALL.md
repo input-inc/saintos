@@ -264,18 +264,25 @@ ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
 
 ### Installing micro-ROS Agent
 
-```bash
-# Ubuntu with ROS2 Humble
-sudo apt install ros-humble-micro-ros-agent
+The **packaged server dist bundles the micro-ROS agent** — a Pi installed per
+[`INSTALL.md`](../../../docs/INSTALL.md) already has it, so this step is only for a
+from-source dev workspace.
 
-# Or build from source
+```bash
+# From apt, matching your ROS 2 distro (Kilted):
+sudo apt install ros-$ROS_DISTRO-micro-ros-agent
+
+# Or build from source against your distro branch:
 mkdir -p ~/microros_ws/src
 cd ~/microros_ws/src
-git clone -b humble https://github.com/micro-ROS/micro-ROS-Agent.git
+git clone -b $ROS_DISTRO https://github.com/micro-ROS/micro-ROS-Agent.git
 cd ~/microros_ws
 colcon build
 source install/setup.bash
 ```
+
+See [`../../../server/docs/DEVELOPMENT.md`](../../../server/docs/DEVELOPMENT.md)
+for the full dev-environment agent setup (including the macOS Docker path).
 
 ---
 
@@ -447,12 +454,9 @@ The onboard NeoPixel indicates node state:
 
 After the node appears in the SAINT.OS web interface:
 
-1. **Adopt the node** - Select a role (head, arms, tracks, console)
-2. **Wire peripherals** - Connect servos, sensors, motors as needed
-3. **Configure GPIO** - Map pins to role functions via web interface
+1. **Adopt the node** — give it a name, board, and optional role.
+2. **Wire peripherals** — connect servos, sensors, motors as needed.
+3. **Add peripherals + build routing sheets** in the web UI.
 
-See role-specific documentation:
-- [Head Node Setup](./HEAD_NODE.md) - Servos for pan/tilt/roll
-- [Arms Node Setup](./ARMS_NODE.md) - Joint servos and gripper
-- [Tracks Node Setup](./TRACKS_NODE.md) - Motor drivers and encoders
-- [Console Node Setup](./CONSOLE_NODE.md) - Display and buttons
+The full operator workflow (adopt → peripherals → routing sheets) is in the
+[operator guide](../../../server/docs/SERVER_GUIDE.md).

@@ -190,7 +190,7 @@ Pi 5 Node (Python)  <--DDS-->  SAINT.OS Server
   busy-waits then take seconds of wall time and look like hangs.
 
 ### Pi 5 node won't start
-- Source ROS2: `source /opt/ros/jazzy/setup.bash`
+- Source ROS2: `source /opt/ros/kilted/setup.bash`
 - Check Python path: `python3 -c "import saint_node"`
 
 ### Nodes not appearing in SAINT.OS

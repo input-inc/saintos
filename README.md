@@ -3,7 +3,7 @@
 **System for Articulated Intelligence and Navigation Tasks**
 
 SAINT.OS is a ROS 2 control platform for multi-node animatronic and mobile
-robots. A central server (Raspberry Pi) coordinates a fleet of
+robots. A central server (Raspberry Pi or Linux compatible) coordinates a fleet of
 microcontroller and single-board-computer **nodes** over ROS 2, exposes a
 web UI and a WebSocket API, routes live input (gamepad, Unreal LiveLink,
 animation timelines) to actuators through operator-authored **routing
@@ -70,21 +70,18 @@ a Python ROS 2 node directly.
 
 ## Getting started
 
-There are two paths: **deploy to a robot** (the normal path) and
-**development** (build from source on a dev machine).
+SAINT.OS installs from a **prebuilt release** — you don't have to build
+anything to stand up a robot. The server dist bundles the node firmware and
+the controller app, so one download gets you everything. Three steps:
+**install the server → adopt and flash nodes from it → install the
+controller.** (To build from source instead, see [BUILD.md](docs/BUILD.md).)
 
-### 1. Deploy to a robot (Raspberry Pi)
+### 1. Install the server (Raspberry Pi)
 
-The server ships as a self-contained dist tarball that installs offline. On
-a dev machine (macOS or Linux) with Docker + Node:
-
-```bash
-# Build the dist tarball (bundles ROS 2, all deps, node firmware, and the
-# controller app). Output: dist/saint-os_<version>_arm64_kilted.tar.zst
-scripts/build-local-dist.sh
-```
-
-Copy the tarball to the Raspberry Pi and install:
+Download the latest server dist tarball —
+`saint-os_<version>_arm64_kilted.tar.zst` — from the
+[**Releases**](https://github.com/input-inc/saintos/releases) page, copy it
+to the Pi, and install:
 
 ```bash
 # On the Pi
@@ -100,60 +97,53 @@ http://opensaint.local/      # or http://<pi-ip>/
 ```
 
 `install.sh --help` covers options (`--no-wifi`, `--no-start`, `--dry-run`).
+For the full walkthrough — Pi OS image, networking, and verification — see
+[INSTALL.md](docs/INSTALL.md) and the
+[operator guide](server/docs/SERVER_GUIDE.md).
 
-### 2. First-run setup (from the web UI)
+### 2. Adopt nodes and flash firmware — from the server
 
-1. **Adopt nodes.** Powered-on nodes appear as *unadopted*. Adopt each one
-   by giving it a **name** (its identity everywhere in the app), picking its
+Everything below happens in the server's web UI:
+
+1. **Adopt nodes.** Powered-on nodes appear as *unadopted*. Adopt each one by
+   giving it a **name** (its identity everywhere in the app), picking its
    **board**, and optionally a **role** from the active robot manifest.
-2. **Flash node firmware.** Push firmware over the air from the UI, or flash
-   an RP2040 in BOOTSEL mode with the built `.uf2`.
+2. **Flash firmware over the air.** The dist ships firmware for every node
+   type into the server's firmware store — push it from the UI. For an
+   RP2040's first bring-up, flash the bundled `.uf2` in BOOTSEL mode.
+   Raspberry Pi nodes install the bundled `saint_firmware_raspberrypi` bundle.
 3. **Add peripherals.** Configure each node's peripherals (motors, servos,
    Maestro channels, NeoPixels, audio) and sync them to the node.
 4. **Build routing sheets.** Wire controller / LiveLink / animation inputs to
-   peripheral channels. See the operator guide below.
+   peripheral channels.
 
-### 3. Controller app
+The [operator guide](server/docs/SERVER_GUIDE.md) walks through all four in
+detail.
 
-```bash
-cd controller
-npm install
-npm run tauri dev            # native dev run
-npm run tauri build          # production bundle (Steam Deck: see controller/README.md)
-```
+### 3. Install the controller app
 
-### 4. Node firmware
+Get the controller onto a Steam Deck two ways — no toolchain either way:
 
-```bash
-cd firmware/rp2040  && ./build.sh hw     # or: sim  (Renode simulation)
-cd firmware/teensy41 && ./build.sh hw    # PlatformIO under the hood
-```
+- **OTA from the server** — the controller's **Settings** tab polls the
+  SAINT.OS server and self-updates the running AppImage in place.
+- **Bundled AppImage** — the server ships
+  `saint_firmware_controller_*.AppImage`; drop it on the Deck and add it to
+  Steam as a Non-Steam Game.
 
-Raspberry Pi nodes run the Python firmware in `firmware/raspberrypi/`.
+See [controller/README.md](controller/README.md) for first-time Steam Deck
+setup.
 
-### 5. Run a different robot
+### Run a different robot
 
-SAINT.OS isn't tied to OpenSAINT. Add your own manifest at
-`server/config/robots/<id>.yaml` (or, on an installed system,
-`/etc/saint-os/robots/`):
+SAINT.OS isn't tied to OpenSAINT — drop in a one-file robot manifest and select
+it under **Settings → Robot**. See
+[docs/INSTALL.md §6](docs/INSTALL.md#6-run-a-different-robot) for the manifest
+format.
 
-```yaml
-id: myrobot
-name: My Robot
-description: What it is.
-homepage: https://example.com/myrobot
-roles:            # node role labels offered in the adoption dropdown
-  - Base
-  - Head
-```
+### Build from source
 
-Select it under **Settings → Robot** (the setting persists across restarts).
-
-### Development (build from source)
-
-For running the server directly on a dev machine (no dist tarball), see
-[INSTALL.md](INSTALL.md) — it covers ROS 2 setup on macOS/Linux/Windows and
-the `colcon build` workflow.
+To build the server, firmware, or controller yourself — on a dev machine, for
+development or to cut your own release — see [BUILD.md](docs/BUILD.md).
 
 ## Hardware support
 
@@ -188,19 +178,33 @@ the `colcon build` workflow.
 
 ## Documentation
 
+**Install & operate**
+
+- [INSTALL.md](docs/INSTALL.md) — In-depth install guide: Pi OS image, download, install, first-run setup
+- [server/docs/SERVER_GUIDE.md](server/docs/SERVER_GUIDE.md) — Operator guide: install, flash nodes, apply OTA updates, add peripherals, author routing sheets
+- [controller/README.md](controller/README.md) — Controller install on a Steam Deck (OTA + AppImage)
+
+**Build from source**
+
+- [BUILD.md](docs/BUILD.md) — Build the server dist, node firmware, and controller from source
+
+**Component landing pages**
+
+- [server/README.md](server/README.md) — Server (ROS 2 `saint_os` package)
+- [firmware/rp2040/README.md](firmware/rp2040/README.md) · [firmware/teensy41/README.md](firmware/teensy41/README.md) · [firmware/raspberrypi/README.md](firmware/raspberrypi/README.md) — Node firmware
+
+**Reference**
+
 - [docs/SAINT_OS_SPEC.md](docs/SAINT_OS_SPEC.md) — Full system specification
 - [docs/HARDWARE.md](docs/HARDWARE.md) — Hardware requirements and supported platforms
 - [docs/MAESTRO_BRINGUP.md](docs/MAESTRO_BRINGUP.md) — Pololu Maestro servo controller bring-up
 - [docs/SOUNDBOARD.md](docs/SOUNDBOARD.md) — Per-node audio: register and trigger clips
-- [INSTALL.md](INSTALL.md) — Source-build installation guide (dev machines)
-- [server/docs/SERVER_GUIDE.md](server/docs/SERVER_GUIDE.md) — Operator guide: install, flash nodes, apply OTA updates, add peripherals, author routing sheets
-- [controller/README.md](controller/README.md) — Controller build & deployment (Steam Deck + native dev)
 - [controller/docs/SHEETS_BINDINGS.md](controller/docs/SHEETS_BINDINGS.md) — Binding controller inputs to routing-sheet WebSocket inputs
 - [controller/docs/BINDINGS_SYSTEM.md](controller/docs/BINDINGS_SYSTEM.md) — Bindings data model (input sources, action types, preset panels)
 
 ## Project
 
-Homepage: <https://github.com/input-inc/OpenSaint>
+Homepage: <https://github.com/input-inc/saintos>
 
 ## Sponsor
 

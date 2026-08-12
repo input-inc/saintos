@@ -9,126 +9,24 @@ fresh Raspberry Pi:
 4. [Add peripherals to a node](#4-add-peripherals-to-a-node)
 5. [Build routing sheets — inputs to outputs](#5-build-routing-sheets--inputs-to-outputs)
 
-For developer-mode source builds (Ubuntu / macOS / Windows colcon
-workspaces) see [`../../INSTALL.md`](../../INSTALL.md). This guide
-covers the **packaged** deployment — a tarball-based install onto a
-Pi that the robot actually ships with.
-
-For a flat reference of every systemd unit and netplan path the
-installer touches, see [`DEPLOYMENT.md`](DEPLOYMENT.md). This guide is
-the workflow; that one is the inventory.
+This guide is the **workflow** — it walks the packaged deployment end to
+end, from a fresh Pi to a driving robot. For the in-depth install
+reference see [`../../docs/INSTALL.md`](../../docs/INSTALL.md); to build any
+component from source see [`../../docs/BUILD.md`](../../docs/BUILD.md).
 
 ---
 
 ## 1. Install the server
 
-### Hardware
+Install the server on a Raspberry Pi following the in-depth guide,
+[`../../docs/INSTALL.md`](../../docs/INSTALL.md) — it covers the hardware,
+the Pi OS image and imager settings, downloading the release, running
+`install.sh` (with the flags and what each step does), verifying the
+service, and the default WebSocket password. To build the dist yourself
+instead of downloading it, see [`../../docs/BUILD.md`](../../docs/BUILD.md).
 
-- **Recommended:** Raspberry Pi 5 (4 GB+), USB-C 5V/5A supply, NVMe HAT
-  + NVMe SSD (the routing evaluator + ROS bridge are I/O-heavy in
-  practice).
-- **Supported:** Raspberry Pi 4 (4 GB+), USB-C 5V/3A supply, A2-class
-  microSD card.
-- **Network:** built-in Ethernet for the internal peripheral bus,
-  built-in WiFi for the operator-facing access point.
-
-### OS image
-
-Either of these works — both are 64-bit arm64:
-
-- **Raspberry Pi OS Bookworm (64-bit, Lite)** — minimal install, no
-  desktop. Recommended.
-- **Ubuntu 24.04 Server (arm64)**.
-
-Flash with the Raspberry Pi Imager. In the imager's advanced settings,
-set:
-
-- **Hostname:** `opensaint` (the installer expects this; override via
-  `SAINT_HOSTNAME=…` if you need a different name).
-- **Username:** `pi` (any account works; the installer creates a
-  dedicated `saint` service user separately).
-- **SSH:** enable, with your public key authorized.
-- **WiFi:** leave **unset** — the installer takes over WiFi and turns
-  the radio into an access point. If you preconfigure WiFi here the
-  installer will undo it.
-
-Boot the Pi. Find it on your network (`ssh pi@<router-assigned-ip>` or
-`ssh pi@opensaint.local` if mDNS works on your network).
-
-### Build the dist tarball
-
-The installer is shipped as a self-contained tarball — it bundles ROS2
-Jazzy, the micro-ROS agent, the saint_os package, plus apt-deps for
-the target distro. From a Linux dev machine (Docker required):
-
-```bash
-cd SaintOS/source
-scripts/build-local-dist.sh
-```
-
-This produces `dist/saint-os_<version>_arm64_jazzy.tar.zst`. The
-script prints the SHA-256 and an scp/install command at the end.
-
-Built artifact you should see:
-
-```
-dist/saint-os_0.5.1_arm64_jazzy.tar.zst       (~80 MB compressed)
-```
-
-### Copy to the Pi and install
-
-```bash
-scp dist/saint-os_*_arm64_jazzy.tar.zst pi@opensaint.local:/tmp/
-ssh pi@opensaint.local
-cd /tmp
-tar -xaf saint-os_*_arm64_jazzy.tar.zst
-sudo saint-os_*_arm64_jazzy/install.sh
-```
-
-`install.sh` is idempotent. It will:
-
-| Step | What it does |
-|---|---|
-| Extract ROS2 + micro-ROS agent | Lands under `/opt/ros/jazzy/` — does **not** use a public apt repo, so this works on machines with no internet access |
-| Install apt runtime deps | Uses the bundled local apt repo for `python3-packaging`, `nginx`, etc.; cleans up the temporary repo when done |
-| Create the `saint` service user | Owns `/var/lib/saint-os/` (state) and `/var/log/saint-os/` (logs) |
-| Install the saint_os ROS package | Lands under `/opt/saint-os/` |
-| Install systemd units | `saint-os.service` (the server itself), plus `apply-update.sh` and `usb-helper.sh` privileged wrappers used by the OTA flow |
-| Configure the WiFi access point | SSID `OpenSAINT`, passphrase `ifeelalive`, country `US`. Override at install time with `SAINT_WIFI_SSID=… SAINT_WIFI_PASS=…` |
-| Configure mDNS + DHCP on the internal Ethernet bus | The Pi answers to `opensaint.local`; `eth0` hands out `192.168.10.10–254` to peripherals |
-| Enable and start the service | Skip with `--no-start` if you want to inspect the install before launching |
-
-Useful flags:
-
-```bash
-sudo ./install.sh --no-wifi          # keep host WiFi management as-is
-sudo ./install.sh --no-dhcp          # don't run the internal-bus DHCP server
-sudo ./install.sh --no-start         # install but don't enable / start
-sudo ./install.sh --dry-run          # show what would happen
-```
-
-Verify the service is up:
-
-```bash
-systemctl status saint-os
-journalctl -u saint-os -f            # tail the logs
-```
-
-Open the web UI from your laptop / Deck once it's connected to the
-**OpenSAINT** WiFi AP:
-
-```
-http://opensaint.local/
-```
-
-Default WebSocket password is `12345`. Change it from the web UI
-(**Settings → Security**) or by editing
-`/etc/saint-os/server_config.yaml` and restarting the service:
-
-```yaml
-websocket:
-  password: 'your-strong-password'
-```
+When the service is up and the web UI answers at `http://opensaint.local/`
+(from a device on the **OpenSAINT** WiFi AP), continue below.
 
 ---
 
@@ -161,78 +59,28 @@ supported node types are:
 The web UI surfaces them on the **Firmware** page with one-click
 download buttons.
 
-### Flashing an RP2040 (Pi Pico W)
+### Flash each initial node
 
-1. Hold the **BOOTSEL** button on the Pico.
-2. Plug it into your laptop via USB-C / micro-USB while still holding
-   BOOTSEL.
-3. Release BOOTSEL once the Pico mounts as a USB drive named
-   `RPI-RP2`.
-4. From your laptop:
-   ```bash
-   curl -OL http://opensaint.local/api/firmware/rp2040/saint_node_combined.uf2
-   cp saint_node_combined.uf2 /Volumes/RPI-RP2/      # macOS
-   # or: cp saint_node_combined.uf2 /media/$USER/RPI-RP2/   # Linux
-   ```
-5. The Pico reboots itself off USB mass storage and the volume
-   unmounts — that's the signal the flash worked.
-6. Plug the Pico into the SAINT.OS Ethernet bus. Within ~10 seconds
-   the server's **Unadopted Nodes** list (web UI → **Nodes**) shows a
-   new entry.
+Download the artifact for the board from the **Firmware** page (or the API URLs
+above), flash it, then plug the node into the internal Ethernet bus — it appears
+in **Unadopted Nodes** within a few seconds. The per-board procedures live in
+each firmware section's install guide; the server-specific notes are:
 
-For the very first flash use `saint_node_combined.uf2` — it bundles
-the OTA bootloader at the bottom of flash plus the application image
-on top, so future OTA updates can replace only the application slot
-without re-flashing the bootloader. For nodes that already have the
-bootloader (i.e. anything you've adopted before), `saint_node.uf2` is
-fine.
+- **RP2040** — BOOTSEL drag-and-drop. For the *first* flash use
+  `saint_node_combined.uf2` (it bundles the OTA bootloader + application, so
+  later OTA updates replace only the app slot); `saint_node.uf2` is fine once a
+  board already has the bootloader. Steps:
+  [`firmware/rp2040/docs/INSTALL.md`](../../firmware/rp2040/docs/INSTALL.md).
+- **Teensy 4.1** — flash `firmware.hex` with the Teensy Loader. Steps:
+  [`firmware/teensy41/docs/INSTALL.md`](../../firmware/teensy41/docs/INSTALL.md).
+- **Raspberry Pi node** — scp the `saint_firmware_raspberrypi_<ver>.tar.zst`
+  bundle and run its `scripts/install.sh` (detects Bookworm/Trixie, installs the
+  bundled ROS 2 Kilted runtime, starts the service). Steps:
+  [`firmware/raspberrypi/docs/INSTALL.md`](../../firmware/raspberrypi/docs/INSTALL.md).
 
-### Flashing a Teensy 4.1
-
-1. Plug the Teensy into your laptop via USB.
-2. Download `firmware.hex` from the Firmware page (or
-   `http://opensaint.local/api/firmware/teensy41/firmware.hex`).
-3. Open the **Teensy Loader** app (`teensy_loader_cli` works too):
-   ```bash
-   teensy_loader_cli --mcu=TEENSY41 -w -v firmware.hex
-   ```
-4. Press the program button on the Teensy when prompted (or pass `-s`
-   to soft-reboot).
-5. Plug into the internal Ethernet bus — the node appears in
-   **Unadopted Nodes**.
-
-### Bringing up a Raspberry Pi peripheral node
-
-Pi 3 / Pi 4 / Pi 5 nodes run the **saint-node** firmware — a ROS 2
-node that handles GPIO, audio playback, the console kiosk display,
-and BLE-attached BMSes. Pi model is auto-detected at startup.
-
-**Quick recipe** (the firmware zip is self-contained — no internet
-required on the Pi at install time):
-
-```bash
-# On the Pi, after scp'ing the bundle:
-cd /tmp
-tar -xaf saint_firmware_raspberrypi_<ver>.tar.zst   # -xaf auto-detects .zst
-cd saint_firmware_raspberrypi_<ver>/scripts
-sudo ./install.sh
-```
-
-The installer detects the Pi's Debian release (Bookworm or Trixie),
-installs the matching ROS 2 Kilted runtime from the bundle, sets up
-the systemd unit, and starts the service. Within a few seconds the
-node should appear in the server's **Unadopted Nodes** panel.
-
-**Full walkthrough** — supported hardware, the offline-bundle build
-workflow, OTA flow, troubleshooting, and uninstall — is bundled inside
-the firmware zip at `docs/INSTALL.md`, and also lives in the repo at
-[`firmware/raspberrypi/docs/INSTALL.md`](../../firmware/raspberrypi/docs/INSTALL.md).
-Short orientation: [`firmware/raspberrypi/README.md`](../../firmware/raspberrypi/README.md).
-
-> The Pi-node firmware is distinct from the SAINT.OS server itself.
-> A Pi running the server *can* also run saint-node (they're
-> independent systemd services); the node will adopt itself like any
-> other Pi on the network.
+> The Pi-node firmware is distinct from the SAINT.OS server itself. A Pi running
+> the server *can* also run saint-node (independent systemd services); the node
+> adopts itself like any other Pi on the network.
 
 ---
 
@@ -453,13 +301,12 @@ sudo -u saint /opt/saint-os/bin/saint-shell    # if installed — exec into the 
 
 ## Related docs
 
-- [`DEPLOYMENT.md`](DEPLOYMENT.md) — every systemd / netplan / firewall
-  path the installer touches (reference, not workflow)
+- [`../../docs/INSTALL.md`](../../docs/INSTALL.md) — the in-depth install reference
+  (prerequisites, download, install, troubleshooting)
+- [`../../docs/BUILD.md`](../../docs/BUILD.md) — building any component from source
 - [`DEVELOPMENT.md`](DEVELOPMENT.md) — running the server out of a
   colcon workspace for development
-- [`../../INSTALL.md`](../../INSTALL.md) — building the server from
-  source on macOS / Linux / Windows
-- [`../../controller/README.md`](../../controller/README.md) — building
-  and deploying the controller Flatpak
+- [`../../controller/README.md`](../../controller/README.md) — installing
+  and building the Steam Deck controller
 - [`../../controller/docs/SHEETS_BINDINGS.md`](../../controller/docs/SHEETS_BINDINGS.md)
   — controller-side bindings → routing-sheet WS-inputs walkthrough

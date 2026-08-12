@@ -267,3 +267,5 @@ target/
 firmware/simulation/logs/
 
 ros2-install.tar.gz
+
+.obsidian

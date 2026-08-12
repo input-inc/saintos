@@ -69,6 +69,28 @@ See the table in [README.md](README.md#repository-layout). In short:
 `firmware/` (RP2040 / Teensy / Pi nodes + shared drivers),
 `configs/`, `scripts/`, `packaging/`, `docs/`.
 
+## Documentation structure
+
+SAINT.OS docs are **install-first**: the primary path is always installing a
+prebuilt release, with from-source builds kept separate.
+
+- **Root [`README.md`](README.md)** — the funnel: install the server → flash
+  nodes from it → install the controller. Links out, doesn't duplicate.
+- **Root [`INSTALL.md`](docs/INSTALL.md)** — the in-depth install reference.
+- **Root [`BUILD.md`](docs/BUILD.md)** — the single index for building any component
+  from source. Build instructions live here (or in a component's `docs/`), never
+  in the install-first funnel.
+- **Each top-level folder has a `README.md` landing page** following one
+  structure: **Overview → Install (install-first) → Building from source (brief
+  + link to BUILD.md) → Documentation → Troubleshooting**. Deep-dives live under
+  that folder's `docs/`.
+
+When you add or move a doc: keep install and build separated, follow the
+landing-page structure above, and use relative links so they resolve on GitHub.
+The canonical repo is `github.com/input-inc/saintos`; link the
+[releases folder](https://github.com/input-inc/saintos/releases) (not a pinned
+version) for downloads.
+
 ## Development workflow
 
 1. **Branch** off `main`. Keep changes focused; one concern per PR.

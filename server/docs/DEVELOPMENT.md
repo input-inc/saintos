@@ -1,10 +1,13 @@
 # SAINT.OS Development Guide
 
-This guide covers setting up a development environment for SAINT.OS.
+This guide covers setting up a development environment for SAINT.OS. For the
+repo-wide from-source build index (release dist, firmware, controller) see
+[`../../docs/BUILD.md`](../../docs/BUILD.md); to install a prebuilt release instead see
+[`../../docs/INSTALL.md`](../../docs/INSTALL.md).
 
 ## Prerequisites
 
-- ROS2 Humble (via conda or native install)
+- ROS 2 Kilted (via conda or native install)
 - Python 3.10+
 - Docker (for macOS development)
 
@@ -19,7 +22,7 @@ conda activate ros2_env
 
 **Linux (native install):**
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/kilted/setup.bash
 ```
 
 ## Quick Start (Recommended)
@@ -54,13 +57,13 @@ The `--watch` flag uses `fswatch` to automatically rebuild when Python files cha
 On Linux (including Raspberry Pi), install the micro-ROS agent:
 
 ```bash
-sudo apt install ros-humble-micro-ros-agent
+sudo apt install ros-kilted-micro-ros-agent
 ```
 
 Then build and launch:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/kilted/setup.bash
 # From the repository root
 cd server
 colcon build --symlink-install
@@ -75,7 +78,7 @@ The micro-ROS agent doesn't have a native macOS package. You can use Docker or b
 **Option A: Docker (easiest)**
 
 ```bash
-docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:humble udp4 --port 8888 -v4
+docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:kilted udp4 --port 8888 -v4
 ```
 
 **Option B: Build Micro-XRCE-DDS-Agent locally**
@@ -118,7 +121,7 @@ Or use the dev script (recommended):
 ### Quick Start (Linux/Raspberry Pi)
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/kilted/setup.bash
 # From the repository root
 cd server
 source install/setup.bash  # after initial build
@@ -130,7 +133,7 @@ ros2 launch saint_os saint_server.launch.py
 Terminal 1 - micro-ROS Agent (choose one):
 ```bash
 # Docker
-docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:humble udp4 --port 8888 -v4
+docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:kilted udp4 --port 8888 -v4
 
 # Or local build (adjust path as needed)
 /path/to/Micro-XRCE-DDS-Agent/build/MicroXRCEAgent udp4 -p 8888
@@ -196,7 +199,7 @@ ros2 launch saint_os saint_server.launch.py server_name:=MY-ROBOT web_port:=8080
 
 On Linux:
 ```bash
-sudo apt install ros-humble-micro-ros-agent
+sudo apt install ros-kilted-micro-ros-agent
 ```
 
 On macOS, use Docker (see above).
@@ -218,7 +221,7 @@ ros2 launch saint_os saint_server.launch.py web_port:=8080
 
 If nodes can't connect through Docker, ensure you're using port mapping:
 ```bash
-docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:humble udp4 --port 8888
+docker run -it --rm -p 8888:8888/udp microros/micro-ros-agent:kilted udp4 --port 8888
 ```
 
 Note: `--net=host` doesn't work on macOS Docker due to VM networking.

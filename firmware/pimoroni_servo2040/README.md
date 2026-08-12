@@ -45,6 +45,10 @@ SCL, GND — the board is powered separately for servos).
 
 ## Building
 
+> Unlike the other node firmware, this image is **not** in the OTA/CI pipeline —
+> it's built and flashed by hand, once (the repo-root [BUILD.md](../../docs/BUILD.md)
+> notes this). The full recipe is right here.
+
 Depends on the [Pico SDK](https://github.com/raspberrypi/pico-sdk) and
 [pimoroni-pico](https://github.com/pimoroni/pimoroni-pico). Copy the two
 standard import shims into this directory first (they ship with the SDKs):

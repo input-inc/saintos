@@ -55,31 +55,33 @@ The bundled firmware zip is **fully self-contained**. The Pi does
 **not** need internet access at install time when the zip carries
 the `deps/` deb cache (the default; see §3.1 of `docs/INSTALL.md`).
 
-## Install — short form
+## Install
 
-On the dev machine:
+The Pi-node firmware ships **inside the server dist**, so the normal path needs
+no build:
 
-```bash
-scripts/build-local-dist.sh
-# Produces firmware/raspberrypi/dist/saint_firmware_raspberrypi_<v>.tar.zst
-# (the multi-target bundle for both Bookworm and Trixie Pi targets)
-```
+- **Over the air (recommended).** Adopt the Pi in the web UI, then push the
+  `raspberrypi` firmware from the server's store — see the
+  [operator guide, §2](../../server/docs/SERVER_GUIDE.md#2-flash-uf2-firmware-to-the-initial-nodes).
+- **Manual bundle install (first bring-up).** Grab
+  `saint_firmware_raspberrypi_<v>.tar.zst` from the server
+  (`http://opensaint.local/api/firmware/raspberrypi/`), scp it to the Pi, and:
 
-scp the bundle to the Pi, then on the Pi:
+  ```bash
+  cd /tmp
+  tar -xaf saint_firmware_raspberrypi_<v>.tar.zst   # -xaf auto-detects .zst
+  cd saint_firmware_raspberrypi_<v>/scripts
+  sudo ./install.sh
+  ```
 
-```bash
-cd /tmp
-tar -xaf saint_firmware_raspberrypi_<v>.tar.zst   # -xaf auto-detects .zst
-cd saint_firmware_raspberrypi_<v>/scripts
-sudo ./install.sh
-```
+`install.sh` is **idempotent** — re-running it on an already-installed Pi just
+updates in place. The service is enabled and started automatically; no manual
+`systemctl enable` step. The bundle is **multi-target** (both Bookworm and
+Trixie payloads); `install.sh` picks the right half from `/etc/os-release`.
 
-`install.sh` is **idempotent** — re-running it on an already-installed
-Pi just updates in place. Service is enabled and started automatically;
-no manual `systemctl enable` step required.
-
-See [`docs/INSTALL.md`](docs/INSTALL.md) for the long form (build the
-offline bundle, OTA flow, rollback, uninstall, troubleshooting).
+See [`docs/INSTALL.md`](docs/INSTALL.md) for the long form (OTA flow, rollback,
+uninstall, troubleshooting) and [`BUILD.md`](../../docs/BUILD.md) to build the offline
+bundle yourself.
 
 ## Layout on disk (after install)
 
