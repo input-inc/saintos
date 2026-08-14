@@ -125,6 +125,28 @@ cargo clean --release \
     --manifest-path "$CONTROLLER_DIR/src-tauri/Cargo.toml" \
     -p saint-controller 2>/dev/null || true
 
+# Pre-seed tauri-bundler's AppImage tool cache. The bundler downloads
+# AppRun into ~/.cache/tauri itself (it doesn't look on PATH — see the
+# Dockerfile note), using a minimal HTTP client that intermittently
+# chokes on GitHub's asset redirect:
+#
+#   Downloading .../releases/download/apprun-old/AppRun-x86_64
+#   failed to bundle project `protocol: http response missing version`
+#
+# When that fetch fails the bundler aborts *before* assembling the
+# AppDir this script relies on ("ERROR: tauri did not produce an
+# AppDir"). Fetch AppRun ourselves with curl (which follows the
+# redirect fine) and drop it in the cache; the bundler then finds it
+# and skips its own download. Idempotent and safe on every path.
+TAURI_TOOLS_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+if [ ! -f "$TAURI_TOOLS_DIR/AppRun-x86_64" ]; then
+    echo "==> Seeding AppRun into $TAURI_TOOLS_DIR (avoids flaky in-bundler download)"
+    mkdir -p "$TAURI_TOOLS_DIR"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$TAURI_TOOLS_DIR/AppRun-x86_64" \
+        https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64
+    chmod +x "$TAURI_TOOLS_DIR/AppRun-x86_64"
+fi
+
 echo "==> Running tauri build --bundles appimage"
 # We treat tauri's own bundling step as best-effort: it produces the
 # AppDir we want (binary + icon + .desktop + Steam library art under

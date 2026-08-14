@@ -98,8 +98,7 @@ http://opensaint.local/      # or http://<pi-ip>/
 
 `install.sh --help` covers options (`--no-wifi`, `--no-start`, `--dry-run`).
 For the full walkthrough — Pi OS image, networking, and verification — see
-[INSTALL.md](docs/INSTALL.md) and the
-[operator guide](server/docs/SERVER_GUIDE.md).
+[INSTALL.md](docs/INSTALL.md) and the [operator guide](server/docs/SERVER_GUIDE.md).
 
 ### 2. Adopt nodes and flash firmware — from the server
 

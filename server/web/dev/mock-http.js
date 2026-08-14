@@ -86,13 +86,16 @@ function serveUrdf (res) {
 }
 
 function serveMesh (res, filename) {
-  if (!filename || filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+  // Accept nested URDF-relative paths (Meshes/Foo/bar.stl) — matching the
+  // real server's /api/robot/meshes/{filename:.+} route — while still
+  // rejecting path traversal and absolute paths.
+  if (!filename || filename.includes('..') || filename.includes('\\') || filename.startsWith('/')) {
     res.writeHead(403, { 'Content-Type': 'text/plain' })
     res.end('Forbidden')
     return true
   }
   const m = st.getUrdfModel()
-  const buf = m?.meshes?.get(filename)
+  const buf = m?.meshes?.get(filename) || m?.meshes?.get(filename.split('/').pop())
   if (!buf) {
     res.writeHead(404, { 'Content-Type': 'text/plain' })
     res.end('Mesh not found')
@@ -157,10 +160,10 @@ async function installFromZip (zipBytes, originalFilename) {
     const base = relPath.split('/').pop()
     const lower = relPath.toLowerCase()
     if ((lower.endsWith('.urdf') || lower.endsWith('.xacro')) && !urdfEntry) {
-      urdfEntry = { entry, base }
+      urdfEntry = { entry, base, relPath }
     } else {
       const ext = '.' + (base.toLowerCase().split('.').pop() || '')
-      if (ALLOWED_MESH_EXT.has(ext)) meshEntries.push({ entry, base })
+      if (ALLOWED_MESH_EXT.has(ext)) meshEntries.push({ entry, base, relPath })
     }
   })
 
@@ -169,10 +172,25 @@ async function installFromZip (zipBytes, originalFilename) {
   const urdfBytes = Buffer.from(await urdfEntry.entry.async('uint8array'))
   const { linkCount, jointCount } = validateUrdf(urdfBytes)
 
+  // Key meshes by their path RELATIVE TO THE URDF's directory — the same
+  // URDF-relative path the `<mesh filename>` refs use and that the viewer
+  // requests (e.g. "Meshes/EyeMechanism/eye.stl"). This mirrors the real
+  // server's URDFStore, which preserves nested paths. The old
+  // flatten-to-basename behavior 404'd every nested mesh — so only the
+  // primitive-geometry links (johnny5's eye-lens cylinders) rendered —
+  // and collided same-named files from different subfolders. A basename
+  // fallback is kept for flat/legacy refs.
+  const urdfDir = urdfEntry.relPath.includes('/')
+    ? urdfEntry.relPath.slice(0, urdfEntry.relPath.lastIndexOf('/') + 1)
+    : ''
   const meshes = new Map()
-  for (const { entry, base } of meshEntries) {
+  const meshFiles = []
+  for (const { entry, base, relPath } of meshEntries) {
     const buf = Buffer.from(await entry.async('uint8array'))
-    meshes.set(base, buf)
+    const rel = relPath.startsWith(urdfDir) ? relPath.slice(urdfDir.length) : relPath
+    meshes.set(rel, buf)
+    meshFiles.push(rel)
+    if (!meshes.has(base)) meshes.set(base, buf) // basename fallback (first wins)
   }
 
   return {
@@ -181,7 +199,7 @@ async function installFromZip (zipBytes, originalFilename) {
       urdf_filename: urdfEntry.base,
       sha256: sha256Hex(urdfBytes),
       uploaded_at: Date.now() / 1000,
-      mesh_files: [...meshes.keys()].sort(),
+      mesh_files: meshFiles.sort(),
       link_count: linkCount,
       joint_count: jointCount,
     },
