@@ -46,6 +46,8 @@ from saint_server.peripheral_model import (
     Wire,
     detect_pin_conflicts,
     maestro_normalize_channels,
+    kangaroo_slim_params_for_wire,
+    switch_input_params_for_wire,
     maestro_slim_channels_for_wire,
     pimoroni_normalize_channels,
     pimoroni_slim_channels_for_wire,
@@ -291,16 +293,24 @@ _FIRMWARE_CHANNEL_MAP: Dict[str, Tuple[int, Dict[int, str]]] = {
             "current_position", "error_flags",
         ))
     }),
-    # KANGAROO_VIRTUAL_GPIO_BASE = 364, 6 channels per unit * 8 units.
+    # KANGAROO_VIRTUAL_GPIO_BASE = 364, 10 channels per unit * 8 units.
     # One Kangaroo motor channel = one unit; the peripheral_id from
     # pin_config_t.logical_name disambiguates which (address, channel).
+    #
+    # The stride and the order below MUST match KANGAROO_CHANNELS_PER_UNIT
+    # and the KANGAROO_SUB_* indices in
+    # firmware/shared/include/kangaroo_protocol.h. They are separate
+    # declarations of one wire contract: get the stride wrong and unit 1's
+    # channels silently decode as unit 0's.
     "kangaroo_motion": (364, {
-        (unit * 6 + sub): name
+        (unit * 10 + sub): name
         for unit in range(8)
         for sub, name in enumerate((
             "target_position", "target_speed",
             "current_position", "current_speed",
             "moving", "error_status",
+            "jog", "tune_state",
+            "taught_min", "taught_max",
         ))
     }),
 }
@@ -2055,6 +2065,15 @@ class StateManager:
             # per-channel extents array.
             if p.type == "pimoroni_servo2040":
                 params = pimoroni_slim_channels_for_wire(params)
+            # Kangaroo: no per-channel array, but KANGAROO_MAX_UNITS is 8
+            # and the linear-actuator params are acted on server-side, so
+            # drop those rather than spend the XRCE budget on them.
+            if p.type == "kangaroo":
+                params = kangaroo_slim_params_for_wire(params)
+            # switch_input: the operator types interlock targets as a
+            # comma-separated string; the firmware parses a JSON array.
+            if p.type == "switch_input":
+                params = switch_input_params_for_wire(params)
             peripherals_out.append({
                 "id": p.id,
                 "type": p.type,
@@ -2122,12 +2141,20 @@ class StateManager:
                           label: str = "",
                           position: Optional[List[int]] = None,
                           kind: str = "topic",
-                          joint: str = "") -> Dict[str, Any]:
-        # Topic-kind inputs require a topic; urdf_joint-kind inputs
-        # require a joint name.
+                          joint: str = "",
+                          channel_node_id: str = "",
+                          peripheral_id: str = "",
+                          channel_id: str = "") -> Dict[str, Any]:
+        # Each input kind has its own required addressing: a topic, a
+        # joint name, or a (node, peripheral, channel) triple.
         if kind == "urdf_joint":
             if not joint:
                 return {"success": False, "message": "Missing joint name"}
+        elif kind == "channel":
+            if not (channel_node_id and peripheral_id and channel_id):
+                return {"success": False,
+                        "message": "Channel inputs need node, peripheral, "
+                                   "and channel"}
         else:
             if not topic:
                 return {"success": False, "message": "Missing topic"}
@@ -2138,7 +2165,10 @@ class StateManager:
         sheet = self.state.system_routing.get_sheet(node_id)
         node = sheet.add_input(topic=topic or "", field=field or "",
                                label=label, position=pos,
-                               kind=kind, joint=joint or "")
+                               kind=kind, joint=joint or "",
+                               channel_node_id=channel_node_id or "",
+                               peripheral_id=peripheral_id or "",
+                               channel_id=channel_id or "")
         self.state.system_routing.bump_version()
         self._save_system_routing()
         return {"success": True, "input": node.to_dict()}
@@ -3476,6 +3506,26 @@ class StateManager:
         if plog is not None:
             for peripheral_id, channel_id, value in channel_updates:
                 plog.record(node_id, peripheral_id, channel_id, value)
+
+        # Feed the routing graph so sensor readings can drive wiring —
+        # a limit switch tripping a pose, a BMS SOC gating a behaviour.
+        # set_peripheral_channel_value short-circuits when nothing
+        # references the channel or the value hasn't changed, so calling
+        # it for every update is cheap. Wrapped because this runs on the
+        # ROS callback thread: an exception here would otherwise kill
+        # telemetry ingestion for the whole node.
+        evaluator = getattr(self, "_routing_evaluator", None)
+        if evaluator is not None:
+            for peripheral_id, channel_id, value in channel_updates:
+                try:
+                    evaluator.set_peripheral_channel_value(
+                        node_id, peripheral_id, channel_id, value)
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            f"Routing channel-source update failed for "
+                            f"{node_id}/{peripheral_id}/{channel_id}: "
+                            f"{type(e).__name__}: {e}", exc_info=True)
         return True
 
     def get_runtime_state(self, node_id: str) -> Optional[Dict[str, Any]]:

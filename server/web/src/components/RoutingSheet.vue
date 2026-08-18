@@ -160,6 +160,21 @@ function meta (g) {
         outputs: [{ id: 'out', label: 'value' }],
       }
     }
+    if (inp.kind === 'channel') {
+      // A reading from a peripheral. Show the node id too: peripheral
+      // ids are only unique within a node, so "limit-1" alone is
+      // ambiguous once a second node has one.
+      const where = inp.channel_node_id ? `${inp.channel_node_id} · ` : ''
+      return {
+        title: inp.label
+          || `${inp.peripheral_id || '?'}.${inp.channel_id || '?'}`,
+        subtitle: `Reading · ${where}${inp.peripheral_id || '?'}`
+                + ` · ${inp.channel_id || '?'}`,
+        builtin: false, removable: true,
+        inputs: [],
+        outputs: [{ id: 'out', label: 'value' }],
+      }
+    }
     const topicMeta = props.topicCatalog.find(t => t.topic === inp.topic)
     return {
       title: inp.label || `${inp.topic}${inp.field ? '.' + inp.field : ''}`,

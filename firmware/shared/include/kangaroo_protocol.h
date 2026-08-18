@@ -32,6 +32,7 @@
 #ifndef KANGAROO_PROTOCOL_H
 #define KANGAROO_PROTOCOL_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -73,9 +74,41 @@ extern "C" {
 
 #define KANGAROO_INCREMENTAL        64  /* OR into move/get parameter byte */
 
-/* System sub-commands (first data byte after channel+flags). */
+/* System sub-commands (first data byte after channel+flags), followed by
+ * zero or more bit-packed parameters. Reference Manual pp.13-15. */
 #define KANGAROO_SYS_POWERDOWN      0   /* power down this channel  */
 #define KANGAROO_SYS_POWERDOWN_ALL  1   /* power down all channels  */
+/* Tuning. These drive a tune without the Autotune button — the same
+ * commands DEScribe itself uses. Order matters: ENTER_MODE, then
+ * SET_DISABLED_CHANNELS (all channels come up disabled for safety and
+ * will not move until you clear the mask), then jog with
+ * CONTROL_OPEN_LOOP, then GO. See docs/KANGAROO_BRINGUP.md. */
+#define KANGAROO_SYS_TUNE_ENTER_MODE        3   /* param: tune mode      */
+#define KANGAROO_SYS_TUNE_GO                4   /* no params             */
+#define KANGAROO_SYS_TUNE_ABORT             5   /* no params             */
+#define KANGAROO_SYS_TUNE_CONTROL_OPEN_LOOP 6   /* param: signed power   */
+#define KANGAROO_SYS_TUNE_SET_DISABLED_CH   8   /* param: bitmask        */
+#define KANGAROO_SYS_SET_BAUD_RATE          32  /* param: 0..3           */
+#define KANGAROO_SYS_SET_SERIAL_TIMEOUT     33  /* param: 1/16 s units   */
+
+/* Tune modes for KANGAROO_SYS_TUNE_ENTER_MODE. Mode 1 is the one this
+ * firmware drives: with absolute (potentiometer) feedback there is
+ * nothing to seek, so the axis does not home on startup. Modes 2 and 3
+ * both home automatically and are deliberately unused here. */
+#define KANGAROO_TUNE_MODE_TEACH          1
+#define KANGAROO_TUNE_MODE_LIMIT_SWITCH   2
+#define KANGAROO_TUNE_MODE_MECH_STOPS     3
+
+/* Get/Status reply error codes (Reference Manual p.12). NOTE these are a
+ * DIFFERENT numbering from the LED blink codes in the main Kangaroo
+ * manual — do not decode one with the other's table. */
+#define KANGAROO_ERR_NONE           0
+#define KANGAROO_ERR_NOT_STARTED    1   /* send Start                     */
+#define KANGAROO_ERR_NOT_HOMED      2   /* send Home                      */
+#define KANGAROO_ERR_CONTROL        3   /* send Start to clear            */
+#define KANGAROO_ERR_WRONG_MODE     4   /* DIPs disagree with the tune    */
+#define KANGAROO_ERR_BAD_PARAMETER  5
+#define KANGAROO_ERR_SERIAL_TIMEOUT 6   /* or TX disconnected; Start clears */
 
 /* Get/Status reply flag bits (KangarooStatusFlags). */
 #define KANGAROO_STATUS_ERROR       0x01  /* value is an error code        */
@@ -92,11 +125,18 @@ extern "C" {
 /* Largest magnitude bitpackNumber can encode (2^29 - 1). */
 #define KANGAROO_BITPACK_MAX        536870911L
 
+/* Control Open Loop has its own, NARROWER range than the bit-packer:
+ * -(2^28 - 1) to 2^28 - 1 (Reference Manual p.14). Clamp jog power with
+ * this, never with KANGAROO_BITPACK_MAX — using the latter would let a
+ * caller command double the intended power on the one operation that
+ * runs with no feedback and no limits. */
+#define KANGAROO_OPEN_LOOP_MAX      268435455L
+
 /* ── Virtual GPIO map: 8 boards/channels × 6 sub-channels = 48 ──── */
 
 #define KANGAROO_VIRTUAL_GPIO_BASE  364   /* first free base after TMC2208 (348..363) */
 #define KANGAROO_MAX_UNITS          8
-#define KANGAROO_CHANNELS_PER_UNIT  6
+#define KANGAROO_CHANNELS_PER_UNIT  10
 #define KANGAROO_MAX_CHANNELS       (KANGAROO_MAX_UNITS * KANGAROO_CHANNELS_PER_UNIT)
 
 /* Sub-channel indices within each unit (one Kangaroo motor channel). */
@@ -106,6 +146,22 @@ extern "C" {
 #define KANGAROO_SUB_CURRENT_SPEED     3  /* read,  units/s                 */
 #define KANGAROO_SUB_MOVING            4  /* read,  1 = motion pending (busy)*/
 #define KANGAROO_SUB_ERROR_STATUS      5  /* read,  last Kangaroo error code */
+/* Teach-tune jog. Deliberately a CHANNEL rather than a peripheral_command:
+ * press-and-hold jog is a stream, and /control is BEST_EFFORT depth 1
+ * (newest-wins) while /command is RELIABLE depth 8. On a stalled link a
+ * reliable queue would deliver a burst of stale non-zero jogs ahead of
+ * the operator's release-to-zero — and because each arrival refreshes
+ * the firmware dead-man, that burst would defeat the dead-man rather
+ * than trip it. Newest-wins has no such failure mode. */
+#define KANGAROO_SUB_JOG               6  /* write, [-1,1] of the power cap */
+#define KANGAROO_SUB_TUNE_STATE        7  /* read,  kangaroo_tune_state_t   */
+/* Taught travel limits, cached from the last tune_read_extents. These
+ * read the driver's cache, NOT the wire — the Get 8/9 round-trip only
+ * happens on an explicit tune_read_extents command, so polling these
+ * costs nothing. Read-only by nature: the protocol has no command to
+ * set them, they come from where the axis was jogged during the teach. */
+#define KANGAROO_SUB_TAUGHT_MIN        8  /* read,  machine units */
+#define KANGAROO_SUB_TAUGHT_MAX        9  /* read,  machine units */
 
 /* ── CRC-14 (verbatim port of DE crc14) ─────────────────────────── */
 
@@ -250,6 +306,88 @@ static inline size_t kangaroo_build_powerdown(uint8_t address, uint8_t channel,
 {
     uint8_t data[3] = { channel, 0 /* flags */, KANGAROO_SYS_POWERDOWN };
     return kangaroo_write_command(address, KANGAROO_CMD_SYSTEM, data, 3, buf);
+}
+
+/* ── System commands ────────────────────────────────────────────── */
+/*
+ * Data layout is channel, flags, sub-command, then zero or more
+ * bit-packed parameters.
+ *
+ * flags stays 0 — i.e. no sequence code — and must stay 0 around tuning.
+ * Reference Manual p.12: "Tuning commands may have unusual effects on
+ * sequence code... These effects are not necessarily limited to the
+ * channel being commanded."
+ */
+static inline size_t kangaroo_build_system(uint8_t address, uint8_t channel,
+                                           uint8_t sub, bool has_param,
+                                           int32_t param, uint8_t* buf)
+{
+    uint8_t data[8];
+    size_t n = 0;
+    data[n++] = channel;
+    data[n++] = 0;              /* flags — see note above */
+    data[n++] = sub;
+    if (has_param) n += kangaroo_bitpack(&data[n], param);
+    return kangaroo_write_command(address, KANGAROO_CMD_SYSTEM, data,
+                                  (uint8_t)n, buf);
+}
+
+/* Enter a tune mode. Equivalent to pressing the Autotune button until
+ * you reach `mode`. Every channel comes up DISABLED afterwards — you
+ * must send kangaroo_build_tune_set_disabled_channels(…, 0) before the
+ * axis will move. */
+static inline size_t kangaroo_build_tune_enter_mode(uint8_t address,
+                                                    uint8_t channel,
+                                                    uint8_t mode, uint8_t* buf)
+{
+    return kangaroo_build_system(address, channel,
+                                 KANGAROO_SYS_TUNE_ENTER_MODE, true,
+                                 (int32_t)mode, buf);
+}
+
+/* Clear the post-Enter-Mode safety interlock. mask 0 enables all channels. */
+static inline size_t kangaroo_build_tune_set_disabled_channels(
+    uint8_t address, uint8_t channel, int32_t mask, uint8_t* buf)
+{
+    return kangaroo_build_system(address, channel,
+                                 KANGAROO_SYS_TUNE_SET_DISABLED_CH, true,
+                                 mask, buf);
+}
+
+/* Open-loop jog, used to position the axis for a Teach tune.
+ *
+ * This is genuinely open loop: no feedback, no travel limits, no
+ * protection. It will drive into the mechanical hard stops if nothing
+ * stops it, so callers own a dead-man and a power cap. `power` is
+ * clamped here to the command's documented range, which is NARROWER
+ * than the bit-packer's — see KANGAROO_OPEN_LOOP_MAX. */
+static inline size_t kangaroo_build_tune_open_loop(uint8_t address,
+                                                   uint8_t channel,
+                                                   int32_t power, uint8_t* buf)
+{
+    if (power >  KANGAROO_OPEN_LOOP_MAX) power =  (int32_t)KANGAROO_OPEN_LOOP_MAX;
+    if (power < -KANGAROO_OPEN_LOOP_MAX) power = -(int32_t)KANGAROO_OPEN_LOOP_MAX;
+    return kangaroo_build_system(address, channel,
+                                 KANGAROO_SYS_TUNE_CONTROL_OPEN_LOOP, true,
+                                 power, buf);
+}
+
+/* Begin the tune cycle. The axis starts moving on its own shortly after
+ * this. Tuning has an automatic serial timeout — the caller must keep
+ * sending packets (a Get loop does the job) or the Kangaroo aborts. */
+static inline size_t kangaroo_build_tune_go(uint8_t address, uint8_t channel,
+                                            uint8_t* buf)
+{
+    return kangaroo_build_system(address, channel, KANGAROO_SYS_TUNE_GO,
+                                 false, 0, buf);
+}
+
+/* Abort an in-progress tune. This is the software e-stop for the tune. */
+static inline size_t kangaroo_build_tune_abort(uint8_t address, uint8_t channel,
+                                               uint8_t* buf)
+{
+    return kangaroo_build_system(address, channel, KANGAROO_SYS_TUNE_ABORT,
+                                 false, 0, buf);
 }
 
 #ifdef __cplusplus

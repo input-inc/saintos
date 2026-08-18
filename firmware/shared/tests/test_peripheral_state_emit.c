@@ -36,6 +36,21 @@
 #undef  PLATFORM_PRINTF
 #define PLATFORM_PRINTF(...) ((void)0)
 
+/* saint_log_publish stub. The manager logs unroutable
+ * peripheral_commands, and the command-routing tests below assert on
+ * what it said — an unroutable command must be visible, not silent. */
+static char log_last[256];
+static int  log_count_stub;
+void saint_log_publish(const char* level, const char* fmt, ...)
+{
+    (void)level;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(log_last, sizeof(log_last), fmt, ap);
+    va_end(ap);
+    log_count_stub++;
+}
+
 /* peripheral_manager.cpp wraps no C++-only features (despite the
  * extension), so it compiles cleanly as C. */
 #include "../src/peripheral_manager.cpp"
@@ -238,6 +253,152 @@ static void test_emit_overflow_returns_neg(void)
     EXPECT(n == -1, "emit_all propagates -1 on overflow");
 }
 
+/* ── peripheral_command routing ───────────────────────────────────── */
+
+/* Records what the fake driver was handed, so the tests can assert the
+ * parser passed through exactly the right slices. */
+static char cmd_seen_id[64];
+static char cmd_seen_cmd[64];
+static char cmd_seen_args[128];
+static int  cmd_call_count;
+static const char* cmd_claim_id = "kangaroo-1";
+
+static void reset_cmd_capture(void)
+{
+    cmd_seen_id[0] = cmd_seen_cmd[0] = cmd_seen_args[0] = '\0';
+    cmd_call_count = 0;
+    log_last[0] = '\0';
+    log_count_stub = 0;
+}
+
+static bool fake_command(const char* peripheral_id, const char* command,
+                         const char* args_json, const char* args_json_end)
+{
+    cmd_call_count++;
+    /* Only claim our own id — that's what lets the manager fall through
+     * to the next registered driver. */
+    if (strcmp(peripheral_id, cmd_claim_id) != 0) return false;
+
+    snprintf(cmd_seen_id, sizeof(cmd_seen_id), "%s", peripheral_id);
+    snprintf(cmd_seen_cmd, sizeof(cmd_seen_cmd), "%s", command);
+    if (args_json && args_json_end && args_json_end > args_json) {
+        size_t n = (size_t)(args_json_end - args_json);
+        if (n >= sizeof(cmd_seen_args)) n = sizeof(cmd_seen_args) - 1;
+        memcpy(cmd_seen_args, args_json, n);
+        cmd_seen_args[n] = '\0';
+    }
+    return true;
+}
+
+static const peripheral_driver_t fake_commandable = {
+    .name = "kangaroo", .mode_string = "kangaroo_motion",
+    .command = fake_command,
+};
+
+static void test_command_routes_to_claiming_driver(void)
+{
+    printf("test_command_routes_to_claiming_driver\n");
+    reset_registry();
+    reset_cmd_capture();
+    peripheral_register(&fake_commandable);
+
+    bool ok = peripheral_command_handle_json(
+        "{\"action\":\"peripheral_command\",\"peripheral\":\"kangaroo-1\","
+        "\"command\":\"tune_jog\",\"args\":{\"power\":-0.25}}");
+
+    EXPECT(ok, "handled");
+    EXPECT(strcmp(cmd_seen_id, "kangaroo-1") == 0, "peripheral id parsed");
+    EXPECT(strcmp(cmd_seen_cmd, "tune_jog") == 0, "command parsed");
+    EXPECT(strcmp(cmd_seen_args, "{\"power\":-0.25}") == 0, "args object sliced");
+}
+
+static void test_command_without_args_is_valid(void)
+{
+    printf("test_command_without_args_is_valid\n");
+    reset_registry();
+    reset_cmd_capture();
+    peripheral_register(&fake_commandable);
+
+    bool ok = peripheral_command_handle_json(
+        "{\"action\":\"peripheral_command\",\"peripheral\":\"kangaroo-1\","
+        "\"command\":\"tune_abort\"}");
+
+    EXPECT(ok, "handled with no args");
+    EXPECT(strcmp(cmd_seen_cmd, "tune_abort") == 0, "command parsed");
+    EXPECT(cmd_seen_args[0] == '\0', "no args slice passed");
+}
+
+/* A brace inside a string value must not truncate the args object. */
+static void test_command_args_with_nested_braces(void)
+{
+    printf("test_command_args_with_nested_braces\n");
+    reset_registry();
+    reset_cmd_capture();
+    peripheral_register(&fake_commandable);
+
+    bool ok = peripheral_command_handle_json(
+        "{\"action\":\"peripheral_command\",\"peripheral\":\"kangaroo-1\","
+        "\"command\":\"x\",\"args\":{\"label\":\"a}b\",\"n\":{\"m\":1}}}");
+
+    EXPECT(ok, "handled");
+    EXPECT(strcmp(cmd_seen_args,
+                  "{\"label\":\"a}b\",\"n\":{\"m\":1}}") == 0,
+           "brace-in-string and nesting survive slicing");
+}
+
+static void test_command_unclaimed_logs_warning(void)
+{
+    printf("test_command_unclaimed_logs_warning\n");
+    reset_registry();
+    reset_cmd_capture();
+    peripheral_register(&fake_commandable);
+
+    bool ok = peripheral_command_handle_json(
+        "{\"action\":\"peripheral_command\",\"peripheral\":\"nope-9\","
+        "\"command\":\"tune_go\"}");
+
+    EXPECT(!ok, "not handled");
+    EXPECT(cmd_call_count == 1, "driver was offered the command");
+    EXPECT(strstr(log_last, "no driver claimed") != NULL,
+           "unroutable command is logged, not silently dropped");
+}
+
+static void test_command_missing_fields_rejected(void)
+{
+    printf("test_command_missing_fields_rejected\n");
+    reset_registry();
+    reset_cmd_capture();
+    peripheral_register(&fake_commandable);
+
+    EXPECT(!peripheral_command_handle_json(
+        "{\"action\":\"peripheral_command\",\"command\":\"tune_go\"}"),
+        "missing peripheral rejected");
+    EXPECT(strstr(log_last, "peripheral") != NULL, "logged missing peripheral");
+
+    reset_cmd_capture();
+    EXPECT(!peripheral_command_handle_json(
+        "{\"action\":\"peripheral_command\",\"peripheral\":\"kangaroo-1\"}"),
+        "missing command rejected");
+    EXPECT(cmd_call_count == 0, "driver never invoked without a verb");
+}
+
+static void test_command_skips_drivers_without_handler(void)
+{
+    printf("test_command_skips_drivers_without_handler\n");
+    reset_registry();
+    reset_cmd_capture();
+    /* fake_maestro has .command == NULL — must be skipped, not crashed on. */
+    peripheral_register(&fake_maestro);
+    peripheral_register(&fake_commandable);
+
+    bool ok = peripheral_command_handle_json(
+        "{\"action\":\"peripheral_command\",\"peripheral\":\"kangaroo-1\","
+        "\"command\":\"tune_enter\"}");
+
+    EXPECT(ok, "routed past the driver with no command handler");
+    EXPECT(strcmp(cmd_seen_cmd, "tune_enter") == 0, "reached the right driver");
+}
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -252,6 +413,13 @@ int main(void)
     test_emit_multiple_drivers();
     test_emit_skips_null_callback();
     test_emit_overflow_returns_neg();
+
+    test_command_routes_to_claiming_driver();
+    test_command_without_args_is_valid();
+    test_command_args_with_nested_braces();
+    test_command_unclaimed_logs_warning();
+    test_command_missing_fields_rejected();
+    test_command_skips_drivers_without_handler();
 
     if (failures == 0) {
         printf("PASS\n");

@@ -98,6 +98,14 @@ class RoutingEvaluator:
         # player calls ``set_urdf_joint_value`` once per tick per
         # active value track.
         self._urdf_joint_values: Dict[str, float] = {}
+        # Peripheral input-channel readings, keyed by
+        # (node_id, peripheral_id, channel_id). Fed by
+        # set_peripheral_channel_value from the same channel-addressed
+        # state the Live tab consumes; read by InputNodes with
+        # kind="channel". Survives across ticks — a sensor holds its last
+        # reported value — but reconcile prunes entries nothing references
+        # any more, so a re-pointed input can't inherit a stale reading.
+        self._channel_values: Dict[Tuple[str, str, str], float] = {}
         # Currently-subscribed topics on behalf of the routing graph.
         self._subscribed_topics: Set[str] = set()
         # Snapshot of the routing graph used for evaluation; refreshed
@@ -230,6 +238,19 @@ class RoutingEvaluator:
                         if ep.kind == "signal" and ep.parts:
                             live_names.add(ep.parts[0])
             self._signals = {k: v for k, v in self._signals.items() if k in live_names}
+            # Same treatment for peripheral-channel readings: keep only
+            # channels some InputNode still references, so deleted or
+            # re-pointed sensor inputs don't leave ghost entries that a
+            # later identically-addressed input would silently inherit.
+            live_channels: Set[Tuple[str, str, str]] = set()
+            for sheet in routing.sheets.values():
+                for inp in sheet.inputs:
+                    if inp.kind == "channel":
+                        live_channels.add(inp.channel_key())
+            self._channel_values = {
+                k: v for k, v in self._channel_values.items()
+                if k in live_channels
+            }
 
         for topic in to_add:
             self._subscribe(topic)
@@ -331,6 +352,134 @@ class RoutingEvaluator:
                           f"Sheet '{sheet.node_id}' evaluation failed: {e}")
 
         if touched and self._on_values_changed is not None:
+            try:
+                self._on_values_changed(self.get_value_snapshot())
+            except Exception as e:
+                self._log("error", f"routing_values broadcast failed: {e}")
+        return True
+
+    def _propagate_signal_readers(self, routing: SystemRouting,
+                                  already: List[NodeSheet],
+                                  before: Dict[str, float]) -> None:
+        """Evaluate sheets that READ a signal some just-evaluated sheet
+        wrote.
+
+        A targeted feed (this channel path, set_ws_input, …) only
+        evaluates the sheets referencing the thing that changed. If one of
+        those writes a cross-sheet signal, the sheets reading it would not
+        see it until they happened to evaluate for their own reasons —
+        which for a sheet with no other live input is never. The full
+        `evaluate()` pass doesn't have this problem because it walks every
+        sheet.
+
+        That gap matters most for exactly the case signals exist to serve:
+        a sensor on one node driving a sink on another. So after a
+        targeted evaluation, chase the readers of any signal whose value
+        actually changed.
+
+        Bounded to a few rounds: two sheets can legitimately write signals
+        each other reads, and an unbounded chase would spin.
+        """
+        MAX_ROUNDS = 4
+        seen = {s.node_id for s in already}
+
+        for _ in range(MAX_ROUNDS):
+            changed = {name for name, v in self._signals.items()
+                       if before.get(name) != v}
+            if not changed:
+                return
+
+            next_sheets: List[NodeSheet] = []
+            for sheet in routing.sheets.values():
+                if sheet.node_id in seen:
+                    continue
+                reads = any(
+                    w.source.kind == "signal" and w.source.parts
+                    and w.source.parts[0] in changed
+                    for w in sheet.wires)
+                if reads:
+                    next_sheets.append(sheet)
+            if not next_sheets:
+                return
+
+            before = dict(self._signals)
+            for sheet in next_sheets:
+                seen.add(sheet.node_id)
+                try:
+                    self._evaluate_sheet(sheet)
+                except Exception as e:
+                    self._log("error",
+                              f"Sheet '{sheet.node_id}' evaluation failed "
+                              f"(signal propagation): {e}")
+
+    def set_peripheral_channel_value(self, node_id: str, peripheral_id: str,
+                                     channel_id: str, value: float) -> bool:
+        """Push a peripheral input-channel READING into the source cache.
+
+        This is what makes sensors routable rather than merely
+        displayable: a limit switch tripping, a BMS state of charge, a
+        current reading. Any ``InputNode`` with ``kind="channel"`` and a
+        matching ``(node_id, peripheral_id, channel_id)`` reads from this
+        cache, so the value flows through wires exactly like a ROS-topic
+        input — including onward to other nodes via SignalNode.
+
+        Called for every channel update the node reports, which is a high
+        rate, so this returns early and cheaply when nothing in the graph
+        references the channel. Deliberately does NOT re-evaluate on an
+        unchanged value: a sensor sitting still would otherwise re-run
+        every sheet it touches on every telemetry tick.
+
+        NOTE this is an input path only. It has nothing to do with
+        `_send_channel`, which commands a channel; a reading arriving here
+        never causes a write by itself.
+
+        Returns False if the routing graph isn't loaded yet, or if the
+        value was ignored (unreferenced or unchanged).
+        """
+        routing = self._routing
+        if routing is None:
+            return False
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError):
+            self._log("warn",
+                      f"set_peripheral_channel_value: non-numeric "
+                      f"{node_id}/{peripheral_id}/{channel_id}={value!r}")
+            return False
+
+        key = (node_id, peripheral_id, channel_id)
+
+        # Find the sheets that actually reference this channel. Doing the
+        # lookup before taking the lock keeps the common "nothing wired
+        # to this sensor" case off the lock entirely.
+        touched: List[NodeSheet] = []
+        for sheet in routing.sheets.values():
+            for inp in sheet.inputs:
+                if inp.kind == "channel" and inp.channel_key() == key:
+                    touched.append(sheet)
+                    break
+        if not touched:
+            return False
+
+        with self._lock:
+            if self._channel_values.get(key) == scalar:
+                return False        # unchanged — no work to do
+            self._channel_values[key] = scalar
+
+        signals_before = dict(self._signals)
+        for sheet in touched:
+            try:
+                self._evaluate_sheet(sheet)
+            except Exception as e:
+                self._log("error",
+                          f"Sheet '{sheet.node_id}' evaluation failed: {e}")
+        # A sensor wired to a signal is how it reaches sinks on other
+        # nodes — the whole point of routing it rather than just handling
+        # it locally. Chase those readers now rather than leaving them to
+        # notice on some later tick they may never have.
+        self._propagate_signal_readers(routing, touched, signals_before)
+
+        if self._on_values_changed is not None:
             try:
                 self._on_values_changed(self.get_value_snapshot())
             except Exception as e:
@@ -522,6 +671,8 @@ class RoutingEvaluator:
         for inp in sheet.inputs:
             if inp.kind == "urdf_joint":
                 v = self._urdf_joint_values.get(inp.joint)
+            elif inp.kind == "channel":
+                v = self._channel_values.get(inp.channel_key())
             else:
                 v = self._sources.get((inp.topic, inp.field))
             if v is not None:
@@ -717,6 +868,8 @@ class RoutingEvaluator:
                 return None
             if inp.kind == "urdf_joint":
                 return self._urdf_joint_values.get(inp.joint)
+            if inp.kind == "channel":
+                return self._channel_values.get(inp.channel_key())
             return self._sources.get((inp.topic, inp.field))
         if source.kind == "ws_input":
             if not source.parts:

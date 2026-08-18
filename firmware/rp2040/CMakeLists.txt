@@ -186,6 +186,8 @@ set(SAINT_NODE_SOURCES
     ../shared/src/kangaroo_driver.c
     src/pimoroni_servo2040_transport.c
     ../shared/src/pimoroni_servo2040_driver.c
+    src/switch_input_pins.c
+    ../shared/src/switch_input_driver.c
     src/maestro_driver.c
     src/pio_uart.c
 )

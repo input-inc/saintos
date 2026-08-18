@@ -56,9 +56,40 @@
 #define KANGAROO_RESPONSE_TIMEOUT_MS 50
 #define KANGAROO_BYTE_TIMEOUT_MS     10
 
-/* Kangaroo error codes (returned in a Get reply when STATUS_ERROR set). */
-#define KANGAROO_ERR_NOT_STARTED     1
-#define KANGAROO_ERR_NOT_HOMED       2
+/* ── Teach-tune timings ─────────────────────────────────────────── */
+
+/* Tuning has an automatic serial timeout and aborts if packets stop
+ * (Packet Serial Reference p.14: "You must continually send packets or
+ * it will abort. Get commands in a loop will do the job."). We hold a
+ * Get loop at this interval for the whole tune — comfortably inside any
+ * plausible timeout without saturating a 9600 baud link. */
+#define KANGAROO_TUNE_KEEPALIVE_MS   200
+
+/* Dead-man. Open-loop jog has no feedback and no travel limits, so a
+ * jog that stops being refreshed must decay to zero rather than stay
+ * latched — otherwise a dropped link pins the actuator against a hard
+ * stop. Must exceed the UI's jog repeat interval with margin. */
+#define KANGAROO_JOG_DEADMAN_MS      250
+
+/* Absolute ceiling on a tune cycle. A slow linear actuator can take
+ * minutes; past this something is wrong and we abort rather than leave
+ * the axis under the Kangaroo's control indefinitely. */
+#define KANGAROO_TUNE_MAX_MS         600000
+
+/* The tune is complete when the axis has reported not-busy continuously
+ * for this long, no earlier than KANGAROO_TUNE_MIN_MS after Go (the
+ * cycle does not start instantly, so an early not-busy is meaningless). */
+#define KANGAROO_TUNE_QUIET_MS       3000
+#define KANGAROO_TUNE_MIN_MS         5000
+
+/* Default open-loop jog cap, as a percentage of full scale. Deliberately
+ * low: the first jog on an untuned axis is the single most dangerous
+ * moment in this whole procedure, and direction is unknown until tried. */
+#define KANGAROO_DEFAULT_JOG_PCT     10
+
+/* Get-reply error codes (KANGAROO_ERR_*) now live in kangaroo_protocol.h
+ * alongside the rest of the wire constants — the full set, not just the
+ * two this file used to declare locally. Do not redeclare them here. */
 
 static uint8_t kangaroo_tx_pin = KANGAROO_DEFAULT_TX_PIN;
 static uint8_t kangaroo_rx_pin = KANGAROO_DEFAULT_RX_PIN;
@@ -90,7 +121,42 @@ typedef struct {
     bool     first_cmd_logged;
     uint8_t  consecutive_misses;
     uint32_t last_reprobe_ms;
+
+    /* ── Teach tune (see kangaroo_driver.h) ─────────────────────── */
+    uint8_t  tune_state;         /* kangaroo_tune_state_t */
+    uint8_t  jog_pct;            /* open-loop power cap, % of full scale */
+    int32_t  jog_power;          /* last open-loop power actually sent */
+    uint32_t jog_refresh_ms;     /* last kangaroo_tune_jog() call */
+    uint32_t tune_keepalive_ms;  /* last keep-alive Get during a tune */
+    uint32_t tune_go_ms;         /* when Go was sent */
+    uint32_t tune_quiet_since;   /* first not-busy poll since Go (0 = busy) */
+
+    int32_t  taught_min;         /* Get 8 — read-only on the wire */
+    int32_t  taught_max;         /* Get 9 */
+    bool     extents_valid;
+
+    /* Operator-assigned id from the peripheral JSON. Routes inbound
+     * peripheral_commands to this unit — same use as the RoboClaw
+     * driver's field of the same name. */
+    char     peripheral_id[32];
+
+    /* Latched safety interlock, asserted by an external source (today a
+     * switch_input peripheral tripping — see docs/SENSOR_INPUTS.md).
+     * Distinct from a plain powerdown: powerdown alone is undone by the
+     * very next routed setpoint, which is not an interlock. This blocks
+     * motion until something explicitly clears it. */
+    bool     interlocked;
 } kangaroo_unit_t;
+
+/* True while a unit owns the bus for tuning. Normal position/speed
+ * polling is suspended for these — the tune's keep-alive is the only
+ * traffic that may go out, and interleaving Moves would fight it. */
+static inline bool tune_is_active(const kangaroo_unit_t* u)
+{
+    return u->tune_state == KANGAROO_TUNE_ENTERING
+        || u->tune_state == KANGAROO_TUNE_JOG
+        || u->tune_state == KANGAROO_TUNE_GOING;
+}
 
 /* ── Driver State ───────────────────────────────────────────────── */
 
@@ -334,6 +400,20 @@ static bool send_powerdown(kangaroo_unit_t* u)
     return wire_write(buf, n);
 }
 
+/* Send a System command. Packet protocol only — the tune sub-commands
+ * have no simplified-serial equivalent, and silently doing nothing on a
+ * SIMPLE channel would leave an operator jogging a dead UI. */
+static bool send_system(kangaroo_unit_t* u, uint8_t sub, bool has_param,
+                        int32_t param)
+{
+    if (!wire_ready()) return false;
+    if (u->protocol != KANGAROO_PROTO_PACKET) return false;
+    uint8_t buf[16];
+    size_t n = kangaroo_build_system(u->address, u->channel_name, sub,
+                                     has_param, param, buf);
+    return wire_write(buf, n);
+}
+
 /* Issue a Get for `param` and read back the reply. Returns true on a
  * well-formed reply (which may itself carry an error flag). */
 static bool query(kangaroo_unit_t* u, uint8_t param, kangaroo_reply_t* out)
@@ -387,6 +467,120 @@ static void start_unit(uint8_t idx)
     if (idx >= KANGAROO_MAX_UNITS || !wire_ready()) return;
     kangaroo_unit_t* u = &units[idx];
     if (send_start(u)) u->started = true;
+}
+
+/* ── Teach tune ─────────────────────────────────────────────────── */
+
+static void tune_set_state(uint8_t idx, kangaroo_tune_state_t st,
+                           const char* level, const char* why)
+{
+    kangaroo_unit_t* u = &units[idx];
+    u->tune_state = (uint8_t)st;
+    saint_log_publish(level, "Kangaroo: unit %u tune → %s (%s)",
+        (unsigned)idx,
+        st == KANGAROO_TUNE_IDLE     ? "idle"     :
+        st == KANGAROO_TUNE_ENTERING ? "entering" :
+        st == KANGAROO_TUNE_JOG      ? "jog"      :
+        st == KANGAROO_TUNE_GOING    ? "running"  :
+        st == KANGAROO_TUNE_DONE     ? "done"     : "failed",
+        why);
+}
+
+/* Stop the axis and leave tune mode. Safe to call from any state — this
+ * is the path e-stop, disconnect and timeout all funnel through. */
+static void tune_stop(uint8_t idx, kangaroo_tune_state_t end_state,
+                      const char* level, const char* why)
+{
+    kangaroo_unit_t* u = &units[idx];
+#ifndef SIMULATION
+    /* Zero power before Abort: Abort ends the tune but says nothing
+     * about the open-loop power we may have left running. */
+    (void)send_system(u, KANGAROO_SYS_TUNE_CONTROL_OPEN_LOOP, true, 0);
+    (void)send_system(u, KANGAROO_SYS_TUNE_ABORT, false, 0);
+#endif
+    u->jog_power = 0;
+    u->tune_quiet_since = 0;
+    /* The tune leaves the channel in an indeterminate control state and
+     * error 6 (serial timeout) clears with a Start, so force a fresh
+     * Start before any normal motion command is accepted again. */
+    u->started = false;
+    tune_set_state(idx, end_state, level, why);
+}
+
+/* Serviced from kangaroo_update() for whichever unit is mid-tune. */
+static void tune_tick(uint8_t idx)
+{
+    kangaroo_unit_t* u = &units[idx];
+    uint32_t now = PLATFORM_MILLIS();
+
+    /* Dead-man applies the moment we are jogging, regardless of state. */
+    if (u->jog_power != 0
+        && (uint32_t)(now - u->jog_refresh_ms) >= KANGAROO_JOG_DEADMAN_MS) {
+        (void)send_system(u, KANGAROO_SYS_TUNE_CONTROL_OPEN_LOOP, true, 0);
+        u->jog_power = 0;
+        saint_log_publish("warn",
+            "Kangaroo: unit %u jog dead-man fired — no refresh for %u ms, "
+            "open-loop power zeroed", (unsigned)idx,
+            (unsigned)KANGAROO_JOG_DEADMAN_MS);
+    }
+
+    if (u->tune_state == KANGAROO_TUNE_GOING
+        && (uint32_t)(now - u->tune_go_ms) >= KANGAROO_TUNE_MAX_MS) {
+        tune_stop(idx, KANGAROO_TUNE_FAILED, "error", "exceeded time limit");
+        return;
+    }
+
+    if ((uint32_t)(now - u->tune_keepalive_ms) < KANGAROO_TUNE_KEEPALIVE_MS) {
+        return;
+    }
+    u->tune_keepalive_ms = now;
+
+    /* The keep-alive doubles as telemetry, so position stays live in the
+     * UI while the Kangaroo drives the axis around. */
+    kangaroo_reply_t r;
+    if (!query(u, KANGAROO_GET_POSITION, &r)) {
+        mark_unit_response(idx, false);
+        /* Don't fail the tune on one missed reply — a single dropped
+         * frame is normal. Losing the channel outright is handled by
+         * the disconnect check in kangaroo_update(). */
+        return;
+    }
+    mark_unit_response(idx, true);
+    u->moving = (r.flags & KANGAROO_STATUS_BUSY) ? 1 : 0;
+
+    if (r.flags & KANGAROO_STATUS_ERROR) {
+        u->error_status = (uint16_t)r.value;
+        /* Error 6 during a tune means the keep-alive lost the race and
+         * the Kangaroo already aborted — reporting anything else would
+         * be a lie. Every other error is equally terminal here. */
+        tune_stop(idx, KANGAROO_TUNE_FAILED, "error",
+                  r.value == KANGAROO_ERR_SERIAL_TIMEOUT
+                      ? "Kangaroo aborted on serial timeout"
+                      : "Kangaroo reported an error");
+        return;
+    }
+    u->error_status = 0;
+    u->current_position = r.value;
+
+    if (u->tune_state != KANGAROO_TUNE_GOING) return;
+
+    /* Completion: the wire gives us no explicit "tune finished" signal,
+     * so infer it from the axis going quiet — but only after the cycle
+     * has had time to start, since not-busy is the initial state too. */
+    if (u->moving) {
+        u->tune_quiet_since = 0;
+        return;
+    }
+    if ((uint32_t)(now - u->tune_go_ms) < KANGAROO_TUNE_MIN_MS) return;
+    if (u->tune_quiet_since == 0) { u->tune_quiet_since = now; return; }
+    if ((uint32_t)(now - u->tune_quiet_since) < KANGAROO_TUNE_QUIET_MS) return;
+
+    u->started = false;
+    u->tune_state = (uint8_t)KANGAROO_TUNE_DONE;
+    saint_log_publish("info",
+        "Kangaroo: unit %u tune → done. POWER CYCLE REQUIRED before the "
+        "new tune takes effect; taught extents readable after that.",
+        (unsigned)idx);
 }
 
 /* ── Public API ─────────────────────────────────────────────────── */
@@ -475,6 +669,21 @@ void kangaroo_update(void)
     if (!port_initialized || unit_count == 0) return;
 
 #ifndef SIMULATION
+    /* A tune owns the bus. Its keep-alive is the only traffic allowed
+     * out — a normal Move or an interleaved Get on another channel would
+     * fight the tune and risk tripping its serial timeout — so service
+     * the tuning unit and return without touching the round-robin. */
+    for (uint8_t t = 0; t < unit_count; t++) {
+        if (!tune_is_active(&units[t])) continue;
+        if (!units[t].connected) {
+            tune_stop(t, KANGAROO_TUNE_FAILED, "error",
+                      "channel dropped mid-tune");
+            continue;
+        }
+        tune_tick(t);
+        return;
+    }
+
     uint8_t i = poll_unit;
     kangaroo_unit_t* u = &units[i];
 
@@ -539,6 +748,21 @@ bool kangaroo_set_position(uint8_t unit, int32_t position)
             (unsigned)unit, (long)position);
         return false;
     }
+    if (units[unit].interlocked) {
+        saint_log_publish("warn",
+            "Kangaroo: set_position(unit=%u) refused — safety interlock "
+            "latched; clear it before commanding motion", (unsigned)unit);
+        return false;
+    }
+    /* Refuse routed motion while tuning. The Kangaroo is driving the axis
+     * itself and a Move here would fight the tune — and during the jog
+     * stage it would move an axis whose travel limits are not yet known. */
+    if (tune_is_active(&units[unit])) {
+        saint_log_publish("warn",
+            "Kangaroo: set_position(unit=%u) refused — tune in progress",
+            (unsigned)unit);
+        return false;
+    }
     units[unit].target_position = position;
 
 #ifndef SIMULATION
@@ -568,6 +792,18 @@ bool kangaroo_set_speed(uint8_t unit, int32_t speed)
             (unsigned)unit, (long)speed);
         return false;
     }
+    if (units[unit].interlocked) {
+        saint_log_publish("warn",
+            "Kangaroo: set_speed(unit=%u) refused — safety interlock latched",
+            (unsigned)unit);
+        return false;
+    }
+    if (tune_is_active(&units[unit])) {
+        saint_log_publish("warn",
+            "Kangaroo: set_speed(unit=%u) refused — tune in progress",
+            (unsigned)unit);
+        return false;
+    }
     units[unit].target_speed = speed;
 
 #ifndef SIMULATION
@@ -595,6 +831,202 @@ bool kangaroo_powerdown(uint8_t unit)
 #endif
     units[unit].started = false;  /* powerdown drops the control loop */
     return true;
+}
+
+/* ── Teach tune, public entry points ────────────────────────────── */
+
+/* Shared guard: tuning needs a live, initialized, packet-protocol
+ * channel. Logs the specific reason — a silently-refused tune command
+ * leaves an operator jogging a dead UI wondering why nothing moves. */
+static bool tune_precheck(uint8_t unit, const char* what)
+{
+    if (unit >= KANGAROO_MAX_UNITS) return false;
+    if (!port_initialized) {
+        saint_log_publish("warn", "Kangaroo: tune %s(unit=%u) ignored — "
+            "driver not initialized", what, (unsigned)unit);
+        return false;
+    }
+    if (unit >= unit_count) {
+        saint_log_publish("warn", "Kangaroo: tune %s(unit=%u) ignored — "
+            "no such unit (%u configured)", what, (unsigned)unit,
+            (unsigned)unit_count);
+        return false;
+    }
+    if (units[unit].protocol != KANGAROO_PROTO_PACKET) {
+        saint_log_publish("warn", "Kangaroo: tune %s(unit=%u) ignored — "
+            "tuning requires packet serial; this channel is on simplified "
+            "serial", what, (unsigned)unit);
+        return false;
+    }
+    if (!units[unit].connected) {
+        saint_log_publish("warn", "Kangaroo: tune %s(unit=%u) ignored — "
+            "channel not responding", what, (unsigned)unit);
+        return false;
+    }
+    /* Starting a tune with a limit tripped is the worst case: jogging is
+     * open loop, so the axis would be driven with no feedback past a
+     * point something already decided was out of bounds. */
+    if (units[unit].interlocked) {
+        saint_log_publish("warn", "Kangaroo: tune %s(unit=%u) refused — "
+            "safety interlock latched", what, (unsigned)unit);
+        return false;
+    }
+    return true;
+}
+
+bool kangaroo_tune_enter(uint8_t unit)
+{
+    if (!tune_precheck(unit, "enter")) return false;
+    kangaroo_unit_t* u = &units[unit];
+
+    if (tune_is_active(u)) {
+        saint_log_publish("warn", "Kangaroo: tune enter(unit=%u) ignored — "
+            "a tune is already in progress", (unsigned)unit);
+        return false;
+    }
+
+#ifndef SIMULATION
+    if (!send_system(u, KANGAROO_SYS_TUNE_ENTER_MODE, true,
+                     KANGAROO_TUNE_MODE_TEACH)) {
+        return false;
+    }
+    /* Every channel comes up disabled after Enter Mode and will not move
+     * until the mask is cleared (Reference Manual p.14). Skipping this is
+     * indistinguishable from a wiring fault at the jog step. */
+    if (!send_system(u, KANGAROO_SYS_TUNE_SET_DISABLED_CH, true, 0)) {
+        tune_stop(unit, KANGAROO_TUNE_FAILED, "error",
+                  "could not clear the disabled-channel mask");
+        return false;
+    }
+#endif
+
+    u->jog_power = 0;
+    u->jog_refresh_ms = PLATFORM_MILLIS();
+    u->tune_keepalive_ms = PLATFORM_MILLIS();
+    u->tune_quiet_since = 0;
+    u->extents_valid = false;
+    tune_set_state(unit, KANGAROO_TUNE_JOG, "info",
+                   "Mode 1 Teach — jog to each end, then centre");
+    return true;
+}
+
+bool kangaroo_tune_jog(uint8_t unit, float fraction)
+{
+    if (!tune_precheck(unit, "jog")) return false;
+    kangaroo_unit_t* u = &units[unit];
+
+    if (u->tune_state != KANGAROO_TUNE_JOG) {
+        saint_log_publish("warn", "Kangaroo: tune jog(unit=%u) ignored — "
+            "not in the jog stage", (unsigned)unit);
+        return false;
+    }
+
+    if (fraction < -1.0f) fraction = -1.0f;
+    if (fraction >  1.0f) fraction =  1.0f;
+
+    /* Scale into the unit's power cap before the builder's own clamp.
+     * Open loop has no protection of its own, so this cap is the only
+     * thing bounding how hard an untuned axis is driven. */
+    uint8_t pct = u->jog_pct > 0 ? u->jog_pct : KANGAROO_DEFAULT_JOG_PCT;
+    if (pct > 100) pct = 100;
+    int32_t power = (int32_t)(fraction * ((float)pct / 100.0f)
+                              * (float)KANGAROO_OPEN_LOOP_MAX);
+
+    u->jog_refresh_ms = PLATFORM_MILLIS();
+
+#ifndef SIMULATION
+    if (!send_system(u, KANGAROO_SYS_TUNE_CONTROL_OPEN_LOOP, true, power)) {
+        return false;
+    }
+#endif
+    u->jog_power = power;
+    return true;
+}
+
+bool kangaroo_tune_go(uint8_t unit)
+{
+    if (!tune_precheck(unit, "go")) return false;
+    kangaroo_unit_t* u = &units[unit];
+
+    if (u->tune_state != KANGAROO_TUNE_JOG) {
+        saint_log_publish("warn", "Kangaroo: tune go(unit=%u) ignored — "
+            "must be in the jog stage (enter tune mode first)",
+            (unsigned)unit);
+        return false;
+    }
+
+#ifndef SIMULATION
+    /* Never hand over to the tune cycle with jog power still applied. */
+    (void)send_system(u, KANGAROO_SYS_TUNE_CONTROL_OPEN_LOOP, true, 0);
+    u->jog_power = 0;
+    if (!send_system(u, KANGAROO_SYS_TUNE_GO, false, 0)) return false;
+#else
+    u->jog_power = 0;
+#endif
+
+    uint32_t now = PLATFORM_MILLIS();
+    u->tune_go_ms = now;
+    u->tune_keepalive_ms = now;
+    u->tune_quiet_since = 0;
+    tune_set_state(unit, KANGAROO_TUNE_GOING, "warn",
+                   "STAND CLEAR — the axis now moves under its own control");
+    return true;
+}
+
+bool kangaroo_tune_abort(uint8_t unit)
+{
+    if (unit >= KANGAROO_MAX_UNITS) return false;
+    /* Deliberately skips tune_precheck: abort must work even when the
+     * channel looks unhealthy, since that is exactly when it is wanted. */
+    if (!tune_is_active(&units[unit])) return false;
+    tune_stop(unit, KANGAROO_TUNE_FAILED, "warn", "aborted by operator");
+    return true;
+}
+
+bool kangaroo_tune_read_extents(uint8_t unit, int32_t* out_min, int32_t* out_max)
+{
+    if (!tune_precheck(unit, "read_extents")) return false;
+    kangaroo_unit_t* u = &units[unit];
+
+    if (tune_is_active(u)) {
+        saint_log_publish("warn", "Kangaroo: read_extents(unit=%u) ignored — "
+            "tune still in progress", (unsigned)unit);
+        return false;
+    }
+
+#ifndef SIMULATION
+    if (!u->started) start_unit(unit);
+
+    kangaroo_reply_t r;
+    if (!query(u, KANGAROO_GET_ABS_MIN, &r) || (r.flags & KANGAROO_STATUS_ERROR)) {
+        saint_log_publish("warn", "Kangaroo: unit %u could not read minimum "
+            "position%s", (unsigned)unit,
+            (r.flags & KANGAROO_STATUS_ERROR) ? " (channel reported an error)" : "");
+        return false;
+    }
+    int32_t lo = r.value;
+
+    if (!query(u, KANGAROO_GET_ABS_MAX, &r) || (r.flags & KANGAROO_STATUS_ERROR)) {
+        saint_log_publish("warn", "Kangaroo: unit %u could not read maximum "
+            "position", (unsigned)unit);
+        return false;
+    }
+    u->taught_min = lo;
+    u->taught_max = r.value;
+#endif
+
+    u->extents_valid = true;
+    if (out_min) *out_min = u->taught_min;
+    if (out_max) *out_max = u->taught_max;
+    saint_log_publish("info", "Kangaroo: unit %u taught travel %ld … %ld",
+        (unsigned)unit, (long)u->taught_min, (long)u->taught_max);
+    return true;
+}
+
+kangaroo_tune_state_t kangaroo_tune_get_state(uint8_t unit)
+{
+    if (unit >= KANGAROO_MAX_UNITS) return KANGAROO_TUNE_IDLE;
+    return (kangaroo_tune_state_t)units[unit].tune_state;
 }
 
 void kangaroo_powerdown_all(void)
@@ -630,6 +1062,11 @@ static bool drv_set_value(uint8_t channel, float value)
         int32_t spd = (int32_t)(value * (float)units[unit].max_speed);
         return kangaroo_set_speed(unit, spd);
     }
+    case KANGAROO_SUB_JOG:
+        /* Only meaningful mid-tune; kangaroo_tune_jog rejects it
+         * otherwise, so a stray routed value can't drive the axis open
+         * loop outside a tune. */
+        return kangaroo_tune_jog(unit, value);
     default:
         return false;  /* read-only sub-channels */
     }
@@ -663,6 +1100,19 @@ static bool drv_get_value(uint8_t channel, float* value)
     case KANGAROO_SUB_ERROR_STATUS:
         *value = (float)units[unit].error_status;
         return true;
+    case KANGAROO_SUB_JOG:
+        *value = (KANGAROO_OPEN_LOOP_MAX == 0) ? 0.0f
+            : (float)units[unit].jog_power / (float)KANGAROO_OPEN_LOOP_MAX;
+        return true;
+    case KANGAROO_SUB_TUNE_STATE:
+        *value = (float)units[unit].tune_state;
+        return true;
+    case KANGAROO_SUB_TAUGHT_MIN:
+        *value = (float)units[unit].taught_min;
+        return true;
+    case KANGAROO_SUB_TAUGHT_MAX:
+        *value = (float)units[unit].taught_max;
+        return true;
     default:
         return false;
     }
@@ -695,6 +1145,16 @@ static bool drv_apply_config(uint8_t channel, const pin_config_t* config)
         units[unit].home_on_start = config->params.kangaroo.home_on_start;
         units[unit].max_position  = config->params.kangaroo.max_position;
         units[unit].max_speed     = config->params.kangaroo.max_speed;
+        units[unit].jog_pct       = config->params.kangaroo.jog_pct;
+    }
+
+    /* Record the operator's id so peripheral_commands (the teach tune)
+     * can be routed back to this unit. Guarded like the params above:
+     * a boot-reload sweep passes an empty name and must not clobber it. */
+    if (config->logical_name[0]) {
+        strncpy(units[unit].peripheral_id, config->logical_name,
+                sizeof(units[unit].peripheral_id) - 1);
+        units[unit].peripheral_id[sizeof(units[unit].peripheral_id) - 1] = '\0';
     }
 
     if (unit >= unit_count) unit_count = unit + 1;
@@ -747,6 +1207,19 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
         if (p) { p++; while (*p == ' ') p++;
                  config->params.kangaroo.max_speed = (int32_t)atol(p); } }
 
+    /* Teach-tune open-loop power cap. Clamped to 1..100 here rather
+     * than trusted: this bounds how hard an untuned axis is driven with
+     * no feedback and no travel limits, so a malformed value must not
+     * widen it. Absent leaves 0, which the driver reads as "use the low
+     * default" — never as unlimited. */
+    p = strstr(json_start, "\"jog_power_pct\"");
+    if (p && p < json_end) { p = strchr(p, ':');
+        if (p) { p++; while (*p == ' ') p++;
+                 long v = atol(p);
+                 if (v < 0)   v = 0;
+                 if (v > 100) v = 100;
+                 config->params.kangaroo.jog_pct = (uint8_t)v; } }
+
     /* Optional baud override (Kangaroo can run up to 115200). */
     p = strstr(json_start, "\"baud\"");
     if (p && p < json_end) { p = strchr(p, ':');
@@ -762,11 +1235,121 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
     return true;
 }
 
+/* ── Out-of-band commands (the teach tune) ──────────────────────── */
+
+/* Pull a numeric field out of the raw "args" object. Hand-rolled for
+ * the same reason drv_parse_json is: there is no JSON parser on the
+ * MCU. Returns false when the key is absent so callers can default. */
+static bool args_get_float(const char* json, const char* json_end,
+                           const char* key, float* out)
+{
+    if (!json || !json_end || json_end <= json) return false;
+    char pat[32];
+    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
+    if (n <= 0 || (size_t)n >= sizeof(pat)) return false;
+
+    const char* p = strstr(json, pat);
+    if (!p || p >= json_end) return false;
+    p = strchr(p + n, ':');
+    if (!p || p >= json_end) return false;
+    p++;
+    while (p < json_end && (*p == ' ' || *p == '\t')) p++;
+    if (p >= json_end) return false;
+    *out = (float)atof(p);
+    return true;
+}
+
+static bool drv_command(const char* peripheral_id, const char* command,
+                        const char* args_json, const char* args_json_end)
+{
+    if (!peripheral_id || !command) return false;
+
+    /* Resolve the operator's id to one of our units. Returning false for
+     * an id we don't own is what lets the manager try the next driver. */
+    uint8_t unit = 0xFF;
+    for (uint8_t i = 0; i < unit_count; i++) {
+        if (units[i].peripheral_id[0]
+            && strcmp(units[i].peripheral_id, peripheral_id) == 0) {
+            unit = i;
+            break;
+        }
+    }
+    if (unit == 0xFF) return false;
+
+    if (strcmp(command, "tune_enter") == 0) {
+        return kangaroo_tune_enter(unit);
+    }
+    if (strcmp(command, "tune_jog") == 0) {
+        /* Absent//unparseable power means stop, not full speed — this
+         * runs open loop with no travel limits, so the safe reading of a
+         * malformed jog is zero. */
+        float power = 0.0f;
+        if (!args_get_float(args_json, args_json_end, "power", &power)) {
+            saint_log_publish("warn",
+                "Kangaroo: tune_jog for '%s' had no 'power' argument — "
+                "treating as stop", peripheral_id);
+            power = 0.0f;
+        }
+        return kangaroo_tune_jog(unit, power);
+    }
+    if (strcmp(command, "tune_go") == 0) {
+        return kangaroo_tune_go(unit);
+    }
+    if (strcmp(command, "tune_abort") == 0) {
+        return kangaroo_tune_abort(unit);
+    }
+    if (strcmp(command, "tune_read_extents") == 0) {
+        return kangaroo_tune_read_extents(unit, NULL, NULL);
+    }
+
+    /* Per-instance safety interlock. The peripheral_driver_t estop()
+     * vtable entry is driver-WIDE — it stops every Kangaroo the driver
+     * owns — so a limit switch guarding one axis has to come in through
+     * the command path, which routes by peripheral_id. See
+     * docs/SENSOR_INPUTS.md. */
+    if (strcmp(command, "estop") == 0) {
+        units[unit].interlocked = true;
+        if (tune_is_active(&units[unit])) {
+            tune_stop(unit, KANGAROO_TUNE_FAILED, "warn",
+                      "safety interlock tripped");
+        }
+        (void)kangaroo_powerdown(unit);
+        saint_log_publish("warn",
+            "Kangaroo: '%s' INTERLOCK — powered down; motion blocked until "
+            "cleared", peripheral_id);
+        return true;
+    }
+    if (strcmp(command, "clear_estop") == 0) {
+        if (!units[unit].interlocked) return true;
+        units[unit].interlocked = false;
+        /* Leave the channel un-started: the next setpoint re-Starts it.
+         * Clearing the latch must not itself command motion. */
+        units[unit].started = false;
+        saint_log_publish("info",
+            "Kangaroo: '%s' interlock cleared — motion re-enabled",
+            peripheral_id);
+        return true;
+    }
+
+    saint_log_publish("warn",
+        "Kangaroo: '%s' ignoring unknown command '%s'",
+        peripheral_id, command);
+    /* Claimed the peripheral, just not the verb — returning true stops
+     * the manager from also logging "no driver claimed it". */
+    return true;
+}
+
 static void drv_estop(void)
 {
     /* Stop motion (speed 0) then power down each channel. Speed-0 is
      * defense in depth in case the power-down packet is delayed. */
     for (uint8_t i = 0; i < unit_count; i++) {
+        /* An in-flight tune has the Kangaroo driving the axis on its own
+         * schedule; Move/powerdown alone would not end that, so abort the
+         * tune first. tune_stop also zeroes any open-loop jog power. */
+        if (tune_is_active(&units[i])) {
+            tune_stop(i, KANGAROO_TUNE_FAILED, "warn", "e-stop");
+        }
 #ifndef SIMULATION
         if (wire_ready()) {
             (void)send_move_speed(&units[i], 0);
@@ -875,6 +1458,7 @@ static const peripheral_driver_t kangaroo_peripheral = {
     .set_defaults      = drv_set_defaults,
     .apply_config      = drv_apply_config,
     .parse_json_params = drv_parse_json,
+    .command           = drv_command,
     .estop             = drv_estop,
     .save_config       = drv_save,
     .load_config       = drv_load,

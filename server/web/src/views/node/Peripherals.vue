@@ -6,6 +6,7 @@ import { useChannelHistory } from '@/composables/useChannelHistory'
 import { useWsTopic } from '@/composables/useWsTopic'
 import AppModal from '@/components/AppModal.vue'
 import ServoExtentsControl from '@/components/peripherals/ServoExtentsControl.vue'
+import KangarooTuneModal from '@/components/peripherals/KangarooTuneModal.vue'
 
 // Param IDs the servo type stores as a 4-tuple of pulse widths. The
 // modal renders these as a single radial control instead of four
@@ -596,6 +597,25 @@ function channelDisplayLabel (peripheral, channelIdx, catalogChannel) {
   return catalogChannel.id
 }
 
+// ── Kangaroo teach tune ───────────────────────────────────────────
+// Gated on linear motion: on a rotational channel the workflow has no
+// meaning, and entering a tune drives the axis open loop with no travel
+// limits. Server-side `motion_mode` is the switch (see the catalog
+// entry in peripheral_model.py).
+const tuneModalPeripheralId = ref(null)
+const tunePeripheral = computed(() =>
+  peripherals.value.find(p => p.id === tuneModalPeripheralId.value) || null)
+const tuneChannels = computed(() =>
+  liveChannels.value[tuneModalPeripheralId.value] || {})
+
+function tuneable (p) {
+  return p?.type === 'kangaroo' && p?.params?.motion_mode === 'linear'
+}
+function openTune (p) {
+  if (!tuneable(p)) return
+  tuneModalPeripheralId.value = p.id
+}
+
 function openChannelEdit (peripheral, channelIdx) {
   if (!channelEditable(peripheral)) return
   const channels = peripheral.params?.channels || []
@@ -781,6 +801,17 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
               @click="toggleLog(p)"
             >
               Log {{ readableChannelsOf(p).length === 0 ? '—' : (p.log_enabled ? 'on' : 'off') }}
+            </button>
+            <!-- Teach tune. Only on a Kangaroo set to linear motion —
+                 the workflow is meaningless on a rotational channel, and
+                 a stray tune drives the axis open loop. -->
+            <button
+              v-if="tuneable(p)"
+              class="btn-sm bg-surface hover:bg-surface-2 text-fg-strong"
+              title="Teach tune (travel range)"
+              @click="openTune(p)"
+            >
+              <span class="material-icons icon-sm">tune</span>
             </button>
             <button class="btn-sm bg-surface hover:bg-surface-2 text-fg-strong" @click="openEdit(p)" title="Edit">
               <span class="material-icons icon-sm">edit</span>
@@ -1184,5 +1215,17 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
         <button class="btn-primary" @click="saveChannelEdit">Save</button>
       </template>
     </AppModal>
+
+    <!-- Kangaroo teach tune. Self-contained workflow component — it owns
+         the enter/jog/capture/go sequence and talks to the firmware
+         directly; we just hand it the peripheral and its live channel
+         values. -->
+    <KangarooTuneModal
+      v-if="tunePeripheral"
+      :node-id="nodeId"
+      :peripheral="tunePeripheral"
+      :channels="tuneChannels"
+      @close="tuneModalPeripheralId = null"
+    />
   </div>
 </template>

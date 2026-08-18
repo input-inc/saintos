@@ -26,6 +26,7 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import URDFLoader from 'urdf-loader'
 import { resolveMeshUrl } from '@/utils/meshUrl'
+import { buildColliders, computeBaseline, collidingPairs, samplesToIntervals } from '@/utils/collision'
 
 const props = defineProps({
   // Source URL for the URDF text. Null/empty disables loading.
@@ -45,6 +46,7 @@ const emit = defineEmits([
   'joint-click',         // (jointName) — operator clicked a link/mesh in the scene
   'joint-rotate',        // (jointName, angle) — live during gizmo drag
   'joint-rotate-commit', // (jointName, angle) — gizmo drag ended; safe to write a keyframe
+  'interact',            // () — user is manipulating the view (orbit/zoom/drag)
 ])
 
 const container = ref(null)
@@ -62,6 +64,25 @@ let resizeObserver = null
 
 // Viewer-chrome state surfaced to the template (top-right toolbar).
 const showGrid = ref(true)
+// Collision-geometry overlay. Off by default; parseCollision below loads
+// the <collision> shapes so this toggle can reveal them as a translucent
+// overlay for eyeballing that the collision model looks sane.
+const showCollision = ref(false)
+// Self-collision detection state (see utils/collision.js). `colliders` is
+// built once per load; `collisionBaseline` is the set of pairs already
+// touching at the home pose (ignored forever).
+let colliders = []
+let collisionBaseline = null
+// Meshes recolored for the live collision highlight: [{ mesh, material }].
+let highlighted = []
+// An invisible clone of the robot used purely as an FK sandbox for the
+// timeline scan, so scanning never disturbs the visible model (no flicker)
+// and can be time-sliced without fighting the user's scrub/orbit. Shares
+// geometry with the display robot, so the BVHs are reused (not rebuilt).
+let robotClone = null
+let cloneColliders = []
+let cloneBaseline = null
+let scanGeneration = 0
 const viewMenuOpen = ref(false)
 
 // Raycast click-to-select state. We can't naively attach a `click`
@@ -173,6 +194,13 @@ function setupScene () {
   renderer.domElement.addEventListener('pointermove', onPointerMove)
   renderer.domElement.addEventListener('pointerup', onPointerUp)
   renderer.domElement.addEventListener('pointerleave', onPointerUp)
+  // Separate, non-interfering interaction signals to pause the collision scan
+  // while the user manipulates the view.
+  renderer.domElement.addEventListener('pointerdown', onInteractStart)
+  renderer.domElement.addEventListener('pointermove', onInteractMove)
+  renderer.domElement.addEventListener('pointerup', onInteractEnd)
+  renderer.domElement.addEventListener('pointerleave', onInteractEnd)
+  renderer.domElement.addEventListener('wheel', onInteractWheel, { passive: true })
 }
 
 // Project the current mouse position onto the joint's rotation plane
@@ -455,7 +483,8 @@ function onPointerMove (e) {
     angle = Math.max(lim.lower, Math.min(lim.upper, angle))
   }
   limitVisual.joint.setJointValue(angle)
-  emit('joint-rotate', limitVisual.joint.name, angle)
+  // Emit in the −1..+1 control domain (the model applied radians above).
+  emit('joint-rotate', limitVisual.joint.name, normJoint(limitVisual.joint, angle))
 }
 
 function onPointerUp (e) {
@@ -465,7 +494,8 @@ function onPointerUp (e) {
     document.body.style.userSelect = ''
     document.body.style.webkitUserSelect = ''
     if (limitVisual?.joint) {
-      emit('joint-rotate-commit', limitVisual.joint.name, limitVisual.joint.angle ?? 0)
+      emit('joint-rotate-commit', limitVisual.joint.name,
+        normJoint(limitVisual.joint, limitVisual.joint.angle ?? 0))
     }
     pressDownPx = null
     e.preventDefault?.()
@@ -542,9 +572,13 @@ function onResize () {
   renderer.setSize(w, h)
 }
 
-function makeMeshLoader () {
+function makeMeshLoader (hooks = {}) {
   const manager = new THREE.LoadingManager()
   return (path, _manager, onComplete) => {
+    // Mesh geometry loads asynchronously; hooks let loadUrdf wait for all
+    // of them before inspecting meshes for collision.
+    hooks.onStart?.()
+    const settle = (obj) => { onComplete(obj); hooks.onSettle?.() }
     // Path-preserving resolution (see utils/meshUrl.js for the
     // johnny5 same-basename story).
     const url = resolveMeshUrl(path, props.urdfUrl, props.meshesBase)
@@ -555,7 +589,7 @@ function makeMeshLoader () {
     else if (ext === 'obj') loader = new OBJLoader(manager)
     else if (ext === 'gltf' || ext === 'glb') loader = new GLTFLoader(manager)
     else {
-      onComplete(new THREE.Object3D())
+      settle(new THREE.Object3D())
       return
     }
     loader.load(
@@ -575,7 +609,7 @@ function makeMeshLoader () {
         } else {
           object = result
         }
-        onComplete(object)
+        settle(object)
       },
       undefined,
       (err) => {
@@ -584,7 +618,7 @@ function makeMeshLoader () {
         // figure out which file is missing from their bundle.
         // eslint-disable-next-line no-console
         console.warn('Mesh load failed', url, err)
-        onComplete(new THREE.Object3D())
+        settle(new THREE.Object3D())
       },
     )
   }
@@ -596,6 +630,16 @@ function clearRobot () {
     disposeObject3D(robot)
     robot = null
   }
+  // Drop stale collision/highlight references tied to the old robot. Don't
+  // disposeObject3D(robotClone) — it shares geometry with the (separately
+  // disposed) display robot; just release the ref.
+  colliders = []
+  collisionBaseline = null
+  highlighted = []
+  robotClone = null
+  cloneColliders = []
+  cloneBaseline = null
+  scanGeneration += 1 // cancel any in-flight scan
 }
 
 async function loadUrdf () {
@@ -606,8 +650,24 @@ async function loadUrdf () {
   loading.value = true
   loadError.value = ''
   try {
+    // Track async mesh loads: loadMeshCb fires onStart per mesh during parse
+    // and onSettle when each geometry arrives. We must wait for ALL of them
+    // before building colliders — otherwise the <collision> meshes have no
+    // geometry yet and the collision set comes up empty.
+    let pending = 0
+    let parseDone = false
+    let resolveAll
+    const allMeshesLoaded = new Promise((r) => { resolveAll = r })
+    const settleIfDone = () => { if (parseDone && pending === 0) resolveAll() }
+
     const loader = new URDFLoader()
-    loader.loadMeshCb = makeMeshLoader()
+    loader.loadMeshCb = makeMeshLoader({
+      onStart: () => { pending += 1 },
+      onSettle: () => { pending -= 1; settleIfDone() },
+    })
+    // Parse <collision> too so the overlay + collision detection have geometry.
+    // (Heavier load — these models can ship full-detail meshes.)
+    loader.parseCollision = true
     const result = await new Promise((resolve, reject) => {
       loader.load(props.urdfUrl, resolve, undefined, reject)
     })
@@ -617,6 +677,33 @@ async function loadUrdf () {
     // so the robot stands on the grid rather than lying flat.
     robot.rotation.x = -Math.PI / 2
     scene.add(robot)
+
+    // All loadMeshCb calls were issued synchronously during parse; now wait
+    // for the async geometry (with a safety timeout) before inspecting meshes.
+    parseDone = true
+    settleIfDone()
+    await Promise.race([allMeshesLoaded, new Promise((r) => setTimeout(r, 15000))])
+
+    applyColliders()
+    // Build the collision set + baseline at the freshly-loaded (home) pose,
+    // BEFORE any parent posing, so intrinsic overlaps/adjacency get ignored.
+    robot.updateMatrixWorld(true)
+    const _tb0 = performance.now()
+    colliders = buildColliders(robot)
+    const _tb1 = performance.now()
+    collisionBaseline = colliders.length ? computeBaseline(colliders) : null
+    const _tb2 = performance.now()
+    // Invisible FK sandbox for the async timeline scan (shares geometry/BVHs).
+    robotClone = robot.clone(true)
+    robotClone.updateMatrixWorld(true)
+    cloneColliders = buildColliders(robotClone)
+    cloneBaseline = cloneColliders.length ? computeBaseline(cloneColliders) : null
+    if (import.meta.env?.DEV) {
+      // eslint-disable-next-line no-console
+      console.info(`[collision] ${colliders.length} collider meshes ` +
+        `(BVH build ${(_tb1 - _tb0) | 0}ms); baseline ${collisionBaseline?.size ?? 0} ` +
+        `pairs (${(_tb2 - _tb1) | 0}ms)`)
+    }
     const jointNames = Object.keys(robot.joints || {})
     emit('joints', jointNames)
     emit('loaded', robot)
@@ -628,10 +715,50 @@ async function loadUrdf () {
   }
 }
 
-// Public-ish API: parent can call setJointValue from a ref.
+// ── Control-value normalization (home-centered, convention C) ────────
+//
+// SaintOS drives joints in a −1..+1 control range (the same range the
+// servos use). We map that range onto each joint's URDF <limit>, pinned
+// so the URDF home (θ=0) is control 0:
+//
+//   −1 → lower limit      0 → home (θ=0)      +1 → upper limit
+//
+// Each side is scaled independently (θ = n·upper for n≥0, n·|lower| for
+// n<0), so asymmetric joints keep 0 at home — at the cost of a different
+// gain per side. One-sided joints (lower=0) have no negative travel, so
+// negative control just holds at home. All derived from the URDF limits;
+// no extra metadata. Joints without a finite limit pass through as-is.
+function jointLimits (joint) {
+  const lim = joint?.limit
+  const lo = lim ? Number(lim.lower) : NaN
+  const hi = lim ? Number(lim.upper) : NaN
+  return Number.isFinite(lo) && Number.isFinite(hi) ? { lo, hi } : null
+}
+
+// control (−1..+1) → joint value (radians / metres)
+function denormJoint (joint, n) {
+  const L = jointLimits(joint)
+  if (!L) return n
+  const c = Math.max(-1, Math.min(1, Number(n) || 0))
+  const theta = c >= 0 ? c * L.hi : c * Math.abs(L.lo)
+  return Math.max(L.lo, Math.min(L.hi, theta))
+}
+
+// joint value (radians / metres) → control (−1..+1)
+function normJoint (joint, theta) {
+  const L = jointLimits(joint)
+  if (!L) return theta
+  const t = Number(theta) || 0
+  if (t >= 0) return L.hi > 0 ? Math.min(1, t / L.hi) : 0
+  return L.lo < 0 ? Math.max(-1, t / Math.abs(L.lo)) : 0
+}
+
+// Public-ish API: parent calls setJointValue from a ref with a −1..+1
+// control value; we denormalize to the joint's native units for display.
 function setJointValue (jointName, value) {
-  if (!robot?.joints || !robot.joints[jointName]) return false
-  robot.joints[jointName].setJointValue(value)
+  const j = robot?.joints?.[jointName]
+  if (!j) return false
+  j.setJointValue(denormJoint(j, value))
   return true
 }
 
@@ -640,6 +767,130 @@ function setJointValue (jointName, value) {
 function toggleGrid () {
   showGrid.value = !showGrid.value
   if (grid) grid.visible = showGrid.value
+}
+
+// Translucent overlay material for collision shapes so they read over the
+// visual mesh (depthWrite off keeps them from z-fighting the surface).
+const COLLISION_MAT = new THREE.MeshStandardMaterial({
+  color: 0xff3b30, transparent: true, opacity: 0.35,
+  depthWrite: false, metalness: 0, roughness: 1,
+})
+
+// urdf-loader tags collision subtrees with `isURDFCollider`. Recolor their
+// meshes to the overlay material and gate visibility on the toggle.
+function applyColliders () {
+  if (!robot) return
+  robot.traverse((o) => {
+    if (!o.isURDFCollider) return
+    o.visible = showCollision.value
+    o.traverse((m) => { if (m.isMesh) m.material = COLLISION_MAT })
+  })
+}
+
+function toggleCollision () {
+  showCollision.value = !showCollision.value
+  applyColliders()
+}
+
+// Self-collision at the CURRENT pose → array of "linkA|linkB" pair keys
+// (baseline adjacency/overlap pairs excluded). Cheap; call on pose change.
+function collisionsAtCurrent () {
+  if (!robot || !colliders.length) return []
+  robot.updateMatrixWorld(true)
+  return [...collidingPairs(colliders, collisionBaseline)]
+}
+
+// Scan an animation for collisions, WITHOUT blocking the UI. `sampleFn(t)`
+// returns a map { jointName: controlValue(−1..1) } for time t. Runs on the
+// invisible clone (so it never disturbs the visible model or fights the user's
+// scrub/orbit) and time-slices across animation frames — a few samples per
+// frame, then yields so rendering + input stay live. Returns a Promise of
+// merged intervals, or null if a newer scan superseded this one.
+function rafYield () {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve())
+    else setTimeout(resolve, 0)
+  })
+}
+
+async function scanTimeline (sampleFn, duration, steps = 90) {
+  if (!robotClone || !cloneColliders.length || !(duration > 0)) return []
+  const gen = ++scanGeneration
+  const n = Math.max(2, Math.min(600, Math.round(steps)))
+  const SLICE = 6 // samples processed per frame before yielding
+  const samples = []
+  for (let k = 0; k <= n; k++) {
+    const t = (duration * k) / n
+    const vals = sampleFn(t) || {}
+    for (const name in vals) {
+      const j = robotClone.joints[name]
+      if (j) j.setJointValue(denormJoint(j, vals[name]))
+    }
+    robotClone.updateMatrixWorld(true)
+    samples.push({ t, pairs: collidingPairs(cloneColliders, cloneBaseline) })
+    if (k % SLICE === SLICE - 1) {
+      await rafYield()
+      if (gen !== scanGeneration) return null // a newer scan started; bail
+    }
+  }
+  return samplesToIntervals(samples)
+}
+
+// Abort any in-flight scan immediately. Called by the parent on scrub/edit,
+// and internally on view manipulation, so interaction never competes with the
+// collision reprocess for the main thread.
+function cancelScan () { scanGeneration += 1 }
+
+// Canvas input signals (orbit / zoom / drag). Each aborts an in-flight scan
+// and tells the parent to (re)start its idle countdown, so reprocessing only
+// runs once the user pauses.
+let _pointerDown = false
+let _lastInteractAt = 0
+function notifyInteract () {
+  cancelScan()
+  emit('interact')
+}
+function notifyInteractThrottled () {
+  const now = (typeof performance !== 'undefined') ? performance.now() : 0
+  if (now - _lastInteractAt < 60) return
+  _lastInteractAt = now
+  notifyInteract()
+}
+function onInteractStart () { _pointerDown = true; notifyInteract() }
+function onInteractMove () { if (_pointerDown) notifyInteractThrottled() }
+function onInteractEnd () { _pointerDown = false; notifyInteract() }
+function onInteractWheel () { notifyInteractThrottled() }
+
+// Solid red material for parts currently in collision (distinct from the
+// translucent collision-geometry overlay).
+const HIGHLIGHT_MAT = new THREE.MeshStandardMaterial({
+  color: 0xff3b30, emissive: 0x4c0000, metalness: 0, roughness: 0.7,
+})
+
+function clearCollisionHighlight () {
+  for (const h of highlighted) h.mesh.material = h.material
+  highlighted = []
+}
+
+// Tint the VISUAL meshes of the links named in `pairs` (["linkA|linkB", …])
+// red. Only each link's OWN visuals — not its colliders, not descendant
+// links (those are separate URDFLink nodes, highlighted only if named).
+function highlightCollision (pairs) {
+  clearCollisionHighlight()
+  if (!robot || !pairs || !pairs.length) return
+  const links = new Set()
+  for (const p of pairs) for (const n of String(p).split('|')) links.add(n)
+  robot.traverse((o) => {
+    if (!o.isURDFLink || !links.has(o.name)) return
+    for (const child of o.children) {
+      if (!child.isURDFVisual) continue
+      child.traverse((m) => {
+        if (!m.isMesh) return
+        highlighted.push({ mesh: m, material: m.material })
+        m.material = HIGHLIGHT_MAT
+      })
+    }
+  })
 }
 
 // Frame the robot so it fits the viewport with a small margin. Keeps
@@ -720,7 +971,7 @@ watch(viewMenuOpen, (open) => {
   }
 })
 
-defineExpose({ setJointValue, selectJoint })
+defineExpose({ setJointValue, selectJoint, collisionsAtCurrent, scanTimeline, highlightCollision, cancelScan })
 
 onMounted(() => {
   setupScene()
@@ -743,6 +994,11 @@ onBeforeUnmount(() => {
     renderer.domElement.removeEventListener('pointermove', onPointerMove)
     renderer.domElement.removeEventListener('pointerup', onPointerUp)
     renderer.domElement.removeEventListener('pointerleave', onPointerUp)
+    renderer.domElement.removeEventListener('pointerdown', onInteractStart)
+    renderer.domElement.removeEventListener('pointermove', onInteractMove)
+    renderer.domElement.removeEventListener('pointerup', onInteractEnd)
+    renderer.domElement.removeEventListener('pointerleave', onInteractEnd)
+    renderer.domElement.removeEventListener('wheel', onInteractWheel)
   }
   gizmoJoint = null
   handleDragging = false
@@ -804,6 +1060,12 @@ watch(() => display.theme, () => {
               @click="toggleGrid">
         <span class="material-icons icon-sm">{{ showGrid ? 'grid_on' : 'grid_off' }}</span>
       </button>
+      <button class="viewer-btn pointer-events-auto"
+              :class="{ 'viewer-btn-active': showCollision }"
+              :title="showCollision ? 'Hide collision geometry' : 'Show collision geometry'"
+              @click="toggleCollision">
+        <span class="material-icons icon-sm">{{ showCollision ? 'deblur' : 'blur_on' }}</span>
+      </button>
       <div class="relative pointer-events-auto">
         <button class="viewer-btn"
                 title="Set camera view"
@@ -850,6 +1112,11 @@ watch(() => display.theme, () => {
   background: rgba(6, 182, 212, 0.18);
   border-color: #06b6d4;
   color: #67e8f9;
+}
+.viewer-btn-active {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: #ef4444;
+  color: #fca5a5;
 }
 .viewer-menu {
   position: absolute; top: calc(100% + 4px); right: 0;

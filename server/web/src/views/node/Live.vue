@@ -8,6 +8,7 @@ import Sparkline from '@/components/Sparkline.vue'
 import BMSCard from '@/components/peripherals/BMSCard.vue'
 import MaestroCard from '@/components/peripherals/MaestroCard.vue'
 import RoboClawCard from '@/components/peripherals/RoboClawCard.vue'
+import KangarooCard from '@/components/peripherals/KangarooCard.vue'
 import PimoroniServo2040Card from '@/components/peripherals/PimoroniServo2040Card.vue'
 
 const props = defineProps({
@@ -165,6 +166,14 @@ function sparkSamples (nodeId, peripheralId, channelId) {
            per-servo target table. -->
       <PimoroniServo2040Card
         v-else-if="p.type === 'pimoroni_servo2040'"
+        :peripheral="p"
+        :channels="values[p.id] || {}"
+        :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"
+      />
+      <!-- Kangaroo: position/speed telemetry, decoded Get-reply error
+           codes, and the teach-tune state when one is in progress. -->
+      <KangarooCard
+        v-else-if="p.type === 'kangaroo'"
         :peripheral="p"
         :channels="values[p.id] || {}"
         :spark-samples="(channelId) => sparkSamples(nodeId, p.id, channelId)"

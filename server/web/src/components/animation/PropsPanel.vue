@@ -84,9 +84,8 @@ const selectedKeyframe = computed(() => {
   if (s?.kind !== 'keyframe' || !selectedTrack.value) return null
   return selectedTrack.value.curve?.keys?.[s.kfIdx] || null
 })
-// ws_input value tracks carry controller scalars (−1..1), not joint
-// radians, so the keyframe value editor scopes its slider + helper text
-// to the binding kind.
+// Both ws_input tracks and URDF-joint tracks now carry −1..+1 control
+// scalars, so the keyframe value editor uses the same range for either.
 const selectedTrackIsWs = computed(() =>
   selectedTrack.value?.target_kind === 'ws_input')
 const valueSliderRange = computed(() => selectedTrackIsWs.value ? 1 : JOINT_RANGE)
@@ -198,12 +197,12 @@ function makeJointActive (name) {
   emit('select', { kind: 'joint', value: name })
 }
 
-// Joint angle range — URDF revolute joints are conventionally ±π
-// radians. Continuous joints have no limit; we cap the slider at
-// ±2π so the operator can still drag through a full rotation. For
-// prismatic joints the units are meters but the same range works
-// as a sensible default; the operator can type a precise value.
-const JOINT_RANGE = Math.PI * 2
+// Joint control range. SaintOS drives URDF joints in the same −1..+1
+// range as the servos (mapped onto each joint's URDF <limit>, home
+// centered at 0 — see URDFViewer's denormJoint). So both the pose
+// slider and the keyframe-value slider run −1..+1 regardless of joint
+// type (revolute radians vs prismatic metres — the viewer converts).
+const JOINT_RANGE = 1
 
 // Existing group names across all animations — fed into the group
 // field's <datalist> so the operator gets autocomplete instead of

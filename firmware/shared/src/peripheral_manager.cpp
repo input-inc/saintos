@@ -6,6 +6,7 @@
 
 #include "peripheral_driver.h"
 #include "platform.h"
+#include "saint_log.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -73,6 +74,118 @@ void peripheral_clear_estop_all(void)
             drivers[i]->clear_estop();
         }
     }
+}
+
+bool peripheral_dispatch_command(const char* peripheral_id,
+                                 const char* command,
+                                 const char* args_json,
+                                 const char* args_json_end)
+{
+    if (!peripheral_id || !command) return false;
+
+    for (uint8_t i = 0; i < driver_count; i++) {
+        if (!drivers[i]->command) continue;
+        if (drivers[i]->command(peripheral_id, command,
+                                args_json, args_json_end)) {
+            return true;
+        }
+    }
+    // Not a silent drop: an unroutable command means the operator's UI
+    // and the node disagree about what is configured, and that is worth
+    // seeing in the log rather than debugging as "the button does
+    // nothing."
+    saint_log_publish("warn",
+        "peripheral_command: no driver claimed peripheral '%s' for "
+        "command '%s'", peripheral_id, command);
+    return false;
+}
+
+// Extract a JSON string value for `key` into `out`. Hand-rolled: there
+// is no JSON parser on the MCU and every driver here already parses its
+// own params the same way.
+static bool json_get_string(const char* json, const char* key,
+                            char* out, size_t out_cap)
+{
+    char pat[32];
+    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
+    if (n <= 0 || (size_t)n >= sizeof(pat)) return false;
+
+    const char* p = strstr(json, pat);
+    if (!p) return false;
+    p = strchr(p + n, ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return false;
+    p++;
+
+    size_t i = 0;
+    while (*p && *p != '"' && i < out_cap - 1) out[i++] = *p++;
+    if (*p != '"') return false;      // truncated or unterminated
+    out[i] = '\0';
+    return i > 0;
+}
+
+// Locate the {...} object following "args". Returns false if absent —
+// commands without arguments are legitimate.
+static bool json_find_object(const char* json, const char* key,
+                             const char** start, const char** end)
+{
+    char pat[32];
+    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
+    if (n <= 0 || (size_t)n >= sizeof(pat)) return false;
+
+    const char* p = strstr(json, pat);
+    if (!p) return false;
+    p = strchr(p + n, ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '{') return false;
+
+    // Depth-count to the matching brace, skipping braces inside strings
+    // so a string value can't truncate the object early.
+    int depth = 0;
+    bool in_string = false, escaped = false;
+    const char* q = p;
+    for (; *q; q++) {
+        if (in_string) {
+            if (escaped)        escaped = false;
+            else if (*q == '\\') escaped = true;
+            else if (*q == '"')  in_string = false;
+            continue;
+        }
+        if (*q == '"') { in_string = true; continue; }
+        if (*q == '{') depth++;
+        else if (*q == '}') {
+            if (--depth == 0) { *start = p; *end = q + 1; return true; }
+        }
+    }
+    return false;
+}
+
+bool peripheral_command_handle_json(const char* json)
+{
+    if (!json) return false;
+
+    char peripheral_id[32];
+    char command[32];
+    if (!json_get_string(json, "peripheral", peripheral_id, sizeof(peripheral_id))) {
+        saint_log_publish("warn",
+            "peripheral_command: missing or malformed 'peripheral' field");
+        return false;
+    }
+    if (!json_get_string(json, "command", command, sizeof(command))) {
+        saint_log_publish("warn",
+            "peripheral_command: '%s' sent no 'command' field", peripheral_id);
+        return false;
+    }
+
+    const char* args = NULL;
+    const char* args_end = NULL;
+    (void)json_find_object(json, "args", &args, &args_end);
+
+    return peripheral_dispatch_command(peripheral_id, command, args, args_end);
 }
 
 // =============================================================================

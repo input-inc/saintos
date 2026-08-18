@@ -57,6 +57,27 @@ typedef struct peripheral_driver {
     bool (*parse_json_params)(const char* json_start, const char* json_end,
                               pin_config_t* config);
 
+    // Out-of-band commands keyed by name (optional, NULL = none).
+    //
+    // Channels carry floats. Some peripherals need a verb plus
+    // structured arguments — the Kangaroo's teach tune is enter / jog /
+    // go / abort, none of which is a setpoint. Those arrive as
+    // {"action":"peripheral_command","peripheral":"...","command":"...",
+    //  "args":{...}} on the node's RELIABLE /command topic and land here.
+    //
+    // `peripheral_id` is the operator-assigned id from the peripheral
+    // JSON (the same string a driver stores from config->logical_name);
+    // the driver resolves it to whichever instance it owns and returns
+    // false if it isn't one of its own. `args_json` .. `args_json_end`
+    // bracket the raw "args" object so the driver can pull out whatever
+    // fields it needs — there is no shared JSON parser on the MCU, and
+    // every driver here already hand-parses its own params.
+    //
+    // Mirrors the Pi's PeripheralDriver.handle_command contract in
+    // firmware/raspberrypi/saint_node/peripherals/base.py.
+    bool (*command)(const char* peripheral_id, const char* command,
+                    const char* args_json, const char* args_json_end);
+
     // Emergency stop.
     //   estop:       latch on  — assert e-stop (motors → 0, e-stop pins
     //                            driven into their asserted state, etc.)
@@ -101,6 +122,19 @@ void peripheral_init_all(void);
 void peripheral_update_all(void);
 void peripheral_estop_all(void);
 void peripheral_clear_estop_all(void);
+
+// Route a peripheral_command to whichever registered driver claims
+// `peripheral_id`. Returns true iff a driver handled it. Mirrors the
+// Pi's PeripheralManager.dispatch_command.
+bool peripheral_dispatch_command(const char* peripheral_id,
+                                 const char* command,
+                                 const char* args_json,
+                                 const char* args_json_end);
+
+// Parse an {"action":"peripheral_command", ...} frame and route it.
+// Lives here rather than in each platform's main so RP2040 and Teensy
+// share one parser. Returns true iff a driver handled the command.
+bool peripheral_command_handle_json(const char* json);
 
 const peripheral_driver_t* peripheral_find_by_gpio(uint16_t gpio);
 const peripheral_driver_t* peripheral_find_by_mode(pin_mode_t mode);

@@ -313,6 +313,71 @@ def maestro_normalize_channels(params: Dict[str, Any]) -> None:
     params["channels"] = normalized
 
 
+# Kangaroo params the firmware never reads. Every one of these is acted
+# on entirely server-side, so shipping them to the node only burns the
+# XRCE budget:
+#
+#   motion_mode        — gates the dashboard's tune UI
+#   home_position      — the server sends a position when Home is pressed
+#   power_on_enabled   — the server decides whether to command on connect
+#   power_on_position  — ditto
+#
+# `jog_power_pct` deliberately IS on the wire: it caps open-loop jog
+# power, and a safety limit belongs in the firmware rather than depending
+# on the server scaling correctly.
+_KANGAROO_SERVER_ONLY_PARAMS = frozenset({
+    "motion_mode",
+    "home_position",
+    "power_on_enabled",
+    "power_on_position",
+})
+
+
+# Max interlock targets the firmware will store per switch — mirrors
+# SWITCH_INPUT_MAX_TARGETS in firmware/shared/include/switch_input_protocol.h.
+SWITCH_INPUT_MAX_TARGETS = 4
+
+
+def switch_input_params_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a switch_input's params for the config push.
+
+    The operator types interlock targets as a comma-separated string
+    because a free-form list widget doesn't exist yet, but the firmware
+    parses a JSON array. Convert here rather than making the firmware
+    tokenize a string — hand-rolled string splitting on the MCU is
+    exactly the kind of thing that goes wrong quietly.
+
+    Over-long lists are truncated to what the firmware can hold, so the
+    wire never claims more targets than will actually be armed.
+    """
+    out = dict(params)
+    raw = out.get("targets")
+    if isinstance(raw, str):
+        ids = [t.strip() for t in raw.split(",") if t.strip()]
+        out["targets"] = ids[:SWITCH_INPUT_MAX_TARGETS]
+    elif isinstance(raw, list):
+        out["targets"] = [str(t).strip() for t in raw if str(t).strip()
+                          ][:SWITCH_INPUT_MAX_TARGETS]
+    return out
+
+
+def kangaroo_slim_params_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of `params` with the server-only keys dropped.
+
+    A single Kangaroo is small — its params are flat, no per-channel
+    array — but KANGAROO_MAX_UNITS is 8, so a node can carry eight of
+    them in one config push. With the linear-actuator params included
+    that worst case serializes to ~2.6 KB, past the XRCE-DDS reassembly
+    cap (512 MTU × 4 MAX_HISTORY ≈ 2048) where the firmware crashes
+    rather than rejecting the message.
+
+    See test_kangaroo_wire_size_budget.py, which fails CI if a future
+    param pushes it back over.
+    """
+    return {k: v for k, v in params.items()
+            if k not in _KANGAROO_SERVER_ONLY_PARAMS}
+
+
 def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of `params` where every channel that exactly
     matches its default gets replaced with an empty `{}`. The full
@@ -504,6 +569,101 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
         params=[
             PeripheralTypeParam("active_low", "Active low", "bool", False),
             PeripheralTypeParam("initial_on", "Initial on", "bool", False),
+        ],
+    ),
+    # Generic switch / sensor input. A limit switch, end-stop, e-stop
+    # button or any other on/off sensor, as a peripheral in its own right
+    # rather than a private field on whichever driver happens to care —
+    # so one physical sensor can affect more than one thing. Design and
+    # rationale in docs/SENSOR_INPUTS.md.
+    "switch_input": PeripheralType(
+        id="switch_input", label="Switch / Limit Input",
+        description=(
+            "An on/off sensor — limit switch, end-stop, e-stop button. "
+            "Reads on a digital pin, or on an ADC pin with a threshold "
+            "for sensors that can't drive logic levels directly. Can "
+            "stop peripherals on this node immediately, and its state is "
+            "routable to anything else."
+        ),
+        pin_kind="gpio",
+        channels=[
+            PeripheralChannel("state",      "Asserted",   "in", "digital_in"),
+            PeripheralChannel("latched",    "Latched",    "in", "digital_in"),
+            PeripheralChannel("voltage",    "Voltage",    "in", "analog"),
+            PeripheralChannel("trip_count", "Trip count", "in", "analog"),
+        ],
+        params=[
+            # Analog sense is not a nicety. A 2-wire sensor with a series
+            # voltage drop (the IDC PSR-2's anti-parallel diode pair
+            # drops ~1.9V) sits between the 3.3V logic thresholds and
+            # cannot be read on a digital pin at all — the pin reads high
+            # in both states. See docs/KANGAROO_BRINGUP.md.
+            PeripheralTypeParam(
+                "sense_analog", "Read as analog", "bool", False,
+                help="Turn on for sensors that can't drive a logic level "
+                     "— anything with a series LED or diode. Reads the "
+                     "pin as a voltage and compares against a threshold. "
+                     "Requires an ADC-capable pin (GP26-29 on RP2040); on "
+                     "any other pin the voltage stays at 0.",
+            ),
+            PeripheralTypeParam(
+                "active_low", "Asserted when low", "bool", True,
+                help="On for a normally-closed sensor, which asserts when "
+                     "the contact OPENS. A cut cable then reads as "
+                     "tripped, which is the safe direction.",
+            ),
+            PeripheralTypeParam(
+                "pull_up", "Pull-up resistor", "bool", True,
+                visible_when={"sense_analog": False},
+            ),
+            PeripheralTypeParam(
+                "threshold_mv", "Threshold (mV)", "int", 2500,
+                min=0, max=3300,
+                visible_when={"sense_analog": True},
+                help="Above this counts as high. Watch the live voltage "
+                     "on the Live tab in both states and put this between "
+                     "them.",
+            ),
+            PeripheralTypeParam(
+                "hysteresis_mv", "Hysteresis (mV)", "int", 200,
+                min=0, max=1000,
+                visible_when={"sense_analog": True},
+                help="Dead band around the threshold. Without it a sensor "
+                     "resting near the crossing point chatters, and every "
+                     "chatter edge counts as a trip.",
+            ),
+            PeripheralTypeParam(
+                "debounce_ms", "Debounce (ms)", "int", 5, min=0, max=5000,
+                help="Mechanical reeds bounce for 0.5-2 ms. Too long and "
+                     "a fast-moving mechanism sweeps past unnoticed.",
+            ),
+            PeripheralTypeParam(
+                "latch", "Latch until cleared", "bool", True,
+                help="Hold the tripped state even after the sensor "
+                     "releases. Needed when a moving magnet only passes "
+                     "the sensor briefly.",
+            ),
+            # ── Local interlock (Tier 1) ──────────────────────────
+            # Resolved on the node with no server in the path. Anything
+            # non-protective belongs in the routing graph instead, where
+            # it can reach other nodes and be edited freely.
+            PeripheralTypeParam(
+                "on_trip", "On trip", "int", 0,
+                choices=[
+                    {"value": 0, "label": "Report only — wire it up in Routes"},
+                    {"value": 1, "label": "Stop the peripherals listed below"},
+                    {"value": 2, "label": "E-stop everything on this node"},
+                ],
+                help="Runs on the node itself, with no round trip to the "
+                     "server — so it still works when the link is down. "
+                     "Report-only still publishes the state for routing.",
+            ),
+            PeripheralTypeParam(
+                "targets", "Stop these peripherals", "string", "",
+                visible_when={"on_trip": 1},
+                help="Comma-separated peripheral ids on THIS node, e.g. "
+                     "'kangaroo-1, roboclaw-2'. Up to 4.",
+            ),
         ],
     ),
     "analog_in": PeripheralType(
@@ -975,6 +1135,22 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
             PeripheralChannel("current_speed",    "Current speed",    "in",  "analog"),
             PeripheralChannel("moving",           "Moving",           "in",  "digital_in"),
             PeripheralChannel("error_status",     "Error status",     "in",  "analog"),
+            # Teach-tune channels. `jog` is a channel rather than a
+            # peripheral_command because press-and-hold jog is a stream:
+            # /control is BEST_EFFORT depth 1 (newest-wins), while
+            # /command is RELIABLE depth 8. On a stalled link the
+            # reliable queue would deliver a burst of stale non-zero
+            # jogs ahead of the operator's release-to-zero — and each
+            # arrival refreshes the firmware dead-man, so the burst
+            # would defeat it rather than trip it.
+            PeripheralChannel("jog",              "Tune jog",         "out", "analog"),
+            PeripheralChannel("tune_state",       "Tune state",       "in",  "analog"),
+            # Taught travel, cached from the last tune_read_extents.
+            # Read-only by nature — the protocol has no command to set
+            # these; they come from where the axis was jogged during
+            # the teach. Set them numerically in DEScribe, not here.
+            PeripheralChannel("taught_min",       "Taught min",       "in",  "analog"),
+            PeripheralChannel("taught_max",       "Taught max",       "in",  "analog"),
         ],
         params=[
             # Board address (high bit set on the wire). Two Kangaroo
@@ -1026,6 +1202,53 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
                 ],
                 help="Must match the rate set in DEScribe. The Kangaroo "
                      "has no autobaud — it listens at exactly this rate.",
+            ),
+            # ── Linear-actuator mode ─────────────────────────────
+            # Everything below is gated on motion_mode=linear so a
+            # rotational channel's modal stays exactly as it was, and
+            # existing saved configs (which have no motion_mode) keep
+            # today's behavior. See docs/KANGAROO_BRINGUP.md.
+            PeripheralTypeParam(
+                "motion_mode", "Motion type", "string", "rotational",
+                choices=[
+                    {"value": "rotational", "label": "Rotational — continuous or angular"},
+                    {"value": "linear",     "label": "Linear actuator — enables teach tune"},
+                ],
+                help="Linear adds the teach-tune workflow (jog to each "
+                     "end, capture travel) plus home and power-on "
+                     "positions. Leave rotational for wheels and "
+                     "turntables.",
+            ),
+            PeripheralTypeParam(
+                "jog_power_pct", "Jog power (%)", "int", 10, min=1, max=100,
+                visible_when={"motion_mode": "linear"},
+                help="Open-loop power cap while jogging during a tune. "
+                     "Jogging has NO feedback and NO travel limits — it "
+                     "will drive into the hard stops. Start low; the "
+                     "direction of travel is unknown until the first "
+                     "tune.",
+            ),
+            PeripheralTypeParam(
+                "home_position", "Home position (units)", "int", 0,
+                min=-536870911, max=536870911,
+                visible_when={"motion_mode": "linear"},
+                help="Position the Home button and Poses recall. Never "
+                     "commanded automatically.",
+            ),
+            PeripheralTypeParam(
+                "power_on_enabled", "Command a position on connect", "bool", False,
+                visible_when={"motion_mode": "linear"},
+                help="Off by default, and normally should stay off. With "
+                     "potentiometer feedback the Kangaroo already knows "
+                     "where it is at power-up, so nothing needs to move "
+                     "— turning this on makes the actuator drive on every "
+                     "connect.",
+            ),
+            PeripheralTypeParam(
+                "power_on_position", "Power-on position (units)", "int", 0,
+                min=-536870911, max=536870911,
+                visible_when={"motion_mode": "linear", "power_on_enabled": True},
+                help="Only used when the option above is enabled.",
             ),
         ],
     ),
@@ -1498,6 +1721,21 @@ class InputNode:
         animation plays and one of its value tracks matches this joint
         name, the sampled value flows through this input as the joint's
         live setpoint.
+      - ``"channel"``: a READING from a peripheral input channel, named
+        by ``(channel_node_id, peripheral_id, channel_id)``. This is what
+        makes sensors routable — a limit switch tripping, a BMS state of
+        charge, a current reading — rather than merely displayable. Fed
+        from the same channel-addressed state the Live tab consumes; see
+        ``RoutingEvaluator.set_peripheral_channel_value``.
+
+        Note the peripheral channel is addressed by ID, not by an index
+        into the emitted ``channels[]`` array. An index would silently
+        re-bind to a different reading the moment a peripheral is added
+        or a driver's emit order changes.
+
+        ``channel_node_id`` is separate from the sheet's own ``node_id``
+        on purpose: a sheet is scoped to one controller, but a sensor on
+        any node may drive it.
     """
     id: str
     topic: str
@@ -1506,6 +1744,10 @@ class InputNode:
     position: Tuple[int, int] = (0, 0)
     kind: str = "topic"
     joint: str = ""
+    # kind == "channel" only.
+    channel_node_id: str = ""
+    peripheral_id: str = ""
+    channel_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1516,6 +1758,9 @@ class InputNode:
             "position": list(self.position),
             "kind": self.kind,
             "joint": self.joint,
+            "channel_node_id": self.channel_node_id,
+            "peripheral_id": self.peripheral_id,
+            "channel_id": self.channel_id,
         }
 
     @classmethod
@@ -1530,7 +1775,14 @@ class InputNode:
                       int(pos[1]) if len(pos) > 1 else 0),
             kind=d.get("kind", "topic"),
             joint=d.get("joint", ""),
+            channel_node_id=d.get("channel_node_id", ""),
+            peripheral_id=d.get("peripheral_id", ""),
+            channel_id=d.get("channel_id", ""),
         )
+
+    def channel_key(self) -> Tuple[str, str, str]:
+        """Addressing tuple for a ``kind="channel"`` input."""
+        return (self.channel_node_id, self.peripheral_id, self.channel_id)
 
 
 @dataclass
@@ -1791,10 +2043,15 @@ class NodeSheet:
 
     def add_input(self, topic: str, field: str, label: str = "",
                   position: Tuple[int, int] = (0, 0),
-                  kind: str = "topic", joint: str = "") -> InputNode:
+                  kind: str = "topic", joint: str = "",
+                  channel_node_id: str = "", peripheral_id: str = "",
+                  channel_id: str = "") -> InputNode:
         existing = {n.id for n in self.inputs}
         if kind == "urdf_joint":
             default_label = joint or "joint"
+        elif kind == "channel":
+            default_label = f"{peripheral_id}.{channel_id}" if peripheral_id \
+                else (channel_id or "channel")
         else:
             default_label = f"{topic}{('.' + field) if field else ''}"
         node = InputNode(
@@ -1804,6 +2061,9 @@ class NodeSheet:
             position=position,
             kind=kind,
             joint=joint,
+            channel_node_id=channel_node_id,
+            peripheral_id=peripheral_id,
+            channel_id=channel_id,
         )
         self.inputs.append(node)
         return node

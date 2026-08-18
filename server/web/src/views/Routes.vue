@@ -158,15 +158,39 @@ const inputModal = ref({
   open: false, kind: 'ws_input', topic: '', field: '', joint: '',
   label: '', labelEdited: false, error: '',
   urdfJoints: [],
+  // kind === 'channel': a reading FROM a peripheral, so a sensor can
+  // drive wiring instead of only being displayed. chNodeId is separate
+  // from the sheet's node — a sheet belongs to one controller, but a
+  // sensor on any node may drive it.
+  chNodeId: '', chPeripheralId: '', chChannelId: '',
 })
 function inputDerivedLabel () {
   if (inputModal.value.kind === 'urdf_joint') {
     return inputModal.value.joint || ''
   }
+  if (inputModal.value.kind === 'channel') {
+    const p = inputModal.value.chPeripheralId || ''
+    const c = inputModal.value.chChannelId || ''
+    return p ? (c ? `${p}.${c}` : p) : ''
+  }
   const t = inputModal.value.topic || ''
   const f = inputModal.value.field || ''
   return t ? (f ? `${t}.${f}` : t) : ''
 }
+
+// Only INPUT channels can be sources — an output channel is something
+// the graph commands, not something it reads.
+const inputChannelPeripherals = computed(() => {
+  const id = inputModal.value.chNodeId
+  return id ? (nodePeripherals.value[id] || []) : []
+})
+const inputChannelOptions = computed(() => {
+  const p = inputChannelPeripherals.value
+    .find(x => x.id === inputModal.value.chPeripheralId)
+  if (!p) return []
+  const type = catalog.byType(p.type)
+  return (type?.channels || []).filter(c => c.dir === 'in')
+})
 function openAddInput () {
   if (!activeSheetId.value) return
   const first = topicCatalog.value[0]
@@ -179,6 +203,10 @@ function openAddInput () {
     labelEdited: false,
     error: '',
     urdfJoints: [],
+    // Default the channel picker to this sheet's own node — the common
+    // case is a sensor on the same node as what it affects.
+    chNodeId: activeSheetId.value || '',
+    chPeripheralId: '', chChannelId: '',
   }
   // Fire-and-forget: load the joint list so the URDF Model option has
   // something to pick from when the operator switches to it.
@@ -193,6 +221,7 @@ const inputTopicChannels = computed(() =>
 )
 const inputIsWs = computed(() => inputModal.value.kind === 'ws_input')
 const inputIsUrdf = computed(() => inputModal.value.kind === 'urdf_joint')
+const inputIsChannel = computed(() => inputModal.value.kind === 'channel')
 const inputTopicFieldLabel = computed(() =>
   inputIsWs.value ? 'Pick a topic to copy its name (optional)' : 'ROS topic',
 )
@@ -205,13 +234,25 @@ const inputLabelPlaceholder = computed(() => {
 // Auto-derive label on topic/field/joint changes — but only until the
 // user types something into the label box.
 watch(
-  () => [inputModal.value.topic, inputModal.value.field, inputModal.value.joint, inputModal.value.kind],
+  () => [inputModal.value.topic, inputModal.value.field, inputModal.value.joint,
+         inputModal.value.kind, inputModal.value.chPeripheralId,
+         inputModal.value.chChannelId],
   () => {
     if (inputModal.value.open && !inputModal.value.labelEdited) {
       inputModal.value.label = inputDerivedLabel()
     }
   },
 )
+
+// Reset the dependent pickers when their parent changes, so a stale
+// peripheral/channel id can't be submitted against a different node.
+watch(() => inputModal.value.chNodeId, () => {
+  inputModal.value.chPeripheralId = ''
+  inputModal.value.chChannelId = ''
+})
+watch(() => inputModal.value.chPeripheralId, () => {
+  inputModal.value.chChannelId = inputChannelOptions.value[0]?.id || ''
+})
 function onInputLabelInput (evt) {
   inputModal.value.label = evt.target.value
   inputModal.value.labelEdited = !!evt.target.value.trim()
@@ -221,10 +262,7 @@ async function saveAddInput () {
   let derivedLabel = label.trim()
   // Belt-and-suspenders: if the operator cleared the label after
   // picking a topic/channel/joint, fall back to the derived name.
-  if (!derivedLabel) {
-    if (kind === 'urdf_joint') derivedLabel = joint || ''
-    else if (topic) derivedLabel = field ? `${topic}.${field}` : topic
-  }
+  if (!derivedLabel) derivedLabel = inputDerivedLabel()
   inputModal.value.error = ''
   try {
     let r
@@ -235,6 +273,20 @@ async function saveAddInput () {
       r = await ws.management('add_routing_input', {
         node_id: activeSheetId.value,
         kind: 'urdf_joint', joint, label: derivedLabel,
+      })
+    } else if (kind === 'channel') {
+      const { chNodeId, chPeripheralId, chChannelId } = inputModal.value
+      if (!chNodeId || !chPeripheralId || !chChannelId) {
+        inputModal.value.error = 'Pick a node, peripheral, and channel'
+        return
+      }
+      r = await ws.management('add_routing_input', {
+        node_id: activeSheetId.value,
+        kind: 'channel',
+        channel_node_id: chNodeId,
+        peripheral_id: chPeripheralId,
+        channel_id: chChannelId,
+        label: derivedLabel,
       })
     } else {
       if (!topic) { inputModal.value.error = 'Pick a ROS topic'; return }
@@ -497,9 +549,52 @@ const sheetCounts = computed(() => {
             <option value="ws_input">WebSocket Input (controller-driven)</option>
             <option value="topic">ROS Topic (subscribe to state)</option>
             <option value="urdf_joint">URDF Model (animation joint)</option>
+            <option value="channel">Peripheral reading (sensor, switch, telemetry)</option>
           </select>
         </div>
-        <template v-if="inputIsUrdf">
+        <!-- Peripheral reading: makes a sensor drive wiring rather than
+             only appear on the Live tab. Node is separate from the sheet
+             so a sensor on any node can drive this sheet. -->
+        <template v-if="inputIsChannel">
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">Node</label>
+            <select v-model="inputModal.chNodeId" class="input-field w-full">
+              <option v-for="e in sheetEntries.filter(x => x.kind !== 'dashboard')"
+                      :key="e.id" :value="e.id">
+                {{ e.node?.name || e.id }}
+              </option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">Peripheral</label>
+            <select v-model="inputModal.chPeripheralId" class="input-field w-full">
+              <option value="" disabled>Pick a peripheral…</option>
+              <option v-for="p in inputChannelPeripherals" :key="p.id" :value="p.id">
+                {{ p.label || p.id }}
+              </option>
+              <option v-if="!inputChannelPeripherals.length" value="" disabled>
+                (no peripherals on this node)
+              </option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-fg mb-1">Channel</label>
+            <select v-model="inputModal.chChannelId" class="input-field w-full">
+              <option v-for="c in inputChannelOptions" :key="c.id" :value="c.id">
+                {{ c.label || c.id }}
+              </option>
+              <option v-if="inputModal.chPeripheralId && !inputChannelOptions.length"
+                      value="" disabled>
+                (this peripheral has no readable channels)
+              </option>
+            </select>
+            <p class="text-xs text-fg-faint mt-1">
+              Only input channels are listed — an output channel is something
+              the graph commands, not something it reads.
+            </p>
+          </div>
+        </template>
+        <template v-else-if="inputIsUrdf">
           <div>
             <label class="block text-sm font-medium text-fg mb-1">Joint</label>
             <select v-model="inputModal.joint" class="input-field w-full">

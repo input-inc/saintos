@@ -642,6 +642,429 @@ static int test_estop_clears_started(void)
     return 1;
 }
 
+/* ── Teach tune ────────────────────────────────────────────────── */
+/*
+ * Byte layouts below are checked against the Kangaroo Packet Serial
+ * Reference Manual pp.13-15 (System data = channel, flags, sub-command,
+ * then bit-packed parameters). Flags must stay 0: the manual warns that
+ * tuning commands have unpredictable effects on sequence codes.
+ */
+
+/* Stage a unit that is live enough to accept tune commands. */
+static void tune_ready_unit(void)
+{
+    reset_state();
+    port_initialized = true;
+    unit_count = 1;
+    units[0].address = 128;
+    units[0].channel_name = '1';
+    units[0].protocol = KANGAROO_PROTO_PACKET;
+    units[0].connected = true;
+}
+
+/* flags 0, param 1 (position), value 4321, BUSY clear. */
+static const uint8_t TUNE_REPLY_IDLE[] = {
+    0x80, 0x43, 0x06, 0x31, 0x00, 0x01, 0x42, 0x47, 0x02, 0x09, 0x52
+};
+/* flags ERROR, value 1. */
+static const uint8_t TUNE_REPLY_ERROR[] = {
+    0x80, 0x43, 0x04, 0x31, 0x01, 0x01, 0x02, 0x45, 0x6a
+};
+
+static int test_tune_builders_match_reference(void)
+{
+    uint8_t b[24];
+
+    (void)kangaroo_build_tune_enter_mode(128, '1', KANGAROO_TUNE_MODE_TEACH, b);
+    CHECK_EQ(b[1], KANGAROO_CMD_SYSTEM);
+    CHECK_EQ(b[2], 4);                    /* chan, flags, sub, bitpack(1) */
+    CHECK_EQ(b[3], '1');
+    CHECK_EQ(b[4], 0x00);                 /* flags — never a sequence code */
+    CHECK_EQ(b[5], KANGAROO_SYS_TUNE_ENTER_MODE);
+    CHECK_EQ(b[6], 0x02);                 /* bitpack(1) = 1 << 1 */
+
+    (void)kangaroo_build_tune_set_disabled_channels(128, '1', 0, b);
+    CHECK_EQ(b[2], 4);
+    CHECK_EQ(b[5], KANGAROO_SYS_TUNE_SET_DISABLED_CH);
+    CHECK_EQ(b[6], 0x00);                 /* mask 0 = enable all */
+
+    (void)kangaroo_build_tune_open_loop(128, '1', 1000, b);
+    CHECK_EQ(b[2], 5);                    /* 1000 bit-packs to 2 bytes */
+    CHECK_EQ(b[5], KANGAROO_SYS_TUNE_CONTROL_OPEN_LOOP);
+    CHECK_EQ(b[6], 0x50);                 /* (2000 & 0x3f) | 0x40 */
+    CHECK_EQ(b[7], 0x1F);                 /* 2000 >> 6 */
+
+    (void)kangaroo_build_tune_go(128, '1', b);
+    CHECK_EQ(b[2], 3);                    /* no parameters */
+    CHECK_EQ(b[5], KANGAROO_SYS_TUNE_GO);
+
+    (void)kangaroo_build_tune_abort(128, '1', b);
+    CHECK_EQ(b[2], 3);
+    CHECK_EQ(b[5], KANGAROO_SYS_TUNE_ABORT);
+    return 1;
+}
+
+/* Control Open Loop's range is 2^28-1, NARROWER than the bit-packer's
+ * 2^29-1. Clamping with the wrong constant would let a caller command
+ * double the intended power on the one command with no feedback and no
+ * travel limits. */
+static int test_tune_open_loop_clamps_below_bitpack_max(void)
+{
+    uint8_t at_max[24], over[24], bitpack_max[24];
+    size_t n_at  = kangaroo_build_tune_open_loop(128, '1', KANGAROO_OPEN_LOOP_MAX, at_max);
+    size_t n_ov  = kangaroo_build_tune_open_loop(128, '1', 2147483647L, over);
+    size_t n_bp  = kangaroo_build_tune_open_loop(128, '1', KANGAROO_BITPACK_MAX, bitpack_max);
+
+    CHECK(KANGAROO_OPEN_LOOP_MAX < KANGAROO_BITPACK_MAX);
+    CHECK_EQ(n_ov, n_at);
+    CHECK_EQ(memcmp(over, at_max, n_at), 0);
+    CHECK_EQ(n_bp, n_at);
+    CHECK_EQ(memcmp(bitpack_max, at_max, n_at), 0);
+
+    /* And symmetrically on the negative side. */
+    uint8_t neg_at[24], neg_over[24];
+    size_t n_nat = kangaroo_build_tune_open_loop(128, '1', -KANGAROO_OPEN_LOOP_MAX, neg_at);
+    size_t n_nov = kangaroo_build_tune_open_loop(128, '1', -2147483647L, neg_over);
+    CHECK_EQ(n_nov, n_nat);
+    CHECK_EQ(memcmp(neg_over, neg_at, n_nat), 0);
+    return 1;
+}
+
+static int test_tune_enter_moves_to_jog(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_JOG);
+    CHECK_EQ(units[0].jog_power, 0);
+    return 1;
+}
+
+static int test_tune_enter_rejects_simple_protocol(void)
+{
+    tune_ready_unit();
+    units[0].protocol = KANGAROO_PROTO_SIMPLE;
+    CHECK(!kangaroo_tune_enter(0));
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_IDLE);
+    CHECK_LOG("packet serial");
+    return 1;
+}
+
+static int test_tune_enter_rejects_disconnected(void)
+{
+    tune_ready_unit();
+    units[0].connected = false;
+    CHECK(!kangaroo_tune_enter(0));
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_IDLE);
+    CHECK_LOG("not responding");
+    return 1;
+}
+
+static int test_tune_jog_scales_by_power_cap(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+
+    units[0].jog_pct = 50;
+    CHECK(kangaroo_tune_jog(0, 1.0f));
+    /* ~half of full scale; float rounding on a 28-bit value means this
+     * can't be an exact compare. */
+    CHECK(units[0].jog_power > 134000000L);
+    CHECK(units[0].jog_power < 134500000L);
+
+    CHECK(kangaroo_tune_jog(0, -1.0f));
+    CHECK(units[0].jog_power < -134000000L);
+
+    CHECK(kangaroo_tune_jog(0, 0.0f));
+    CHECK_EQ(units[0].jog_power, 0);
+    return 1;
+}
+
+/* An unset cap must not mean "unlimited" — it falls back to the low
+ * default, because the first jog on an untuned axis is the most
+ * dangerous moment in the procedure. */
+static int test_tune_jog_unset_cap_uses_safe_default(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    units[0].jog_pct = 0;
+
+    CHECK(kangaroo_tune_jog(0, 1.0f));
+    long expect = (long)(KANGAROO_OPEN_LOOP_MAX / 10);   /* 10% default */
+    CHECK(units[0].jog_power < expect + (expect / 100));
+    CHECK(units[0].jog_power > expect - (expect / 100));
+    return 1;
+}
+
+static int test_tune_jog_rejected_outside_jog_stage(void)
+{
+    tune_ready_unit();
+    CHECK(!kangaroo_tune_jog(0, 1.0f));      /* still IDLE */
+    CHECK_EQ(units[0].jog_power, 0);
+    CHECK_LOG("not in the jog stage");
+    return 1;
+}
+
+static int test_tune_jog_deadman_zeroes_power(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    CHECK(kangaroo_tune_jog(0, 1.0f));
+    CHECK(units[0].jog_power != 0);
+
+    /* Hold off the keep-alive so only the dead-man can act. */
+    test_now_ms += KANGAROO_JOG_DEADMAN_MS + 10;
+    units[0].tune_keepalive_ms = test_now_ms;
+    tune_tick(0);
+
+    CHECK_EQ(units[0].jog_power, 0);
+    CHECK_LOG("dead-man");
+    return 1;
+}
+
+static int test_tune_jog_refresh_holds_off_deadman(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    CHECK(kangaroo_tune_jog(0, 1.0f));
+    long armed = units[0].jog_power;
+
+    /* Refresh just inside the window, twice — power must survive. */
+    for (int i = 0; i < 2; i++) {
+        test_now_ms += KANGAROO_JOG_DEADMAN_MS - 50;
+        CHECK(kangaroo_tune_jog(0, 1.0f));
+        units[0].tune_keepalive_ms = test_now_ms;
+        tune_tick(0);
+    }
+    CHECK_EQ(units[0].jog_power, armed);
+    return 1;
+}
+
+static int test_tune_go_requires_jog_stage(void)
+{
+    tune_ready_unit();
+    CHECK(!kangaroo_tune_go(0));
+    CHECK_LOG("must be in the jog stage");
+
+    CHECK(kangaroo_tune_enter(0));
+    CHECK(kangaroo_tune_jog(0, 1.0f));
+    CHECK(kangaroo_tune_go(0));
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_GOING);
+    /* Go must never hand over with jog power still applied. */
+    CHECK_EQ(units[0].jog_power, 0);
+    return 1;
+}
+
+static int test_tune_abort_fails_the_tune(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    units[0].started = true;
+
+    CHECK(kangaroo_tune_abort(0));
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_FAILED);
+    CHECK_EQ(units[0].jog_power, 0);
+    /* Error 6 clears with a Start, so the channel must re-Start before
+     * normal motion is accepted again. */
+    CHECK(!units[0].started);
+    CHECK_LOG("aborted by operator");
+    return 1;
+}
+
+static int test_tune_blocks_routed_motion(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    units[0].max_position = 10000;
+
+    CHECK(!kangaroo_set_position(0, 500));
+    CHECK(!kangaroo_set_speed(0, 500));
+    CHECK_LOG("tune in progress");
+    /* The refused setpoint must not be recorded either. */
+    CHECK_EQ(units[0].target_position, 0);
+    return 1;
+}
+
+static int test_estop_aborts_tune(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    CHECK(kangaroo_tune_jog(0, 1.0f));
+
+    drv_estop();
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_FAILED);
+    CHECK_EQ(units[0].jog_power, 0);
+    CHECK_LOG("e-stop");
+    return 1;
+}
+
+static int test_tune_error_reply_fails_tune(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    CHECK(kangaroo_tune_jog(0, 1.0f));
+    CHECK(kangaroo_tune_go(0));
+
+    set_canned(TUNE_REPLY_ERROR, sizeof(TUNE_REPLY_ERROR));
+    test_now_ms += KANGAROO_TUNE_KEEPALIVE_MS + 10;
+    tune_tick(0);
+
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_FAILED);
+    CHECK_LOG("reported an error");
+    return 1;
+}
+
+static int test_tune_completes_after_quiet_period(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    CHECK(kangaroo_tune_go(0));
+    set_canned(TUNE_REPLY_IDLE, sizeof(TUNE_REPLY_IDLE));
+
+    /* Not-busy before the cycle has had time to start proves nothing —
+     * the axis is idle at that point anyway. */
+    test_now_ms += KANGAROO_TUNE_KEEPALIVE_MS + 10;
+    tune_tick(0);
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_GOING);
+
+    /* Past the minimum, then quiet for long enough. Completion needs
+     * KANGAROO_TUNE_QUIET_MS of continuous not-busy, which is many
+     * keep-alive intervals — iterate well past that so the test doesn't
+     * become brittle if either constant is retuned. */
+    test_now_ms += KANGAROO_TUNE_MIN_MS;
+    int ticks = (KANGAROO_TUNE_QUIET_MS / KANGAROO_TUNE_KEEPALIVE_MS) + 5;
+    for (int i = 0; i < ticks; i++) {
+        test_now_ms += KANGAROO_TUNE_KEEPALIVE_MS + 10;
+        tune_tick(0);
+    }
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_DONE);
+    CHECK_LOG("POWER CYCLE REQUIRED");
+    return 1;
+}
+
+static int test_tune_times_out(void)
+{
+    tune_ready_unit();
+    CHECK(kangaroo_tune_enter(0));
+    CHECK(kangaroo_tune_go(0));
+
+    test_now_ms += KANGAROO_TUNE_MAX_MS + 1;
+    tune_tick(0);
+
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_FAILED);
+    CHECK_LOG("time limit");
+    return 1;
+}
+
+/* ── Safety interlock (estop / clear_estop command verbs) ──────── */
+/*
+ * These come in through drv_command rather than the estop() vtable entry
+ * because estop() is driver-WIDE: it stops every Kangaroo the driver
+ * owns. A limit switch guarding one axis must stop only that axis, so
+ * the switch_input driver routes by peripheral_id. See
+ * docs/SENSOR_INPUTS.md.
+ */
+
+static void interlock_ready_unit(const char* id)
+{
+    tune_ready_unit();
+    snprintf(units[0].peripheral_id, sizeof(units[0].peripheral_id), "%s", id);
+    units[0].max_position = 10000;
+    units[0].max_speed = 1000;
+}
+
+static int test_estop_command_latches_and_blocks_motion(void)
+{
+    interlock_ready_unit("kangaroo-1");
+
+    CHECK(drv_command("kangaroo-1", "estop", NULL, NULL));
+    CHECK(units[0].interlocked);
+
+    /* A plain powerdown would be undone by the very next setpoint —
+     * that's why the latch exists. */
+    CHECK(!kangaroo_set_position(0, 500));
+    CHECK(!kangaroo_set_speed(0, 500));
+    CHECK_LOG("safety interlock");
+    CHECK_EQ(units[0].target_position, 0);
+    return 1;
+}
+
+static int test_estop_command_only_hits_named_instance(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    /* Second unit on the same driver — must be untouched. */
+    units[1] = units[0];
+    units[1].interlocked = false;
+    snprintf(units[1].peripheral_id, sizeof(units[1].peripheral_id),
+             "kangaroo-2");
+    unit_count = 2;
+
+    CHECK(drv_command("kangaroo-1", "estop", NULL, NULL));
+    CHECK(units[0].interlocked);
+    CHECK(!units[1].interlocked);
+    return 1;
+}
+
+static int test_estop_command_unknown_id_not_claimed(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    /* Returning false is what lets the manager offer it to the next
+     * driver instead of swallowing it. */
+    CHECK(!drv_command("not-ours", "estop", NULL, NULL));
+    CHECK(!units[0].interlocked);
+    return 1;
+}
+
+static int test_estop_command_aborts_running_tune(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    CHECK(kangaroo_tune_enter(0));
+    CHECK(kangaroo_tune_jog(0, 1.0f));
+    CHECK(kangaroo_tune_go(0));
+
+    CHECK(drv_command("kangaroo-1", "estop", NULL, NULL));
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_FAILED);
+    CHECK_EQ(units[0].jog_power, 0);
+    CHECK(units[0].interlocked);
+    return 1;
+}
+
+/* Starting a tune with a limit tripped is the worst case: jogging is
+ * open loop, so it would drive with no feedback past a point something
+ * already decided was out of bounds. */
+static int test_interlock_blocks_starting_a_tune(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    CHECK(drv_command("kangaroo-1", "estop", NULL, NULL));
+
+    CHECK(!kangaroo_tune_enter(0));
+    CHECK_EQ(kangaroo_tune_get_state(0), KANGAROO_TUNE_IDLE);
+    CHECK_LOG("interlock latched");
+    return 1;
+}
+
+static int test_clear_estop_re_enables_motion(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    CHECK(drv_command("kangaroo-1", "estop", NULL, NULL));
+    CHECK(!kangaroo_set_position(0, 500));
+
+    CHECK(drv_command("kangaroo-1", "clear_estop", NULL, NULL));
+    CHECK(!units[0].interlocked);
+    /* Clearing must not itself command motion — the channel stays
+     * un-started until a real setpoint arrives. */
+    CHECK(!units[0].started);
+    CHECK(kangaroo_set_position(0, 500));
+    return 1;
+}
+
+static int test_clear_estop_when_not_latched_is_a_noop(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    CHECK(drv_command("kangaroo-1", "clear_estop", NULL, NULL));
+    CHECK(!units[0].interlocked);
+    return 1;
+}
+
 /* ── Test runner ───────────────────────────────────────────────── */
 
 typedef int (*test_fn)(void);
@@ -677,6 +1100,32 @@ static const test_entry_t TESTS[] = {
     {"save_load_roundtrip",                 test_save_load_roundtrip},
     {"invalid_pin_pair_warns",              test_invalid_pin_pair_warns},
     {"estop_clears_started",                test_estop_clears_started},
+
+    {"tune_builders_match_reference",       test_tune_builders_match_reference},
+    {"tune_open_loop_clamps_below_bitpack", test_tune_open_loop_clamps_below_bitpack_max},
+    {"tune_enter_moves_to_jog",             test_tune_enter_moves_to_jog},
+    {"tune_enter_rejects_simple_protocol",  test_tune_enter_rejects_simple_protocol},
+    {"tune_enter_rejects_disconnected",     test_tune_enter_rejects_disconnected},
+    {"tune_jog_scales_by_power_cap",        test_tune_jog_scales_by_power_cap},
+    {"tune_jog_unset_cap_uses_default",     test_tune_jog_unset_cap_uses_safe_default},
+    {"tune_jog_rejected_outside_jog_stage", test_tune_jog_rejected_outside_jog_stage},
+    {"tune_jog_deadman_zeroes_power",       test_tune_jog_deadman_zeroes_power},
+    {"tune_jog_refresh_holds_off_deadman",  test_tune_jog_refresh_holds_off_deadman},
+    {"tune_go_requires_jog_stage",          test_tune_go_requires_jog_stage},
+    {"tune_abort_fails_the_tune",           test_tune_abort_fails_the_tune},
+    {"tune_blocks_routed_motion",           test_tune_blocks_routed_motion},
+    {"estop_aborts_tune",                   test_estop_aborts_tune},
+    {"tune_error_reply_fails_tune",         test_tune_error_reply_fails_tune},
+    {"tune_completes_after_quiet_period",   test_tune_completes_after_quiet_period},
+    {"tune_times_out",                      test_tune_times_out},
+
+    {"estop_cmd_latches_blocks_motion",     test_estop_command_latches_and_blocks_motion},
+    {"estop_cmd_only_named_instance",       test_estop_command_only_hits_named_instance},
+    {"estop_cmd_unknown_id_not_claimed",    test_estop_command_unknown_id_not_claimed},
+    {"estop_cmd_aborts_running_tune",       test_estop_command_aborts_running_tune},
+    {"interlock_blocks_starting_a_tune",    test_interlock_blocks_starting_a_tune},
+    {"clear_estop_re_enables_motion",       test_clear_estop_re_enables_motion},
+    {"clear_estop_not_latched_noop",        test_clear_estop_when_not_latched_is_a_noop},
 };
 
 int main(void)

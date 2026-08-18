@@ -40,6 +40,7 @@ TEST_BINARIES=(
     "test_tic_driver"
     "test_tmc2208_driver"
     "test_kangaroo_driver"
+    "test_switch_input_driver"
 )
 
 overall_rc=0

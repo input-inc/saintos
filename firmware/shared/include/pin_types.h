@@ -34,6 +34,7 @@
 #define PIN_CAP_TMC2208_STEPPER 0x8000
 #define PIN_CAP_KANGAROO        0x10000
 #define PIN_CAP_PIMORONI_SERVO  0x20000
+#define PIN_CAP_SWITCH_INPUT    0x40000
 
 // Convenience combinations
 #define PIN_CAP_GPIO            (PIN_CAP_DIGITAL_IN | PIN_CAP_DIGITAL_OUT)
@@ -64,7 +65,8 @@ typedef enum {
     PIN_MODE_TIC_STEPPER,
     PIN_MODE_TMC2208_STEPPER,
     PIN_MODE_KANGAROO,
-    PIN_MODE_PIMORONI_SERVO
+    PIN_MODE_PIMORONI_SERVO,
+    PIN_MODE_SWITCH_INPUT
 } pin_mode_t;
 
 // =============================================================================
@@ -253,7 +255,30 @@ typedef struct {
              * (speed channel) in the Kangaroo's machine units. */
             int32_t  max_position;     /* default 10000 units      */
             int32_t  max_speed;        /* default 1000 units/sec   */
+            /* Open-loop power cap for teach-tune jogging, as a percent
+             * of full scale. Deliberately NOT persisted in flash: it is
+             * only consulted during an operator-initiated tune, which
+             * always follows a config sync, and a flash-only boot
+             * falling back to the driver's low default is the safe
+             * outcome. Skipping it avoids a flash version bump. */
+            uint8_t  jog_pct;          /* default 10 (%)           */
         } kangaroo;
+        /* Generic switch / limit sensor input. See docs/SENSOR_INPUTS.md.
+         *
+         * `sense` picks digital or analog. Analog is not a nicety: a
+         * 2-wire sensor with a series voltage drop (the IDC PSR-2's
+         * anti-parallel diode pair drops ~1.9 V) sits between the 3.3 V
+         * logic thresholds and CANNOT be read on a digital pin at all. */
+        struct {
+            uint8_t  sense;            /* SWITCH_SENSE_DIGITAL | _ANALOG   */
+            uint8_t  active_low;       /* 1 = asserted when low/below      */
+            uint8_t  pull_up;          /* digital sense only               */
+            uint8_t  latch;            /* 1 = hold asserted until cleared  */
+            uint16_t debounce_ms;      /* reeds bounce 0.5-2 ms            */
+            uint16_t threshold_mv;     /* analog: assert crossing point    */
+            uint16_t hysteresis_mv;    /* analog: stops chatter at the edge*/
+            uint8_t  on_trip;          /* SWITCH_TRIP_* action             */
+        } switch_input;
         struct {
             /* Per-servo-channel extents for the Pimoroni Servo 2040.
              * Four-tuple pulse model shared with the native servo path

@@ -31,6 +31,10 @@ const jointNames = ref([])
 const selection  = ref({ kind: null, value: null })
 const playerPos  = ref(0)
 const liveJointAngle = ref({ name: null, angle: 0 })
+// Self-collision results: timeline intervals from a full-animation scan, and
+// the pairs colliding at the current playhead (for a live badge).
+const collisionIntervals = ref([])
+const liveCollisions = ref([])
 
 provide('urdf-viewer', viewerRef)
 provide('urdf-joints', jointNames)
@@ -183,20 +187,106 @@ function driveUrdfFromPlayhead () {
   for (const [jointName, val] of Object.entries(sampled)) {
     v.setJointValue(jointName, val)
   }
+  // Posing is cheap and must stay smooth; the collision check + 3D re-tint is
+  // heavy (full-body pass + material swaps), so throttle it — a rapid keyframe
+  // or scrub drag fires this watcher on every mousemove.
+  scheduleLiveCollision()
 }
+
+let _liveCollisionTimer = null
+function updateLiveCollision () {
+  const v = viewerRef?.value
+  if (!v?.collisionsAtCurrent) return
+  liveCollisions.value = v.collisionsAtCurrent()
+  v.highlightCollision?.(liveCollisions.value)
+}
+function scheduleLiveCollision () {
+  if (_liveCollisionTimer) return // trailing throttle: coalesce a burst
+  _liveCollisionTimer = setTimeout(() => {
+    _liveCollisionTimer = null
+    updateLiveCollision()
+  }, 100)
+}
+
+// Self-collision timeline scan, gated on IDLE. The scan only runs after the
+// user has paused; ANY manipulation — scrubbing, keyframe drags, sidebar edits,
+// Save, orbiting the 3D view, keystrokes — aborts an in-flight scan and resets
+// the idle countdown. So reprocessing never competes with interaction.
+//   _needScan  : the animation data changed since the last completed scan
+//   _scanning  : a scan is currently in flight
+//   _idleTimer : fires runCollisionScan once input has stopped for IDLE_MS
+const IDLE_MS = 350
+let _needScan = false
+let _scanning = false
+let _idleTimer = null
+
+// Animation data changed → a scan is needed; then wait for idle.
+function requestCollisionScan () {
+  _needScan = true
+  deferCollisionScan()
+}
+// Any user activity → abort the in-flight scan and (re)start the idle timer.
+function deferCollisionScan () {
+  viewerRef?.value?.cancelScan?.()
+  clearTimeout(_idleTimer)
+  _idleTimer = setTimeout(() => {
+    if (_needScan && !_scanning) runCollisionScan()
+  }, IDLE_MS)
+}
+
+async function runCollisionScan () {
+  const v = viewerRef?.value
+  const a = anim.value
+  const dur = Number(a?.duration) || 0
+  if (!v?.scanTimeline || !a || !(dur > 0)) { collisionIntervals.value = []; _needScan = false; return }
+  const steps = Math.min(150, Math.max(20, Math.round(dur * 15))) // ~15 samples/sec
+  const _ts = performance.now()
+  _scanning = true
+  let res
+  try {
+    // Non-blocking: scanTimeline runs on the viewer's hidden clone and yields
+    // between slices; interaction aborts it (returns null) via cancelScan.
+    res = await v.scanTimeline((t) => sampleAllTracks(a, t), dur, steps)
+  } catch (_) {
+    res = []
+  }
+  _scanning = false
+  if (res == null) { deferCollisionScan(); return } // aborted → retry once idle
+  collisionIntervals.value = res
+  _needScan = false
+  if (import.meta.env?.DEV) {
+    // eslint-disable-next-line no-console
+    console.info(`[collision] scan: dur=${dur}s steps=${steps} ` +
+      `→ ${res.length} interval(s) in ${(performance.now() - _ts) | 0}ms`)
+  }
+}
+
+// Document-wide activity detector: any of these means the user is manipulating
+// something (a control, a field, the timeline, the view) → defer the scan.
+// pointermove only counts while a button is held (a drag), so passive cursor
+// movement doesn't starve the scan.
+let _pointerHeld = false
+function onActivityDown () { _pointerHeld = true; deferCollisionScan() }
+function onActivityUp () { _pointerHeld = false; deferCollisionScan() }
+function onActivityMove () { if (_pointerHeld) deferCollisionScan() }
+function onActivity () { deferCollisionScan() }
 watch(playerPos, (now, prev) => {
   driveUrdfFromPlayhead()
+  deferCollisionScan() // scrubbing is interaction — hold the scan until idle
   if (livePreviewActive()) sendLivePreview(now, crossedTriggers(prev ?? now, now))
 })
 watch(
   () => JSON.stringify(anim.value?.value_tracks || []),
   () => {
     driveUrdfFromPlayhead()
+    requestCollisionScan()
     // A value keyframe was edited; time didn't move, so re-push values
     // only (no trigger crossing).
     if (livePreviewActive()) sendLivePreview(playerPos.value, [])
   },
 )
+// Duration changes remap every keyframe's time — rescan.
+watch(() => anim.value?.duration, requestCollisionScan)
 // Trigger keyframe edits: fire any trigger sitting AT the current
 // playhead (within a frame) so adjusting a point at the cursor shows
 // its effect immediately — matching the value-track behavior above.
@@ -558,6 +648,16 @@ watch(editingId, () => {
 onMounted(async () => {
   window.addEventListener('keydown', onKeyDown)
   document.addEventListener('focusin', onFocusIn)
+  // Defer the collision scan on ANY interaction anywhere in the editor —
+  // controls, fields, Save, timeline, 3D view. Capture phase so we still see
+  // events that child handlers stopPropagation on (e.g. the gizmo).
+  document.addEventListener('pointerdown', onActivityDown, true)
+  document.addEventListener('pointermove', onActivityMove, true)
+  document.addEventListener('pointerup', onActivityUp, true)
+  document.addEventListener('wheel', onActivity, { capture: true, passive: true })
+  document.addEventListener('keydown', onActivity, true)
+  document.addEventListener('input', onActivity, true)
+  document.addEventListener('change', onActivity, true)
   await Promise.all([robot.refresh(), animations.reload()])
   // Load the WS-input catalog up front so the timeline's "+ Input"
   // dropdown is populated immediately — value tracks can bind a
@@ -571,6 +671,15 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   document.removeEventListener('focusin', onFocusIn)
+  document.removeEventListener('pointerdown', onActivityDown, true)
+  document.removeEventListener('pointermove', onActivityMove, true)
+  document.removeEventListener('pointerup', onActivityUp, true)
+  document.removeEventListener('wheel', onActivity, { capture: true })
+  document.removeEventListener('keydown', onActivity, true)
+  document.removeEventListener('input', onActivity, true)
+  document.removeEventListener('change', onActivity, true)
+  clearTimeout(_liveCollisionTimer)
+  clearTimeout(_idleTimer)
   stopPlayLoop()
   // Relax the live rig so leaving the editor with Live Preview on
   // doesn't strand the robot in the previewed pose.
@@ -656,6 +765,8 @@ onBeforeUnmount(() => {
                         :urdf-url="robot.urdfUrl"
                         :meshes-base="robot.meshesBase"
                         height="100%"
+                        @loaded="requestCollisionScan"
+                        @interact="deferCollisionScan"
                         @joints="onJointsChanged"
                         @joint-click="onJointClicked"
                         @joint-rotate="onGizmoRotate"
@@ -669,6 +780,13 @@ onBeforeUnmount(() => {
                 Upload one in Settings → Robot Model
               </RouterLink>
             </div>
+          </div>
+          <!-- Live self-collision badge at the current playhead pose. -->
+          <div v-if="robot.installed && liveCollisions.length"
+               class="absolute top-2 left-2 z-10 flex items-center gap-1 rounded bg-red-600/90 text-white text-xs px-2 py-1 pointer-events-none"
+               :title="liveCollisions.join(', ')">
+            <span class="material-icons" style="font-size:14px">warning</span>
+            Collision
           </div>
         </div>
 
@@ -690,6 +808,7 @@ onBeforeUnmount(() => {
         <TimelineEditor v-if="anim"
                         :animation="anim"
                         :player-pos="playerPos"
+                        :collision-intervals="collisionIntervals"
                         :selection="selection"
                         :playing="!!playingState?.running"
                         :unbound-joints="unboundJoints"

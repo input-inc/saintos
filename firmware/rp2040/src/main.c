@@ -153,6 +153,7 @@ static const char* ota_fail_reason_str(uint8_t reason)
 #include "tic_driver.h"
 #include "tmc2208_driver.h"
 #include "kangaroo_driver.h"
+#include "switch_input_driver.h"
 #include "pimoroni_servo2040_driver.h"
 #include "saint_log.h"
 
@@ -815,6 +816,17 @@ static void dispatch_action_buffer(const char* data, size_t size)
     if (strstr(data, "\"action\":\"roboclaw_debug\"")
         || strstr(data, "\"action\": \"roboclaw_debug\"")) {
         roboclaw_debug_handle_json(data);
+        return;
+    }
+
+    // Named, argument-carrying commands routed to a specific peripheral
+    // — e.g. the Kangaroo teach tune (tune_enter / tune_jog / tune_go /
+    // tune_abort). Channels only carry floats, so verbs with structured
+    // arguments come through here instead. Parser and routing are shared
+    // with the Teensy build; see peripheral_command_handle_json().
+    if (strstr(data, "\"action\":\"peripheral_command\"")
+        || strstr(data, "\"action\": \"peripheral_command\"")) {
+        (void)peripheral_command_handle_json(data);
         return;
     }
 
@@ -1604,6 +1616,9 @@ int main(void)
     peripheral_register(tmc2208_get_peripheral_driver());
     peripheral_register(kangaroo_get_peripheral_driver());
     peripheral_register(pimoroni_servo2040_get_peripheral_driver());
+    // Registered LAST so that when a switch trips and fans out estops to
+    // its targets, every driver it might name is already registered.
+    peripheral_register(switch_input_get_peripheral_driver());
 
     // Load saved pin configuration (also fans out to each driver's
     // load_config callback).

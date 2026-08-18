@@ -1308,6 +1308,16 @@ class WebSocketHandler:
             if kind == 'urdf_joint':
                 if not joint:
                     return {"status": "error", "message": "Missing joint name"}
+            elif kind == 'channel':
+                # A peripheral reading as a routing source — sensors
+                # driving wiring rather than just being displayed. See
+                # docs/SENSOR_INPUTS.md.
+                if not (params.get('channel_node_id')
+                        and params.get('peripheral_id')
+                        and params.get('channel_id')):
+                    return {"status": "error",
+                            "message": "Channel inputs need channel_node_id, "
+                                       "peripheral_id, and channel_id"}
             elif not topic:
                 return {"status": "error", "message": "Missing topic"}
             result = self.state_manager.add_routing_input(
@@ -1318,6 +1328,9 @@ class WebSocketHandler:
                 position=params.get('position'),
                 kind=kind,
                 joint=joint,
+                channel_node_id=params.get('channel_node_id', ''),
+                peripheral_id=params.get('peripheral_id', ''),
+                channel_id=params.get('channel_id', ''),
             )
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
