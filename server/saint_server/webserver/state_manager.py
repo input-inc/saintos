@@ -2921,6 +2921,54 @@ class StateManager:
         self._log_activity(f"Added widget {widget.id} ({widget.type}) to {node_id}", "info")
         return {"success": True, "widget": widget.to_dict()}
 
+    def reorder_widgets(self, widget_ids: List[str]) -> Dict[str, Any]:
+        """Persist the dashboard card order.
+
+        `widget_ids` is the full ordered list as the operator arranged it.
+        Ids are unique across every sheet, so this walks all sheets and
+        stamps each widget's `dashboard_order` from its index.
+
+        Widgets the caller didn't mention keep a stable place AFTER the
+        ordered ones rather than jumping to the front — a client with a
+        stale widget list shouldn't silently reshuffle cards it never
+        knew about.
+        """
+        if not isinstance(widget_ids, list):
+            return {"success": False, "message": "widget_ids must be a list"}
+
+        rank = {}
+        for i, wid in enumerate(widget_ids):
+            if isinstance(wid, str) and wid and wid not in rank:
+                rank[wid] = i
+
+        known = {
+            w.id
+            for s in self.state.system_routing.sheets.values()
+            for w in s.widgets
+        }
+        unknown = [w for w in rank if w not in known]
+        if unknown:
+            return {"success": False,
+                    "message": f"Unknown widget id(s): {', '.join(sorted(unknown))}"}
+
+        # Unlisted widgets sort after the listed ones, in their existing
+        # relative order.
+        tail = len(rank)
+        updated = 0
+        for sheet in self.state.system_routing.sheets.values():
+            for w in sheet.widgets:
+                new_order = rank.get(w.id)
+                if new_order is None:
+                    new_order = tail
+                    tail += 1
+                if w.dashboard_order != new_order:
+                    w.dashboard_order = new_order
+                    updated += 1
+
+        self.state.system_routing.bump_version()
+        self._save_system_routing()
+        return {"success": True, "reordered": updated, "count": len(known)}
+
     # =========================================================================
     # Persistence (system_routing.yaml + per-node peripheral configs)
     # =========================================================================

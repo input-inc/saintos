@@ -6,6 +6,7 @@ import { useDisplayStore } from '@/stores/display'
 import { useChannelHistory } from '@/composables/useChannelHistory'
 import Sparkline from '@/components/Sparkline.vue'
 import { decodeRoboclawFaults } from '@/composables/roboclawFaults'
+import WidgetFrame from '@/components/widgets/WidgetFrame.vue'
 
 // Mockup-faithful Vue port of the legacy `_renderRoboClawCard` widget.
 // Five rows (motor / encoder / voltage / current / temperature). Each
@@ -273,18 +274,23 @@ const faults = computed(() => {
 </script>
 
 <template>
-  <div class="card" :data-widget-id="widget.id">
-    <div class="flex items-center justify-between mb-3">
-      <div class="flex items-center gap-2">
-        <span class="material-icons text-violet-400 icon-md">precision_manufacturing</span>
-        <h4 class="text-base font-semibold text-fg-strong">{{ widget.label || widget.id }}</h4>
-      </div>
-      <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-violet-900/40 text-violet-200">
-        RoboClaw
-      </span>
-    </div>
-    <div class="h-0.5 bg-violet-500 rounded-full mb-3"></div>
-
+  <WidgetFrame
+    :widget="widget"
+    :routes="routes"
+    :sheet-id="sheetId"
+    icon="precision_manufacturing"
+    icon-class="text-violet-400"
+    rule-class="bg-violet-500"
+    badge="RoboClaw"
+    badge-class="bg-violet-900/40 text-violet-200"
+    :draggable="draggable"
+    :dragging="dragging"
+    :drop-before="dropBefore"
+    :drop-after="dropAfter"
+    @handle-down="emit('handle-down', $event)"
+    @move-prev="emit('move-prev')"
+    @move-next="emit('move-next')"
+  >
     <!-- Fault badge strip — decoded from the routed error_flags input.
          Error-severity faults render red, warnings amber. Hidden when
          healthy or when error_flags isn't routed. -->
@@ -348,5 +354,5 @@ const faults = computed(() => {
         </div>
       </div>
     </div>
-  </div>
+  </WidgetFrame>
 </template>

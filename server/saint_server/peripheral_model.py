@@ -2547,6 +2547,21 @@ class WidgetInstance:
     label: str
     position: Tuple[int, int] = (0, 0)
     params: Dict[str, Any] = field(default_factory=dict)
+    # Operator-chosen order in the dashboard grid, ascending.
+    #
+    # Distinct from `position`, which places the widget on the Routes
+    # canvas — the two are different layouts of the same widget and
+    # reordering the dashboard must not shuffle the wiring diagram.
+    #
+    # A single flat sequence rather than a per-sheet index, because the
+    # dashboard flattens widgets across every sheet: ordering one sheet's
+    # list would leave the cross-sheet order at the mercy of dict
+    # iteration. Widget ids are already unique across all sheets (see
+    # NodeSheet.add_widget), so a flat order is unambiguous.
+    #
+    # Defaults to 0 so widgets saved before this existed all tie, and a
+    # stable sort leaves them in exactly their previous order.
+    dashboard_order: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -2555,11 +2570,16 @@ class WidgetInstance:
             "label": self.label,
             "position": list(self.position),
             "params": dict(self.params),
+            "dashboard_order": int(self.dashboard_order),
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "WidgetInstance":
         pos = d.get("position") or [0, 0]
+        try:
+            order = int(d.get("dashboard_order", 0) or 0)
+        except (TypeError, ValueError):
+            order = 0
         return cls(
             id=d["id"],
             type=d["type"],
@@ -2567,6 +2587,7 @@ class WidgetInstance:
             position=(int(pos[0]) if len(pos) > 0 else 0,
                       int(pos[1]) if len(pos) > 1 else 0),
             params=dict(d.get("params", {})),
+            dashboard_order=order,
         )
 
 

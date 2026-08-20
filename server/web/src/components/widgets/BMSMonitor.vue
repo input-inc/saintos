@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useDisplayStore } from '@/stores/display'
+import WidgetFrame from '@/components/widgets/WidgetFrame.vue'
 
 // Dashboard-card sized BMS summary. Surfaces SOC + pack metrics +
 // FET state + protection faults, but deliberately omits the per-cell
@@ -17,7 +18,15 @@ import { useDisplayStore } from '@/stores/display'
 const props = defineProps({
   widget: { type: Object, required: true },
   routes: { type: Array,  default: () => [] },
+  // Owning routing sheet — the drilldown target. See WidgetFrame.
+  sheetId: { type: String, default: '' },
+  // Reorder affordances, forwarded straight to WidgetFrame.
+  draggable:  { type: Boolean, default: false },
+  dragging:   { type: Boolean, default: false },
+  dropBefore: { type: Boolean, default: false },
+  dropAfter:  { type: Boolean, default: false },
 })
+const emit = defineEmits(['handle-down', 'move-prev', 'move-next'])
 
 const ws = useWsStore()
 const catalog = usePeripheralCatalog()
@@ -169,30 +178,46 @@ const socColor = computed(() => {
 })
 const socPct = computed(() => Math.max(0, Math.min(100, soc.value ?? 0)))
 
-// Header status chip: red if faults asserted, amber if either FET is
-// off (pack isolated), else green. Lets an operator scan a dashboard
-// full of these and spot the angry one without reading the panel.
+// Health, rendered as the header's status DOT — the chip beside it is the
+// device shortname ("BMS"), consistent with every other widget. Colour
+// alone isn't a label, so `label` is passed through as the dot's tooltip
+// and aria-label.
+//
+// Non-OK states pulse. The point of a header indicator is spotting the
+// angry pack in a grid of them without reading any panel, and a static
+// red dot is much easier to miss than a moving one.
 const status = computed(() => {
-  if (faults.value.length) return { label: 'FAULT', cls: 'bg-rose-500/20 text-rose-300' }
-  if (!chargeOn.value || !dischargeOn.value) return { label: 'ISOLATED', cls: 'bg-amber-500/20 text-amber-300' }
-  if (soc.value === null) return { label: 'NO DATA', cls: 'bg-surface text-fg-faint' }
-  return { label: 'OK', cls: 'bg-emerald-500/20 text-emerald-300' }
+  if (faults.value.length) {
+    return { label: 'Fault', dot: 'bg-rose-500 animate-pulse-dot' }
+  }
+  if (!chargeOn.value || !dischargeOn.value) {
+    return { label: 'Isolated — a FET is off', dot: 'bg-amber-400 animate-pulse-dot' }
+  }
+  if (soc.value === null) return { label: 'No data', dot: 'bg-slate-500' }
+  return { label: 'OK', dot: 'bg-emerald-500' }
 })
 </script>
 
 <template>
-  <div class="card" :data-widget-id="widget.id">
-    <div class="flex items-center justify-between mb-3">
-      <div class="flex items-center gap-2">
-        <span class="material-icons text-emerald-400 icon-md">battery_charging_full</span>
-        <h4 class="text-base font-semibold text-fg-strong">{{ widget.label || widget.id }}</h4>
-      </div>
-      <span :class="['px-2 py-0.5 text-xs font-medium rounded-full', status.cls]">
-        {{ status.label }}
-      </span>
-    </div>
-    <div class="h-0.5 bg-emerald-500 rounded-full mb-3"></div>
-
+  <WidgetFrame
+    :widget="widget"
+    :routes="routes"
+    :sheet-id="sheetId"
+    icon="battery_charging_full"
+    icon-class="text-emerald-400"
+    rule-class="bg-emerald-500"
+    badge="BMS"
+    badge-class="bg-emerald-900/40 text-emerald-200"
+    :status-dot="status.dot"
+    :status-label="status.label"
+    :draggable="draggable"
+    :dragging="dragging"
+    :drop-before="dropBefore"
+    :drop-after="dropAfter"
+    @handle-down="emit('handle-down', $event)"
+    @move-prev="emit('move-prev')"
+    @move-next="emit('move-next')"
+  >
     <!-- SOC bar -->
     <div class="space-y-1 mb-3">
       <div class="flex justify-between text-xs text-fg-muted">
@@ -244,5 +269,5 @@ const status = computed(() => {
         <li v-for="f in faults" :key="f">{{ f }}</li>
       </ul>
     </div>
-  </div>
+  </WidgetFrame>
 </template>

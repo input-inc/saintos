@@ -67,6 +67,12 @@ function loadCatalogsFromPython () {
 
 loadCatalogsFromPython()
 
+// Restore the operator's dashboard card order from the previous run —
+// the mock half of "the order survives a restart".
+if (st.loadWidgetOrder()) {
+  console.log('[mock] restored dashboard widget order from dev/.mock-widget-order.json')
+}
+
 // ── HTTP server (landing page + WebSocket upgrade) ───────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -389,9 +395,14 @@ function synthesizeChannel (type, channelId, key, nodeId, periphId, tune) {
     if (channelId === 'current') return Math.abs(jitter(key, 3.5, 0.6))
     if (channelId === 'temp')    return jitter(key, 38, 0.5)
   }
+  // Sits on the drive bus fed by the two series BMS packs, so its
+  // readings are kept consistent with them: bus volts ≈ the sum of both
+  // pack voltages, and bus amps ≈ each pack's current (series string —
+  // same current through both). Three widgets showing one coherent story
+  // is worth more than three showing unrelated plausible numbers.
   if (type === 'fas100') {
-    if (channelId === 'amps')  return Math.abs(jitter(key, 5, 0.5))
-    if (channelId === 'volts') return jitter(key, 12.4, 0.05)
+    if (channelId === 'amps')  return Math.abs(jitter(key, 8.5, 0.5))
+    if (channelId === 'volts') return jitter(key, 26.33, 0.06)
     if (channelId === 'temp1') return jitter(key, 35, 0.5)
     if (channelId === 'temp2') return jitter(key, 33, 0.5)
   }
@@ -415,6 +426,36 @@ function synthesizeChannel (type, channelId, key, nodeId, periphId, tune) {
     // peripheral editor can be set against realistic numbers.
     if (channelId === 'voltage')    return asserted ? 3.3 : jitter(key, 1.7, 0.02)
     if (channelId === 'trip_count') return st.live.switchLatched[skey] ? 1 : 0
+  }
+  // Dual 4S LiFePO4 in series, matching the real rig. Pack B is
+  // deliberately a little lower and warmer than Pack A: two independent
+  // BMSes on a series string DO drift apart (each only balances its own
+  // four cells), and a mock where both packs read identically would hide
+  // exactly the condition the second widget exists to reveal.
+  if (type === 'pathfinder_bms') {
+    const b = periphId === 'bms-2'
+    // 4S LiFePO4: 3.2 V/cell nominal, ~13.2 V resting for a full pack.
+    if (channelId === 'pack_voltage') return jitter(key, b ? 13.05 : 13.28, 0.03)
+    // Negative = discharging, which is what a driving robot is doing.
+    if (channelId === 'current')      return jitter(key, b ? -8.4 : -8.6, 0.5)
+    if (channelId === 'soc')          return b ? 71 : 78
+    if (channelId === 'temp_1')       return jitter(key, b ? 34.5 : 31.0, 0.3)
+    if (channelId === 'temp_2')       return jitter(key, b ? 33.8 : 30.4, 0.3)
+    // 0 = no protection faults asserted. The widget decodes this as a
+    // JBD bitmask and shows FAULT for any non-zero bit.
+    if (channelId === 'protection')   return 0
+    // Bit 0 = charge FET on, bit 1 = discharge FET on → 3 = both on,
+    // which is what the widget reads as a healthy, non-isolated pack.
+    if (channelId === 'fet_status')   return 3
+    if (channelId === 'remain_cap')   return b ? 7.1 : 7.8
+    if (channelId === 'cycles')       return b ? 42 : 41
+    if (channelId === 'cell_count')   return 4
+    // Per-cell voltages. Only the first 4 are real on a 4S pack; the
+    // catalog exposes 16 slots and the rest stay at 0, same as hardware.
+    if (/^cell_(0[1-4])$/.test(channelId)) {
+      return jitter(key, (b ? 13.05 : 13.28) / 4, 0.012)
+    }
+    if (/^cell_\d+$/.test(channelId)) return 0
   }
   if (type === 'button') return Math.random() < 0.02 ? 1 : 0
   if (type === 'analog_in') return jitter(key, 1.65, 0.05)

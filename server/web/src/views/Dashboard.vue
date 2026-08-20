@@ -118,6 +118,70 @@ const wifiNoiseText   = computed(() => wifiMetrics.value.noise   != null ? `${Ma
 const wifiBitrateText = computed(() => wifiMetrics.value.bitrate != null ? `${wifiMetrics.value.bitrate.toFixed(1)} Mbps` : '-- Mbps')
 const wifiUpdatedText = computed(() => wifiUpdatedAt.value ? new Date(wifiUpdatedAt.value).toLocaleTimeString([], { hour12: false }) : '--')
 
+// ── WiFi visual treatment ───────────────────────────────────────────
+// Seven label/value rows of dBm and percentages is a lot of reading for
+// what's usually one question: is the link good enough right now? These
+// derive the same numbers into things that can be seen at a glance. The
+// raw figures stay reachable — in the strip below the bars, and in
+// tooltips — because when the answer IS "no", the raw numbers are what
+// you diagnose with.
+
+// Signal → 0-4 bars, on the usual dBm breakpoints for 802.11.
+const wifiBars = computed(() => {
+  const s = wifiMetrics.value.signal
+  if (s == null) return 0
+  if (s >= -55) return 4
+  if (s >= -65) return 3
+  if (s >= -72) return 2
+  if (s >= -80) return 1
+  return 0
+})
+
+// Signal-to-noise ratio. The honest single measure of link quality —
+// -70 dBm over a -95 dBm floor is a fine link, while the same -70 over a
+// -75 floor is unusable, and no signal number alone distinguishes them.
+// Null unless BOTH readings are present rather than assuming a floor.
+const wifiSnr = computed(() => {
+  const { signal, noise } = wifiMetrics.value
+  if (signal == null || noise == null) return null
+  return signal - noise
+})
+
+const wifiQuality = computed(() => {
+  const snr = wifiSnr.value
+  // With no noise floor reported (host without `iw`, or a driver that
+  // doesn't expose it), fall back to signal alone and say so.
+  if (snr == null) {
+    const s = wifiMetrics.value.signal
+    if (s == null) return { label: 'No data', cls: 'text-fg-faint', dot: 'bg-slate-500' }
+    if (s >= -65) return { label: 'Good signal', cls: 'text-emerald-400', dot: 'bg-emerald-400' }
+    if (s >= -75) return { label: 'Fair signal', cls: 'text-amber-400', dot: 'bg-amber-400' }
+    return { label: 'Weak signal', cls: 'text-rose-400', dot: 'bg-rose-400' }
+  }
+  if (snr >= 40) return { label: 'Excellent', cls: 'text-emerald-400', dot: 'bg-emerald-400' }
+  if (snr >= 25) return { label: 'Good',      cls: 'text-emerald-400', dot: 'bg-emerald-400' }
+  if (snr >= 15) return { label: 'Fair',      cls: 'text-amber-400',   dot: 'bg-amber-400' }
+  return { label: 'Poor', cls: 'text-rose-400', dot: 'bg-rose-400' }
+})
+
+const wifiSnrText = computed(() =>
+  wifiSnr.value != null ? `${Math.round(wifiSnr.value)} dB SNR` : 'SNR unavailable')
+
+// TX retry is the metric that actually predicts control-latency trouble,
+// so it gets a meter rather than a number in a list. Scale caps at 30% —
+// past that the link is unusable and the exact figure stops mattering.
+const wifiRetryPct = computed(() => {
+  const r = wifiMetrics.value.retry
+  return r == null ? null : Math.max(0, Math.min(100, (r / 30) * 100))
+})
+const wifiRetryClass = computed(() => {
+  const r = wifiMetrics.value.retry
+  if (r == null) return 'bg-slate-500'
+  if (r < 5) return 'bg-emerald-500'
+  if (r < 15) return 'bg-amber-500'
+  return 'bg-rose-500'
+})
+
 function onSwitching (info) {
   wifiSwitching.value = info || { detail: '' }
 }
@@ -148,13 +212,23 @@ function fmtUptime (sec) {
       </button>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <div class="card">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-fg-strong">System Status</h3>
+    <!-- System + WiFi in one card. They were separate boxes reporting on
+         the same machine, and the WiFi half was seven rows of dBm and
+         percentages — a lot of reading for "is the link OK?". Split
+         internally: host on the left, network on the right, stacking on
+         narrow screens. -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-semibold text-fg-strong">System</h3>
+        <div class="flex items-center gap-3">
           <span class="px-2 py-1 text-xs font-medium rounded-full bg-emerald-500/20 text-emerald-400">Online</span>
+          <RouterLink to="/settings" class="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">Manage →</RouterLink>
         </div>
-        <div class="grid grid-cols-2 gap-4">
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8">
+        <!-- ── Host ──────────────────────────────────────────────── -->
+        <div class="grid grid-cols-2 gap-4 content-start">
           <div class="stat-item">
             <span class="stat-label">Uptime</span>
             <span class="stat-value">{{ fmtUptime(uptime) }}</span>
@@ -190,53 +264,73 @@ function fmtUptime (sec) {
             <span :class="throttleClass" :title="throttleTitle">{{ throttleText }}</span>
           </div>
         </div>
-      </div>
 
-      <!-- WiFi Status — server-level card (not a routable widget),
-           treated like System Status because it reports on the AP the
-           dashboard itself depends on. Static-ish bits (SSID, band,
-           channel) come from wifi_get_config; live metrics come from
-           pin_state/host_controller's system_monitor.wifi_* channels. -->
-      <div class="card">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-fg-strong">WiFi Status</h3>
-          <RouterLink to="/settings" class="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">Manage →</RouterLink>
-        </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div class="stat-item col-span-2">
-            <span class="stat-label">SSID</span>
-            <span class="stat-value font-mono">{{ wifiSsid }}</span>
+        <!-- ── Network ───────────────────────────────────────────── -->
+        <div class="lg:border-l lg:border-line lg:pl-8 border-t border-line pt-6 lg:border-t-0 lg:pt-0">
+          <!-- Signal bars + quality verdict. The bars answer "is it OK?";
+               the dBm/SNR line underneath is what you diagnose with. -->
+          <div class="flex items-center gap-3 mb-4">
+            <div class="flex items-end gap-[3px] h-6" :title="wifiSignalText" aria-hidden="true">
+              <div
+                v-for="b in 4"
+                :key="b"
+                class="w-1.5 rounded-sm transition-colors"
+                :class="b <= wifiBars ? wifiQuality.dot : 'bg-surface'"
+                :style="{ height: `${b * 25}%` }"
+              />
+            </div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="text-lg font-semibold leading-none" :class="wifiQuality.cls">
+                  {{ wifiQuality.label }}
+                </span>
+              </div>
+              <div class="text-xs text-fg-faint font-mono mt-1 truncate"
+                   :title="`Signal ${wifiSignalText} · noise ${wifiNoiseText}`">
+                {{ wifiSignalText }} · {{ wifiSnrText }}
+              </div>
+            </div>
+            <span class="ml-auto text-[10px] text-fg-faint font-mono whitespace-nowrap"
+                  :title="`Metrics last updated ${wifiUpdatedText}`">
+              {{ wifiUpdatedText }}
+            </span>
           </div>
-          <div class="stat-item">
-            <span class="stat-label">Band / Channel</span>
-            <span class="stat-value">{{ wifiBandCh }}</span>
+
+          <!-- SSID + band/channel: identity, not health, so it's a quiet
+               single line rather than two labelled rows. -->
+          <div class="flex items-baseline gap-2 mb-4 text-sm min-w-0">
+            <span class="material-icons icon-sm text-fg-faint">wifi</span>
+            <span class="font-mono text-fg-strong truncate">{{ wifiSsid }}</span>
+            <span class="text-xs text-fg-muted whitespace-nowrap">{{ wifiBandCh }}</span>
           </div>
-          <div class="stat-item">
-            <span class="stat-label">Signal</span>
-            <span class="stat-value">{{ wifiSignalText }}</span>
+
+          <!-- TX retry gets a meter because it's the metric that actually
+               predicts control-latency trouble; bitrate is just a number. -->
+          <div class="space-y-3">
+            <div>
+              <div class="flex items-baseline justify-between mb-1">
+                <span class="stat-label">TX retry</span>
+                <span class="text-sm font-semibold text-fg-strong tabular-nums">{{ wifiRetryText }}</span>
+              </div>
+              <div class="h-2 bg-surface rounded-full overflow-hidden"
+                   title="Retransmission rate — the first thing to check when control feels laggy. Scale caps at 30%.">
+                <div class="h-full transition-all duration-300"
+                     :class="wifiRetryClass"
+                     :style="{ width: `${wifiRetryPct ?? 0}%` }" />
+              </div>
+            </div>
+            <div class="flex items-baseline justify-between">
+              <span class="stat-label">TX bitrate</span>
+              <span class="text-sm font-semibold text-fg-strong tabular-nums">{{ wifiBitrateText }}</span>
+            </div>
           </div>
-          <div class="stat-item">
-            <span class="stat-label">TX retry</span>
-            <span class="stat-value">{{ wifiRetryText }}</span>
+
+          <div class="mt-4 pt-4 border-t border-line flex items-center justify-end">
+            <button class="btn-secondary text-sm flex items-center gap-2" @click="wifiModalOpen = true">
+              <span class="material-icons icon-sm">wifi_find</span>
+              Find better channel
+            </button>
           </div>
-          <div class="stat-item">
-            <span class="stat-label">Noise floor</span>
-            <span class="stat-value">{{ wifiNoiseText }}</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-label">TX bitrate</span>
-            <span class="stat-value">{{ wifiBitrateText }}</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-label">Last updated</span>
-            <span class="stat-value text-sm">{{ wifiUpdatedText }}</span>
-          </div>
-        </div>
-        <div class="mt-4 pt-4 border-t border-line flex items-center justify-end">
-          <button class="btn-secondary text-sm flex items-center gap-2" @click="wifiModalOpen = true">
-            <span class="material-icons icon-sm">wifi_find</span>
-            Find better channel
-          </button>
         </div>
       </div>
     </div>

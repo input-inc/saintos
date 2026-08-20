@@ -201,6 +201,37 @@ export const managementHandlers = {
 
   // Routing (system_routing graph) ─────────────────────────────────
   get_system_routing:  () => ok(st.systemRouting),
+
+  // Dashboard card order. Mirrors StateManager.reorder_widgets: stamp
+  // dashboard_order from each id's index, unlisted widgets sort after,
+  // then persist (to a scratch file here, to system_routing.yaml there).
+  reorder_widgets: ({ widget_ids }, ctx) => {
+    if (!Array.isArray(widget_ids)) {
+      return { success: false, message: 'widget_ids must be a list' }
+    }
+    const rank = new Map()
+    widget_ids.forEach((id, i) => { if (id && !rank.has(id)) rank.set(id, i) })
+
+    const known = new Set()
+    for (const sheet of Object.values(st.systemRouting.sheets)) {
+      for (const w of (sheet.widgets || [])) known.add(w.id)
+    }
+    const unknown = [...rank.keys()].filter(id => !known.has(id))
+    if (unknown.length) {
+      return { success: false, message: `Unknown widget id(s): ${unknown.sort().join(', ')}` }
+    }
+
+    let tail = rank.size
+    for (const sheet of Object.values(st.systemRouting.sheets)) {
+      for (const w of (sheet.widgets || [])) {
+        w.dashboard_order = rank.has(w.id) ? rank.get(w.id) : tail++
+      }
+    }
+    st.systemRouting.version++
+    st.saveWidgetOrder()
+    ctx.broadcast('system_routing', st.systemRouting)
+    return ok({ reordered: rank.size, count: known.size })
+  },
   add_routing_input:   ({ node_id, topic = '', field = '', joint = '',
                           kind = 'topic', label = '',
                           position = [40, 40] }, ctx) => {

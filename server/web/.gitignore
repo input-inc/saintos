@@ -3,3 +3,6 @@ dist/
 .vite/
 .histoire/
 *.local
+
+# Dev-only scratch: dashboard widget order persisted by the mock server.
+dev/.mock-widget-order.json

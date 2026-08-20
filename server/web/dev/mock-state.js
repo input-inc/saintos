@@ -1,5 +1,9 @@
 // In-memory fixture state for the dev mock WebSocket server.
 //
+// One exception: the dashboard widget order persists to a scratch file
+// (see saveWidgetOrder at the bottom), because restart-survival is the
+// point of that feature.
+//
 // Shapes here mirror the real server's JSON wire format. The originals
 // live in:
 //   - server/saint_server/peripheral_model.py     (routing, catalogs)
@@ -8,6 +12,10 @@
 //
 // Mutations are performed in place; broadcast helpers in mock-server.js
 // snapshot via JSON.stringify on every send.
+
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // ── Adopted / unadopted nodes ────────────────────────────────────────
 
@@ -133,6 +141,28 @@ export const nodePeripherals = {
         id: 'button-1', type: 'button', label: 'Limit Switch',
         pins: { gpio: 6 },
         params: { pull_up: true, active_low: true, debounce_ms: 20 },
+        builtin: false, log_enabled: false,
+      },
+      // Sources for the dashboard's BMS + current-sensor widgets.
+      // Two BMSes because the real rig runs dual 4S packs in series
+      // (see docs/KANGAROO_BRINGUP.md) — and because one widget can't
+      // show you that the halves have drifted apart.
+      {
+        id: 'bms-1', type: 'pathfinder_bms', label: 'Pack A (lower 4S)',
+        pins: { tx: 4, rx: 5 },
+        params: { transport: 'uart', mac: '', poll_interval_ms: 1000 },
+        builtin: false, log_enabled: false,
+      },
+      {
+        id: 'bms-2', type: 'pathfinder_bms', label: 'Pack B (upper 4S)',
+        pins: { tx: 12, rx: 13 },
+        params: { transport: 'uart', mac: '', poll_interval_ms: 1000 },
+        builtin: false, log_enabled: false,
+      },
+      {
+        id: 'fas100-1', type: 'fas100', label: 'Drive Bus Current',
+        pins: { tx: 8, rx: 9 },
+        params: { poll_interval_ms: 50 },
         builtin: false, log_enabled: false,
       },
     ],
@@ -341,14 +371,21 @@ export const systemRouting = {
                     parts: ['rp2040_48405f4f3d28', 'roboclaw-1', 'motor'] } },
       ],
     },
-    _dashboard: {
-      node_id: '_dashboard',
+    // Widgets live on their OWNING NODE's sheet, which is what the real
+    // server enforces: add_widget() runs _validate_sheet_owner(), which
+    // requires an adopted node id — so "_dashboard" is rejected outright.
+    // That pseudo-sheet only ever holds widgets migrated off the old
+    // global dashboard (see the legacy branch in SystemRouting.from_dict).
+    //
+    // The earlier fixture parked everything on _dashboard, which the
+    // server would never accept, and made widgets look unlinkable when
+    // the real cause was an impossible fixture.
+    rp2040_5857c7555f34: {
+      node_id: 'rp2040_5857c7555f34',
       inputs: [], ws_inputs: [], outputs: [], operators: [],
       widgets: [
         { id: 'roboclaw_monitor-1', type: 'roboclaw_monitor',
-          label: 'Right Motor', position: [40, 40], params: {} },
-        { id: 'roboclaw_monitor-2', type: 'roboclaw_monitor',
-          label: 'Left Motor', position: [380, 40], params: {} },
+          label: 'Right Motor', position: [40, 40], params: {}, dashboard_order: 0 },
       ],
       wires: [
         { id: 'w1',
@@ -359,6 +396,56 @@ export const systemRouting = {
           source: { kind: 'peripheral',
                     parts: ['rp2040_5857c7555f34', 'roboclaw-1', 'voltage'] },
           sink:   { kind: 'widget', parts: ['roboclaw_monitor-1', 'voltage'] } },
+      ],
+    },
+    rp2040_48405f4f3d28: {
+      node_id: 'rp2040_48405f4f3d28',
+      inputs: [], ws_inputs: [], outputs: [], operators: [],
+      widgets: [
+        // Deliberately unwired, to keep exercising the "widget with no
+        // routed inputs" body state — it still links, because its sheet
+        // names the node regardless of wiring.
+        { id: 'roboclaw_monitor-2', type: 'roboclaw_monitor',
+          label: 'Left Motor', position: [380, 40], params: {}, dashboard_order: 1 },
+        { id: 'bms_monitor-1', type: 'bms_monitor',
+          label: 'Pack A', position: [720, 40], params: {}, dashboard_order: 2 },
+        { id: 'bms_monitor-2', type: 'bms_monitor',
+          label: 'Pack B', position: [1060, 40], params: {}, dashboard_order: 3 },
+        { id: 'battery_monitor-1', type: 'battery_monitor',
+          label: 'Drive Bus', position: [40, 380], params: {}, dashboard_order: 4 },
+      ],
+      wires: [
+        // ── Pack A (bms-1) → BMS Monitor ──────────────────────────
+        ...['soc', 'voltage', 'current', 'temp', 'protection', 'fet_status']
+          .map((input, i) => ({
+            id: `wbmsa${i}`,
+            source: { kind: 'peripheral',
+                      // The catalog's channel ids differ from the widget's
+                      // input ids: pack_voltage→voltage, temp_1→temp.
+                      parts: ['rp2040_48405f4f3d28', 'bms-1',
+                              input === 'voltage' ? 'pack_voltage'
+                              : input === 'temp' ? 'temp_1' : input] },
+            sink: { kind: 'widget', parts: ['bms_monitor-1', input] },
+          })),
+        // ── Pack B (bms-2) → BMS Monitor ──────────────────────────
+        ...['soc', 'voltage', 'current', 'temp', 'protection', 'fet_status']
+          .map((input, i) => ({
+            id: `wbmsb${i}`,
+            source: { kind: 'peripheral',
+                      parts: ['rp2040_48405f4f3d28', 'bms-2',
+                              input === 'voltage' ? 'pack_voltage'
+                              : input === 'temp' ? 'temp_1' : input] },
+            sink: { kind: 'widget', parts: ['bms_monitor-2', input] },
+          })),
+        // ── FAS100 current sensor → Power Monitor ─────────────────
+        ...[['current', 'amps'], ['voltage', 'volts'],
+            ['temp1', 'temp1'], ['temp2', 'temp2']]
+          .map(([input, channel], i) => ({
+            id: `wfas${i}`,
+            source: { kind: 'peripheral',
+                      parts: ['rp2040_48405f4f3d28', 'fas100-1', channel] },
+            sink: { kind: 'widget', parts: ['battery_monitor-1', input] },
+          })),
       ],
     },
   },
@@ -669,4 +756,46 @@ export function adoptedListSnapshot () {
     peripheral_count: nodePeripherals[n.node_id]?.peripherals?.length || 0,
     peripheral_sync_status: nodePeripherals[n.node_id]?.sync_status || 'unconfigured',
   }))
+}
+
+// ── Dashboard widget order, persisted across mock restarts ───────────
+//
+// The mock is otherwise entirely in-memory, so a restart would reset the
+// card order — and "the server remembers the order across a restart" is
+// precisely the behaviour this feature exists to provide. Persisting just
+// this one field to a scratch file lets that be verified here without
+// pretending the whole fixture set is durable.
+//
+// The real server writes dashboard_order into system_routing.yaml via
+// StateManager._save_system_routing(); see reorder_widgets() there.
+
+const ORDER_FILE = path.join(
+  path.dirname(fileURLToPath(import.meta.url)), '.mock-widget-order.json')
+
+export function saveWidgetOrder () {
+  const order = {}
+  for (const sheet of Object.values(systemRouting.sheets)) {
+    for (const w of (sheet.widgets || [])) order[w.id] = w.dashboard_order ?? 0
+  }
+  try {
+    fs.writeFileSync(ORDER_FILE, JSON.stringify(order, null, 2))
+  } catch (e) {
+    console.warn('[mock] could not persist widget order:', e.message)
+  }
+}
+
+export function loadWidgetOrder () {
+  let order
+  try {
+    order = JSON.parse(fs.readFileSync(ORDER_FILE, 'utf8'))
+  } catch (_) {
+    return false   // no saved order yet — fixtures keep their defaults
+  }
+  let applied = 0
+  for (const sheet of Object.values(systemRouting.sheets)) {
+    for (const w of (sheet.widgets || [])) {
+      if (typeof order[w.id] === 'number') { w.dashboard_order = order[w.id]; applied++ }
+    }
+  }
+  return applied > 0
 }

@@ -5,6 +5,7 @@ import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import { useDisplayStore } from '@/stores/display'
 import { useChannelHistory } from '@/composables/useChannelHistory'
 import Sparkline from '@/components/Sparkline.vue'
+import WidgetFrame from '@/components/widgets/WidgetFrame.vue'
 
 // Mockup-faithful Vue port of the legacy `_renderFas100Card` widget.
 // Four rows (current / voltage / temp1 / temp2). Each row pairs an
@@ -15,7 +16,15 @@ import Sparkline from '@/components/Sparkline.vue'
 const props = defineProps({
   widget: { type: Object, required: true },
   routes: { type: Array,  default: () => [] },
+  // Owning routing sheet — the drilldown target. See WidgetFrame.
+  sheetId: { type: String, default: '' },
+  // Reorder affordances, forwarded straight to WidgetFrame.
+  draggable:  { type: Boolean, default: false },
+  dragging:   { type: Boolean, default: false },
+  dropBefore: { type: Boolean, default: false },
+  dropAfter:  { type: Boolean, default: false },
 })
+const emit = defineEmits(['handle-down', 'move-prev', 'move-next'])
 
 const ws = useWsStore()
 const catalog = usePeripheralCatalog()
@@ -196,18 +205,23 @@ function sourceLabel (inputId) {
 </script>
 
 <template>
-  <div class="card" :data-widget-id="widget.id">
-    <div class="flex items-center justify-between mb-3">
-      <div class="flex items-center gap-2">
-        <span class="material-icons text-amber-400 icon-md">bolt</span>
-        <h4 class="text-base font-semibold text-fg-strong">{{ widget.label || widget.id }}</h4>
-      </div>
-      <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-amber-900/40 text-amber-200">
-        FAS100
-      </span>
-    </div>
-    <div class="h-0.5 bg-amber-500 rounded-full mb-3"></div>
-
+  <WidgetFrame
+    :widget="widget"
+    :routes="routes"
+    :sheet-id="sheetId"
+    icon="bolt"
+    icon-class="text-amber-400"
+    rule-class="bg-amber-500"
+    badge="FAS100"
+    badge-class="bg-amber-900/40 text-amber-200"
+    :draggable="draggable"
+    :dragging="dragging"
+    :drop-before="dropBefore"
+    :drop-after="dropAfter"
+    @handle-down="emit('handle-down', $event)"
+    @move-prev="emit('move-prev')"
+    @move-next="emit('move-next')"
+  >
     <div>
       <div
         v-for="inp in inputs"
@@ -240,5 +254,5 @@ function sourceLabel (inputId) {
         </div>
       </div>
     </div>
-  </div>
+  </WidgetFrame>
 </template>

@@ -1704,6 +1704,19 @@ class WebSocketHandler:
             await self._broadcast_routing()
             return {"status": "ok", "data": result}
 
+        elif action == 'reorder_widgets':
+            # Dashboard card order, persisted to system_routing.yaml so it
+            # survives a server restart.
+            widget_ids = params.get('widget_ids')
+            if not isinstance(widget_ids, list):
+                return {"status": "error", "message": "widget_ids must be a list"}
+            result = self.state_manager.reorder_widgets(widget_ids)
+            if not result.get('success'):
+                return {"status": "error",
+                        "message": result.get('message', 'Reorder failed')}
+            await self._broadcast_routing()
+            return {"status": "ok", "data": result}
+
         elif action == 'get_logs':
             limit = params.get('limit', 100)
             level = params.get('level')
