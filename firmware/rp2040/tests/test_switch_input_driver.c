@@ -71,6 +71,7 @@ bool switch_input_read_analog_mv(uint8_t pin, uint16_t* out_mv)
 /* Record what the interlock tried to stop, and let a test decide
  * whether the target "exists". */
 static char stopped_ids[8][32];
+static char last_args[64];
 static int  stopped_count = 0;
 static int  estop_all_count = 0;
 static bool stub_dispatch_result = true;
@@ -78,10 +79,16 @@ static bool stub_dispatch_result = true;
 bool peripheral_dispatch_command(const char* peripheral_id, const char* command,
                                  const char* args_json, const char* args_json_end)
 {
-    (void)args_json; (void)args_json_end;
     if (stopped_count < 8 && strcmp(command, "estop") == 0) {
         snprintf(stopped_ids[stopped_count], sizeof(stopped_ids[0]),
                  "%s", peripheral_id);
+        last_args[0] = '\0';
+        if (args_json && args_json_end && args_json_end > args_json) {
+            size_t n = (size_t)(args_json_end - args_json);
+            if (n >= sizeof(last_args)) n = sizeof(last_args) - 1;
+            memcpy(last_args, args_json, n);
+            last_args[n] = '\0';
+        }
         stopped_count++;
     }
     return stub_dispatch_result;
@@ -141,6 +148,7 @@ static void reset_state(void)
     stopped_count = 0;
     estop_all_count = 0;
     stub_dispatch_result = true;
+    last_args[0] = '\0';
 }
 
 /* Configure unit 0 directly — apply_config's own path is covered
@@ -478,6 +486,51 @@ static int test_parse_json_reads_params_and_targets(void)
     return 1;
 }
 
+/* Each target carries which direction of travel this switch blocks, as
+ * an ":<dir>" suffix on the id. */
+static int test_parse_json_target_direction_suffix(void)
+{
+    reset_state();
+    pin_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    const char* json =
+        "{\"targets\":[\"kangaroo-1:+\",\"roboclaw-2:-\",\"maestro-3\"]}";
+    CHECK(drv_parse_json(json, json + strlen(json), &cfg));
+
+    CHECK_EQ(pending_target_count, 3);
+    /* The suffix must be stripped from the id — otherwise the id never
+     * matches and the target silently isn't stopped. */
+    CHECK(strcmp(pending_targets[0], "kangaroo-1") == 0);
+    CHECK_EQ(pending_target_block[0], SWITCH_BLOCK_POSITIVE);
+    CHECK(strcmp(pending_targets[1], "roboclaw-2") == 0);
+    CHECK_EQ(pending_target_block[1], SWITCH_BLOCK_NEGATIVE);
+    /* No suffix → block both. Over-blocking is recoverable; a wrong
+     * direction drives further into the switch. */
+    CHECK(strcmp(pending_targets[2], "maestro-3") == 0);
+    CHECK_EQ(pending_target_block[2], SWITCH_BLOCK_BOTH);
+    return 1;
+}
+
+/* The direction has to reach the target, or the retreat behaviour is
+ * silently lost and the axis strands on the switch. */
+static int test_trip_passes_direction_to_target(void)
+{
+    reset_state();
+    mkunit(SWITCH_SENSE_DIGITAL, false, true, 5, SWITCH_TRIP_STOP_TARGETS);
+    snprintf(units[0].targets[0], 32, "kangaroo-1");
+    units[0].target_block[0] = SWITCH_BLOCK_NEGATIVE;
+    units[0].target_count = 1;
+
+    stub_digital_level = true;
+    advance(30);
+
+    CHECK_EQ(stopped_count, 1);
+    CHECK(strstr(last_args, "\"block\":2") != NULL);
+    CHECK_LOG("retract/reverse");
+    return 1;
+}
+
 /* The targets array must not run on into a later param's strings. */
 static int test_parse_json_targets_stop_at_bracket(void)
 {
@@ -561,6 +614,8 @@ static const test_entry_t TESTS[] = {
     {"clear_latch_succeeds_once_released", test_clear_latch_succeeds_once_released},
     {"init_seeds_already_asserted",       test_init_seeds_already_asserted},
     {"parse_json_reads_params_and_targets", test_parse_json_reads_params_and_targets},
+    {"parse_json_target_direction_suffix", test_parse_json_target_direction_suffix},
+    {"trip_passes_direction_to_target",    test_trip_passes_direction_to_target},
     {"parse_json_targets_stop_at_bracket", test_parse_json_targets_stop_at_bracket},
     {"parse_json_clamps_out_of_range",    test_parse_json_clamps_out_of_range},
     {"set_value_rejected",                test_set_value_rejected},

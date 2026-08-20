@@ -81,6 +81,86 @@ const errorText  = computed(() =>
 
 const jogPct = computed(() => Number(props.peripheral?.params?.jog_power_pct) || 10)
 
+// ── Home / power-on positions ───────────────────────────────────────
+// These are peripheral PARAMS, not tune state, so dragging edits a local
+// draft and an explicit save persists it. Editing them live would send a
+// config push on every pointermove.
+const powerOnEnabled = computed(() =>
+  !!props.peripheral?.params?.power_on_enabled)
+
+const num = (v, dflt) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : dflt
+}
+
+const softMinDraft = ref(num(props.peripheral?.params?.soft_min, 0))
+const softMaxDraft = ref(num(props.peripheral?.params?.soft_max, 10000))
+const softCenterDraft = ref(num(props.peripheral?.params?.soft_center, 5000))
+const homeDraft = ref(num(props.peripheral?.params?.home_position, 0))
+const powerOnDraft = ref(
+  powerOnEnabled.value
+    ? num(props.peripheral?.params?.power_on_position, 0)
+    : null)
+const positionsDirty = ref(false)
+
+function resetPositions () {
+  const p = props.peripheral?.params || {}
+  softMinDraft.value = num(p.soft_min, 0)
+  softMaxDraft.value = num(p.soft_max, 10000)
+  softCenterDraft.value = num(p.soft_center, 5000)
+  homeDraft.value = num(p.home_position, 0)
+  powerOnDraft.value = powerOnEnabled.value
+    ? num(p.power_on_position, 0)
+    : null
+  positionsDirty.value = false
+}
+
+// Re-seed if the peripheral is reloaded underneath us, but never while
+// the operator has unsaved drags — that would silently discard them.
+watch(() => props.peripheral?.params, () => {
+  if (!positionsDirty.value) resetPositions()
+})
+
+async function savePositions () {
+  error.value = ''
+  busy.value = true
+  try {
+    const params = { ...(props.peripheral.params || {}) }
+    params.soft_min = Math.round(softMinDraft.value)
+    params.soft_max = Math.round(softMaxDraft.value)
+    params.soft_center = Math.round(softCenterDraft.value)
+    params.home_position = Math.round(homeDraft.value)
+    if (powerOnEnabled.value && powerOnDraft.value != null) {
+      params.power_on_position = Math.round(powerOnDraft.value)
+    }
+    // The firmware rejects the whole soft-limit set unless min < max, so
+    // a save that would be silently dropped is refused here with a reason.
+    if (params.soft_min >= params.soft_max) {
+      error.value = 'Retract limit must be below the extend limit'
+      return
+    }
+    const r = await ws.management('save_node_peripheral', {
+      node_id: props.nodeId,
+      peripheral: {
+        id: props.peripheral.id,
+        type: props.peripheral.type,
+        label: props.peripheral.label,
+        pins: { ...(props.peripheral.pins || {}) },
+        params,
+      },
+    })
+    if (r?.success === false) {
+      error.value = r.message || 'Save failed'
+      return
+    }
+    positionsDirty.value = false
+  } catch (e) {
+    error.value = e?.message || String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
 // ── Captured endpoints ──────────────────────────────────────────────
 // Purely local bookkeeping. The Kangaroo does not record these — it
 // watches the pot for itself during the teach. We track them so the
@@ -91,12 +171,21 @@ const marks = ref({ retract: null, extend: null, center: null })
 const allMarked = computed(() =>
   marks.value.retract != null && marks.value.extend != null && marks.value.center != null)
 
+// Marking records the session checklist AND writes the usable-travel
+// draft, so jogging to an end and marking it is how you set that limit.
+// Without this the marks would be a throwaway checklist — the Kangaroo
+// watches the potentiometer itself and never sees them.
 function markHere (which) {
   if (position.value == null) {
     error.value = 'No position reading yet — is the channel responding?'
     return
   }
-  marks.value[which] = position.value
+  const at = Math.round(position.value)
+  marks.value[which] = at
+  if (which === 'retract')     softMinDraft.value = at
+  else if (which === 'extend') softMaxDraft.value = at
+  else                         softCenterDraft.value = at
+  positionsDirty.value = true
   error.value = ''
 }
 
@@ -218,12 +307,41 @@ function close () {
            cannot be typed, only jogged to. -->
       <LinearTravelControl
         :position="position"
-        :retract="marks.retract"
-        :extend="marks.extend"
-        :center="marks.center"
+        :retract="softMinDraft"
+        :extend="softMaxDraft"
+        :center="softCenterDraft"
         :taught-min="taughtMin"
         :taught-max="taughtMax"
+        :home="homeDraft"
+        :power-on="powerOnDraft"
+        :range-max="Number(peripheral?.params?.max_position) || 10000"
+        :editable="!isTuning"
+        @update:retract="(v) => { softMinDraft = v; positionsDirty = true }"
+        @update:extend="(v) => { softMaxDraft = v; positionsDirty = true }"
+        @update:center="(v) => { softCenterDraft = v; positionsDirty = true }"
+        @update:home="(v) => { homeDraft = v; positionsDirty = true }"
+        @update:power-on="(v) => { powerOnDraft = v; positionsDirty = true }"
       />
+
+      <!-- These are peripheral params, not tune state, so they need an
+           explicit save. Only offered when something changed — an
+           always-visible Save button on a dial invites the operator to
+           wonder whether dragging did anything on its own. -->
+      <div v-if="positionsDirty" class="flex items-center justify-between gap-2">
+        <span class="text-[11px] text-fg-faint">
+          {{ softMinDraft }} … {{ softMaxDraft }} · centre {{ softCenterDraft }}
+          · home {{ homeDraft }} — not saved yet
+        </span>
+        <div class="flex gap-2">
+          <button class="btn-secondary text-xs py-1 px-2" @click="resetPositions">
+            Revert
+          </button>
+          <button class="btn-primary text-xs py-1 px-2" :disabled="busy"
+                  @click="savePositions">
+            Save positions
+          </button>
+        </div>
+      </div>
 
       <!-- ── Step 1: enter tune mode ─────────────────────────────── -->
       <div v-if="!isTuning" class="space-y-3">

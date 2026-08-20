@@ -981,10 +981,174 @@ static int test_estop_command_latches_and_blocks_motion(void)
 
     /* A plain powerdown would be undone by the very next setpoint —
      * that's why the latch exists. */
+    /* A bare estop with no direction argument blocks everything — the
+     * conservative reading, and what an operator-driven stop should do. */
+    CHECK_EQ(units[0].interlock_block, SWITCH_BLOCK_BOTH);
     CHECK(!kangaroo_set_position(0, 500));
     CHECK(!kangaroo_set_speed(0, 500));
-    CHECK_LOG("safety interlock");
+    CHECK(!kangaroo_set_speed(0, -500));
+    CHECK_LOG("interlock blocks");
     CHECK_EQ(units[0].target_position, 0);
+    return 1;
+}
+
+/* ── Soft limits (usable travel inside the taught range) ───────── */
+
+static int test_soft_limits_clamp_position(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    units[0].soft_valid = true;
+    units[0].soft_min = 1000;
+    units[0].soft_max = 9000;
+
+    /* Clamped, not refused: a routed animation that overshoots slightly
+     * should ride the limit rather than drop the move entirely. */
+    CHECK(kangaroo_set_position(0, 12000));
+    CHECK_EQ(units[0].target_position, 9000);
+    CHECK(kangaroo_set_position(0, -500));
+    CHECK_EQ(units[0].target_position, 1000);
+    CHECK(kangaroo_set_position(0, 5000));
+    CHECK_EQ(units[0].target_position, 5000);
+    CHECK_LOG("clamped");
+    return 1;
+}
+
+/* Without a config sync there are no soft limits, and the driver must
+ * behave exactly as it did before rather than clamping to zero. */
+static int test_soft_limits_inactive_until_synced(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    units[0].soft_valid = false;
+    units[0].soft_min = 0;
+    units[0].soft_max = 0;
+
+    CHECK(kangaroo_set_position(0, 12000));
+    CHECK_EQ(units[0].target_position, 12000);
+    return 1;
+}
+
+/* All three values must arrive together, and min must be below max —
+ * a half-configured window could park the axis somewhere the operator
+ * never asked for. */
+static int test_soft_limits_reject_partial_or_inverted(void)
+{
+    pin_config_t cfg;
+
+    memset(&cfg, 0, sizeof(cfg));
+    const char* partial = "{\"soft_min\":1000,\"soft_max\":9000}";
+    CHECK(drv_parse_json(partial, partial + strlen(partial), &cfg));
+    CHECK_EQ(cfg.params.kangaroo.soft_valid, 0);
+
+    memset(&cfg, 0, sizeof(cfg));
+    const char* inverted =
+        "{\"soft_min\":9000,\"soft_max\":1000,\"soft_center\":5000}";
+    CHECK(drv_parse_json(inverted, inverted + strlen(inverted), &cfg));
+    CHECK_EQ(cfg.params.kangaroo.soft_valid, 0);
+
+    memset(&cfg, 0, sizeof(cfg));
+    const char* good =
+        "{\"soft_min\":1000,\"soft_max\":9000,\"soft_center\":4200}";
+    CHECK(drv_parse_json(good, good + strlen(good), &cfg));
+    CHECK_EQ(cfg.params.kangaroo.soft_valid, 1);
+    CHECK_EQ(cfg.params.kangaroo.soft_min, 1000);
+    CHECK_EQ(cfg.params.kangaroo.soft_max, 9000);
+    CHECK_EQ(cfg.params.kangaroo.soft_center, 4200);
+    return 1;
+}
+
+/* The clamp must not let a move sneak past the interlock: clamping
+ * happens first so the direction check sees the real commanded value. */
+static int test_soft_clamp_runs_before_interlock_check(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    units[0].soft_valid = true;
+    units[0].soft_min = 1000;
+    units[0].soft_max = 9000;
+    units[0].current_position = 5000;
+
+    const char* args = "{\"block\":1}";      /* block extend */
+    CHECK(drv_command("kangaroo-1", "estop", args, args + strlen(args)));
+
+    /* Clamps to 9000, which is still an extend from 5000 → refused. */
+    CHECK(!kangaroo_set_position(0, 99999));
+    /* Clamps to 1000, a retreat → allowed. */
+    CHECK(kangaroo_set_position(0, -99999));
+    CHECK_EQ(units[0].target_position, 1000);
+    return 1;
+}
+
+/* ── Directional interlock ─────────────────────────────────────── */
+/*
+ * An end-of-travel switch blocks motion INTO itself but must let the
+ * axis retreat — otherwise tripping a limit strands the mechanism on the
+ * switch with no way off but a manual clear.
+ */
+
+static int test_interlock_positive_allows_retreat(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    units[0].current_position = 5000;
+
+    const char* args = "{\"block\":1}";      /* SWITCH_BLOCK_POSITIVE */
+    CHECK(drv_command("kangaroo-1", "estop", args, args + strlen(args)));
+    CHECK_EQ(units[0].interlock_block, SWITCH_BLOCK_POSITIVE);
+
+    /* Blocked: extend. Allowed: retract. */
+    CHECK(!kangaroo_set_speed(0, 400));
+    CHECK(kangaroo_set_speed(0, -400));
+    CHECK_LOG("extend/forward");
+    return 1;
+}
+
+static int test_interlock_negative_allows_extend(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    units[0].current_position = 5000;
+
+    const char* args = "{\"block\":2}";      /* SWITCH_BLOCK_NEGATIVE */
+    CHECK(drv_command("kangaroo-1", "estop", args, args + strlen(args)));
+
+    CHECK(!kangaroo_set_speed(0, -400));
+    CHECK(kangaroo_set_speed(0, 400));
+    return 1;
+}
+
+/* Position commands are judged against the CURRENT position, so a move
+ * that retreats is allowed and one that drives further in is not. */
+static int test_interlock_position_compares_against_current(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    units[0].current_position = 5000;
+
+    const char* args = "{\"block\":1}";      /* block extend */
+    CHECK(drv_command("kangaroo-1", "estop", args, args + strlen(args)));
+
+    CHECK(!kangaroo_set_position(0, 6000));  /* further out — refused */
+    CHECK(kangaroo_set_position(0, 4000));   /* back off  — allowed  */
+    CHECK_EQ(units[0].target_position, 4000);
+    return 1;
+}
+
+/* Zero must always get through regardless of direction, or the interlock
+ * could not actually stop the axis. */
+static int test_interlock_never_blocks_a_stop(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    CHECK(drv_command("kangaroo-1", "estop", NULL, NULL));   /* blocks both */
+    CHECK(kangaroo_set_speed(0, 0));
+    return 1;
+}
+
+/* A malformed or out-of-range direction must fall back to blocking
+ * everything, never to blocking nothing. */
+static int test_interlock_bad_direction_blocks_both(void)
+{
+    interlock_ready_unit("kangaroo-1");
+    const char* args = "{\"block\":99}";
+    CHECK(drv_command("kangaroo-1", "estop", args, args + strlen(args)));
+    CHECK_EQ(units[0].interlock_block, SWITCH_BLOCK_BOTH);
+    CHECK(!kangaroo_set_speed(0, 400));
+    CHECK(!kangaroo_set_speed(0, -400));
     return 1;
 }
 
@@ -1126,6 +1290,17 @@ static const test_entry_t TESTS[] = {
     {"interlock_blocks_starting_a_tune",    test_interlock_blocks_starting_a_tune},
     {"clear_estop_re_enables_motion",       test_clear_estop_re_enables_motion},
     {"clear_estop_not_latched_noop",        test_clear_estop_when_not_latched_is_a_noop},
+
+    {"soft_limits_clamp_position",          test_soft_limits_clamp_position},
+    {"soft_limits_inactive_until_synced",   test_soft_limits_inactive_until_synced},
+    {"soft_limits_reject_partial",          test_soft_limits_reject_partial_or_inverted},
+    {"soft_clamp_before_interlock_check",   test_soft_clamp_runs_before_interlock_check},
+
+    {"interlock_positive_allows_retreat",   test_interlock_positive_allows_retreat},
+    {"interlock_negative_allows_extend",    test_interlock_negative_allows_extend},
+    {"interlock_position_vs_current",       test_interlock_position_compares_against_current},
+    {"interlock_never_blocks_a_stop",       test_interlock_never_blocks_a_stop},
+    {"interlock_bad_direction_blocks_both", test_interlock_bad_direction_blocks_both},
 };
 
 int main(void)

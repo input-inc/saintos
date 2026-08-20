@@ -35,6 +35,10 @@
 #include "platform.h"
 #include "saint_log.h"
 #include "uart_pin_pairs.h"
+/* SWITCH_BLOCK_* — the blocked-direction codes a switch_input hands us
+ * with an "estop" command. Shared constants only; no dependency on the
+ * switch driver itself. */
+#include "switch_input_protocol.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,6 +113,21 @@ typedef struct {
     int32_t  max_position;       /* scaling for target_position */
     int32_t  max_speed;          /* scaling for target_speed (units/s) */
 
+    /* Usable travel inside whatever the teach tune taught the Kangaroo —
+     * the manual's "soft limits". The tune establishes the HARDWARE
+     * range; these are the operator's WORKING range within it, and
+     * commanded positions are clamped to them.
+     *
+     * Clamped in firmware rather than server-side for the same reason
+     * the interlock is: it has to hold when the link is down. soft_valid
+     * is false until a config sync provides them, so a flash-only boot
+     * behaves exactly as before rather than clamping to zero.
+     */
+    int32_t  soft_min;
+    int32_t  soft_max;
+    int32_t  soft_center;
+    bool     soft_valid;
+
     int32_t  target_position;    /* last commanded position */
     int32_t  target_speed;       /* last commanded speed */
     int32_t  current_position;   /* read back via getp */
@@ -146,7 +165,35 @@ typedef struct {
      * very next routed setpoint, which is not an interlock. This blocks
      * motion until something explicitly clears it. */
     bool     interlocked;
+    /* Which direction the latched interlock blocks — SWITCH_BLOCK_* from
+     * switch_input_protocol.h. An end-of-travel switch blocks motion
+     * INTO itself while still allowing the axis to retreat; blocking
+     * both would strand the mechanism on the switch. */
+    uint8_t  interlock_block;
 } kangaroo_unit_t;
+
+/* True if `interlocked` should refuse a move in this direction.
+ * `direction` is the sign of intended travel: >0 extend/forward,
+ * <0 retract/reverse, 0 stop (never blocked — a stop must always get
+ * through, or the interlock couldn't stop anything). */
+static bool interlock_blocks(const kangaroo_unit_t* u, int direction)
+{
+    if (!u->interlocked || direction == 0) return false;
+    switch (u->interlock_block) {
+    case SWITCH_BLOCK_POSITIVE: return direction > 0;
+    case SWITCH_BLOCK_NEGATIVE: return direction < 0;
+    default:                    return true;   /* SWITCH_BLOCK_BOTH */
+    }
+}
+
+static const char* interlock_dir_text(const kangaroo_unit_t* u)
+{
+    switch (u->interlock_block) {
+    case SWITCH_BLOCK_POSITIVE: return "extend/forward";
+    case SWITCH_BLOCK_NEGATIVE: return "retract/reverse";
+    default:                    return "all";
+    }
+}
 
 /* True while a unit owns the bus for tuning. Normal position/speed
  * polling is suspended for these — the tune's keep-alive is the only
@@ -748,11 +795,41 @@ bool kangaroo_set_position(uint8_t unit, int32_t position)
             (unsigned)unit, (long)position);
         return false;
     }
+    /* Clamp to the operator's usable travel before anything else, so the
+     * interlock's direction check below reasons about the position we
+     * will actually command. Clamping rather than refusing: a routed
+     * animation that overshoots slightly should ride the limit, not drop
+     * the whole move. */
+    if (units[unit].soft_valid) {
+        int32_t clamped = position;
+        if (clamped < units[unit].soft_min) clamped = units[unit].soft_min;
+        if (clamped > units[unit].soft_max) clamped = units[unit].soft_max;
+        if (clamped != position) {
+            saint_log_publish("info",
+                "Kangaroo: unit %u position %ld clamped to %ld (usable travel "
+                "%ld … %ld)", (unsigned)unit, (long)position, (long)clamped,
+                (long)units[unit].soft_min, (long)units[unit].soft_max);
+            position = clamped;
+        }
+    }
+
+    /* Direction of intended travel, relative to where the axis actually
+     * is — so a move that retreats off the switch is permitted while one
+     * that drives further in is refused. Uses the last reported
+     * position; a stale reading is the known limitation of doing this by
+     * comparison rather than by sign alone. */
     if (units[unit].interlocked) {
-        saint_log_publish("warn",
-            "Kangaroo: set_position(unit=%u) refused — safety interlock "
-            "latched; clear it before commanding motion", (unsigned)unit);
-        return false;
+        int dir = (position > units[unit].current_position) ? 1
+                : (position < units[unit].current_position) ? -1 : 0;
+        if (interlock_blocks(&units[unit], dir)) {
+            saint_log_publish("warn",
+                "Kangaroo: set_position(unit=%u, %ld) refused — interlock "
+                "blocks %s and the axis is at %ld",
+                (unsigned)unit, (long)position,
+                interlock_dir_text(&units[unit]),
+                (long)units[unit].current_position);
+            return false;
+        }
     }
     /* Refuse routed motion while tuning. The Kangaroo is driving the axis
      * itself and a Move here would fight the tune — and during the jog
@@ -792,10 +869,11 @@ bool kangaroo_set_speed(uint8_t unit, int32_t speed)
             (unsigned)unit, (long)speed);
         return false;
     }
-    if (units[unit].interlocked) {
+    /* Speed carries its direction in its sign, so no feedback needed. */
+    if (interlock_blocks(&units[unit], (speed > 0) - (speed < 0))) {
         saint_log_publish("warn",
-            "Kangaroo: set_speed(unit=%u) refused — safety interlock latched",
-            (unsigned)unit);
+            "Kangaroo: set_speed(unit=%u, %ld) refused — interlock blocks %s",
+            (unsigned)unit, (long)speed, interlock_dir_text(&units[unit]));
         return false;
     }
     if (tune_is_active(&units[unit])) {
@@ -1146,6 +1224,10 @@ static bool drv_apply_config(uint8_t channel, const pin_config_t* config)
         units[unit].max_position  = config->params.kangaroo.max_position;
         units[unit].max_speed     = config->params.kangaroo.max_speed;
         units[unit].jog_pct       = config->params.kangaroo.jog_pct;
+        units[unit].soft_valid    = config->params.kangaroo.soft_valid != 0;
+        units[unit].soft_min      = config->params.kangaroo.soft_min;
+        units[unit].soft_max      = config->params.kangaroo.soft_max;
+        units[unit].soft_center   = config->params.kangaroo.soft_center;
     }
 
     /* Record the operator's id so peripheral_commands (the teach tune)
@@ -1212,6 +1294,36 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
      * no feedback and no travel limits, so a malformed value must not
      * widen it. Absent leaves 0, which the driver reads as "use the low
      * default" — never as unlimited. */
+    /* Soft limits. All three must arrive together to take effect —
+     * clamping to a half-configured window could park the axis somewhere
+     * the operator never asked for. */
+    {
+        long lo = 0, hi = 0, ctr = 0;
+        int  got = 0;
+        p = strstr(json_start, "\"soft_min\"");
+        if (p && p < json_end) { p = strchr(p, ':');
+            if (p) { lo = atol(p + 1); got++; } }
+        p = strstr(json_start, "\"soft_max\"");
+        if (p && p < json_end) { p = strchr(p, ':');
+            if (p) { hi = atol(p + 1); got++; } }
+        p = strstr(json_start, "\"soft_center\"");
+        if (p && p < json_end) { p = strchr(p, ':');
+            if (p) { ctr = atol(p + 1); got++; } }
+        if (got == 3 && hi > lo) {
+            config->params.kangaroo.soft_min    = (int32_t)lo;
+            config->params.kangaroo.soft_max    = (int32_t)hi;
+            config->params.kangaroo.soft_center = (int32_t)ctr;
+            config->params.kangaroo.soft_valid  = 1;
+        } else {
+            config->params.kangaroo.soft_valid = 0;
+            if (got == 3) {
+                saint_log_publish("warn",
+                    "Kangaroo: soft limits ignored — retract %ld is not below "
+                    "extend %ld", lo, hi);
+            }
+        }
+    }
+
     p = strstr(json_start, "\"jog_power_pct\"");
     if (p && p < json_end) { p = strchr(p, ':');
         if (p) { p++; while (*p == ' ') p++;
@@ -1308,6 +1420,15 @@ static bool drv_command(const char* peripheral_id, const char* command,
      * the command path, which routes by peripheral_id. See
      * docs/SENSOR_INPUTS.md. */
     if (strcmp(command, "estop") == 0) {
+        /* Optional {"block":N} from a switch_input says which direction
+         * of travel to refuse. Absent means block everything — the
+         * conservative reading, and what a bare operator-driven estop
+         * should do. */
+        float blk = (float)SWITCH_BLOCK_BOTH;
+        (void)args_get_float(args_json, args_json_end, "block", &blk);
+        uint8_t code = (uint8_t)blk;
+        if (code > SWITCH_BLOCK_NEGATIVE) code = SWITCH_BLOCK_BOTH;
+        units[unit].interlock_block = code;
         units[unit].interlocked = true;
         if (tune_is_active(&units[unit])) {
             tune_stop(unit, KANGAROO_TUNE_FAILED, "warn",
@@ -1315,8 +1436,12 @@ static bool drv_command(const char* peripheral_id, const char* command,
         }
         (void)kangaroo_powerdown(unit);
         saint_log_publish("warn",
-            "Kangaroo: '%s' INTERLOCK — powered down; motion blocked until "
-            "cleared", peripheral_id);
+            "Kangaroo: '%s' INTERLOCK — powered down; %s motion blocked "
+            "until cleared%s", peripheral_id,
+            interlock_dir_text(&units[unit]),
+            units[unit].interlock_block == SWITCH_BLOCK_BOTH
+              ? "" : " (the opposite direction still moves, so the axis can "
+                     "retreat off the switch)");
         return true;
     }
     if (strcmp(command, "clear_estop") == 0) {

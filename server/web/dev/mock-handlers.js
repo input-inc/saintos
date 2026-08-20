@@ -613,7 +613,123 @@ export function handleRouter (action, params, ctx) {
   return ok({ acked: true, action })
 }
 
+// Kangaroo teach-tune + switch_input commands. Mirrors the refusal
+// reasons the firmware logs, because "the button does nothing" is
+// exactly the failure mode the real driver goes out of its way to
+// explain — a mock that silently accepts everything would hide UI bugs
+// around those paths.
+function handlePeripheralCommand (params, ctx) {
+  const nodeId = params?.node_id
+  const pid = params?.peripheral_id
+  const cmd = params?.command
+  if (!nodeId || !pid || !cmd) {
+    return { status: 'error', message: 'Missing node_id, peripheral_id, or command' }
+  }
+
+  const key = `${nodeId}/${pid}`
+
+  if (cmd === 'clear_latch') {
+    if (st.live.switchAsserted[key]) {
+      ctx?.log?.('warn', `switch '${pid}' clear ignored — still asserted`)
+      return { status: 'error', message: 'Still asserted — move the mechanism off the switch first' }
+    }
+    st.live.switchLatched[key] = false
+    ctx?.log?.('info', `switch '${pid}' latch cleared`)
+    return ok({ cleared: true })
+  }
+
+  const u = st.tuneUnit(nodeId, pid)
+
+  if (cmd === 'estop') {
+    u.interlocked = true
+    if (u.state === st.TUNE.ENTERING || u.state === st.TUNE.JOG ||
+        u.state === st.TUNE.GOING) {
+      u.state = st.TUNE.FAILED
+    }
+    u.jog = 0
+    ctx?.log?.('warn', `Kangaroo '${pid}' INTERLOCK — motion blocked until cleared`)
+    return ok({ interlocked: true })
+  }
+  if (cmd === 'clear_estop') {
+    u.interlocked = false
+    ctx?.log?.('info', `Kangaroo '${pid}' interlock cleared`)
+    return ok({ interlocked: false })
+  }
+
+  if (u.interlocked) {
+    return { status: 'error', message: 'Safety interlock latched — clear it first' }
+  }
+
+  switch (cmd) {
+    case 'tune_enter':
+      if (u.state === st.TUNE.ENTERING || u.state === st.TUNE.JOG ||
+          u.state === st.TUNE.GOING) {
+        return { status: 'error', message: 'A tune is already in progress' }
+      }
+      u.state = st.TUNE.JOG
+      u.jog = 0
+      u.min = 0
+      u.max = 0
+      ctx?.log?.('info', `Kangaroo '${pid}' tune → jog (Mode 1 Teach)`)
+      return ok({ state: u.state })
+
+    case 'tune_jog':
+      if (u.state !== st.TUNE.JOG) {
+        return { status: 'error', message: 'Not in the jog stage' }
+      }
+      u.jog = Number(params?.args?.power) || 0
+      return ok({ jog: u.jog })
+
+    case 'tune_go':
+      if (u.state !== st.TUNE.JOG) {
+        return { status: 'error', message: 'Must be in the jog stage' }
+      }
+      u.jog = 0
+      u.state = st.TUNE.GOING
+      u.goAt = Date.now()
+      ctx?.log?.('warn', `Kangaroo '${pid}' tune → running. STAND CLEAR`)
+      return ok({ state: u.state })
+
+    case 'tune_abort':
+      u.jog = 0
+      u.state = st.TUNE.FAILED
+      ctx?.log?.('warn', `Kangaroo '${pid}' tune aborted by operator`)
+      return ok({ state: u.state })
+
+    case 'tune_read_extents':
+      if (u.state === st.TUNE.GOING) {
+        return { status: 'error', message: 'Tune still in progress' }
+      }
+      // Only meaningful after a completed tune — before that the
+      // firmware has nothing cached to report.
+      if (u.state === st.TUNE.DONE) {
+        u.min = 820
+        u.max = 9240
+      }
+      ctx?.log?.('info',
+        `Kangaroo '${pid}' taught travel ${u.min} … ${u.max}`)
+      return ok({ taught_min: u.min, taught_max: u.max })
+
+    default:
+      return ok({ acked: true, command: cmd })
+  }
+}
+
 export function handleControl (action, params, ctx) {
+  // Kangaroo teach-tune verbs + switch latch clearing. Simulated so the
+  // dashboard workflow can be driven end to end with no hardware; see
+  // st.tuneUnit for what this does and does not model.
+  if (action === 'peripheral_command') {
+    return handlePeripheralCommand(params, ctx)
+  }
+  // Jog rides the `jog` channel rather than a command (best-effort,
+  // newest-wins — see the channel comment in kangaroo_protocol.h), so
+  // catch it here and integrate it into the simulated position.
+  if (action === 'set_channel_value' && params?.channel_id === 'jog') {
+    const u = st.tuneUnit(params.node_id, params.peripheral_id)
+    if (u.state === st.TUNE.JOG) u.jog = Number(params.value) || 0
+    return ok({ throttled: false, native_value: params?.value })
+  }
   // Pin / channel writes — mutate live.peripheralValues so the
   // pin_state broadcast next tick echoes the desired value back.
   if (action === 'set_pin_value' || action === 'set_pin_values' ||

@@ -53,6 +53,26 @@
 #define SWITCH_SUB_VOLTAGE     2  /* read, volts (analog sense only)      */
 #define SWITCH_SUB_TRIP_COUNT  3  /* read, asserts since boot             */
 
+/* ── Blocked direction, per target ──────────────────────────────── */
+/*
+ * An end-of-travel switch should not simply freeze the axis — it should
+ * stop motion INTO itself while still allowing the axis to retreat.
+ * Otherwise tripping a limit strands the mechanism on the switch with no
+ * way off it but a manual clear.
+ *
+ * Direction is per (switch, target) because it describes where the
+ * switch sits relative to that axis's travel, which the switch itself
+ * cannot know. Sign convention matches the control channels: positive =
+ * extend / forward / increasing position.
+ *
+ * BOTH is the conservative fallback and is what an unannotated target
+ * decodes to — over-blocking is recoverable, whereas a WRONG direction
+ * drives further into the switch.
+ */
+#define SWITCH_BLOCK_BOTH       0
+#define SWITCH_BLOCK_POSITIVE   1   /* block extend / forward  */
+#define SWITCH_BLOCK_NEGATIVE   2   /* block retract / reverse */
+
 /* Max targets one switch can stop. Small on purpose: this is the local
  * interlock list, not a routing graph. */
 #define SWITCH_INPUT_MAX_TARGETS      4

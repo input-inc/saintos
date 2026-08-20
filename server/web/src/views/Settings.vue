@@ -154,6 +154,10 @@ async function reloadBuilds () {
     firmwareBuilds.value = {}
     firmwareLastChecked.value = Date.now()
   }
+  // Independent of the build metadata above — a failure in one shouldn't
+  // blank the other, so this is awaited separately rather than folded
+  // into the same try.
+  await loadFirmwareFiles()
 }
 async function reloadBoards () {
   try { const r = await ws.management('list_boards', {}); boards.value = r?.boards || [] }
@@ -253,13 +257,66 @@ function fmtChecked (ms) {
 
 // Static descriptors for each firmware type. Cards render in this order;
 // teensy41 only appears when the backend actually returned an entry for it.
+// `downloadType` is the on-disk firmware-root directory the artifacts are
+// served from (GET /api/firmware/<type>/<file>), which is NOT always the
+// card key: both RP2040 cards describe builds, but only the hardware one
+// is staged under resources/firmware/rp2040.
+//
+// `simulation` has no downloadType on purpose. Its artifacts live in the
+// firmware BUILD dir (firmware/rp2040/build_sim, or install/simulation),
+// outside the firmware root the download route is rooted at — so there's
+// nothing there to link to rather than a button that 404s.
 const FIRMWARE_TYPES = [
-  { key: 'simulation', label: 'RP2040 Simulation Build',  detail: 'For Renode-simulated RP2040 nodes',          icon: 'computer',         iconClass: 'text-cyan-400'   },
-  { key: 'hardware',   label: 'RP2040 Hardware Build',    detail: 'For physical Feather RP2040 + Ethernet nodes', icon: 'developer_board',  iconClass: 'text-violet-400' },
-  { key: 'teensy41',   label: 'Teensy 4.1 Hardware Build', detail: 'For physical Teensy 4.1 nodes',             icon: 'developer_board',  iconClass: 'text-amber-400'  },
-  { key: 'raspberrypi',       label: 'Raspberry Pi 5 Production Build', detail: 'For Raspberry Pi 5 nodes with GPIO control', icon: 'memory',     iconClass: 'text-rose-400'   },
-  { key: 'controller', label: 'Steam Deck Controller AppImage', detail: 'Tauri operator app — self-contained AppImage', icon: 'sports_esports', iconClass: 'text-cyan-400' },
+  { key: 'simulation', label: 'RP2040 Simulation Build',  detail: 'For Renode-simulated RP2040 nodes',          icon: 'computer',         iconClass: 'text-cyan-400',   downloadType: null,
+    noDownloadReason: 'Built locally, not staged for OTA — take it from firmware/rp2040/build_sim/.' },
+  { key: 'hardware',   label: 'RP2040 Hardware Build',    detail: 'For physical Feather RP2040 + Ethernet nodes', icon: 'developer_board',  iconClass: 'text-violet-400', downloadType: 'rp2040' },
+  { key: 'teensy41',   label: 'Teensy 4.1 Hardware Build', detail: 'For physical Teensy 4.1 nodes',             icon: 'developer_board',  iconClass: 'text-amber-400',  downloadType: 'teensy41' },
+  { key: 'raspberrypi',       label: 'Raspberry Pi 5 Production Build', detail: 'For Raspberry Pi 5 nodes with GPIO control', icon: 'memory',     iconClass: 'text-rose-400',   downloadType: 'raspberrypi' },
+  { key: 'controller', label: 'Steam Deck Controller AppImage', detail: 'Tauri operator app — self-contained AppImage', icon: 'sports_esports', iconClass: 'text-cyan-400', downloadType: 'controller' },
 ]
+
+// Downloadable artifacts per firmware-root type, from GET /api/firmware.
+// Kept separate from `firmwareBuilds` (the WS build metadata) because the
+// two answer different questions: what was BUILT vs what is on disk to
+// hand out.
+const firmwareFiles = ref({})
+
+async function loadFirmwareFiles () {
+  try {
+    const r = await fetch('/api/firmware')
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    const data = await r.json()
+    const map = {}
+    for (const info of (data.firmware_types || [])) {
+      if (info?.type) map[info.type] = info.files || []
+    }
+    firmwareFiles.value = map
+  } catch (e) {
+    // Non-fatal: the cards still render their build metadata, they just
+    // don't offer downloads. Logged rather than surfaced because an
+    // older server without the `files` field is a legitimate state.
+    console.warn('firmware file listing unavailable:', e)
+    firmwareFiles.value = {}
+  }
+}
+
+// Short label for a file's role, so an operator picking between
+// saint_node.uf2 / _combined.uf2 / _bootloader.uf2 isn't guessing from
+// the filename alone. Intentionally descriptive, not prescriptive — this
+// does not tell you which one to flash.
+function fileRole (name) {
+  const n = String(name).toLowerCase()
+  if (n.includes('bootloader'))  return 'OTA bootloader'
+  if (n.includes('combined'))    return 'app + bootloader'
+  if (n.endsWith('.uf2'))        return 'flashable image'
+  if (n.endsWith('.hex'))        return 'flashable image'
+  if (n.endsWith('.appimage'))   return 'operator app'
+  if (n.endsWith('.tar.zst') || n.endsWith('.tar.gz') || n.endsWith('.tgz')
+      || n.endsWith('.zip'))     return 'install bundle'
+  if (n.endsWith('.elf'))        return 'debug symbols'
+  if (n.endsWith('.bin'))        return 'raw binary'
+  return ''
+}
 
 const firmwareCards = computed(() => {
   const builds = firmwareBuilds.value || {}
@@ -299,6 +356,7 @@ const firmwareCards = computed(() => {
         filename: info?.filename || null,
         status,
         statusClass,
+        files: t.downloadType ? (firmwareFiles.value[t.downloadType] || []) : [],
       }
     })
 })
@@ -716,6 +774,46 @@ const tabs = [
                 >{{ fmtShortHash(card.hash) || '—' }}</div>
               </div>
             </div>
+
+            <!-- Downloads. One row per staged artifact rather than a
+                 single "Download" button, because most types ship
+                 several and which one you want depends on what you're
+                 doing (flash vs debug vs bootloader). The role label
+                 describes each file; it deliberately doesn't recommend
+                 one — picking the wrong image can brick a board. -->
+            <div v-if="card.files.length" class="mt-3 ml-8 pt-3 border-t border-line/50">
+              <div class="stat-label mb-2">Download</div>
+              <ul class="space-y-1.5">
+                <li v-for="f in card.files" :key="f.filename">
+                  <a
+                    :href="f.url"
+                    :download="f.filename"
+                    class="group flex items-center gap-2 text-sm hover:bg-surface/60 rounded px-2 py-1.5 -mx-2 transition-colors"
+                  >
+                    <span class="material-icons icon-sm text-fg-faint group-hover:text-cyan-400 transition-colors">
+                      download
+                    </span>
+                    <span class="font-mono text-xs text-fg-strong truncate">{{ f.filename }}</span>
+                    <span v-if="fileRole(f.filename)"
+                          class="text-[10px] px-1.5 py-0.5 rounded-full bg-surface text-fg-muted whitespace-nowrap">
+                      {{ fileRole(f.filename) }}
+                    </span>
+                    <span class="ml-auto text-xs text-fg-faint tabular-nums whitespace-nowrap">
+                      {{ fmtBytes(f.size) }}
+                    </span>
+                  </a>
+                </li>
+              </ul>
+            </div>
+            <p v-else-if="card.noDownloadReason"
+               class="mt-3 ml-8 pt-3 border-t border-line/50 text-xs text-fg-faint">
+              {{ card.noDownloadReason }}
+            </p>
+            <p v-else-if="card.status === 'Available'"
+               class="mt-3 ml-8 pt-3 border-t border-line/50 text-xs text-fg-faint">
+              Built, but no downloadable artifact found under
+              <code class="text-cyan-300">resources/firmware/{{ card.downloadType }}/</code>.
+            </p>
           </div>
         </div>
       </div>

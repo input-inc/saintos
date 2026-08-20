@@ -42,7 +42,116 @@ export async function handleHttp (req, res) {
   if (req.method === 'POST' && url === '/api/animations/import/maestro') {
     return await handleMaestroImport(req, res)
   }
+  // Dev-only: poke a simulated switch_input so the interlock path is
+  // observable without hardware. There is no equivalent on the real
+  // server — a real sensor is asserted by moving the mechanism.
+  //   curl -X POST 'localhost:8081/api/dev/switch?id=teensy41_lift01/limit-1&asserted=1'
+  if (req.method === 'POST' && url.startsWith('/api/dev/switch')) {
+    return handleDevSwitch(url, res)
+  }
+  // Firmware listing + download. Mirrors the real server's
+  // /api/firmware surface (http_server.py) so the Settings → Firmware
+  // download rows render and actually transfer a file.
+  if (req.method === 'GET' && url === '/api/firmware') {
+    return sendJson(res, {
+      firmware_root: '/mock/resources/firmware',
+      firmware_types: Object.entries(MOCK_FIRMWARE).map(([type, files]) => ({
+        type,
+        files: files.map(f => ({
+          filename: f.filename,
+          size: f.size,
+          ext: f.filename.slice(f.filename.lastIndexOf('.')),
+          url: `/api/firmware/${type}/${f.filename}`,
+        })),
+      })),
+    })
+  }
+  if (req.method === 'GET' && url.startsWith('/api/firmware/')) {
+    return serveMockFirmware(url, res)
+  }
   return false
+}
+
+// Sizes mirror the real staged artifacts closely enough that the size
+// column and the "large download" feel are representative.
+const MOCK_FIRMWARE = {
+  rp2040: [
+    { filename: 'saint_node.uf2',          size: 545_259 },
+    { filename: 'saint_node_combined.uf2', size: 663_552 },
+    { filename: 'saint_ota_bootloader.uf2', size: 126_976 },
+    { filename: 'saint_node.elf',          size: 2_243_216 },
+    { filename: 'saint_node.bin',          size: 272_384 },
+  ],
+  teensy41: [
+    { filename: 'firmware.hex',   size: 1_499_136 },
+    { filename: 'saint_node.bin', size: 534_528 },
+  ],
+  raspberrypi: [
+    { filename: 'saint_firmware_raspberrypi_1.1.0.tar.zst', size: 660_812_800 },
+  ],
+  controller: [
+    { filename: 'saint_firmware_controller_0.5.0-local.ef592f5.AppImage', size: 92_557_312 },
+  ],
+}
+
+// Serve a synthetic file of the right name and length. Content is filler
+// — the point is that the browser's download path works end to end
+// (headers, filename, progress), not that the bytes are a real image.
+function serveMockFirmware (url, res) {
+  const rest = decodeURIComponent(url.slice('/api/firmware/'.length))
+  const slash = rest.indexOf('/')
+  if (slash < 0) {
+    const files = MOCK_FIRMWARE[rest]
+    if (!files) return sendJson(res, { error: `Unknown firmware type: ${rest}` }, 404)
+    return sendJson(res, { type: rest, files })
+  }
+  const type = rest.slice(0, slash)
+  const filename = rest.slice(slash + 1)
+  // Same traversal guard as the real handler.
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    res.writeHead(403); res.end('Forbidden'); return true
+  }
+  const entry = (MOCK_FIRMWARE[type] || []).find(f => f.filename === filename)
+  if (!entry) { res.writeHead(404); res.end('Not Found'); return true }
+
+  // Cap the synthetic payload: streaming a truthful 630 MB of filler for
+  // the Pi bundle would tie up the dev loop for no benefit. The
+  // Content-Length is the real size so the UI shows the true figure;
+  // the transfer just ends early, which is fine for a mock.
+  const CAP = 2 * 1024 * 1024
+  const bytes = Math.min(entry.size, CAP)
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Length': String(bytes),
+    'X-Mock-Truncated': bytes < entry.size ? 'true' : 'false',
+  })
+  res.end(Buffer.alloc(bytes, 0x00))
+  return true
+}
+
+function handleDevSwitch (url, res) {
+  const q = new URL(url, 'http://localhost').searchParams
+  const id = q.get('id') || ''
+  const asserted = q.get('asserted') === '1' || q.get('asserted') === 'true'
+  if (!id.includes('/')) {
+    return sendJson(res, {
+      error: 'id must be "<node_id>/<peripheral_id>"',
+      example: '/api/dev/switch?id=teensy41_lift01/limit-1&asserted=1',
+    }, 400)
+  }
+  st.live.switchAsserted[id] = asserted
+  // Asserting latches on the next telemetry tick (the latch is what the
+  // firmware does, so the mock does it there too, not here). Releasing
+  // leaves the latch set — clearing it is the operator's job, via the
+  // clear_latch command.
+  return sendJson(res, {
+    id, asserted,
+    latched: !!st.live.switchLatched[id],
+    note: asserted
+      ? 'latches on next tick; interlock fires in firmware on real hardware'
+      : 'released — latch stays set until cleared',
+  })
 }
 
 // Parse the installed URDF (if any) and return the list of actuatable

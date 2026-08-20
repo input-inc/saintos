@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
 import { MeshBVH } from 'three-mesh-bvh'
-import { collidingPairs, computeBaseline, samplesToIntervals } from '@/utils/collision'
+import { buildColliders, collidingPairs, computeBaseline, samplesToIntervals } from '@/utils/collision'
 
 // A unit box collider at `pos`, tagged with a link name.
 function collider (link, pos) {
@@ -41,6 +41,33 @@ describe('collision engine', () => {
     const A1 = collider('A', [0, 0, 0])
     const A2 = collider('A', [0.1, 0, 0]) // same link, overlapping
     expect(collidingPairs([A1, A2]).size).toBe(0)
+  })
+
+  it('reuses hulls and BVHs when rebuilding over shared geometry', () => {
+    // The viewer builds colliders twice over the SAME geometry objects —
+    // display robot + its clone(true) FK sandbox. Before the hull cache,
+    // QuickHull and the BVH build ran twice per mesh, which froze the
+    // page on URDF upload with real CAD collision meshes.
+    const makeRobot = (geom) => {
+      const link = new THREE.Group()
+      link.isURDFLink = true
+      link.name = 'linkA'
+      const col = new THREE.Group()
+      col.isURDFCollider = true
+      col.add(new THREE.Mesh(geom))
+      link.add(col)
+      const root = new THREE.Group()
+      root.add(link)
+      root.updateMatrixWorld(true)
+      return root
+    }
+    const shared = new THREE.SphereGeometry(1, 16, 16)
+    const a = buildColliders(makeRobot(shared), { simplify: 'hull' })
+    const b = buildColliders(makeRobot(shared), { simplify: 'hull' })
+    expect(a.colliders.length).toBe(1)
+    // Same hull object AND same boundsTree instance — not equal, identical.
+    expect(b.colliders[0].geom).toBe(a.colliders[0].geom)
+    expect(b.colliders[0].geom.boundsTree).toBe(a.colliders[0].geom.boundsTree)
   })
 
   it('merges samples into contiguous intervals', () => {

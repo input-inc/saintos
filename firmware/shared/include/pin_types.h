@@ -262,6 +262,14 @@ typedef struct {
              * falling back to the driver's low default is the safe
              * outcome. Skipping it avoids a flash version bump. */
             uint8_t  jog_pct;          /* default 10 (%)           */
+            /* Usable travel inside the taught hardware range (the
+             * manual's "soft limits"). soft_valid gates them so a
+             * flash-only boot, or a partial config, behaves exactly as
+             * before instead of clamping to zero. */
+            uint8_t  soft_valid;
+            int32_t  soft_min;
+            int32_t  soft_max;
+            int32_t  soft_center;
         } kangaroo;
         /* Generic switch / limit sensor input. See docs/SENSOR_INPUTS.md.
          *

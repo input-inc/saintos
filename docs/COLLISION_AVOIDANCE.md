@@ -209,7 +209,32 @@ Cross-side and brow↔brow pairs added only if the envelope shows they matter.
   (`list_joints` — currently name/type only; needs limits + collision awareness).
 - Mock (dev): `server/web/dev/mock-http.js`, `mock-server.js`, `mock-state.js`.
 
-## 11. Precomputed C-space collision tables (candidate strategy)
+## 13. Direction: general live-checking + ACM (supersedes precompute as primary)
+
+**Decision (2026-08-18):** the collision solution must work for **arbitrary
+uploaded URDFs**, not just johnny5. That rules out precomputed C-space tables as
+the *primary* mechanism (they only work for low-DOF pairs; a general robot can be
+high-DOF → curse of dimensionality). Precompute is demoted to an **opportunistic
+accelerator** for pairs whose relevant DOF ≤ ~3 (see §11), not the foundation.
+
+**Primary mechanism (general, MoveIt-style but FCL-direct):**
+1. **Auto ACM at upload** (any URDF): disable pairs that are tree-**adjacent**,
+   collide **at rest**, or collide in **~all** random samples ("always" = by
+   design). What survives = the real watch-list. Mirrors the MoveIt Setup
+   Assistant. *(An enumeration over 1200 random poses flagged 103 "colliding"
+   pairs — but most are parent/child design-adjacencies (fabco body/piston,
+   pupil/inner, vent/fins, nose body/basket) or random-extreme artifacts; a
+   proper ACM prunes them.)*
+2. **Decimate / convex-hull the collision meshes** — full-detail all-pairs was
+   **452 ms/pose** (the whole perf problem); decimation → ~ms, for any model.
+   Keep full detail only on pairs flagged tight-clearance.
+3. **Fast FK** (batched/compiled, not per-cell Python; FK was ~80% of cost).
+
+This serves both authoring (the existing frontend checker + ACM + decimation —
+likely removing the need for idle-gating) and the runtime governor, and
+generalizes to any URDF. Precompute tables stay a future per-pair speedup.
+
+## 11. Precomputed C-space collision tables (opportunistic accelerator only)
 
 Idea: since self-collision is **deterministic in joint space**, precompute
 (once per model, server-side) a compact per-pair lookup over the joints that
@@ -242,7 +267,107 @@ pruning); grid resolution vs conservative dilation near boundaries; where the
 precompute runs (server FCL at upload, cached + shipped to UI + reused at
 runtime).
 
+## 12. Backend engine evaluation — MoveIt 2 vs. FCL-direct (for Phase 2)
+
+**MoveIt 2 — what it gives out of the box** (verified 2026-08-18):
+- Self- + scene-collision checking (FCL) from URDF+SRDF.
+- ACM precompute via the Setup Assistant (samples configs, disables
+  always/never/adjacent-colliding pairs).
+- `moveit_servo`: reactive avoidance that **scales joint velocity down and
+  stops before contact** (`self_collision_proximity_threshold`,
+  `scene_collision_proximity_threshold`, `collision_check_rate`,
+  `check_collisions`) — essentially the runtime "advance-until-near-contact,
+  hold, resume" governor, as smooth scaling.
+- Available on **ROS 2 Kilted (MoveIt 2.14.0)**, binaries for Ubuntu 24.04
+  amd64 + arm64.
+
+**What MoveIt does NOT give:** a shippable precomputed lookup for the frontend
+authoring UI — it checks on-demand server-side. Authoring feedback stays a
+separate concern (client-side, or WS round-trips, or our own precompute
+tables).
+
+**Caveats for SAINT.OS:**
+- **Bundling:** binaries target Ubuntu 24.04; our server is Debian
+  (Bookworm/Trixie) with **source-built ROS in the offline dist** → MoveIt
+  would be a source build into the bundle (heavy: build time, size, Pi RAM/CPU).
+- **Topology:** `moveit_servo` targets a serial manipulator + end-effector +
+  planning group; our head is ~50 independent 1-DOF servos. The **collision
+  checker** fits; the **servo abstraction** doesn't — likely use MoveIt's
+  `collision_detection` in our own loop, not servo wholesale.
+- Needs an SRDF/config pass (Setup Assistant) for a 50-joint non-serial rig.
+
+**Lighter alternative — FCL / hpp-fcl / python-fcl direct:** same engine MoveIt
+uses underneath, in a small node; no planning/SRDF/servo weight; fits the
+independent-servo topology; natural home for the precompute tables that serve
+BOTH authoring (shippable lookup) and runtime. Trade-off: we build the governor
++ precompute ourselves (vs. MoveIt's OOTB servo scaling + Setup Assistant).
+
+**Decision (2026-08-18): FCL-direct** — lighter, faster to deploy/test, fits the
+topology, serves both authoring precompute + runtime.
+
+### FCL spike — measured (local Mac, python-fcl + trimesh + yourdfpy)
+- **Effective dimensionality** (sensitivity analysis, non-influential joints
+  pruned): brow-top × **eye-pop = 5 DOF** (brow open+tilt, eye-pop, **nose
+  basket+body**), brow-top × **eye_h = 4 DOF** (lens/gaze pruned, nose kept).
+  → The **nose is influential** (eyes are mounted on the nose chain), so it does
+  NOT collapse to 3 DOF unless the nose is treated as static (domain question).
+- **Per-cell cost ≈ 0.9 ms**, DOMINATED by Python FK (`update_cfg` 0.7 ms);
+  FCL narrowphase is only ~0.18 ms even on the full-detail meshes. → FK is the
+  bottleneck and is very optimizable (analytic/batched/compiled → ~0.1 ms).
+- **Real precompute:** one 3D pair table, 20³ = 8 000 cells → **7.1 s** on Mac
+  (23% of cells collide).
+- **Extrapolated dense-grid precompute** (one pair; Pi ≈ 5× / 10× slower):
+
+  | DOF | grid | cells | Mac (0.9ms) | Pi 5 (~5×) | Pi 4 (~10×) |
+  |----:|-----:|------:|------------:|-----------:|------------:|
+  | 3 | 20 | 8 K | 7 s | ~35 s | ~70 s |
+  | 4 | 16 | 65 K | ~1 min | ~5 min | ~10 min |
+  | 5 | 12 | 249 K | ~3.7 min | ~19 min | ~37 min |
+  | 5 | 16 | 1.05 M | ~16 min | ~78 min | ~2.6 h |
+
+  (÷3 with FK optimization; × number of watched pairs.)
+
+**Implications:** precompute is a one-time upload job, so seconds-to-a-few-min
+is fine; **tens of minutes (naive 5D on a Pi) is not**. Levers, highest first:
+1. **Is the nose animated in normal use?** If effectively static → brow×eye-pop
+   5D→3D, brow×eye_h 4D→2D → precompute in **seconds** even on a Pi. *(domain
+   question — pending)*
+2. **Optimize FK** (analytic/batched, not yourdfpy per-cell) → ~3× overall.
+3. **Prune to the ~4–8 pairs that matter** (occluded pupil/iris/vent dropped).
+4. **Boundary/range encoding** or coarse/adaptive grids for any residual 4–5D.
+Runtime lookups are O(1) regardless, so the only cost that matters is this
+one-time precompute.
+
 ## 10. Changelog
+- **2026-08-18** — Prototyped the general approach in the **frontend** engine
+  (experiment, before committing to the system): `collision.js` gained convex-
+  hull simplification (`buildColliders({simplify:'hull'})`) + `computeAdjacency`;
+  `URDFViewer` now builds a real **ACM** = adjacency ∪ at-rest ∪ ~always-collide
+  (250 random samples on the clone) and uses it everywhere instead of the bare
+  home-baseline. Instrumented: the `[collision]` console line reports hull tri
+  reduction, ACM size, and build/scan times. Pending: measure in-browser.
+- **2026-08-18** — Generality requirement (arbitrary uploaded URDFs, not just
+  johnny5) → **pivoted away from precompute as primary** to general
+  **live-checking + auto-ACM + mesh decimation** (§13). Enumeration of 1200
+  random poses found 103 "colliding" pairs, but mostly parent/child
+  design-adjacencies + random-extreme artifacts → confirms an ACM (adjacency +
+  at-rest + always-collide pruning) is the right general filter. Full-detail
+  all-pairs check measured at 452 ms/pose (the core perf issue → decimate).
+- **2026-08-18** — **Chose FCL-direct** + ran a local FCL spike (python-fcl +
+  trimesh + yourdfpy). Measured: per-cell ≈0.9 ms (FK-bound, not FCL),
+  effective DOF 4–5 for brow↔eye (nose is influential), one 3D 8 K-cell table =
+  7.1 s on Mac. Extrapolated Pi 4/5 precompute times (§12): 3D trivial, 4D a few
+  min, naive 5D too long on a Pi. Key open lever: whether the **nose is
+  animated** (static → collapses to 3D → seconds). FK optimization + pair
+  pruning + boundary encoding are the other levers.
+- **2026-08-18** — Evaluated **MoveIt 2** for the backend (§12): confirmed it
+  does self/scene collision + ACM precompute (Setup Assistant) + reactive
+  velocity-scaled avoidance (`moveit_servo`) OOTB, and is on Kilted (2.14.0,
+  arm64). Caveats for us: source-build into the Debian offline dist, servo's
+  manipulator/planning-group model doesn't fit a 50-independent-servo head
+  (checker fits, servo doesn't), and it doesn't provide the frontend lookup.
+  Noted FCL-direct as the lighter, better-fitting alternative that also feeds
+  the authoring precompute. Decision deferred to the Phase 2 design doc.
 - **2026-08-18** — Explored precomputed C-space collision tables. Analyzed
   per-pair dimensionality from the URDF kinematic paths: brow↔eye pairs are
   **5–8 DOF raw** (eyes sit behind nose+pop+lens+iris), so dense tables need

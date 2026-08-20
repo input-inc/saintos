@@ -110,10 +110,16 @@ onMounted(() => robot.refresh())
 
     <div v-if="meta">
       <h4 class="text-sm font-semibold text-fg-strong mb-2">Preview</h4>
+      <!-- Preview only — no collision machinery. With it on, this tab
+           downloaded every <collision> mesh and ran the full hull/BVH/ACM
+           build just to show the model, which is why the upload preview
+           used to sit on "Loading robot model…" long after the mesh was
+           visible. -->
       <URDFViewer
         :urdf-url="robot.urdfUrl"
         :meshes-base="robot.meshesBase"
         height="420px"
+        :collision="false"
       />
     </div>
   </div>

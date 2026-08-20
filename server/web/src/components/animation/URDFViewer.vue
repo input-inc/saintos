@@ -26,7 +26,7 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import URDFLoader from 'urdf-loader'
 import { resolveMeshUrl } from '@/utils/meshUrl'
-import { buildColliders, computeBaseline, collidingPairs, samplesToIntervals } from '@/utils/collision'
+import { buildColliders, computeAdjacency, collidingPairs, samplesToIntervals } from '@/utils/collision'
 
 const props = defineProps({
   // Source URL for the URDF text. Null/empty disables loading.
@@ -37,6 +37,14 @@ const props = defineProps({
   meshesBase: { type: String, default: '/api/robot/meshes/' },
   // Optional fixed height. Falls back to 100% of the parent.
   height: { type: String, default: '100%' },
+  // Self-collision machinery (parse <collision> geometry, hulls, BVHs,
+  // FK-sandbox clone, ACM sampling). Everything the animation editor
+  // needs and nothing a plain preview does — the Settings → Robot Model
+  // tab was paying the full cost (including downloading every collision
+  // mesh) to render a model it never collision-checks. Off = the
+  // viewer is a pure viewer: collisionsAtCurrent returns [] and
+  // scanTimeline returns null.
+  collision: { type: Boolean, default: true },
 })
 
 const emit = defineEmits([
@@ -69,10 +77,11 @@ const showGrid = ref(true)
 // overlay for eyeballing that the collision model looks sane.
 const showCollision = ref(false)
 // Self-collision detection state (see utils/collision.js). `colliders` is
-// built once per load; `collisionBaseline` is the set of pairs already
-// touching at the home pose (ignored forever).
+// built once per load; `acm` is the Allowed-Collision Matrix — the set of
+// link-pairs we ignore (tree-adjacent + colliding at rest + ~always colliding
+// by design). Everything else is a genuine collision to report.
 let colliders = []
-let collisionBaseline = null
+let acm = null
 // Meshes recolored for the live collision highlight: [{ mesh, material }].
 let highlighted = []
 // An invisible clone of the robot used purely as an FK sandbox for the
@@ -81,8 +90,13 @@ let highlighted = []
 // geometry with the display robot, so the BVHs are reused (not rebuilt).
 let robotClone = null
 let cloneColliders = []
-let cloneBaseline = null
 let scanGeneration = 0
+// Load-scoped abort for the async ACM build. Deliberately NOT
+// scanGeneration: that counter is bumped by cancelScan() on every orbit,
+// scroll and drag, and an ACM build that died on the first mouse wheel
+// would leave collision reporting disabled forever. Only a new load (or
+// unmount) invalidates an ACM in progress.
+let acmGeneration = 0
 const viewMenuOpen = ref(false)
 
 // Raycast click-to-select state. We can't naively attach a `click`
@@ -634,12 +648,12 @@ function clearRobot () {
   // disposeObject3D(robotClone) — it shares geometry with the (separately
   // disposed) display robot; just release the ref.
   colliders = []
-  collisionBaseline = null
+  acm = null
   highlighted = []
   robotClone = null
   cloneColliders = []
-  cloneBaseline = null
   scanGeneration += 1 // cancel any in-flight scan
+  acmGeneration += 1  // and any in-flight ACM build
 }
 
 async function loadUrdf () {
@@ -666,8 +680,9 @@ async function loadUrdf () {
       onSettle: () => { pending -= 1; settleIfDone() },
     })
     // Parse <collision> too so the overlay + collision detection have geometry.
-    // (Heavier load — these models can ship full-detail meshes.)
-    loader.parseCollision = true
+    // (Heavier load — these models can ship full-detail meshes, each an
+    // extra HTTP fetch + parse. Skipped entirely for preview-only embeds.)
+    loader.parseCollision = props.collision
     const result = await new Promise((resolve, reject) => {
       loader.load(props.urdfUrl, resolve, undefined, reject)
     })
@@ -678,35 +693,56 @@ async function loadUrdf () {
     robot.rotation.x = -Math.PI / 2
     scene.add(robot)
 
-    // All loadMeshCb calls were issued synchronously during parse; now wait
-    // for the async geometry (with a safety timeout) before inspecting meshes.
+    // All loadMeshCb calls were issued synchronously during parse. The
+    // settle-wait exists for ONE reason: colliders built before every
+    // <collision> mesh has arrived come up empty. Visual meshes need no
+    // waiting — three renders each one the moment it lands — so a
+    // preview-only embed skips this entirely and the joints/loaded
+    // events fire as soon as the parse is done.
     parseDone = true
     settleIfDone()
-    await Promise.race([allMeshesLoaded, new Promise((r) => setTimeout(r, 15000))])
-
-    applyColliders()
-    // Build the collision set + baseline at the freshly-loaded (home) pose,
-    // BEFORE any parent posing, so intrinsic overlaps/adjacency get ignored.
-    robot.updateMatrixWorld(true)
-    const _tb0 = performance.now()
-    colliders = buildColliders(robot)
-    const _tb1 = performance.now()
-    collisionBaseline = colliders.length ? computeBaseline(colliders) : null
-    const _tb2 = performance.now()
-    // Invisible FK sandbox for the async timeline scan (shares geometry/BVHs).
-    robotClone = robot.clone(true)
-    robotClone.updateMatrixWorld(true)
-    cloneColliders = buildColliders(robotClone)
-    cloneBaseline = cloneColliders.length ? computeBaseline(cloneColliders) : null
-    if (import.meta.env?.DEV) {
-      // eslint-disable-next-line no-console
-      console.info(`[collision] ${colliders.length} collider meshes ` +
-        `(BVH build ${(_tb1 - _tb0) | 0}ms); baseline ${collisionBaseline?.size ?? 0} ` +
-        `pairs (${(_tb2 - _tb1) | 0}ms)`)
+    if (props.collision) {
+      await Promise.race([allMeshesLoaded, new Promise((r) => setTimeout(r, 15000))])
     }
+
+    robot.updateMatrixWorld(true)
+
+    // The robot is usable NOW — tell the parent and drop the loading
+    // overlay before any collision prep. The ACM takes seconds of
+    // (time-sliced) sampling on a real model, and collision reporting is
+    // the only thing that needs it; leaving the "Loading robot model…"
+    // spinner up while a fully-rendered, poseable robot sat behind it
+    // read as a hang.
     const jointNames = Object.keys(robot.joints || {})
     emit('joints', jointNames)
     emit('loaded', robot)
+    loading.value = false
+
+    if (props.collision) {
+      applyColliders()
+      // Build colliders (convex-hull-simplified) + the ACM at the
+      // freshly-loaded home pose, before any parent posing.
+      const cb = buildColliders(robot, { simplify: 'hull' })
+      colliders = cb.colliders
+      // Invisible FK sandbox for the async timeline scan. Cheap second pass:
+      // clone(true) shares geometry, and collision.js caches hulls + BVHs
+      // per source geometry, so nothing heavyweight is rebuilt here.
+      robotClone = robot.clone(true)
+      robotClone.updateMatrixWorld(true)
+      cloneColliders = buildColliders(robotClone, { simplify: 'hull' }).colliders
+
+      const _ta = performance.now()
+      const builtAcm = await buildAcm(cloneColliders, computeAdjacency(robotClone))
+      if (builtAcm === null) return // superseded by a newer load — its build owns state now
+      acm = builtAcm
+      const _acmMs = performance.now() - _ta
+      if (import.meta.env?.DEV) {
+        // eslint-disable-next-line no-console
+        console.info(`[collision] ${colliders.length} collider meshes; ` +
+          `tris ${cb.stats.origTris}→${cb.stats.bvhTris} (hull ${cb.stats.buildMs | 0}ms); ` +
+          `ACM ${acm.size} pairs (built ${_acmMs | 0}ms, time-sliced)`)
+      }
+    }
   } catch (e) {
     loadError.value = e?.message || String(e)
     emit('load-error', e)
@@ -792,12 +828,63 @@ function toggleCollision () {
   applyColliders()
 }
 
+// Build the Allowed-Collision Matrix on the clone: ignore tree-adjacent pairs,
+// pairs colliding at rest, and pairs colliding in ~all random samples (design
+// nesting).
+//
+// Async and frame-budgeted, NOT run to completion in one go: 250 random-pose
+// passes over a full CAD model is seconds of work, and the original
+// synchronous version froze the whole page right after URDF upload. Yielding
+// is by elapsed time per slice rather than a fixed sample count, because
+// per-sample cost varies wildly with the pose. A load that supersedes this
+// build (scanGeneration bump) aborts it — returning null.
+async function buildAcm (cols, adjacency, samples = 250, alwaysFrac = 0.9) {
+  const out = new Set(adjacency)
+  if (!robotClone || !cols.length) return out
+  const gen = acmGeneration
+  const FRAME_BUDGET_MS = 10
+  const ranged = Object.keys(robotClone.joints).filter((n) => {
+    const l = robotClone.joints[n]?.limit
+    return l && Number.isFinite(l.lower) && Number.isFinite(l.upper)
+  })
+  robotClone.updateMatrixWorld(true)
+  for (const p of collidingPairs(cols, null)) out.add(p) // at-rest
+  const counts = new Map()
+  let sliceStart = performance.now()
+  for (let s = 0; s < samples; s++) {
+    for (const n of ranged) {
+      const l = robotClone.joints[n].limit
+      robotClone.joints[n].setJointValue(l.lower + Math.random() * (l.upper - l.lower))
+    }
+    robotClone.updateMatrixWorld(true)
+    // Pairs already allowed (adjacent or touching at rest) skip the
+    // narrowphase entirely — they're the ones most likely to overlap in
+    // every sample, so pruning them here is where the time goes.
+    for (const p of collidingPairs(cols, out)) counts.set(p, (counts.get(p) || 0) + 1)
+    if (performance.now() - sliceStart > FRAME_BUDGET_MS) {
+      await rafYield()
+      if (gen !== acmGeneration) return null // superseded by a new load
+      sliceStart = performance.now()
+    }
+  }
+  const thr = alwaysFrac * samples
+  for (const [p, c] of counts) if (c >= thr) out.add(p) // ~always → by design
+  for (const n of ranged) robotClone.joints[n].setJointValue(0) // restore home
+  robotClone.updateMatrixWorld(true)
+  return out
+}
+
 // Self-collision at the CURRENT pose → array of "linkA|linkB" pair keys
-// (baseline adjacency/overlap pairs excluded). Cheap; call on pose change.
+// (ACM pairs excluded). Cheap; call on pose change.
+//
+// Reports nothing until the ACM exists. Now that the ACM builds
+// asynchronously after load, this IS reachable in that window — and
+// running it un-pruned would light every adjacent pair red (false
+// positives) at several times the cost.
 function collisionsAtCurrent () {
-  if (!robot || !colliders.length) return []
+  if (!robot || !colliders.length || !acm) return []
   robot.updateMatrixWorld(true)
-  return [...collidingPairs(colliders, collisionBaseline)]
+  return [...collidingPairs(colliders, acm)]
 }
 
 // Scan an animation for collisions, WITHOUT blocking the UI. `sampleFn(t)`
@@ -815,6 +902,12 @@ function rafYield () {
 
 async function scanTimeline (sampleFn, duration, steps = 90) {
   if (!robotClone || !cloneColliders.length || !(duration > 0)) return []
+  // Null (not []) while the ACM is still building: [] would tell the
+  // editor "scanned, clean" and it would never rescan, while null routes
+  // through its aborted-scan path and retries after the next idle. This
+  // also keeps the scan from posing the clone WHILE buildAcm is posing
+  // it — they share the same FK sandbox.
+  if (!acm) return null
   const gen = ++scanGeneration
   const n = Math.max(2, Math.min(600, Math.round(steps)))
   const SLICE = 6 // samples processed per frame before yielding
@@ -827,7 +920,7 @@ async function scanTimeline (sampleFn, duration, steps = 90) {
       if (j) j.setJointValue(denormJoint(j, vals[name]))
     }
     robotClone.updateMatrixWorld(true)
-    samples.push({ t, pairs: collidingPairs(cloneColliders, cloneBaseline) })
+    samples.push({ t, pairs: collidingPairs(cloneColliders, acm) })
     if (k % SLICE === SLICE - 1) {
       await rafYield()
       if (gen !== scanGeneration) return null // a newer scan started; bail
@@ -1060,7 +1153,10 @@ watch(() => display.theme, () => {
               @click="toggleGrid">
         <span class="material-icons icon-sm">{{ showGrid ? 'grid_on' : 'grid_off' }}</span>
       </button>
-      <button class="viewer-btn pointer-events-auto"
+      <!-- Hidden entirely on preview-only embeds: collision geometry was
+           never parsed, so the toggle would flip an empty overlay. -->
+      <button v-if="props.collision"
+              class="viewer-btn pointer-events-auto"
               :class="{ 'viewer-btn-active': showCollision }"
               :title="showCollision ? 'Hide collision geometry' : 'Show collision geometry'"
               @click="toggleCollision">

@@ -314,12 +314,20 @@ function tickNodePinStates () {
       const periphValues = nodeValues[periph.id] || {}
       nodeValues[periph.id] = periphValues
 
+      // Stateful peripherals advance once per tick, before their
+      // channels are read, so every channel in this pass sees the same
+      // snapshot.
+      const tune = periph.type === 'kangaroo'
+        ? tickKangarooTune(node.node_id, periph)
+        : null
+
       for (const ch of ptype.channels) {
         const key = `${node.node_id}/${periph.id}/${ch.id}`
         let value
         if (ch.dir === 'in') {
           // Synthesize plausible readings by channel id.
-          value = synthesizeChannel(periph.type, ch.id, key)
+          value = synthesizeChannel(periph.type, ch.id, key,
+                                    node.node_id, periph.id, tune)
         } else {
           // Echo back whatever the last write was (or 0).
           value = periphValues[ch.id] ?? 0
@@ -336,7 +344,45 @@ function tickNodePinStates () {
   }
 }
 
-function synthesizeChannel (type, channelId, key) {
+// Advance the simulated Kangaroo tune. Called once per pin_state tick
+// (250 ms) per Kangaroo, before its channels are synthesized.
+//
+// Two things make the workflow feel real enough to test the UI against:
+// jogging actually moves the reported position, and the tune cycle takes
+// long enough that "stand clear" is a state you sit in rather than a
+// flicker.
+const TUNE_CYCLE_MS = 12000      // shorter than real hardware, on purpose
+
+function tickKangarooTune (nodeId, periph) {
+  const u = st.tuneUnit(nodeId, periph.id)
+
+  // Open-loop jog: integrate power into position. Rate is arbitrary but
+  // scaled by the configured cap, so turning jog_power_pct down in the
+  // peripheral editor visibly slows it — which is the parameter's whole
+  // point.
+  if (u.state === st.TUNE.JOG && u.jog !== 0) {
+    const pct = Number(periph.params?.jog_power_pct) || 10
+    u.position += u.jog * (pct / 100) * 900
+    u.position = Math.max(0, Math.min(10000, u.position))
+  }
+
+  if (u.state === st.TUNE.GOING) {
+    const elapsed = Date.now() - u.goAt
+    // Sweep the axis around while "tuning" so the position readout is
+    // visibly busy rather than frozen.
+    u.position = 5000 + Math.sin(elapsed / 700) * 3800
+    if (elapsed > TUNE_CYCLE_MS) {
+      u.state = st.TUNE.DONE
+      u.position = 5000
+      // Extents stay 0 until tune_read_extents is called — the real
+      // firmware only populates them on an explicit Get 8/9, and the UI
+      // has a button for exactly that.
+    }
+  }
+  return u
+}
+
+function synthesizeChannel (type, channelId, key, nodeId, periphId, tune) {
   if (type === 'roboclaw') {
     if (channelId === 'encoder') return jitter(key, 1500, 30)
     if (channelId === 'voltage') return jitter(key, 24.5, 0.1)
@@ -348,6 +394,27 @@ function synthesizeChannel (type, channelId, key) {
     if (channelId === 'volts') return jitter(key, 12.4, 0.05)
     if (channelId === 'temp1') return jitter(key, 35, 0.5)
     if (channelId === 'temp2') return jitter(key, 33, 0.5)
+  }
+  if (type === 'kangaroo' && tune) {
+    if (channelId === 'current_position') return Math.round(tune.position)
+    if (channelId === 'current_speed')    return Math.round(tune.jog * 400)
+    if (channelId === 'moving')           return tune.state === st.TUNE.GOING ? 1 : 0
+    if (channelId === 'error_status')     return 0
+    if (channelId === 'tune_state')       return tune.state
+    if (channelId === 'taught_min')       return tune.min
+    if (channelId === 'taught_max')       return tune.max
+  }
+  if (type === 'switch_input') {
+    const skey = `${nodeId}/${periphId}`
+    const asserted = !!st.live.switchAsserted[skey]
+    if (asserted) st.live.switchLatched[skey] = true
+    if (channelId === 'state')      return asserted ? 1 : 0
+    if (channelId === 'latched')    return st.live.switchLatched[skey] ? 1 : 0
+    // ~1.7 V when the reed conducts, 3.3 V open — the real PSR-2 levels
+    // from docs/KANGAROO_BRINGUP.md, so the threshold slider in the
+    // peripheral editor can be set against realistic numbers.
+    if (channelId === 'voltage')    return asserted ? 3.3 : jitter(key, 1.7, 0.02)
+    if (channelId === 'trip_count') return st.live.switchLatched[skey] ? 1 : 0
   }
   if (type === 'button') return Math.random() < 0.02 ? 1 : 0
   if (type === 'analog_in') return jitter(key, 1.65, 0.05)

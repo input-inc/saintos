@@ -32,6 +32,19 @@ export const adoptedNodes = [
     ip_address: '192.168.4.22',
     mac_address: '48:40:5f:4f:3d:28',
   }),
+  // Linear-actuator rig: Kangaroo x2 + end-of-travel sensor. A separate
+  // adopted node rather than adopting the Teensy below, which stays
+  // unadopted so the adoption flow is still testable.
+  makeAdopted({
+    node_id: 'teensy41_lift01',
+    display_name: 'Lift Actuator',
+    chip_family: 'teensy41',
+    board_id: 'teensy41',
+    role: 'controller',
+    hardware_model: 'Teensy 4.1',
+    ip_address: '192.168.4.31',
+    mac_address: 'a1:b2:c3:d4:11:01',
+  }),
 ]
 
 export const unadoptedNodes = [
@@ -120,6 +133,73 @@ export const nodePeripherals = {
         id: 'button-1', type: 'button', label: 'Limit Switch',
         pins: { gpio: 6 },
         params: { pull_up: true, active_low: true, debounce_ms: 20 },
+        builtin: false, log_enabled: false,
+      },
+    ],
+  },
+  // Teensy node carries the linear-actuator rig: a Kangaroo x2 in
+  // linear mode (so the teach-tune workflow is reachable) plus the
+  // end-of-travel sensor that guards it. Mirrors the real bench setup
+  // described in docs/KANGAROO_BRINGUP.md.
+  teensy41_lift01: {
+    version: 1,
+    sync_status: 'synced',
+    last_synced: nowSec() - 30,
+    peripherals: [
+      {
+        id: 'kangaroo-1', type: 'kangaroo', label: 'Lift Actuator',
+        pins: { tx: 0, rx: 1 },
+        params: {
+          address: 128, channel: '1', protocol: 'packet',
+          home_on_start: false, max_position: 10000, max_speed: 1000,
+          baud: 9600,
+          motion_mode: 'linear',
+          jog_power_pct: 10,
+          // Usable travel inside the taught hardware range — what the
+          // travel control's draggable handles edit.
+          soft_min: 1200,
+          soft_max: 8800,
+          soft_center: 5000,
+          home_position: 5000,
+          power_on_enabled: false,
+          power_on_position: 0,
+        },
+        builtin: false, log_enabled: false,
+      },
+      // A second motion peripheral so the interlock target picker shows
+      // more than one option — and a Maestro specifically, because its
+      // driver has no per-instance estop yet, so it renders disabled
+      // with the reason. Makes the capability distinction visible.
+      {
+        id: 'roboclaw-1', type: 'roboclaw', label: 'Turntable Motor',
+        pins: { tx: 8, rx: 9 },
+        params: { address: 129, deadband: 0, max_current_ma: 30000,
+                  estop_pin: 0, uart_swap: false, invert_direction: false },
+        builtin: false, log_enabled: false,
+      },
+      {
+        id: 'maestro-1', type: 'maestro', label: 'Head Servos',
+        pins: { tx: 20, rx: 21 },
+        params: { transport: 'uart', channel_count: 6,
+                  min_pulse_us: 1000, max_pulse_us: 2000, neutral_us: 1500 },
+        builtin: false, log_enabled: false,
+      },
+      {
+        id: 'limit-1', type: 'switch_input', label: 'Lift Top Limit',
+        pins: { gpio: 26 },
+        params: {
+          sense_analog: true,
+          active_low: true,
+          pull_up: true,
+          threshold_mv: 2500,
+          hysteresis_mv: 200,
+          debounce_ms: 5,
+          latch: true,
+          on_trip: 1,                 // stop the listed peripherals
+          // "<id>:<dir>" — this switch sits at the extend end, so it
+          // blocks extend and still lets the actuator retract off it.
+          targets: 'kangaroo-1:+',
+        },
         builtin: false, log_enabled: false,
       },
     ],
@@ -289,8 +369,44 @@ export const systemRouting = {
 // peripheralValues[node_id][peripheral_id][channel_id] = value.
 // The broadcast loop walks adoptedNodes + nodePeripherals to populate.
 
+// Kangaroo teach-tune simulation, keyed `${node_id}/${peripheral_id}`.
+// The real state machine lives in firmware
+// (firmware/shared/src/kangaroo_driver.c); this mirrors just enough of
+// it that the dashboard workflow can be driven end to end without
+// hardware — the states, the jog integration, and the taught extents.
+//
+// Deliberately NOT a faithful port. It has no dead-man and no
+// keep-alive, because those exist to survive a link failure the mock
+// can't have. Anything you verify here is UI behaviour, not safety
+// behaviour.
+export const kangarooTune = {}   // key -> {state, position, jog, marks, goAt, min, max, interlocked}
+
+export const TUNE = {
+  IDLE: 0, ENTERING: 1, JOG: 2, GOING: 3, DONE: 4, FAILED: 5,
+}
+
+export function tuneUnit (nodeId, peripheralId) {
+  const key = `${nodeId}/${peripheralId}`
+  if (!kangarooTune[key]) {
+    kangarooTune[key] = {
+      state: TUNE.IDLE,
+      position: 4200,      // arbitrary mid-stroke resting position
+      jog: 0,
+      goAt: 0,
+      min: 0, max: 0,
+      interlocked: false,
+    }
+  }
+  return kangarooTune[key]
+}
+
 export const live = {
   peripheralValues: {},     // {node_id: {peripheral_id: {channel_id: number}}}
+  // Latched state for switch_input peripherals, keyed
+  // `${node_id}/${peripheral_id}`. Set by the operator poking the
+  // simulated sensor; cleared by the clear_latch command.
+  switchLatched: {},
+  switchAsserted: {},
   hostMonitor: {            // host_controller telemetry tracked separately
     cpu_usage: 12, cpu_temp: 50, mem_usage: 45, throttle: 0, uptime: 3600,
     wifi_signal: -58, wifi_retry_pct: 2.0, wifi_noise: -95, wifi_bitrate: 87,

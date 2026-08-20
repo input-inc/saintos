@@ -1238,6 +1238,100 @@ static int test_update_defers_telemetry_while_ack_pending(void)
 }
 
 /* ============================================================================
+ * Per-instance safety interlock (switch_input targets)
+ * ============================================================================ */
+
+static void interlock_unit (const char* id)
+{
+    reset_state();
+    port_initialized = true;
+    unit_count = 1;
+    units[0].address = 128;
+    snprintf(units[0].peripheral_id, sizeof(units[0].peripheral_id), "%s", id);
+}
+
+static int test_interlock_blocks_motion_but_allows_stop (void)
+{
+    interlock_unit("roboclaw-1");
+
+    CHECK(roboclaw_drv_command("roboclaw-1", "estop", NULL, NULL))   /* estop command claimed */;
+    CHECK(units[0].interlocked)   /* latched */;
+    CHECK_EQ(units[0].duty, 0)   /* stopped */;
+
+    CHECK(!roboclaw_set_duty(0, 500))   /* motion refused while interlocked */;
+    CHECK_EQ(units[0].duty, 0)   /* duty unchanged by the refused command */;
+    /* Duty 0 must still get through — roboclaw_stop() and the dead-man
+     * both come through set_duty, and refusing them would leave the
+     * interlock unable to stop anything. */
+    CHECK(roboclaw_set_duty(0, 0))   /* stop still allowed while interlocked */;
+    return 1;
+}
+
+/* estop() is driver-wide; the command path must not be. A limit switch
+ * guarding one axis must not stop the other motor on the same board. */
+static int test_interlock_only_hits_named_instance (void)
+{
+    interlock_unit("roboclaw-1");
+    unit_count = 2;
+    units[1].address = 129;
+    snprintf(units[1].peripheral_id, sizeof(units[1].peripheral_id),
+             "roboclaw-2");
+
+    CHECK(roboclaw_drv_command("roboclaw-1", "estop", NULL, NULL))   /* claimed */;
+    CHECK(units[0].interlocked)   /* target latched */;
+    CHECK(!units[1].interlocked)   /* sibling untouched */;
+    CHECK(roboclaw_set_duty(1, 400))   /* sibling still commandable */;
+    return 1;
+}
+
+/* An end-of-travel switch must let the axis retreat off itself. Duty
+ * carries its direction in its sign, so no feedback is involved. */
+static int test_interlock_directional_allows_retreat (void)
+{
+    interlock_unit("roboclaw-1");
+    const char* args = "{\"block\":1}";   /* SWITCH_BLOCK_POSITIVE */
+    CHECK(roboclaw_drv_command("roboclaw-1", "estop", args, args + strlen(args)));
+    CHECK_EQ(units[0].interlock_block, SWITCH_BLOCK_POSITIVE);
+
+    CHECK(!roboclaw_set_duty(0, 400));   /* forward — into the switch */
+    CHECK(roboclaw_set_duty(0, -400));   /* reverse — away from it    */
+    CHECK_EQ(units[0].duty, -400);
+    return 1;
+}
+
+static int test_interlock_bad_direction_blocks_both (void)
+{
+    interlock_unit("roboclaw-1");
+    const char* args = "{\"block\":42}";
+    CHECK(roboclaw_drv_command("roboclaw-1", "estop", args, args + strlen(args)));
+    CHECK_EQ(units[0].interlock_block, SWITCH_BLOCK_BOTH);
+    CHECK(!roboclaw_set_duty(0, 400));
+    CHECK(!roboclaw_set_duty(0, -400));
+    return 1;
+}
+
+static int test_interlock_unknown_id_not_claimed (void)
+{
+    interlock_unit("roboclaw-1");
+    CHECK(!roboclaw_drv_command("not-ours", "estop", NULL, NULL))   /* unclaimed so the manager can try the next driver */;
+    CHECK(!units[0].interlocked)   /* not latched */;
+    return 1;
+}
+
+static int test_clear_estop_re_enables_motion (void)
+{
+    interlock_unit("roboclaw-1");
+    CHECK(roboclaw_drv_command("roboclaw-1", "estop", NULL, NULL))   /* latched */;
+    CHECK(!roboclaw_set_duty(0, 500))   /* blocked */;
+
+    CHECK(roboclaw_drv_command("roboclaw-1", "clear_estop", NULL, NULL))   /* clear claimed */;
+    CHECK(!units[0].interlocked)   /* cleared */;
+    CHECK(roboclaw_set_duty(0, 500))   /* motion re-enabled */;
+    CHECK_EQ(units[0].duty, 500)   /* setpoint took */;
+    return 1;
+}
+
+/* ============================================================================
  * Test runner
  * ============================================================================ */
 
@@ -1245,6 +1339,13 @@ typedef int (*test_fn)(void);
 typedef struct { const char* name; test_fn fn; } test_entry_t;
 
 static const test_entry_t TESTS[] = {
+    /* Per-instance safety interlock (switch_input targets) */
+    { "interlock_blocks_motion_allows_stop",     test_interlock_blocks_motion_but_allows_stop },
+    { "interlock_only_hits_named_instance",      test_interlock_only_hits_named_instance },
+    { "interlock_directional_allows_retreat",    test_interlock_directional_allows_retreat },
+    { "interlock_bad_direction_blocks_both",     test_interlock_bad_direction_blocks_both },
+    { "interlock_unknown_id_not_claimed",        test_interlock_unknown_id_not_claimed },
+    { "interlock_clear_re_enables_motion",       test_clear_estop_re_enables_motion },
     /* CRC */
     { "crc_known_vectors",                       test_crc_known_vectors },
 

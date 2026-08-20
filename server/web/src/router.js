@@ -16,7 +16,11 @@ export const router = createRouter({
         { path: 'state',        name: 'node-state',       component: () => import('@/views/node/State.vue') },
         { path: 'live',         name: 'node-live',        component: () => import('@/views/node/Live.vue') },
         { path: 'logs',         name: 'node-logs',        component: () => import('@/views/node/Logs.vue') },
-        { path: 'control',      name: 'node-control',     component: () => import('@/views/node/Control.vue') },
+        // The Control tab's actions moved onto Overview. The route stays
+        // as a redirect so existing bookmarks and `#node/<id>/control`
+        // links land somewhere useful instead of 404ing. Keeps the name
+        // resolvable too, so any stray RouterLink still builds.
+        { path: 'control',      name: 'node-control',     redirect: { name: 'node-overview' } },
       ],
     },
     { path: '/routes',          name: 'routes',      component: () => import('@/views/Routes.vue') },

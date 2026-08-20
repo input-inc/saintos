@@ -62,11 +62,19 @@ class PeripheralTypeParam:
     id: str
     label: str
     type: str          # "bool" | "int" | "float" | "string" | "gpio"
+                       #   | "motion_peripherals"
                        # "gpio" tells the UI to render this param as a
                        # dropdown of the controller's GPIO pins, filtered
                        # to those not already claimed by another
                        # peripheral. Stored as an integer on the wire,
                        # so the firmware-side parser stays unchanged.
+                       #
+                       # "motion_peripherals" renders a checklist of the
+                       # peripherals on THIS node whose type has
+                       # commands_motion set — the things worth stopping
+                       # when a limit switch trips. Stored as a
+                       # comma-separated id string, which is what the
+                       # firmware parser already reads.
     default: Any
     min: Optional[float] = None
     max: Optional[float] = None
@@ -124,6 +132,34 @@ class PeripheralType:
     # the board YAML seeds the onboard one with — added and onboard
     # NeoPixels then carry the SAME pin key, so a driver reads one slot.
     pin_slot: str = "gpio"
+    # True for peripherals that command physical MOTION — motors,
+    # servos, actuators, steppers. Drives the target picker on a
+    # switch_input's interlock: those are the things worth stopping when
+    # an end-of-travel sensor trips. Not a safety property in itself,
+    # just the filter that keeps the operator from having to pick a
+    # status LED out of a list of everything on the node.
+    #
+    # An LED or audio player is deliberately excluded; a raw `pwm`
+    # output is deliberately included, because it may well be driving an
+    # ESC and offering too few options is the worse error here.
+    commands_motion: bool = False
+    # True where the firmware driver implements the per-instance "estop"
+    # / "clear_estop" command verbs, so a switch_input interlock can
+    # actually stop THIS peripheral and not its siblings.
+    #
+    # Separate from commands_motion because the two genuinely differ:
+    #   - `servo` and `pwm` command motion but are pin_control modes, not
+    #     registered peripheral drivers, so they can never receive a
+    #     peripheral_command at all.
+    #   - maestro / syren / tic / tmc2208 / pimoroni_servo2040 are
+    #     drivers whose verb simply isn't written yet.
+    #
+    # The target picker shows every motion peripheral but disables the
+    # ones without this, with the reason visible — silently omitting them
+    # would look like the peripheral doesn't exist, and silently
+    # accepting them would produce an interlock that logs "could NOT
+    # stop" at the worst possible moment.
+    supports_interlock: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -135,6 +171,8 @@ class PeripheralType:
             "channels": [c.to_dict() for c in self.channels],
             "params": [p.to_dict() for p in self.params],
             "builtin_only": self.builtin_only,
+            "commands_motion": self.commands_motion,
+            "supports_interlock": self.supports_interlock,
         }
 
 
@@ -341,11 +379,15 @@ SWITCH_INPUT_MAX_TARGETS = 4
 def switch_input_params_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize a switch_input's params for the config push.
 
-    The operator types interlock targets as a comma-separated string
-    because a free-form list widget doesn't exist yet, but the firmware
-    parses a JSON array. Convert here rather than making the firmware
-    tokenize a string — hand-rolled string splitting on the MCU is
-    exactly the kind of thing that goes wrong quietly.
+    The UI stores interlock targets as a comma-separated string of
+    ``<peripheral_id>:<dir>`` entries; the firmware parses a JSON array
+    of the same entries. Convert the container here rather than making
+    the firmware tokenize a comma list — hand-rolled string splitting on
+    the MCU is exactly the kind of thing that goes wrong quietly.
+
+    The ``:<dir>`` suffix is passed through untouched: it says which
+    direction of travel the switch blocks on that target, so the axis can
+    still retreat off the switch. See docs/SENSOR_INPUTS.md.
 
     Over-long lists are truncated to what the firmware can hold, so the
     wire never claims more targets than will actually be armed.
@@ -374,8 +416,27 @@ def kangaroo_slim_params_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
     See test_kangaroo_wire_size_budget.py, which fails CI if a future
     param pushes it back over.
     """
-    return {k: v for k, v in params.items()
-            if k not in _KANGAROO_SERVER_ONLY_PARAMS}
+    out = {k: v for k, v in params.items()
+           if k not in _KANGAROO_SERVER_ONLY_PARAMS}
+
+    # Then drop anything still equal to its catalog default. The firmware
+    # parser leaves a field at its own default when the key is absent, so
+    # an omitted default-valued param is indistinguishable from a sent
+    # one — and the budget is tight enough that this is now load-bearing
+    # rather than an optimization. See
+    # test_kangaroo_wire_size_budget.py::test_headroom_for_one_more_param,
+    # which is what caught the overflow when soft limits were added.
+    #
+    # Deliberate exception: jog_power_pct always goes on the wire. It caps
+    # open-loop jog power, and a safety limit should not depend on the
+    # firmware and the catalog agreeing on a default.
+    ktype = DEFAULT_CATALOG.get("kangaroo")
+    if ktype is not None:
+        always = {"jog_power_pct"}
+        defaults = {p.id: p.default for p in ktype.params}
+        out = {k: v for k, v in out.items()
+               if k in always or k not in defaults or v != defaults[k]}
+    return out
 
 
 def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -659,10 +720,10 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
                      "Report-only still publishes the state for routing.",
             ),
             PeripheralTypeParam(
-                "targets", "Stop these peripherals", "string", "",
+                "targets", "Stop these peripherals", "motion_peripherals", "",
                 visible_when={"on_trip": 1},
-                help="Comma-separated peripheral ids on THIS node, e.g. "
-                     "'kangaroo-1, roboclaw-2'. Up to 4.",
+                help="Motion peripherals on this node. Up to 4 — the "
+                     "firmware stores no more than that.",
             ),
         ],
     ),
@@ -677,6 +738,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "servo": PeripheralType(
         id="servo", label="Servo (PWM)",
+        commands_motion=True,
         description=(
             "Hobby servo on a PWM-capable pin. The operator-facing "
             "channel `angle` accepts a normalized −1..+1 signal from the "
@@ -715,6 +777,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "pwm": PeripheralType(
         id="pwm", label="PWM Output",
+        commands_motion=True,
         description=(
             "Generic PWM output on a PWM-capable pin. Independent "
             "frequency and duty cycle — handy for driving LED dimmers, "
@@ -794,6 +857,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     # pimoroni_normalize_channels / pimoroni_slim_channels_for_wire).
     "pimoroni_servo2040": PeripheralType(
         id="pimoroni_servo2040", label="Pimoroni Servo 2040",
+        commands_motion=True,
         description=(
             "Pimoroni Servo 2040 servo controller (18 servos + 6 onboard "
             "RGB LEDs) over I2C on its Qwiic/STEMMA-QT connector. Each "
@@ -848,6 +912,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "syren": PeripheralType(
         id="syren", label="SyRen Motor",
+        commands_motion=True,
         description="Sabertooth SyRen motor controller over packetized serial.",
         pin_kind="uart",
         channels=[PeripheralChannel("motor", "Motor power", "out", "analog")],
@@ -864,6 +929,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     # server/docs/MAESTRO_PROTOCOL.md.
     "maestro": PeripheralType(
         id="maestro", label="Pololu Maestro",
+        commands_motion=True,
         description=(
             "Pololu Maestro USB / TTL servo controller. Pick the channel "
             "count to match your hardware (6 Micro, 12 / 18 / 24 Mini) "
@@ -1001,6 +1067,8 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "roboclaw": PeripheralType(
         id="roboclaw", label="RoboClaw Motor",
+        commands_motion=True,
+        supports_interlock=True,
         description="RoboClaw Solo 60A motor controller with telemetry.",
         pin_kind="uart",
         channels=[
@@ -1055,6 +1123,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "tic": PeripheralType(
         id="tic", label="Tic Stepper",
+        commands_motion=True,
         description=(
             "Pololu Tic stepper motor controller (T834/T825/T249/36v4) "
             "over TTL serial with per-unit device ID. Up to 8 units share "
@@ -1083,6 +1152,7 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "tmc2208": PeripheralType(
         id="tmc2208", label="TMC2208 Stepper",
+        commands_motion=True,
         description=(
             "Trinamic TMC2208 stepper amplifier with UART configuration "
             "and MCU-generated STEP/DIR pulses. Up to 4 axes per node, "
@@ -1118,6 +1188,8 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
     ),
     "kangaroo": PeripheralType(
         id="kangaroo", label="Kangaroo X2",
+        commands_motion=True,
+        supports_interlock=True,
         description=(
             "Dimension Engineering Kangaroo X2 self-tuning closed-loop "
             "motion controller (rides on a Sabertooth / SyRen power "
@@ -1227,6 +1299,37 @@ DEFAULT_CATALOG: Dict[str, PeripheralType] = {
                      "will drive into the hard stops. Start low; the "
                      "direction of travel is unknown until the first "
                      "tune.",
+            ),
+            # Usable travel, inside whatever the teach tune taught the
+            # Kangaroo. The tune establishes the axis's HARDWARE range;
+            # these are the operator's WORKING range within it — the same
+            # thing the Kangaroo manual calls soft limits (default 99% of
+            # hardware range, normally set in DEScribe).
+            #
+            # Settable here, unlike taught_min/taught_max which are
+            # read-only on the wire, so these are what the travel
+            # control's draggable handles edit. The firmware clamps
+            # commanded positions to them.
+            PeripheralTypeParam(
+                "soft_min", "Retract limit (units)", "int", 0,
+                min=-536870911, max=536870911,
+                visible_when={"motion_mode": "linear"},
+                help="Usable retract end. Commands below this are clamped. "
+                     "Keep it inside the taught travel so the axis never "
+                     "loads against a hard stop.",
+            ),
+            PeripheralTypeParam(
+                "soft_max", "Extend limit (units)", "int", 10000,
+                min=-536870911, max=536870911,
+                visible_when={"motion_mode": "linear"},
+                help="Usable extend end. Commands above this are clamped.",
+            ),
+            PeripheralTypeParam(
+                "soft_center", "Centre (units)", "int", 5000,
+                min=-536870911, max=536870911,
+                visible_when={"motion_mode": "linear"},
+                help="Mid-travel reference — where a centred input sends "
+                     "the axis.",
             ),
             PeripheralTypeParam(
                 "home_position", "Home position (units)", "int", 0,

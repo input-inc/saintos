@@ -73,9 +73,82 @@ def test_safe_defaults():
     )
 
 
+def test_targets_param_is_a_picker_not_free_text():
+    """A typo'd interlock target fails silently at exactly the wrong
+    moment, so this must not be a freeform string field."""
+    params = {p.id: p for p in DEFAULT_CATALOG["switch_input"].params}
+    assert params["targets"].type == "motion_peripherals"
+
+
+def test_motion_types_are_flagged():
+    """The target picker filters on commands_motion, so anything that
+    drives a motor/servo/actuator has to carry it — and nothing that
+    doesn't should."""
+    motion = {k for k, v in DEFAULT_CATALOG.items() if v.commands_motion}
+    assert motion == {
+        "servo", "pwm", "roboclaw", "syren", "maestro",
+        "pimoroni_servo2040", "tic", "tmc2208", "kangaroo",
+    }
+    for quiet in ("led", "neopixel", "mono_led", "audio_player",
+                  "pathfinder_bms", "switch_input", "button", "analog_in"):
+        assert not DEFAULT_CATALOG[quiet].commands_motion, (
+            f"'{quiet}' is not motion and must not appear in the interlock "
+            f"target picker")
+
+
+def test_interlock_support_matches_firmware_reality():
+    """supports_interlock gates whether a target is SELECTABLE, so it has
+    to track which drivers actually implement the per-instance estop verb.
+    Anything flagged here without `.command` in its driver would produce an
+    interlock that logs 'could NOT stop' instead of stopping.
+
+    Grepping the driver source is crude, but the alternative is a flag
+    that drifts from the firmware silently.
+    """
+    fw = os.path.join(os.path.dirname(__file__), "..", "..",
+                      "firmware", "shared", "src")
+    for tid, ptype in DEFAULT_CATALOG.items():
+        if not ptype.supports_interlock:
+            continue
+        driver = os.path.join(fw, f"{tid}_driver.c")
+        assert os.path.exists(driver), (
+            f"'{tid}' claims supports_interlock but has no shared driver")
+        src = open(driver).read()
+        assert ".command" in src, (
+            f"'{tid}' claims supports_interlock but its driver registers no "
+            f"command handler")
+        assert '"estop"' in src, (
+            f"'{tid}' claims supports_interlock but its driver handles no "
+            f"'estop' verb")
+
+    # servo/pwm are pin_control modes, not registered drivers — they can
+    # never receive a peripheral_command, so they must never be flagged.
+    for tid in ("servo", "pwm"):
+        assert not DEFAULT_CATALOG[tid].supports_interlock, (
+            f"'{tid}' is a pin_control mode, not a peripheral driver — it "
+            f"cannot receive a peripheral_command")
+
+
 def test_targets_string_becomes_a_list():
     out = switch_input_params_for_wire({"targets": "kangaroo-1, roboclaw-2"})
     assert out["targets"] == ["kangaroo-1", "roboclaw-2"]
+
+
+def test_direction_suffix_survives_to_the_wire():
+    """The ':<dir>' suffix is what lets the axis retreat off the switch.
+    Strip it and every interlock silently becomes a full stop."""
+    out = switch_input_params_for_wire(
+        {"targets": "kangaroo-1:+, roboclaw-2:-, maestro-3"})
+    assert out["targets"] == ["kangaroo-1:+", "roboclaw-2:-", "maestro-3"]
+
+
+def test_block_direction_codes_match_firmware():
+    """The UI writes '+'/'-' and the firmware decodes to SWITCH_BLOCK_*.
+    An unannotated target must decode to BOTH — over-blocking is
+    recoverable, a wrong direction drives further into the switch."""
+    assert _header_define("SWITCH_BLOCK_BOTH") == 0
+    assert _header_define("SWITCH_BLOCK_POSITIVE") == 1
+    assert _header_define("SWITCH_BLOCK_NEGATIVE") == 2
 
 
 def test_targets_blank_entries_dropped():

@@ -30,13 +30,62 @@ too; not done here because those paths are hot and well-exercised, and
 changing their evaluation set is a bigger blast radius than this task
 warranted.
 
-### Known gap
+### Interlock targets
 
-`switch_input` declares `pin_kind="gpio"`, so the pin picker doesn't filter to
-ADC-capable pins when analog sense is on. Pick GP26-29 on RP2040; anywhere
-else the firmware's analog read returns false, the driver holds its last
-state (deliberately — reading 0 V would look like an assert on an active-low
-input), and the voltage channel stays at 0.
+The target field is a checklist of the node's motion peripherals, driven by
+two catalog flags:
+
+- `commands_motion` — drives a motor, servo, or actuator. Set on servo, pwm,
+  roboclaw, syren, maestro, pimoroni_servo2040, tic, tmc2208, kangaroo. This
+  filters the list.
+- `supports_interlock` — the firmware driver implements the per-instance
+  `estop` / `clear_estop` verbs. **Currently only `roboclaw` and `kangaroo`.**
+
+Motion peripherals without interlock support are shown **disabled**, with the
+reason. Omitting them would look like the peripheral doesn't exist; accepting
+them would build an interlock that logs "could NOT stop" at the worst possible
+moment. `test_switch_input_catalog.py` greps each flagged driver for a
+`.command` handler and an `"estop"` verb so the flag can't drift silently.
+
+`servo` and `pwm` can never be targets — they are pin_control modes, not
+registered peripheral drivers, so they cannot receive a `peripheral_command`.
+
+**To make another driver a valid target** it needs: a per-unit
+`peripheral_id` (roboclaw, maestro, pimoroni already store one), a latched
+`interlocked` flag plus `interlock_block`, a direction guard on its motion
+entry point that still permits a stop, and a `drv_command` resolving
+`peripheral_id` → unit. Then set `supports_interlock=True`. Remaining:
+maestro, syren, tic, tmc2208, pimoroni_servo2040.
+
+### Direction — blocking motion *into* the switch
+
+An end-of-travel switch that froze the axis outright would strand the
+mechanism on the switch with no way off but a manual clear. So each target
+carries the direction that switch blocks, and the opposite direction still
+moves.
+
+Wire format is `"<peripheral_id>:<dir>"` — `+` blocks extend/forward, `-`
+blocks retract/reverse, no suffix blocks both. Sign convention matches the
+control channels (positive = extend/forward/increasing).
+
+Per *target*, not per switch, because the direction describes where the switch
+sits relative to that axis's travel — which the switch itself cannot know.
+
+Two deliberate choices:
+
+- **No default direction.** A newly-checked target has none and the peripheral
+  refuses to save until one is picked. There is no safe guess: defaulting to
+  "blocks extend" on a switch that is actually at the retract end would let the
+  first trip drive further *into* it. A missing or out-of-range direction on the
+  wire decodes to BOTH — over-blocking is recoverable.
+- **Position commands are judged against current position**, so a move that
+  retreats is allowed and one that drives further in is refused. This trusts the
+  last reported position; a stale reading is the known limitation of comparing
+  rather than using sign alone. Speed and duty commands carry their direction in
+  their sign and need no feedback.
+
+A stop (zero) is never blocked in any direction — otherwise the interlock could
+not stop anything.
 
 ### Known gap
 

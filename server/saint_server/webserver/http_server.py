@@ -305,12 +305,63 @@ class WebServer:
         self.log('debug', f'Serving: {file_path} as {content_type}')
         return web.FileResponse(file_path, headers=self.NO_CACHE_HEADERS)
 
+    # Downloadable artifact extensions, in the order an operator most
+    # likely wants them. The old list here was ['.zip', '.tar.gz',
+    # '.tgz', '.elf', '.AppImage'] — which missed the flashable artifacts
+    # entirely (.uf2 for RP2040, .hex for Teensy, .tar.zst for the Pi),
+    # so a directory scan found the .elf and nothing you could actually
+    # flash. Ordering puts flashable images first and debug artifacts
+    # (.elf, .bin) last.
+    DOWNLOAD_EXTENSIONS = (
+        '.uf2', '.hex', '.AppImage', '.tar.zst', '.zip', '.tar.gz', '.tgz',
+        '.elf', '.bin',
+    )
+
+    def _list_firmware_files(self, fw_dir: Path) -> list:
+        """Downloadable artifacts in a firmware-type directory.
+
+        Ordered by DOWNLOAD_EXTENSIONS so the flashable image sorts ahead
+        of debug output, then by name for stability. Deliberately does NOT
+        checksum: this runs on every listing request and hashing a 1 GB Pi
+        bundle to render a download button is not a trade worth making.
+        The per-type info.json already carries a checksum where one
+        matters.
+        """
+        out = []
+        for f in sorted(fw_dir.iterdir(), key=lambda p: p.name):
+            if not f.is_file():
+                continue
+            ext = next((e for e in self.DOWNLOAD_EXTENSIONS
+                        if f.name.endswith(e)), None)
+            if ext is None:
+                continue
+            try:
+                size = f.stat().st_size
+            except OSError:
+                continue
+            out.append({
+                'filename': f.name,
+                'size': size,
+                'ext': ext,
+                'url': f'/api/firmware/{fw_dir.name}/{f.name}',
+            })
+        order = {e: i for i, e in enumerate(self.DOWNLOAD_EXTENSIONS)}
+        out.sort(key=lambda d: (order.get(d['ext'], 99), d['filename']))
+        return out
+
     def _get_firmware_info(self, fw_type: str) -> Optional[Dict[str, Any]]:
         """Get firmware info for a specific type."""
         fw_dir = Path(self.firmware_root) / fw_type
 
         if not fw_dir.is_dir():
             return None
+
+        # `files` is attached in BOTH branches below. Previously a type
+        # with an info.json returned only that file's contents, so the
+        # dashboard had no way to learn what was actually downloadable —
+        # which is most types, since raspberrypi/teensy41/controller all
+        # ship one.
+        files = self._list_firmware_files(fw_dir)
 
         # Look for info.json or version file
         info_file = fw_dir / 'info.json'
@@ -320,11 +371,15 @@ class WebServer:
                     info = json.load(f)
                     # Add computed fields
                     info['type'] = fw_type
+                    info['files'] = files
                     return info
             except Exception as e:
                 self.log('error', f'Failed to read firmware info: {e}')
 
-        # Fallback: scan for firmware files
+        # Fallback: scan for firmware files. Deliberately NOT widened to
+        # DOWNLOAD_EXTENSIONS — this branch checksums every match, and
+        # nothing consumes `packages` today. The `files` list above is
+        # what the download UI reads, and it skips hashing.
         packages = []
         for ext in ['.zip', '.tar.gz', '.tgz', '.elf', '.AppImage']:
             for f in fw_dir.glob(f'*{ext}'):
@@ -343,8 +398,11 @@ class WebServer:
                 'type': fw_type,
                 'packages': packages,
                 'latest': packages[0]['filename'] if packages else None,
+                'files': files,
             }
 
+        if files:
+            return {'type': fw_type, 'files': files}
         return None
 
     def _calculate_checksum(self, file_path: Path) -> str:

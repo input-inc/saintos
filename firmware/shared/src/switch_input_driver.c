@@ -45,6 +45,10 @@ typedef struct {
     uint8_t  on_trip;
 
     char     targets[SWITCH_INPUT_MAX_TARGETS][SWITCH_INPUT_TARGET_ID_LEN];
+    /* Which direction of travel this switch blocks on each target —
+     * SWITCH_BLOCK_*. Per-target because it describes where the switch
+     * sits relative to that axis, which the switch can't know itself. */
+    uint8_t  target_block[SWITCH_INPUT_MAX_TARGETS];
     uint8_t  target_count;
 
     /* Debounce: `raw` is the instantaneous read, `state` only follows it
@@ -66,6 +70,7 @@ static uint32_t last_poll_ms = 0;
  * sync then calls apply_config for that instance immediately after. Same
  * parse-then-apply staging the other drivers use for out-of-band fields. */
 static char    pending_targets[SWITCH_INPUT_MAX_TARGETS][SWITCH_INPUT_TARGET_ID_LEN];
+static uint8_t pending_target_block[SWITCH_INPUT_MAX_TARGETS];
 static uint8_t pending_target_count = 0;
 
 /* ── Assert evaluation ──────────────────────────────────────────── */
@@ -124,12 +129,28 @@ static void fire_trip(switch_unit_t* u)
         return;
     }
     for (uint8_t i = 0; i < u->target_count; i++) {
-        bool ok = peripheral_dispatch_command(u->targets[i], "estop", NULL, NULL);
+        /* Hand the blocked direction to the target so it can refuse
+         * motion INTO the switch while still allowing a retreat. Numeric
+         * so the receiving driver's parse stays trivial — there is no
+         * JSON parser on the MCU. */
+        char args[24];
+        int n = snprintf(args, sizeof(args), "{\"block\":%u}",
+                         (unsigned)u->target_block[i]);
+        const char* a_end = (n > 0 && (size_t)n < sizeof(args))
+                              ? args + n : NULL;
+        bool ok = peripheral_dispatch_command(u->targets[i], "estop",
+                                              a_end ? args : NULL, a_end);
+        const char* dirtext =
+            u->target_block[i] == SWITCH_BLOCK_POSITIVE ? "extend/forward" :
+            u->target_block[i] == SWITCH_BLOCK_NEGATIVE ? "retract/reverse" :
+                                                          "both directions";
         saint_log_publish(ok ? "warn" : "error",
-            ok ? "switch '%s' TRIPPED — stopped '%s'"
+            ok ? "switch '%s' TRIPPED — blocked %s on '%s'"
                : "switch '%s' TRIPPED — could NOT stop '%s' (no driver "
-                 "claimed it, or it has no estop command)",
-            u->peripheral_id, u->targets[i]);
+                 "claimed it, or it has no estop command) [wanted %s]",
+            u->peripheral_id,
+            ok ? dirtext : u->targets[i],
+            ok ? u->targets[i] : dirtext);
     }
 }
 
@@ -291,6 +312,7 @@ static bool drv_apply_config(uint8_t channel, const pin_config_t* config)
     u->target_count = pending_target_count;
     for (uint8_t i = 0; i < pending_target_count; i++) {
         memcpy(u->targets[i], pending_targets[i], SWITCH_INPUT_TARGET_ID_LEN);
+        u->target_block[i] = pending_target_block[i];
     }
     pending_target_count = 0;
 
@@ -369,8 +391,14 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
         config->params.switch_input.on_trip = (uint8_t)v;
     }
 
-    /* targets: ["kangaroo-1","roboclaw-2"] — staged for the
-     * apply_config that follows this parse for the same entry. */
+    /* targets: ["kangaroo-1:+","roboclaw-2:-"] — staged for the
+     * apply_config that follows this parse for the same entry.
+     *
+     * The ":<dir>" suffix is which direction of travel this switch
+     * blocks on that target: "+" extend/forward, "-" retract/reverse,
+     * anything else (including no suffix) means both. Both is the
+     * conservative decode — over-blocking is recoverable, a wrong
+     * direction drives further into the switch. */
     pending_target_count = 0;
     const char* p = strstr(json_start, "\"targets\"");
     if (p && p < json_end) {
@@ -384,10 +412,24 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
                 const char* e = strchr(s, '"');
                 if (!e || e >= json_end) break;
                 size_t len = (size_t)(e - s);
+                /* Split the ":<dir>" suffix off the id. */
+                uint8_t block = SWITCH_BLOCK_BOTH;
+                const char* colon = NULL;
+                for (const char* c = s; c < e; c++) {
+                    if (*c == ':') { colon = c; break; }
+                }
+                if (colon) {
+                    if (colon + 1 < e && *(colon + 1) == '+')
+                        block = SWITCH_BLOCK_POSITIVE;
+                    else if (colon + 1 < e && *(colon + 1) == '-')
+                        block = SWITCH_BLOCK_NEGATIVE;
+                    len = (size_t)(colon - s);
+                }
                 if (len >= SWITCH_INPUT_TARGET_ID_LEN)
                     len = SWITCH_INPUT_TARGET_ID_LEN - 1;
                 memcpy(pending_targets[pending_target_count], s, len);
                 pending_targets[pending_target_count][len] = '\0';
+                pending_target_block[pending_target_count] = block;
                 pending_target_count++;
                 q = e;
                 /* Stop at the closing bracket rather than running on

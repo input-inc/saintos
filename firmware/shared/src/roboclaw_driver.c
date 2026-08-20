@@ -42,6 +42,9 @@
 #include "platform.h"
 #include "saint_log.h"
 #include "uart_pin_pairs.h"
+/* SWITCH_BLOCK_* — the blocked-direction codes a switch_input hands us
+ * with an "estop" command. Shared constants only. */
+#include "switch_input_protocol.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,6 +128,15 @@ typedef struct {
     bool     status_valid;
     uint8_t  status_len;
     char     peripheral_id[32];
+    /* Latched safety interlock, asserted per-instance by a switch_input
+     * trip (see roboclaw_drv_command). Distinct from a plain stop: a
+     * duty-0 is undone by the next routed setpoint, which is not an
+     * interlock. */
+    bool     interlocked;
+    /* Which direction the latched interlock refuses — SWITCH_BLOCK_*.
+     * An end-of-travel switch blocks motion INTO itself and lets the axis
+     * retreat; blocking both would strand it on the switch. */
+    uint8_t  interlock_block;
     /* Dead-man bookkeeping: wallclock of the last EXTERNAL setpoint
      * (roboclaw_set_duty — control message, estop, or dead-man's own
      * zero). The keepalive deliberately does not stamp this: it is
@@ -1321,6 +1333,28 @@ bool roboclaw_set_duty(uint8_t unit, int16_t duty)
         return false;
     }
 
+    /* Latched interlock refuses motion in the blocked direction but never
+     * a stop — roboclaw_stop() comes through here as duty 0, and so does
+     * the dead-man. Refusing those would make the interlock unable to
+     * actually stop anything. Duty carries its direction in its sign, so
+     * no position feedback is involved. */
+    if (units[unit].interlocked && duty != 0) {
+        int dir = (duty > 0) - (duty < 0);
+        bool blocked =
+            units[unit].interlock_block == SWITCH_BLOCK_POSITIVE ? dir > 0 :
+            units[unit].interlock_block == SWITCH_BLOCK_NEGATIVE ? dir < 0 :
+                                                                   true;
+        if (blocked) {
+            saint_log_publish("warn",
+                "RoboClaw: set_duty(unit=%u, %d) refused — interlock blocks "
+                "%s", (unsigned)unit, (int)duty,
+                units[unit].interlock_block == SWITCH_BLOCK_POSITIVE ? "forward"
+              : units[unit].interlock_block == SWITCH_BLOCK_NEGATIVE ? "reverse"
+              : "all motion");
+            return false;
+        }
+    }
+
     if (duty > ROBOCLAW_DUTY_MAX) duty = ROBOCLAW_DUTY_MAX;
     if (duty < ROBOCLAW_DUTY_MIN) duty = ROBOCLAW_DUTY_MIN;
 
@@ -1421,6 +1455,68 @@ void roboclaw_stop_all(void)
     for (uint8_t i = 0; i < ROBOCLAW_MAX_UNITS; i++) {
         roboclaw_set_duty(i, 0);
     }
+}
+
+/* ── Per-instance safety interlock ──────────────────────────────── */
+/*
+ * A switch_input tripping stops the peripherals it names (see
+ * docs/SENSOR_INPUTS.md). Routed by peripheral_id through the command
+ * path rather than the estop() vtable entry, because estop() is
+ * driver-WIDE: one limit switch guarding one axis would otherwise stop
+ * every RoboClaw on the node.
+ *
+ * Latched, not just stopped — a bare duty-0 is undone by the very next
+ * routed setpoint, which is not an interlock.
+ */
+static bool roboclaw_drv_command(const char* peripheral_id, const char* command,
+                                 const char* args_json,
+                                 const char* args_json_end)
+{
+    (void)args_json; (void)args_json_end;
+    if (!peripheral_id || !command) return false;
+
+    for (uint8_t u = 0; u < ROBOCLAW_MAX_UNITS; u++) {
+        if (!units[u].peripheral_id[0]) continue;
+        if (strcmp(units[u].peripheral_id, peripheral_id) != 0) continue;
+
+        if (strcmp(command, "estop") == 0) {
+            /* Optional {"block":N} from a switch_input names the direction
+             * to refuse. Absent means block everything — the conservative
+             * reading, and what a bare operator estop should do. */
+            uint8_t code = SWITCH_BLOCK_BOTH;
+            if (args_json && args_json_end) {
+                const char* p = strstr(args_json, "\"block\"");
+                if (p && p < args_json_end && (p = strchr(p, ':')) != NULL) {
+                    long v = atol(p + 1);
+                    if (v >= 0 && v <= SWITCH_BLOCK_NEGATIVE) code = (uint8_t)v;
+                }
+            }
+            units[u].interlock_block = code;
+            units[u].interlocked = true;
+            (void)roboclaw_stop(u);
+            saint_log_publish("warn",
+                "RoboClaw: '%s' INTERLOCK — stopped; %s blocked until cleared",
+                peripheral_id,
+                code == SWITCH_BLOCK_POSITIVE ? "forward motion"
+              : code == SWITCH_BLOCK_NEGATIVE ? "reverse motion"
+              : "all motion");
+            return true;
+        }
+        if (strcmp(command, "clear_estop") == 0) {
+            if (units[u].interlocked) {
+                units[u].interlocked = false;
+                saint_log_publish("info",
+                    "RoboClaw: '%s' interlock cleared — motion re-enabled",
+                    peripheral_id);
+            }
+            return true;
+        }
+        saint_log_publish("warn",
+            "RoboClaw: '%s' ignoring unknown command '%s'",
+            peripheral_id, command);
+        return true;   /* claimed the peripheral, just not the verb */
+    }
+    return false;      /* not ours — let the manager try the next driver */
 }
 
 /* ── peripheral_driver_t glue ───────────────────────────────────── */
@@ -1777,6 +1873,7 @@ static const peripheral_driver_t roboclaw_peripheral = {
     .set_defaults      = roboclaw_drv_set_defaults,
     .apply_config      = roboclaw_drv_apply_config,
     .parse_json_params = roboclaw_drv_parse_json,
+    .command           = roboclaw_drv_command,
     .estop             = roboclaw_drv_estop,
     .clear_estop       = roboclaw_drv_clear_estop,
     .save_config       = roboclaw_drv_save,

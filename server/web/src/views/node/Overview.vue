@@ -1,7 +1,8 @@
 <script setup>
 import { computed, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useNodesStore } from '@/stores/nodes'
-import { useDisplayStore } from '@/stores/display'
+import { useWsStore } from '@/stores/ws'
 import FirmwareUpdateModal from '@/components/FirmwareUpdateModal.vue'
 import FirmwareUpdateProgress from '@/components/FirmwareUpdateProgress.vue'
 import NodeEditModal from '@/components/NodeEditModal.vue'
@@ -11,8 +12,16 @@ const props = defineProps({
   node:   { type: Object, default: null },
 })
 
-const display = useDisplayStore()
 const nodes = useNodesStore()
+const ws = useWsStore()
+const router = useRouter()
+
+// Node actions used to live on their own Control tab. They're here now:
+// a whole tab for six buttons wasn't paying for itself, and the
+// destructive ones sat a tab away from the identity they act on.
+// CPU/state/last-seen moved the other way — up into the page header, so
+// they follow you across tabs (see NodeDetail.vue).
+const message = ref('')
 
 const fwUpdateAvailable = computed(() =>
   !!(props.node?.firmware_update_available && props.node?.server_firmware_version)
@@ -35,9 +44,51 @@ function formatUptime (seconds) {
   return `${minutes}m`
 }
 
-function formatLastSeen (ts) {
-  if (!ts) return '--'
-  try { return new Date(ts * 1000).toLocaleString() } catch (_) { return '--' }
+async function restartNode () {
+  if (!confirm('Restart this node?')) return
+  try {
+    await ws.management('restart_node', { node_id: props.nodeId })
+    message.value = 'Restarting…'
+  } catch (e) { message.value = e.message || String(e) }
+}
+
+async function identifyNode () {
+  try {
+    await ws.management('identify_node', { node_id: props.nodeId })
+    message.value = 'Identifying…'
+  } catch (e) { message.value = e.message || String(e) }
+}
+
+async function estopNode () {
+  try {
+    await ws.command(props.nodeId, 'estop', {})
+    message.value = 'E-Stop sent'
+  } catch (e) { message.value = e.message || String(e) }
+}
+
+async function updateFirmware () {
+  try {
+    await ws.management('update_firmware', { node_id: props.nodeId })
+    message.value = 'Firmware update started'
+  } catch (e) {
+    // Fall back to the force-firmware modal if the server doesn't
+    // support a one-shot "update to latest available" action.
+    firmwareModalOpen.value = true
+  }
+}
+
+async function factoryResetNode () {
+  if (!confirm(
+    'Factory reset this node?\n\n' +
+    'The node will erase its saved configuration and reboot, ' +
+    'and the server will drop all record of it. ' +
+    'It will reappear in the Unadopted list on its next announcement.'
+  )) return
+  try {
+    await ws.management('remove_node', { node_id: props.nodeId })
+    message.value = 'Factory reset issued'
+    router.push({ name: 'nodes' })
+  } catch (e) { message.value = e.message || String(e) }
 }
 </script>
 
@@ -102,23 +153,56 @@ function formatLastSeen (ts) {
       </div>
     </div>
 
-    <!-- Status card -->
+    <!-- Node actions. Moved here from the old Control tab. -->
     <div class="card">
-      <h3 class="text-lg font-semibold text-fg-strong mb-4">Status</h3>
-      <div class="space-y-4">
-        <div class="stat-item">
-          <span class="stat-label">CPU Temperature</span>
-          <span class="stat-value">{{ display.formatTemperature(node?.cpu_temp) }}</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">State</span>
-          <span class="stat-value">{{ node?.state || 'Unknown' }}</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">Last Seen</span>
-          <span class="stat-value text-sm">{{ formatLastSeen(node?.last_seen) }}</span>
+      <h3 class="text-lg font-semibold text-fg-strong mb-4">Actions</h3>
+      <div class="space-y-3">
+        <button
+          v-if="fwUpdateAvailable"
+          class="btn-primary w-full justify-center"
+          @click="updateFirmware"
+        >
+          <span class="material-icons icon-sm">system_update</span>
+          <span class="update-text">Update Firmware</span>
+          <span v-if="fwAvailableVersion" class="text-xs opacity-75 ml-1">{{ fwAvailableVersion }}</span>
+        </button>
+        <button class="btn-secondary w-full justify-center" @click="restartNode">
+          <span class="material-icons icon-sm">restart_alt</span>
+          Restart Node
+        </button>
+        <button class="btn-secondary w-full justify-center" @click="identifyNode">
+          <span class="material-icons icon-sm">lightbulb</span>
+          Identify (Blink LED)
+        </button>
+        <button class="btn-danger w-full justify-center" @click="estopNode">
+          <span class="material-icons icon-sm">warning</span>
+          Emergency Stop
+        </button>
+      </div>
+
+      <!-- Irreversible actions, kept visually separate from the routine
+           ones above so a mis-click can't wander into a factory reset. -->
+      <div class="mt-5 pt-4 border-t border-line">
+        <h4 class="text-xs uppercase tracking-wide text-fg-faint mb-3">Danger zone</h4>
+        <div class="space-y-3">
+          <button
+            class="btn-secondary w-full justify-center text-cyan-400 border-cyan-500/50 hover:bg-cyan-500/20"
+            @click="firmwareModalOpen = true"
+          >
+            <span class="material-icons icon-sm">system_update</span>
+            Force Firmware Update
+          </button>
+          <button
+            class="btn-secondary w-full justify-center text-amber-400 border-amber-500/50 hover:bg-amber-500/20"
+            @click="factoryResetNode"
+          >
+            <span class="material-icons icon-sm">delete_forever</span>
+            Factory Reset
+          </button>
         </div>
       </div>
+
+      <p v-if="message" class="mt-3 text-xs text-fg-muted">{{ message }}</p>
     </div>
 
     <FirmwareUpdateModal

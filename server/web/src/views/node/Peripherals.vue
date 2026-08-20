@@ -315,6 +315,99 @@ const typesById = computed(() => {
 // so the dashboard's pin/gpio dropdowns flag the same conflicts the
 // upsert path will reject. A param value of 0 is the "no pin" sentinel
 // and is skipped.
+// ── Motion-peripheral target picker (switch_input interlock) ────────
+// Peripherals on this node whose TYPE declares commands_motion — the
+// things worth stopping when a limit switch trips. Excludes the
+// peripheral being edited: a switch can't be its own stop target.
+// Peripherals whose type does NOT implement the per-instance estop verb
+// are listed but disabled, with the reason shown. Omitting them would
+// look like the peripheral doesn't exist; accepting them would build an
+// interlock that logs "could NOT stop" at the worst possible moment.
+const motionPeripherals = computed(() =>
+  peripherals.value
+    .filter(p => {
+      if (modalMode.value === 'edit' && p.id === modalEditingId.value) return false
+      return !!typesById.value[p.type]?.commands_motion
+    })
+    .map(p => {
+      const t = typesById.value[p.type]
+      return {
+        ...p,
+        typeLabel: t?.label || p.type,
+        supported: !!t?.supports_interlock,
+      }
+    })
+    // Selectable ones first so the operator isn't hunting past
+    // greyed-out rows.
+    .sort((a, b) => (b.supported ? 1 : 0) - (a.supported ? 1 : 0)))
+
+// Interlock targets are stored as a comma-separated string of
+// "<id>:<dir>" entries, because that's what the firmware parser reads.
+// `dir` is which direction of travel this switch blocks on that target:
+//   '+'  extend / forward
+//   '-'  retract / reverse
+//   ''   direction not yet chosen (blocks everything — see below)
+//
+// Direction is per-target because it describes where the switch sits
+// relative to that axis, which the switch itself can't know.
+function motionTargetsOf (paramId) {
+  const raw = modalParams.value[paramId]
+  const items = Array.isArray(raw)
+    ? raw
+    : String(raw || '').split(',')
+  return items.map(s => String(s).trim()).filter(Boolean).map(entry => {
+    const i = entry.lastIndexOf(':')
+    if (i < 0) return { id: entry, dir: '' }
+    const dir = entry.slice(i + 1)
+    return { id: entry.slice(0, i), dir: (dir === '+' || dir === '-') ? dir : '' }
+  })
+}
+function writeMotionTargets (paramId, list) {
+  modalParams.value[paramId] =
+    list.map(t => (t.dir ? `${t.id}:${t.dir}` : t.id)).join(',')
+}
+function motionTargetChecked (paramId, pid) {
+  return motionTargetsOf(paramId).some(t => t.id === pid)
+}
+function motionTargetDir (paramId, pid) {
+  return motionTargetsOf(paramId).find(t => t.id === pid)?.dir || ''
+}
+// Mirrors SWITCH_INPUT_MAX_TARGETS in the firmware — over that the
+// server truncates on the way to the wire, so refusing here means the
+// operator sees the limit instead of silently losing a target.
+const MOTION_TARGET_MAX = 4
+function toggleMotionTarget (paramId, pid, on) {
+  const cur = motionTargetsOf(paramId)
+  if (on) {
+    if (cur.some(t => t.id === pid)) return
+    if (cur.length >= MOTION_TARGET_MAX) return
+    // Deliberately no default direction. There is no safe guess: if the
+    // switch is at the retract end and we defaulted to blocking extend,
+    // the first trip would let the axis drive further INTO the switch.
+    // Save is blocked until the operator picks — see motionTargetsUnset.
+    writeMotionTargets(paramId, [...cur, { id: pid, dir: '' }])
+  } else {
+    writeMotionTargets(paramId, cur.filter(t => t.id !== pid))
+  }
+}
+function setMotionTargetDir (paramId, pid, dir) {
+  writeMotionTargets(paramId,
+    motionTargetsOf(paramId).map(t => (t.id === pid ? { ...t, dir } : t)))
+}
+// Targets checked but with no direction chosen. Save is refused while
+// any exist, rather than silently persisting a block-everything target
+// the operator didn't ask for.
+const motionTargetsUnset = computed(() => {
+  const out = []
+  for (const p of (modalType.value?.params || [])) {
+    if (p.type !== 'motion_peripherals') continue
+    for (const t of motionTargetsOf(p.id)) {
+      if (!t.dir) out.push(t.id)
+    }
+  }
+  return out
+})
+
 const claimedPins = computed(() => {
   const out = {}
   for (const p of peripherals.value) {
@@ -520,6 +613,16 @@ async function saveModal () {
   modalError.value = ''
   const type = typesById.value[modalTypeId.value]
   if (!type) { modalError.value = 'Pick a type'; return }
+
+  // Every interlock target needs an explicit direction. Saving without
+  // one would persist a target that blocks ALL motion — which strands
+  // the axis on the switch — and it would look like a deliberate
+  // setting rather than an unanswered question.
+  if (motionTargetsUnset.value.length) {
+    modalError.value =
+      `Pick which end the switch is at for: ${motionTargetsUnset.value.join(', ')}`
+    return
+  }
 
   // Drop params hidden by `visible_when` from the saved payload so
   // stale values (e.g. a MAC entered before switching transport
@@ -964,6 +1067,86 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
               @input="(e) => modalParams[p.id] = (p.type === 'int' ? parseInt : parseFloat)(e.target.value) || 0"
               class="input-field w-full"
             />
+            <!--
+              motion_peripherals: a checklist of the motion-capable
+              peripherals on this node. A freeform id list was too easy
+              to typo, and a typo'd interlock target fails silently at
+              exactly the wrong moment — the firmware logs "could NOT
+              stop" and the axis keeps going.
+            -->
+            <div v-else-if="p.type === 'motion_peripherals'" class="space-y-2">
+              <div v-for="mp in motionPeripherals" :key="mp.id">
+                <label
+                  class="flex items-center gap-2 text-sm"
+                  :class="mp.supported
+                    ? 'text-fg cursor-pointer'
+                    : 'text-fg-faint cursor-not-allowed'"
+                  :title="mp.supported ? '' :
+                    `${mp.typeLabel} can't be stopped individually yet — its firmware driver has no per-instance estop`"
+                >
+                  <input
+                    type="checkbox"
+                    class="rounded bg-surface border-line-strong"
+                    :checked="motionTargetChecked(p.id, mp.id)"
+                    :disabled="!mp.supported
+                               || (!motionTargetChecked(p.id, mp.id)
+                                   && motionTargetsOf(p.id).length >= MOTION_TARGET_MAX)"
+                    @change="(e) => toggleMotionTarget(p.id, mp.id, e.target.checked)"
+                  />
+                  <span>{{ mp.label || mp.id }}</span>
+                  <span class="text-xs text-fg-faint">
+                    {{ mp.typeLabel }} · <span class="font-mono">{{ mp.id }}</span>
+                  </span>
+                  <span v-if="!mp.supported"
+                        class="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-2 text-fg-faint border border-line">
+                    not stoppable yet
+                  </span>
+                </label>
+                <!-- Which direction this switch blocks on this target.
+                     No default is pre-selected on purpose: there is no
+                     safe guess, and a wrong direction lets the axis drive
+                     further INTO the switch. -->
+                <div v-if="motionTargetChecked(p.id, mp.id)"
+                     class="ml-6 mt-1 flex flex-wrap items-center gap-3 text-xs">
+                  <span class="text-fg-muted">Switch is at the:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer">
+                    <input type="radio" class="accent-cyan-500"
+                           :name="`dir-${p.id}-${mp.id}`"
+                           :checked="motionTargetDir(p.id, mp.id) === '+'"
+                           @change="setMotionTargetDir(p.id, mp.id, '+')" />
+                    <span :class="motionTargetDir(p.id, mp.id) === '+' ? 'text-fg-strong' : 'text-fg-muted'">
+                      extend / forward end
+                    </span>
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer">
+                    <input type="radio" class="accent-cyan-500"
+                           :name="`dir-${p.id}-${mp.id}`"
+                           :checked="motionTargetDir(p.id, mp.id) === '-'"
+                           @change="setMotionTargetDir(p.id, mp.id, '-')" />
+                    <span :class="motionTargetDir(p.id, mp.id) === '-' ? 'text-fg-strong' : 'text-fg-muted'">
+                      retract / reverse end
+                    </span>
+                  </label>
+                  <span v-if="!motionTargetDir(p.id, mp.id)" class="text-amber-300">
+                    ← pick which end
+                  </span>
+                  <span v-else class="text-fg-faint">
+                    blocks
+                    {{ motionTargetDir(p.id, mp.id) === '+' ? 'extend' : 'retract' }};
+                    the axis can still back off
+                  </span>
+                </div>
+              </div>
+              <p v-if="!motionPeripherals.length" class="text-xs text-fg-faint italic">
+                No motion peripherals on this node yet — add a motor,
+                servo, or actuator first.
+              </p>
+              <p v-else-if="motionTargetsOf(p.id).length >= MOTION_TARGET_MAX"
+                 class="text-xs text-amber-300">
+                {{ MOTION_TARGET_MAX }}-target limit reached (firmware
+                stores no more than that).
+              </p>
+            </div>
             <input
               v-else
               type="text"
