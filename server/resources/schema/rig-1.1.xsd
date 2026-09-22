@@ -1,0 +1,398 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SAINT.OS rig file, version 1.1.
+
+  1.1 adds widget geometry (shape enum, per-axis scale, offset, rotation,
+  drag axis, visibility) so controls can be drawn and grabbed in the 3D
+  view. Purely additive: every 1.0 document is still valid, and the
+  namespace stays at :1.0 for that reason.
+
+  Companion schema for robot.rig.xml — the control layer that sits on top
+  of a URDF (structure) and an SRDF (groups + named poses). Full element
+  reference and design rationale: docs/RIG_SCHEMA.md
+
+  What this schema is for: making the format checkable by someone who
+  isn't us. A private vocabulary becomes legitimate in this ecosystem
+  through a published schema and a spec document, not through permission
+  from an existing tool. Drake's <drake:*> and Gazebo's <gazebo> subtree
+  are in exactly this category.
+
+  Note that the runtime parser (saint_server/animation/rig.py) matches on
+  LOCAL names and does not require the namespace, so a hand-authored file
+  without an xmlns still loads. Validate against this schema to catch
+  structural mistakes early; the parser's own validate() additionally
+  cross-checks every joint, link, and pose reference against the URDF and
+  SRDF, which no XSD can do.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:rig="urn:saintos:rig:1.0"
+           targetNamespace="urn:saintos:rig:1.0"
+           elementFormDefault="qualified"
+           attributeFormDefault="unqualified">
+
+  <!-- ── simple types ────────────────────────────────────────────── -->
+
+  <xs:simpleType name="controlKind">
+    <xs:annotation>
+      <xs:documentation>
+        channel — one scalar, renders as a slider.
+        pad     — two scalars, renders as an XY pad (eye look).
+        spatial — a 3D point in an anchor frame, renders as a gizmo;
+                  requires a gaze binding.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="channel"/>
+      <xs:enumeration value="pad"/>
+      <xs:enumeration value="spatial"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="clampPolicy">
+    <xs:annotation>
+      <xs:documentation>
+        clamp      — each joint stops independently at its limit; the pose
+                     breaks at the extremes.
+        scale_back — the whole frame's delta scales back by the worst
+                     offender, so the pose saturates as a unit.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="clamp"/>
+      <xs:enumeration value="scale_back"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="axisName">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="x"/>
+      <xs:enumeration value="y"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="widgetKind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="slider"/>
+      <xs:enumeration value="pad"/>
+      <xs:enumeration value="gizmo"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="widgetShape">
+    <xs:annotation>
+      <xs:documentation>
+        Control shapes drawable in the 3D view. A closed set on purpose:
+        a shape name that silently fell back to a sphere would leave an
+        operator wondering why their arrow never appeared.
+
+        Chosen for the interaction vocabulary rather than to mirror
+        Unreal's full library — a ring for rotation, an arrow for a
+        single axis, a plane for two, a sphere or box for a position,
+        and a wedge for a bounded sweep.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="sphere"/>
+      <xs:enumeration value="box"/>
+      <xs:enumeration value="circle"/>
+      <xs:enumeration value="ring"/>
+      <xs:enumeration value="cylinder"/>
+      <xs:enumeration value="cone"/>
+      <xs:enumeration value="arrow"/>
+      <xs:enumeration value="diamond"/>
+      <xs:enumeration value="torus"/>
+      <xs:enumeration value="wedge"/>
+      <xs:enumeration value="plane"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="scale1or3">
+    <xs:annotation>
+      <xs:documentation>
+        One number (uniform) or three (per-axis), so a ring can be
+        flattened or an arrow stretched.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="\s*[+\-]?[0-9.eE+\-]+([,\s]+[+\-]?[0-9.eE+\-]+){0,2}\s*"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="version">
+    <xs:annotation>
+      <xs:documentation>
+        MAJOR.MINOR. The parser rejects a higher MAJOR outright rather
+        than best-effort parsing it: an unknown control kind dropped in
+        silence is worse than a load error an operator can see. A higher
+        MINOR loads fine, so additive changes stay backward-compatible.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9]+\.[0-9]+"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="easingName">
+    <xs:annotation>
+      <xs:documentation>
+        A name from the shared easing catalog — the same one the animation
+        timeline uses, so the two can never diverge. Derived mechanically
+        from CurveInterpolation in saint_server/unreal/animation.py.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="constant|linear|cubic|ease|easeIn|easeOut|easeInOut|ease(In|Out|InOut)(Sine|Quad|Cubic|Quart|Quint|Expo|Circ|Back|Elastic|Bounce)"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="vec3">
+    <xs:annotation>
+      <xs:documentation>Three numbers, space- or comma-separated.</xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="\s*[+\-]?[0-9.eE+\-]+([,\s]+[+\-]?[0-9.eE+\-]+){2}\s*"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="rgbaColor">
+    <xs:annotation>
+      <xs:documentation>Three or four numbers in 0..1.</xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="\s*[+\-]?[0-9.eE+\-]+([,\s]+[+\-]?[0-9.eE+\-]+){2,3}\s*"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="nameList">
+    <xs:annotation>
+      <xs:documentation>Space- or comma-separated joint names.</xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:minLength value="1"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ── binding elements (contract) ─────────────────────────────── -->
+
+  <xs:complexType name="drive">
+    <xs:annotation>
+      <xs:documentation>
+        Drive a joint directly from the control's value:
+          contribution = curve(deflection) * sign * scale + offset
+        in NORMALIZED joint space (-1..+1), where scale reads as
+        "fraction of this joint's travel at full deflection".
+      </xs:documentation>
+    </xs:annotation>
+    <xs:attribute name="joint" type="xs:string" use="required"/>
+    <xs:attribute name="scale" type="xs:double" default="1.0"/>
+    <xs:attribute name="offset" type="xs:double" default="0.0"/>
+    <xs:attribute name="curve" type="rig:easingName" default="linear"/>
+  </xs:complexType>
+
+  <xs:complexType name="target">
+    <xs:annotation>
+      <xs:documentation>
+        Blend toward a named pose (an SRDF group_state, or a pose saved in
+        the UI) reached at control value `at`. Targets make a control a 1D
+        blend space: with mad at -1 and happy at +1, one slider covers
+        both and they can never be active at once. The curve belongs to
+        the target being approached, so each half can ease differently.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:attribute name="pose" type="xs:string" use="required"/>
+    <xs:attribute name="at" type="xs:double" default="1.0"/>
+    <xs:attribute name="curve" type="rig:easingName" default="linear"/>
+  </xs:complexType>
+
+  <xs:complexType name="axis">
+    <xs:annotation>
+      <xs:documentation>
+        One axis of a pad control, with its own bindings. Callers address
+        axes as "&lt;control&gt;.&lt;axis&gt;".
+      </xs:documentation>
+    </xs:annotation>
+    <!-- Order-free: the parser collects by element name, so requiring a
+         sequence here would reject valid files for no reason. -->
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="drive" type="rig:drive"/>
+      <xs:element name="target" type="rig:target"/>
+    </xs:choice>
+    <xs:attribute name="name" type="rig:axisName" use="required"/>
+    <xs:attribute name="min" type="xs:double" default="-1.0"/>
+    <xs:attribute name="max" type="xs:double" default="1.0"/>
+    <xs:attribute name="default" type="xs:double" default="0.0"/>
+  </xs:complexType>
+
+  <xs:complexType name="gazeFrame">
+    <xs:annotation>
+      <xs:documentation>
+        A frame participating in the gaze solve. `axis` is the
+        frame-local forward direction. Weight sets how hard this frame
+        competes: strong on the eyes, weak on the head, and the head
+        follows.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:attribute name="link" type="xs:string" use="required"/>
+    <xs:attribute name="axis" type="rig:vec3" default="0 0 1"/>
+    <xs:attribute name="weight" type="xs:double" default="1.0"/>
+  </xs:complexType>
+
+  <xs:complexType name="regularize">
+    <xs:annotation>
+      <xs:documentation>
+        A posture task pulling joints back toward centre. This is what
+        produces eyes-lead-head-follows with two weights instead of a
+        curve per joint.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:attribute name="joints" type="rig:nameList" use="required"/>
+    <xs:attribute name="weight" type="xs:double" default="0.05"/>
+  </xs:complexType>
+
+  <xs:complexType name="gaze">
+    <xs:annotation>
+      <xs:documentation>
+        A look-at binding: a 2-DOF residual per frame, NOT a 6-DOF pose
+        goal. A full orientation target pins roll about the gaze axis and
+        forces an arbitrary head tilt as a side effect.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="frame" type="rig:gazeFrame" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="regularize" type="rig:regularize" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- ── presentation (never read by the evaluator) ──────────────── -->
+
+  <xs:complexType name="widget">
+    <xs:annotation>
+      <xs:documentation>
+        Presentation hints ONLY. Cosmetic by contract: a scripted
+        performance, a CLI, a test harness, or recorded playback needs the
+        bindings and has no use for a colour. `dofs` mirrors
+        visualization_msgs/InteractiveMarkerControl's interaction_mode
+        vocabulary, so a spatial control instantiates as a ROS interactive
+        marker without a translation table.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:attribute name="kind" type="rig:widgetKind"/>
+    <xs:attribute name="shape" type="rig:widgetShape"/>
+    <xs:attribute name="scale" type="rig:scale1or3" default="0.05"/>
+    <xs:attribute name="color" type="rig:rgbaColor" default="1 0.7 0 0.8"/>
+    <xs:attribute name="offset" type="rig:vec3" default="0 0 0">
+      <xs:annotation>
+        <xs:documentation>
+          Position within the ANCHOR LINK's frame, so the shape follows
+          the joint it belongs to for free.
+        </xs:documentation>
+      </xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="rotation" type="rig:vec3" default="0 0 0">
+      <xs:annotation>
+        <xs:documentation>Roll pitch yaw, radians, in the anchor's frame.</xs:documentation>
+      </xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="axis" type="rig:vec3" default="1 0 0">
+      <xs:annotation>
+        <xs:documentation>
+          Drag direction for a channel control, in the widget's own
+          (post-rotation) frame. Pointer motion is projected onto this
+          axis on screen and mapped to the control's min..max — that's
+          what gives a scalar spatial meaning instead of leaving it a
+          slider bolted into 3D space.
+        </xs:documentation>
+      </xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="dofs" type="xs:string" default="move_3d"/>
+    <xs:attribute name="invert_y" type="xs:boolean" default="false"/>
+    <xs:attribute name="visible" type="xs:boolean" default="true">
+      <xs:annotation>
+        <xs:documentation>
+          Draw this control in the 3D view at all. A control only ever
+          driven by an animation doesn't need a handle cluttering the
+          viewport but still wants its slider in the panel.
+        </xs:documentation>
+      </xs:annotation>
+    </xs:attribute>
+  </xs:complexType>
+
+  <!-- ── controls ───────────────────────────────────────────────── -->
+
+  <xs:complexType name="control">
+    <xs:annotation>
+      <xs:documentation>
+        Shape rules this schema cannot express, checked by
+        Rig.validate() instead:
+          * kind=channel needs at least one drive or target
+          * kind=pad     needs at least one axis
+          * kind=spatial needs a gaze binding and an anchor
+          * min &lt; max, and min &lt;= default &lt;= max
+          * no two targets share the same `at` (zero-width segment)
+        Deflection is measured outward from `default`, so a control
+        contributes nothing at rest.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <!-- Binding elements are order-free; only <widget> is pinned last,
+           to keep the contract/presentation split visible in the file. -->
+      <xs:choice minOccurs="0" maxOccurs="unbounded">
+        <xs:element name="target" type="rig:target"/>
+        <xs:element name="drive" type="rig:drive"/>
+        <xs:element name="axis" type="rig:axis"/>
+        <xs:element name="gaze" type="rig:gaze"/>
+      </xs:choice>
+      <xs:element name="widget" type="rig:widget" minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="kind" type="rig:controlKind" default="channel"/>
+    <xs:attribute name="label" type="xs:string"/>
+    <xs:attribute name="group" type="xs:string"/>
+    <xs:attribute name="order" type="xs:integer" default="0"/>
+    <xs:attribute name="min" type="xs:double" default="-1.0"/>
+    <xs:attribute name="max" type="xs:double" default="1.0"/>
+    <xs:attribute name="default" type="xs:double" default="0.0"/>
+    <xs:attribute name="anchor" type="xs:string">
+      <xs:annotation>
+        <xs:documentation>
+          URDF link this control's shape hangs off. Required for
+          kind="spatial"; optional elsewhere, where it is DERIVED from the
+          first joint the control drives. Deriving is what lets a rig file
+          written before widget geometry existed still draw in the
+          viewport instead of silently showing nothing.
+        </xs:documentation>
+      </xs:annotation>
+    </xs:attribute>
+  </xs:complexType>
+
+  <xs:complexType name="settings">
+    <xs:attribute name="clamp" type="rig:clampPolicy" default="scale_back"/>
+    <xs:attribute name="neutral_pose" type="xs:string"/>
+  </xs:complexType>
+
+  <!-- ── document root ──────────────────────────────────────────── -->
+
+  <xs:element name="rig">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="settings" type="rig:settings" minOccurs="0"/>
+        <xs:element name="control" type="rig:control" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:attribute name="version" type="rig:version" use="required"/>
+      <xs:attribute name="robot" type="xs:string">
+        <xs:annotation>
+          <xs:documentation>
+            Must match the URDF's &lt;robot name&gt;. Every joint, link,
+            and pose named anywhere in this file is a dangling reference
+            without that URDF.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:attribute>
+    </xs:complexType>
+    <xs:unique name="uniqueControlName">
+      <xs:selector xpath="rig:control"/>
+      <xs:field xpath="@name"/>
+    </xs:unique>
+  </xs:element>
+
+</xs:schema>

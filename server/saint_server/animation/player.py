@@ -17,6 +17,11 @@ import asyncio
 import time
 from typing import Awaitable, Callable, Dict, List, Optional
 
+from saint_server.animation.frame import (
+    PoseLookup,
+    relaxed_frame,
+    resolve_frame,
+)
 from saint_server.animation.models import (
     Animation,
     TriggerKeyframe,
@@ -77,6 +82,8 @@ class AnimationPlayer:
         send_peripheral_command: Optional[SendPeripheralCommand] = None,
         apply_frame: Optional[ApplyFrame] = None,
         on_finished: Optional[Callable[[str], None]] = None,
+        pose_lookup: Optional[PoseLookup] = None,
+        neutral: Optional[Dict[str, float]] = None,
         logger=None,
     ):
         self.anim = anim
@@ -87,6 +94,12 @@ class AnimationPlayer:
         self._send_peripheral_command = send_peripheral_command
         self._estop_active = estop_active
         self._on_finished = on_finished
+        # Pose tracks resolve their weight curve against a pose's joint
+        # values; without a lookup they contribute nothing. `neutral` is
+        # the base a pose blends up from on untouched joints — the rig's
+        # neutral pose when there is one, else implicit zeros.
+        self._pose_lookup = pose_lookup
+        self._neutral = neutral or {}
         self.logger = logger
 
         self._t = 0.0
@@ -121,10 +134,33 @@ class AnimationPlayer:
             except Exception:
                 pass
         self._task = None
-        # Drop cached values so downstream peripherals settle at neutral
-        # rather than holding the last animation frame indefinitely.
-        for track in self.anim.value_tracks:
-            self._dispatch_value(track, 0.0)
+        # Drive every target this animation touches back to neutral, so
+        # downstream peripherals settle rather than holding the last
+        # frame indefinitely. Note this is NOT "resolve the frame with
+        # zero weights" — a pose track at weight 0 contributes nothing,
+        # which would strand the joints it was moving. See
+        # frame.relaxed_frame.
+        joint_values, ws_values = relaxed_frame(
+            self.anim, pose_lookup=self._pose_lookup, neutral=self._neutral)
+        if not joint_values and not ws_values:
+            return
+        if self._apply_frame is not None:
+            try:
+                self._apply_frame(joint_values, ws_values)
+            except Exception as e:
+                self._log("error", f"relax frame {self.anim.id} failed: {e}")
+            return
+        for joint, value in joint_values.items():
+            try:
+                self._set_urdf_joint_value(joint, value)
+            except Exception as e:
+                self._log("warn", f"relax joint {joint} failed: {e}")
+        for (sheet_id, input_id), value in ws_values.items():
+            try:
+                self._set_ws_input(sheet_id, input_id, value)
+            except Exception as e:
+                self._log("warn",
+                          f"relax ws {sheet_id}/{input_id} failed: {e}")
 
     @property
     def is_running(self) -> bool:
@@ -199,58 +235,46 @@ class AnimationPlayer:
                     self._log("error", f"on_finished callback failed: {e}")
 
     def _tick_value_tracks(self, t: float) -> None:
-        # Fast path: batch every track's sampled value into ONE evaluator
-        # call so the shared sheet is evaluated once and the UI snapshot
-        # broadcast once per frame — not once per track. Falls back to
-        # per-track dispatch when no batch callable is wired.
-        if self._apply_frame is None:
-            for track in self.anim.value_tracks:
-                try:
-                    self._dispatch_value(track, track.value_at(t))
-                except Exception as e:
-                    self._log("warn",
-                              f"value-track {self.anim.id}/{track.id} failed: {e}")
+        """Resolve one frame and push it into the routing graph.
+
+        Resolution (including pose-track layering, which is order
+        dependent) lives in ``frame.resolve_frame`` so the player, the
+        editor's Live Preview, and the client's 3D viewport can't drift
+        apart on what a frame means.
+        """
+        joint_values, ws_values = resolve_frame(
+            self.anim, t,
+            pose_lookup=self._pose_lookup,
+            neutral=self._neutral,
+            on_error=lambda track_id, e: self._log(
+                "warn", f"value-track {self.anim.id}/{track_id} failed: {e}"),
+        )
+        if not joint_values and not ws_values:
             return
 
-        joint_values: Dict[str, float] = {}
-        ws_values: Dict = {}
-        for track in self.anim.value_tracks:
-            try:
-                v = track.value_at(t)
-            except Exception as e:
-                self._log("warn",
-                          f"value-track {self.anim.id}/{track.id} failed: {e}")
-                continue
-            if getattr(track, "target_kind", "urdf_joint") == "ws_input":
-                target = getattr(track, "target", None) or []
-                if len(target) >= 2:
-                    ws_values[(target[0], target[1])] = v
-            else:
-                joint_values[track.id] = v
-
-        if joint_values or ws_values:
+        # Fast path: batch the whole frame into ONE evaluator call so the
+        # shared sheet is evaluated once and the UI snapshot broadcast
+        # once per frame — not once per track.
+        if self._apply_frame is not None:
             try:
                 self._apply_frame(joint_values, ws_values)
             except Exception as e:
                 self._log("error",
                           f"apply_animation_frame {self.anim.id} failed: {e}")
+            return
 
-    def _dispatch_value(self, track, v: float) -> None:
-        """Push a sampled value-track value to its bound target.
-
-        Mirrors the trigger-track target model: ``ws_input`` tracks fan
-        out via set_ws_input (no URDF needed); everything else defaults
-        to the legacy urdf_joint path where the track id is the joint
-        name.
-        """
-        if getattr(track, "target_kind", "urdf_joint") == "ws_input":
-            target = getattr(track, "target", None) or []
-            if len(target) >= 2:
-                self._set_ws_input(target[0], target[1], v)
-        else:
-            # urdf_joint (default): track id IS the joint name — see the
-            # SetUrdfJointValue docstring above.
-            self._set_urdf_joint_value(track.id, v)
+        # Per-setpoint fallback for registries without the batch call.
+        for joint, value in joint_values.items():
+            try:
+                self._set_urdf_joint_value(joint, value)
+            except Exception as e:
+                self._log("warn", f"set_urdf_joint_value {joint} failed: {e}")
+        for (sheet_id, input_id), value in ws_values.items():
+            try:
+                self._set_ws_input(sheet_id, input_id, value)
+            except Exception as e:
+                self._log("warn",
+                          f"set_ws_input {sheet_id}/{input_id} failed: {e}")
 
     def _fire_triggers(self, t_prev: float, t_now: float) -> None:
         if t_now <= t_prev:
@@ -362,6 +386,8 @@ class AnimationPlayerRegistry:
         estop_active: EstopGate,
         send_peripheral_command: Optional[SendPeripheralCommand] = None,
         apply_frame: Optional[ApplyFrame] = None,
+        pose_source: Optional[Callable[[], PoseLookup]] = None,
+        neutral_source: Optional[Callable[[], Dict[str, float]]] = None,
         logger=None,
     ):
         self._set_urdf_joint_value = set_urdf_joint_value
@@ -370,6 +396,11 @@ class AnimationPlayerRegistry:
         self._apply_frame = apply_frame
         self._send_peripheral_command = send_peripheral_command
         self._estop_active = estop_active
+        # Factories, not values: each playback gets a fresh pose lookup
+        # (and so a fresh cache), which is what makes a pose edited
+        # between runs take effect on the next start.
+        self._pose_source = pose_source
+        self._neutral_source = neutral_source
         self.logger = logger
         self._players: Dict[str, AnimationPlayer] = {}
 
@@ -388,6 +419,8 @@ class AnimationPlayerRegistry:
             apply_frame=self._apply_frame,
             estop_active=self._estop_active,
             on_finished=self._on_player_finished,
+            pose_lookup=self._pose_source() if self._pose_source else None,
+            neutral=self._neutral_source() if self._neutral_source else None,
             logger=self.logger,
         )
         self._players[anim.id] = player

@@ -200,6 +200,78 @@ def _easings_net_at(code: int, t: float) -> float:
     return t
 
 
+def ease_at(code: int, t: float) -> float:
+    """Sample the easing identified by ``code`` at progress ``t``.
+
+    Returns the eased progress in [0, 1] — a pure shaping function with
+    no keyframe values involved, which is what makes it reusable
+    outside the timeline. The rig evaluator needs exactly this: a
+    control's ``curve=`` shapes how its value ramps into a joint, with
+    no curve keys anywhere in sight.
+
+    CONSTANT holds at 0 until the segment completes (it has no
+    meaningful mid-segment value), and CUBIC degrades to linear here
+    because Hermite interpolation needs the surrounding keys' tangents,
+    which a standalone easing has no access to. Unknown codes fall back
+    to linear so both the timeline and the rig stay forward-compatible
+    with future catalog entries.
+    """
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    if code == int(CurveInterpolation.CONSTANT):
+        return 0.0
+    cp = _EASING_BEZIERS.get(code)
+    if cp is not None:
+        return _cubic_bezier_at_time(t, cp[0], cp[1], cp[2], cp[3])
+    if 10 <= code <= 39:
+        return _easings_net_at(code, t)
+    return t
+
+
+def _js_easing_name(enum_name: str) -> str:
+    """``EASE_IN_OUT_SINE`` → ``easeInOutSine``.
+
+    The Vue catalog in ``src/composables/easings.js`` is the canonical
+    name list, and it's camelCase. Deriving the names from the enum
+    rather than hand-maintaining a second table means a new easing can
+    never be spelled differently on the two sides.
+    """
+    head, *rest = enum_name.lower().split("_")
+    return head + "".join(part.capitalize() for part in rest)
+
+
+# Easing name → integer code, matching the `name` field of each entry
+# in src/composables/easings.js. The rig file spells curves by name
+# (`curve="easeInOut"`) because a hand-authored XML attribute reading
+# `curve="6"` is unreviewable.
+EASING_NAME_TO_CODE = {
+    _js_easing_name(m.name): int(m.value) for m in CurveInterpolation
+}
+EASING_CODE_TO_NAME = {v: k for k, v in EASING_NAME_TO_CODE.items()}
+
+
+def easing_code(name: str, default: int = int(CurveInterpolation.LINEAR)) -> int:
+    """Resolve an easing name to its code, case-insensitively.
+
+    Falls back to ``default`` (linear) for an unknown name so a typo in
+    a rig file costs a slightly wrong feel rather than a failed load.
+    Callers that need to report the typo should check membership in
+    EASING_NAME_TO_CODE first.
+    """
+    if not name:
+        return default
+    exact = EASING_NAME_TO_CODE.get(name)
+    if exact is not None:
+        return exact
+    lowered = name.strip().lower()
+    for known, code in EASING_NAME_TO_CODE.items():
+        if known.lower() == lowered:
+            return code
+    return default
+
+
 @dataclass
 class CurveKey:
     """A single keyframe in an animation curve."""
@@ -263,21 +335,14 @@ class AnimationCurve:
                     return (h1 * k0.value + h2 * k1.value +
                             h3 * k0.leave_tangent * dt +
                             h4 * k1.arrive_tangent * dt)
-                # CSS easing presets — cubic-bezier evaluated at the
-                # normalized segment progress `t`, scaled into the
-                # segment's value span.
-                cp = _EASING_BEZIERS.get(k0.interp)
-                if cp is not None:
-                    y = _cubic_bezier_at_time(t, cp[0], cp[1], cp[2], cp[3])
-                    return k0.value + y * (k1.value - k0.value)
-                # easings.net catalog (codes 10-39).
-                code = int(k0.interp)
-                if 10 <= code <= 39:
-                    y = _easings_net_at(code, t)
-                    return k0.value + y * (k1.value - k0.value)
-                # Unknown interp — fall back to linear so playback
-                # never silently jumps to zero on legacy data.
-                return k0.value + t * (k1.value - k0.value)
+                # Everything else — CSS presets (codes 3-6) and the
+                # easings.net catalog (10-39) — is a pure shaping
+                # function of the normalized segment progress, so it
+                # goes through the same sampler the rig evaluator uses.
+                # ease_at falls back to linear on unknown codes, so
+                # legacy data never silently jumps to zero.
+                y = ease_at(int(k0.interp), t)
+                return k0.value + y * (k1.value - k0.value)
 
         return self.keys[-1].value
 

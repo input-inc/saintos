@@ -793,6 +793,19 @@ class StateManager:
         self.pose_store = PoseStore(self.config_dir, logger=self.logger)
         self.sound_store = SoundStore(self.config_dir, logger=self.logger)
         self._animation_registry = None
+        # Cached rig evaluator + the pose generation that invalidates it.
+        # See _rig_evaluator: rebuilding parses the URDF, so it must not
+        # happen per slider tick.
+        self._rig_eval_cache = None
+        self._rig_eval_key = None
+        self._pose_generation = 0
+        # Robot model store (URDF + SRDF + rig). Owned and constructed by
+        # http_server, which injects it here — we need it to resolve
+        # group_state imports, convert SRDF radians to the normalized
+        # −1..+1 the pose library stores, and evaluate the rig. Left None
+        # in headless/test setups that never serve HTTP, so every reader
+        # has to tolerate its absence.
+        self.robot_store = None
 
         # Chip + board YAML catalog. Replaces the firmware-emitted
         # capability JSON as the source of truth for "what pins this
@@ -2430,40 +2443,36 @@ class StateManager:
         except (KeyError, ValueError, TypeError) as e:
             return {"success": False, "message": f"Invalid pose payload: {e}"}
         saved = self.pose_store.save(pose)
+        self.invalidate_rig_cache()
         return {"success": True, "pose": saved.to_dict()}
 
     def delete_pose(self, pose_id: str) -> Dict[str, Any]:
         if not self.pose_store.delete(pose_id):
             return {"success": False, "message": "Pose not found"}
+        self.invalidate_rig_cache()
         return {"success": True}
 
     def apply_pose(self, pose_id: str) -> Dict[str, Any]:
-        """Fan out a pose's setpoints into the routing evaluator's
-        WS-input cache. Each setpoint becomes a one-shot
-        ``set_ws_input(sheet, input, value)`` call — the same path the
-        controller gamepad bindings use, so peripheral routing applies
-        identically.
+        """Fan out a pose's setpoints into the routing evaluator.
+
+        Two address spaces, matching PoseSetpoint.target_kind:
+          * ``ws_input`` → ``set_ws_input(sheet, input, value)``, the
+            same path the controller gamepad bindings use, so peripheral
+            routing applies identically.
+          * ``joint`` → ``set_urdf_joint_value(joint, value)``, the path
+            animation value tracks use. This is what SRDF group_state
+            imports produce.
+
+        Both go through ``apply_animation_frame`` when available so the
+        whole pose costs one sheet evaluation and one UI broadcast rather
+        than one of each per setpoint.
         """
         if self._routing_evaluator is None:
             return {"success": False, "message": "Routing evaluator not ready"}
         pose = self.pose_store.get(pose_id)
         if pose is None:
             return {"success": False, "message": "Pose not found"}
-        applied = 0
-        skipped: List[str] = []
-        for s in pose.setpoints:
-            try:
-                ok = self._routing_evaluator.set_ws_input(
-                    s.sheet_id, s.ws_input_id, s.value)
-            except Exception as e:
-                if self.logger:
-                    self.logger.warn(f"apply_pose set_ws_input failed: {e}")
-                ok = False
-            if ok:
-                applied += 1
-            else:
-                skipped.append(f"{s.sheet_id}/{s.ws_input_id}")
-        return {"success": True, "applied": applied, "skipped": skipped}
+        return self._fan_out_setpoints(pose.setpoints, "apply_pose")
 
     def preview_setpoints(self, setpoints: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Apply an inline list of pose setpoints WITHOUT saving the pose.
@@ -2476,29 +2485,344 @@ class StateManager:
         """
         if self._routing_evaluator is None:
             return {"success": False, "message": "Routing evaluator not ready"}
-        applied = 0
+        from saint_server.animation.models import PoseSetpoint
+        parsed = []
+        for raw in setpoints or []:
+            try:
+                parsed.append(PoseSetpoint.from_dict(raw))
+            except (TypeError, ValueError) as e:
+                if self.logger:
+                    self.logger.warn(f"preview_setpoints: bad setpoint {raw!r}: {e}")
+        return self._fan_out_setpoints(parsed, "preview_setpoints")
+
+    def _fan_out_setpoints(self, setpoints, where: str) -> Dict[str, Any]:
+        """Shared apply path for stored and in-progress poses."""
+        ev = self._routing_evaluator
+        joint_values: Dict[str, float] = {}
+        ws_values: Dict[Any, float] = {}
         skipped: List[str] = []
-        for s in setpoints or []:
-            sheet_id = s.get("sheet_id")
-            ws_input_id = s.get("ws_input_id")
-            if not sheet_id or not ws_input_id:
-                continue
+
+        for s in setpoints:
+            if s.is_joint:
+                if not s.joint:
+                    skipped.append("(joint setpoint with no joint name)")
+                    continue
+                joint_values[s.joint] = s.value
+            else:
+                if not s.sheet_id or not s.ws_input_id:
+                    skipped.append(s.address())
+                    continue
+                ws_values[(s.sheet_id, s.ws_input_id)] = s.value
+
+        applied = 0
+        batch = getattr(ev, "apply_animation_frame", None)
+        if batch is not None and (joint_values or ws_values):
             try:
-                value = float(s.get("value") or 0.0)
-            except (TypeError, ValueError):
-                value = 0.0
-            try:
-                ok = self._routing_evaluator.set_ws_input(
-                    sheet_id, ws_input_id, value)
+                if batch(joint_values, ws_values):
+                    applied = len(joint_values) + len(ws_values)
+                else:
+                    skipped.extend(list(joint_values))
+                    skipped.extend(f"{a}/{b}" for a, b in ws_values)
             except Exception as e:
                 if self.logger:
-                    self.logger.warn(f"preview_setpoints set_ws_input failed: {e}")
+                    self.logger.warn(f"{where} apply_animation_frame failed: {e}")
+                skipped.extend(list(joint_values))
+                skipped.extend(f"{a}/{b}" for a, b in ws_values)
+            return {"success": True, "applied": applied, "skipped": skipped}
+
+        # Per-setpoint fallback for evaluators without the batch call.
+        for joint, value in joint_values.items():
+            try:
+                ok = ev.set_urdf_joint_value(joint, value)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warn(f"{where} set_urdf_joint_value failed: {e}")
                 ok = False
-            if ok:
-                applied += 1
-            else:
-                skipped.append(f"{sheet_id}/{ws_input_id}")
+            applied += 1 if ok else 0
+            if not ok:
+                skipped.append(joint)
+        for (sheet_id, input_id), value in ws_values.items():
+            try:
+                ok = ev.set_ws_input(sheet_id, input_id, value)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warn(f"{where} set_ws_input failed: {e}")
+                ok = False
+            applied += 1 if ok else 0
+            if not ok:
+                skipped.append(f"{sheet_id}/{input_id}")
         return {"success": True, "applied": applied, "skipped": skipped}
+
+    # ── control rig ───────────────────────────────────────────────
+    #
+    # The rig evaluates HERE, not in the browser, and the response
+    # carries the resolved joint values back so the client can drive its
+    # 3D viewport with them. A JS port of the evaluator would be a second
+    # implementation of the blend math, the clamp policy, and the mimic
+    # round-trip — three places to drift. A local websocket round-trip is
+    # a millisecond or two, which a slider drag does not notice.
+
+    def get_rig(self) -> Dict[str, Any]:
+        """The full parsed rig, for building the control panel.
+
+        Includes ``<widget>`` hints, which the evaluator itself never
+        reads — presentation is the client's business and the contract
+        is the server's.
+        """
+        if self.robot_store is None:
+            return {"success": False, "message": "Robot model store not ready"}
+        rig = self.robot_store.load_rig()
+        if rig is None:
+            return {"success": True, "rig": None}
+        urdf = self.robot_store.load_urdf()
+        srdf = self.robot_store.load_srdf()
+        pose_names = [p["id"] for p in self.pose_store.list()]
+        evaluator = self._rig_evaluator(rig)
+        # Which link each control's 3D shape hangs off. Derived from what
+        # the control drives when the file doesn't say, so a rig authored
+        # before widget geometry existed still draws in the viewport
+        # instead of silently showing nothing.
+        anchors = rig.resolve_anchors_with_poses(
+            urdf, evaluator.poses if evaluator else None)
+        return {
+            "success": True,
+            "rig": rig.to_dict(),
+            "defaults": evaluator.control_defaults() if evaluator else {},
+            "anchors": anchors,
+            "warnings": rig.validate(urdf, srdf, pose_names),
+        }
+
+    def _rig_evaluator(self, rig=None):
+        """Evaluator over the installed rig and pose library, cached.
+
+        The cache is not an optimization detail — it's required. Building
+        this from scratch parses the rig XML, parses the whole URDF, and
+        reads one JSON file per referenced pose. ``evaluate_rig`` is
+        called on every slider input event (~30/s while dragging), so
+        doing that per call means re-parsing a several-hundred-link URDF
+        thirty times a second on a Pi.
+
+        Keyed on the two file hashes plus a pose generation counter, so
+        any upload or pose edit that goes through this API invalidates it.
+        A pose file edited on disk behind our back won't — same as the
+        rest of the runtime config.
+        """
+        from saint_server.animation.rig_eval import RigEvaluator
+
+        if self.robot_store is None:
+            return None
+
+        explicit_rig = rig is not None
+        meta = self.robot_store.get_metadata()
+        key = None
+        if not explicit_rig and meta is not None:
+            key = (meta.sha256, meta.rig_sha256, self._pose_generation)
+            if key == self._rig_eval_key and self._rig_eval_cache is not None:
+                return self._rig_eval_cache
+
+        if rig is None:
+            rig = self.robot_store.load_rig()
+        if rig is None:
+            return None
+        urdf = self.robot_store.load_urdf()
+
+        # Only the poses the rig actually references, plus the neutral —
+        # loading the whole library would read every pose file off disk.
+        wanted = set(rig.referenced_poses())
+        if rig.settings.neutral_pose:
+            wanted.add(rig.settings.neutral_pose)
+        poses: Dict[str, Dict[str, float]] = {}
+        for name in wanted:
+            pose = self.pose_store.get(name)
+            if pose is not None:
+                poses[name] = pose.joint_values()
+
+        evaluator = RigEvaluator(rig, urdf=urdf, poses=poses)
+        if key is not None:
+            self._rig_eval_key = key
+            self._rig_eval_cache = evaluator
+        return evaluator
+
+    def invalidate_rig_cache(self) -> None:
+        """Drop the cached rig evaluator.
+
+        Called whenever a pose changes. Poses are inputs to the blend, so
+        a stale cache would keep a control blending toward the old shape
+        of a pose the operator just edited.
+        """
+        self._pose_generation += 1
+        self._rig_eval_key = None
+        self._rig_eval_cache = None
+
+    def evaluate_rig(self, values: Optional[Dict[str, Any]] = None,
+                     apply: bool = False) -> Dict[str, Any]:
+        """Evaluate the rig at ``values`` and optionally drive the robot.
+
+        ``values`` is keyed by control name, and by ``"<control>.<axis>"``
+        for pad controls. Anything omitted sits at its declared default,
+        so a partial dict is fine.
+
+        Returns the resolved joint values plus per-control contributions
+        (so the UI can answer "which slider moved this joint?"), whether
+        the clamp policy had to pull the frame back, and any controls the
+        evaluator couldn't handle. With ``apply``, the same frame is
+        pushed into the routing graph through the animation-frame batch
+        path — one sheet evaluation and one broadcast for the whole frame.
+        """
+        evaluator = self._rig_evaluator()
+        if evaluator is None:
+            return {"success": False, "message": "No rig file installed"}
+
+        clean: Dict[str, float] = {}
+        for key, raw in (values or {}).items():
+            try:
+                clean[str(key)] = float(raw)
+            except (TypeError, ValueError):
+                if self.logger:
+                    self.logger.warn(f"evaluate_rig: non-numeric {key}={raw!r}")
+
+        frame = evaluator.evaluate(clean)
+        result = {"success": True, **frame.to_dict()}
+
+        if apply:
+            if self._routing_evaluator is None:
+                result["applied"] = 0
+                result["message"] = "Routing evaluator not ready"
+                return result
+            try:
+                batch = getattr(self._routing_evaluator,
+                                "apply_animation_frame", None)
+                if batch is not None:
+                    batch(frame.joints, {})
+                else:
+                    for joint, value in frame.joints.items():
+                        self._routing_evaluator.set_urdf_joint_value(joint, value)
+                result["applied"] = len(frame.joints)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warn(f"evaluate_rig apply failed: {e}")
+                result["applied"] = 0
+                result["message"] = str(e)
+        return result
+
+    # ── SRDF group_state import ───────────────────────────────────
+
+    def list_group_states(self) -> Dict[str, Any]:
+        """SRDF group_states available to import as poses.
+
+        Each entry is annotated with what importing it would do —
+        ``exists`` when a pose of that id is already present, and
+        ``locally_edited`` when that pose was imported before and has
+        since been modified in the UI. The prompt needs both to avoid
+        silently overwriting an operator's tweaks.
+        """
+        if self.robot_store is None:
+            return {"success": False, "message": "Robot model store not ready",
+                    "group_states": []}
+        from saint_server.animation.store import slugify
+
+        existing = {p["id"]: p for p in self.pose_store.list()}
+        out = []
+        for gs in self.robot_store.list_group_states():
+            pose_id = slugify(gs["name"])
+            prior = existing.get(pose_id)
+            entry = dict(gs)
+            entry["pose_id"] = pose_id
+            entry["exists"] = prior is not None
+            entry["locally_edited"] = bool(
+                prior and prior.get("modified")
+                and prior.get("modified") != prior.get("created"))
+            out.append(entry)
+        return {"success": True, "group_states": out}
+
+    def import_group_states(self, names: Optional[List[str]] = None,
+                            group: str = "", icon: str = "",
+                            overwrite: bool = False) -> Dict[str, Any]:
+        """Create poses from SRDF ``<group_state>`` definitions.
+
+        ``names`` selects which group_states to import; omitting it takes
+        all of them. Existing poses are skipped unless ``overwrite``,
+        because an operator may have tuned an imported pose by hand and a
+        re-upload of the SRDF shouldn't discard that.
+
+        Values are converted from URDF-native units to the normalized
+        −1..+1 the pose library stores, using each joint's ``<limit>``.
+        Joints the URDF doesn't have are dropped and reported rather than
+        passed through — an unconverted radian value one hop from a servo
+        is not an acceptable failure mode.
+        """
+        if self.robot_store is None:
+            return {"success": False, "message": "Robot model store not ready"}
+        if not self.robot_store.has_model():
+            return {"success": False, "message": "No URDF installed"}
+
+        from saint_server.animation.models import Pose, PoseSetpoint
+        from saint_server.animation.store import slugify
+
+        candidates = self.robot_store.list_group_states()
+        if not candidates:
+            return {"success": False,
+                    "message": "No SRDF group_states found — is an SRDF installed?"}
+
+        wanted = set(names) if names else None
+        imported: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, str]] = []
+        warnings: List[str] = []
+
+        for gs in candidates:
+            if wanted is not None and gs["name"] not in wanted:
+                continue
+
+            if not gs["normalized"]:
+                skipped.append({
+                    "name": gs["name"],
+                    "reason": "no joints resolved against the URDF"})
+                continue
+
+            pose = Pose(
+                id="", name=gs["name"], icon=icon,
+                group=group or gs.get("group") or "",
+                description=(f"Imported from SRDF group_state "
+                             f"'{gs['name']}'"
+                             + (f" (group {gs['group']})" if gs.get("group") else "")),
+                source="srdf",
+                source_ref=gs["name"],
+                setpoints=[
+                    PoseSetpoint(target_kind="joint", joint=joint, value=value)
+                    for joint, value in sorted(gs["normalized"].items())
+                ],
+            )
+
+            existing = self.pose_store.get(slugify(pose.name))
+            if existing is not None and not overwrite:
+                skipped.append({"name": gs["name"],
+                                "reason": f"pose '{existing.id}' already exists"})
+                continue
+            if existing is not None:
+                # Keep the original creation stamp so overwriting reads
+                # as a revision rather than a brand-new pose.
+                pose.created = existing.created
+
+            saved = self.pose_store.save(pose)
+            imported.append({"id": saved.id, "name": saved.name,
+                             "joint_count": len(saved.setpoints)})
+
+            if gs["unresolved"]:
+                warnings.append(
+                    f"'{gs['name']}': dropped {len(gs['unresolved'])} joint(s) "
+                    f"not in the URDF ({', '.join(gs['unresolved'][:4])}"
+                    f"{'…' if len(gs['unresolved']) > 4 else ''})")
+
+        if imported:
+            self.invalidate_rig_cache()
+        if self.logger and imported:
+            from saint_server.log_level import log_at
+            log_at(self.logger, "info",
+                   f"Imported {len(imported)} SRDF group_state(s) as poses"
+                   f"{f'; {len(skipped)} skipped' if skipped else ''}")
+
+        return {"success": True, "imported": imported,
+                "skipped": skipped, "warnings": warnings}
 
     # ── soundboard ────────────────────────────────────────────────
     #
@@ -3038,8 +3362,36 @@ class StateManager:
             apply_frame=evaluator.apply_animation_frame,
             estop_active=estop_active,
             send_peripheral_command=self._peripheral_command_sender,
+            pose_source=self._make_pose_lookup,
+            neutral_source=self.rig_neutral,
             logger=self.logger,
         )
+
+    def _make_pose_lookup(self):
+        """Fresh pose lookup for one playback (see frame.make_pose_lookup).
+
+        Called per start rather than cached on the registry, so a pose
+        edited between runs takes effect on the next start while staying
+        stable for the duration of a performance.
+        """
+        from saint_server.animation.frame import make_pose_lookup
+        return make_pose_lookup(self.pose_store)
+
+    def rig_neutral(self) -> Dict[str, float]:
+        """Joint values of the rig's declared neutral pose, or {}.
+
+        The base a pose track blends up from on joints nothing else has
+        touched. Absent a rig (or a ``neutral_pose`` in it) an untouched
+        joint starts at 0, which is the midpoint of its travel.
+        """
+        if self.robot_store is None:
+            return {}
+        rig = self.robot_store.load_rig()
+        name = rig.settings.neutral_pose if rig else ""
+        if not name:
+            return {}
+        pose = self.pose_store.get(name)
+        return pose.joint_values() if pose else {}
 
     def set_routing_estop_active(self, active: bool) -> None:
         """Mirror the system-wide e-stop latch into the routing evaluator

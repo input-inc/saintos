@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct AxisState {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct GamepadState {
     pub connected: bool,
     pub name: String,

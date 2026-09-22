@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Example rig file — on-screen controls over a URDF + SRDF.
+
+  Companion to example.srdf. Full element reference and the reasoning
+  behind the design: docs/RIG_SCHEMA.md
+  Schema for validation: server/resources/schema/rig-1.1.xsd
+
+  Two rules to keep in mind while editing:
+
+  1. Everything except <widget> is contract. <widget> is a presentation
+     hint and the evaluator never reads it, so the rig still evaluates
+     headless — in a scripted performance, a test, or a CLI.
+
+  2. Joint values are NORMALIZED −1..+1 across each joint's URDF <limit>,
+     not radians. So scale="0.35" reads as "35% of this joint's travel at
+     full deflection". Normalized 0 is the MIDPOINT of a joint's travel,
+     which for an asymmetric joint is not its native zero.
+
+  Validate before uploading, with xmllint against the XSD above.
+  (The exact command is in docs/ROBOT_MODEL.md; XML comments can't
+  contain a double hyphen, so it can't be spelled out here.)
+-->
+<rig xmlns="urn:saintos:rig:1.0" version="1.1" robot="example_head">
+
+  <!-- neutral_pose names an SRDF group_state (imported as a pose) used
+       as the blend origin q₀. Every control's contribution is a delta
+       from it, which is what makes stacking commutative.
+
+       clamp="scale_back": when controls sum past a joint's limit, the
+       whole frame scales back proportionally so the pose saturates as a
+       unit. The alternative, clamp="clamp", stops each joint
+       independently — the brow pins while the mouth keeps travelling, so
+       the face breaks at the extremes instead of saturating. -->
+  <settings clamp="scale_back" neutral_pose="neutral"/>
+
+  <!-- ══ Face ═══════════════════════════════════════════════════════ -->
+
+  <!-- One slider spanning two antagonistic poses. Because they sit at
+       opposite ends of a single 1D blend space, they can never be active
+       at once — the same reason riggers use one smile/frown slider
+       instead of two. The curve belongs to the target being approached,
+       so each half can ease differently. -->
+  <control name="mood" kind="channel" label="Mood" group="Face" order="10"
+           min="-1" max="1" default="0" anchor="head_link">
+    <target pose="mad"   at="-1" curve="easeInOut"/>
+    <target pose="happy" at="1"  curve="easeInOut"/>
+    <!-- Ring standing off the front of the face, swept left/right. The
+         offset is in head_link's frame, so it rides the head. -->
+    <widget shape="ring" scale="0.030 0.030 0.030" offset="0.105 0 0.075"
+            rotation="0 1.5708 0" axis="0 1 0" color="0.13 0.72 0.81 0.85"/>
+  </control>
+
+  <!-- A one-sided control: 0 is rest, 1 is fully surprised. Deflection
+       is measured outward from `default`, so this contributes nothing at
+       0 rather than sitting half-applied. -->
+  <control name="surprise" kind="channel" label="Surprise" group="Face" order="20"
+           min="0" max="1" default="0" anchor="head_link">
+    <target pose="surprised" at="1" curve="easeOutBack"/>
+    <!-- Arrow above the brows, pulled upward. -->
+    <widget shape="arrow" scale="0.022 0.022 0.022" offset="0.085 0 0.135"
+            rotation="0 0 0" axis="0 0 1" color="0.85 0.45 0.20 0.85"/>
+  </control>
+
+  <!-- Layers over whatever expression is active, because the "blink"
+       pose names only the eyelid joints. easeInQuad on the way in reads
+       as a snap rather than a fade. -->
+  <control name="blink" kind="channel" label="Blink" group="Face" order="30"
+           min="0" max="1" default="0" anchor="head_link">
+    <target pose="blink" at="1" curve="easeInQuad"/>
+    <!-- Flat disc over the left eye, pulled down like an eyelid. -->
+    <widget shape="circle" scale="0.016 0.016 0.016" offset="0.095 0.032 0.098"
+            rotation="0 1.5708 0" axis="0 0 -1" color="0.92 0.94 0.96 0.7"/>
+  </control>
+
+  <!-- ══ Head ═══════════════════════════════════════════════════════ -->
+
+  <!-- Head nod: one control, several joints, different weights and
+       curves per joint. No pose needs to exist for this. The per-joint
+       curves are where the organic feel lives — the neck leading and the
+       head trailing slightly is the difference between a rig and a lerp.
+
+       This is also why <mimic> can't do this job: mimic is one linear
+       ratio forever, with no intermediate neutral and no curves. -->
+  <control name="head_nod" kind="channel" label="Nod" group="Head" order="10"
+           min="-1" max="1" default="0" anchor="head_link">
+    <drive joint="head_pitch" scale="1.00" curve="easeInOut"/>
+    <drive joint="neck_pitch" scale="0.35" curve="easeIn"/>
+    <!-- Ring in the sagittal plane: the shape you'd grab to pitch a head,
+         swept vertically. -->
+    <widget shape="ring" scale="0.075 0.075 0.075" offset="0 0 0.055"
+            rotation="1.5708 0 0" axis="0 0 1" color="0.13 0.72 0.81 0.55"
+            dofs="rotate_axis"/>
+  </control>
+
+  <!-- Head tilt (roll). Small counter-rotation on the neck keeps the
+       head's mass over the base instead of leaning it off-axis. -->
+  <control name="head_tilt" kind="channel" label="Tilt" group="Head" order="20"
+           min="-1" max="1" default="0" anchor="head_link">
+    <drive joint="head_roll" scale="1.00" curve="easeInOut"/>
+    <drive joint="neck_roll" scale="-0.20" curve="linear"/>
+    <!-- Coronal-plane ring, swept side to side. -->
+    <widget shape="ring" scale="0.082 0.082 0.082" offset="0 0 0.055"
+            rotation="0 1.5708 0" axis="0 1 0" color="0.55 0.35 0.85 0.55"
+            dofs="rotate_axis"/>
+  </control>
+
+  <control name="head_turn" kind="channel" label="Turn" group="Head" order="30"
+           min="-1" max="1" default="0" anchor="neck_link">
+    <drive joint="neck_yaw" scale="1.00" curve="easeInOut"/>
+    <!-- Horizontal ring at the neck — the classic yaw collar. -->
+    <widget shape="ring" scale="0.062 0.062 0.062" offset="0 0 0.02"
+            axis="0 1 0" color="0.20 0.80 0.55 0.55" dofs="rotate_axis"/>
+  </control>
+
+  <!-- Eye look as a 2-axis pad. For a pan/tilt eye mechanism this is
+       more direct and more predictable than a gaze solve, and there's no
+       solver in the loop.
+
+       Each axis feeds a little head motion at low weight and with an
+       easeIn curve, so the head stays still for small eye movements and
+       only starts following once the eyes are well off-centre — which is
+       roughly what people do. Tune the two scales rather than authoring
+       a curve per joint.
+
+       invert_y is a widget hint: dragging up should raise the eyes, and
+       screen y grows downward. -->
+  <!-- anchor is explicit here: derivation would place this on
+       eye_l_pan_link (its first drive), and the offset below is written in
+       head_link's frame. It would also then travel WITH the eye it
+       controls, which is the wrong feel for a look-at pad. -->
+  <control name="eye_look" kind="pad" label="Eye look" group="Head" order="40"
+           anchor="head_link">
+    <axis name="x" min="-1" max="1" default="0">
+      <drive joint="eye_l_pan" scale="1.00" curve="linear"/>
+      <drive joint="eye_r_pan" scale="1.00" curve="linear"/>
+      <drive joint="neck_yaw"  scale="0.25" curve="easeIn"/>
+    </axis>
+    <axis name="y" min="-1" max="1" default="0">
+      <drive joint="eye_l_tilt"  scale="1.00" curve="linear"/>
+      <drive joint="eye_r_tilt"  scale="1.00" curve="linear"/>
+      <drive joint="head_pitch"  scale="0.20" curve="easeIn"/>
+    </axis>
+    <!-- Plane between the eyes: drag in 2D, which is what a pad IS. -->
+    <widget kind="pad" shape="plane" scale="0.045 0.045 0.045"
+            offset="0.115 0 0.075" rotation="0 1.5708 0"
+            color="0.95 0.75 0.20 0.35" invert_y="true"/>
+  </control>
+
+  <!-- ══ Jaw ════════════════════════════════════════════════════════ -->
+
+  <control name="jaw" kind="channel" label="Jaw" group="Jaw" order="10"
+           min="0" max="1" default="0" anchor="jaw_link">
+    <drive joint="jaw_open" scale="1.0" curve="linear"/>
+    <!-- Box on the chin, pulled down. -->
+    <widget shape="box" scale="0.012 0.030 0.008" offset="0.075 0 -0.018"
+            axis="0 0 -1" color="0.85 0.45 0.20 0.75"/>
+  </control>
+
+  <!-- ══ Declared, not yet solved ═══════════════════════════════════ -->
+
+  <!-- A true look-at: aim frames at a 3D point rather than driving
+       pan/tilt directly. Deliberately a 2-DOF residual per frame, not a
+       6-DOF pose goal — a full orientation target would pin roll about
+       the gaze axis and force an arbitrary head tilt as a side effect of
+       asking the rig to look somewhere.
+
+       <regularize> is what makes the eye/head split fall out of the
+       solve rather than being hand-authored: strong gaze tasks on the
+       eyes plus a weak posture task pulling them toward centre means the
+       eyes snap to the target, the posture task complains they're
+       off-centre, and the only way to satisfy both is for the head to
+       rotate and re-centre them. Eyes lead, head follows — two weights
+       instead of a curve per joint. And the URDF's own <limit> handles
+       the rest: when the eyes hit their stops, the residual can only
+       shrink by moving the head.
+
+       STATUS: parsed and validated, NOT evaluated. Needs joint origins
+       and axes plus a damped-least-squares solve. The control shows up
+       in the panel labelled as inactive rather than as a gizmo that
+       silently does nothing. Use `eye_look` above meanwhile. -->
+  <control name="look_at" kind="spatial" label="Look at" group="Head" order="50"
+           anchor="ctrl_lookat">
+    <gaze>
+      <frame link="eye_l_link" axis="0 0 1" weight="1.0"/>
+      <frame link="eye_r_link" axis="0 0 1" weight="1.0"/>
+      <frame link="head_link"  axis="1 0 0" weight="0.2"/>
+      <regularize joints="eye_l_pan eye_l_tilt eye_r_pan eye_r_tilt"
+                  weight="0.05"/>
+    </gaze>
+    <!-- Small on purpose: this control is INERT until the gaze solve
+         lands, so it's a marker showing where the target frame is, not a
+         handle offering a drag that goes nowhere. The viewport draws it
+         as a dim wireframe and skips it in hit-testing. -->
+    <widget kind="gizmo" shape="diamond" scale="0.012"
+            color="1 0.7 0 0.8" dofs="move_3d"/>
+  </control>
+
+</rig>

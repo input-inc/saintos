@@ -1,11 +1,14 @@
 // Curve sampling is the playback math: given an animation's keyframes
 // and a time, produce the interpolated value the robot is driven to.
 // These lock the segment boundary handling, linear / constant / easing
-// interpolation, the cubic-bezier solver endpoints, and the multi-track
-// fan-out.
+// interpolation, and the cubic-bezier solver endpoints.
+//
+// Fanning those values out to targets is a separate concern and lives in
+// ./frameResolve.spec.js — it has to dispatch on each track's
+// target_kind and apply pose-track layering.
 import { describe, it, expect } from 'vitest'
 import {
-  cubicBezierAtTime, sampleCurve, sampleAllTracks,
+  cubicBezierAtTime, sampleCurve,
   INTERP_LINEAR, INTERP_CONSTANT,
 } from '../useCurveSampling'
 
@@ -81,30 +84,5 @@ describe('sampleCurve', () => {
     ] }
     const v = sampleCurve(dup, 5)
     expect(Number.isFinite(v)).toBe(true)
-  })
-})
-
-describe('sampleAllTracks', () => {
-  it('samples every value track into an id→value map', () => {
-    const anim = {
-      value_tracks: [
-        { id: 'pan', curve: { keys: [
-          { time: 0, value: 0, interp: INTERP_LINEAR },
-          { time: 10, value: 1, interp: INTERP_LINEAR },
-        ] } },
-        { id: 'tilt', curve: { keys: [
-          { time: 0, value: -1, interp: INTERP_LINEAR },
-          { time: 10, value: 1, interp: INTERP_LINEAR },
-        ] } },
-      ],
-    }
-    const out = sampleAllTracks(anim, 5)
-    approx(out.pan, 0.5)
-    approx(out.tilt, 0)
-  })
-
-  it('returns an empty map for an animation with no tracks', () => {
-    expect(sampleAllTracks({}, 5)).toEqual({})
-    expect(sampleAllTracks(undefined, 5)).toEqual({})
   })
 })

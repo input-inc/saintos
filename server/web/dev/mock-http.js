@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import JSZip from 'jszip'
 
 import * as st from './mock-state.js'
+import { bridge } from './mock-bridge.js'
 
 const MAX_URDF_UPLOAD_BYTES = 64 * 1024 * 1024
 const ALLOWED_MESH_EXT = new Set(['.stl', '.dae', '.obj', '.ply', '.glb', '.gltf'])
@@ -21,7 +22,7 @@ export async function handleHttp (req, res) {
   const url = req.url || ''
 
   if (req.method === 'GET' && url === '/api/robot/metadata') {
-    return sendJson(res, robotMetadataPayload())
+    return sendJson(res, await robotMetadataPayload())
   }
   if (req.method === 'GET' && url.startsWith('/api/robot/urdf')) {
     return serveUrdf(res)
@@ -33,8 +34,38 @@ export async function handleHttp (req, res) {
     st.setUrdfModel(null)
     return sendJson(res, { removed: true })
   }
+  // ── SRDF + rig companions ──────────────────────────────────────
+  // Written in place: an annotation layer install must not disturb the
+  // URDF. Mirrors RobotModelStore.install_srdf / install_rig.
+  if (req.method === 'GET' && url.startsWith('/api/robot/srdf')) {
+    return serveCompanion(res, 'srdfBytes', 'No SRDF installed')
+  }
+  if (req.method === 'POST' && url === '/api/robot/srdf') {
+    return await handleCompanionUpload(req, res, 'srdf')
+  }
+  if (req.method === 'DELETE' && url === '/api/robot/srdf') {
+    return sendJson(res, { removed: st.clearSrdf() })
+  }
+  if (req.method === 'GET' && url.startsWith('/api/robot/rig')) {
+    return serveCompanion(res, 'rigBytes', 'No rig file installed')
+  }
+  if (req.method === 'POST' && url === '/api/robot/rig') {
+    return await handleCompanionUpload(req, res, 'rig')
+  }
+  if (req.method === 'DELETE' && url === '/api/robot/rig') {
+    return sendJson(res, { removed: st.clearRig() })
+  }
+  if (req.method === 'GET' && url === '/api/robot/groups') {
+    return sendJson(res, await bridge('groups', st.robotModelTexts()))
+  }
+  if (req.method === 'GET' && url === '/api/robot/group_states') {
+    return sendJson(res, await bridge('group_states', {
+      ...st.robotModelTexts(),
+      existing_pose_ids: [...st.poses.keys()],
+    }))
+  }
   if (req.method === 'GET' && url === '/api/robot/joints') {
-    return sendJson(res, { joints: listUrdfJoints() })
+    return sendJson(res, { joints: await listUrdfJoints() })
   }
   if (req.method === 'GET' && url.startsWith('/api/robot/meshes/')) {
     return serveMesh(res, decodeURIComponent(url.slice('/api/robot/meshes/'.length)))
@@ -154,12 +185,21 @@ function handleDevSwitch (url, res) {
   })
 }
 
-// Parse the installed URDF (if any) and return the list of actuatable
-// joints. Skips fixed joints because they don't accept setpoints.
-// Mirrors the real server's URDFStore.list_joints.
-function listUrdfJoints () {
+// Actuatable joints in the installed URDF, WITH their limits. Skips
+// fixed joints because they accept no setpoint — they're structural (a
+// control anchor frame is a massless link on a fixed joint).
+//
+// Goes through the Python bridge rather than a regex: the limits are the
+// point. Every consumer that shows a joint also needs them, because the
+// normalized -1..+1 the whole stack speaks is *defined* by them. Falls
+// back to the old regex scan if the bridge is unavailable, so the joint
+// picker still populates on a machine without python3.
+async function listUrdfJoints () {
   const m = st.getUrdfModel()
   if (!m) return []
+  const viaBridge = await bridge('joints', { urdf: m.urdfBytes.toString('utf8') })
+  if (!viaBridge.error && Array.isArray(viaBridge.joints)) return viaBridge.joints
+
   const text = m.urdfBytes.toString('utf-8')
   const out = []
   const re = /<joint\s+[^>]*\bname="([^"]+)"[^>]*\btype="([^"]+)"/gi
@@ -173,10 +213,99 @@ function listUrdfJoints () {
 
 // ── URDF lifecycle ──────────────────────────────────────────────────
 
-function robotMetadataPayload () {
+async function robotMetadataPayload () {
   const m = st.getUrdfModel()
   if (!m) return { installed: false }
-  return { installed: true, ...m.metadata }
+  // describe(): metadata plus each companion's parsed summary and every
+  // unresolved cross-file reference. Those warnings matter more than
+  // they look — an SRDF or rig reference that doesn't resolve is a
+  // silent no-op, so this response is the only place it surfaces.
+  const desc = await bridge('describe', {
+    ...st.robotModelTexts(),
+    pose_names: [...st.poses.keys()],
+  })
+  return {
+    installed: true,
+    ...m.metadata,
+    srdf: desc.srdf ?? null,
+    rig: desc.rig ?? null,
+    robot_name: desc.robot_name ?? m.metadata.robot_name ?? '',
+    warnings: desc.warnings || (desc.error ? [`bridge: ${desc.error}`] : []),
+  }
+}
+
+function serveCompanion (res, field, missingMsg) {
+  const m = st.getUrdfModel()
+  const bytes = m?.[field]
+  if (!bytes) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' })
+    res.end(missingMsg)
+    return true
+  }
+  res.writeHead(200, {
+    'Content-Type': 'application/xml',
+    'Cache-Control': 'no-cache, must-revalidate',
+  })
+  res.end(bytes)
+  return true
+}
+
+/**
+ * Install an SRDF or rig file alongside the existing URDF.
+ *
+ * The SRDF response carries its parsed group_states, which is what lets
+ * the settings tab offer to import them as poses without a second round
+ * trip.
+ */
+async function handleCompanionUpload (req, res, which) {
+  try {
+    if (!st.getUrdfModel()) {
+      throw httpErr(400, which === 'srdf'
+        ? 'no URDF installed — an SRDF is an annotation layer and every '
+          + 'name in it is a dangling reference on its own'
+        : "no URDF installed — a rig file's joints and links are dangling "
+          + 'references on their own')
+    }
+    const part = await readSingleFilePart(req)
+    if (!part) throw httpErr(400, 'Missing file field')
+    const { buffer, filename } = part
+    const text = buffer.toString('utf8')
+
+    // Parse-check through the real implementation before storing, so a
+    // broken file is refused rather than installed inert.
+    const probe = await bridge(which === 'srdf' ? 'group_states' : 'rig',
+      which === 'srdf'
+        ? { urdf: st.robotModelTexts().urdf, srdf: text }
+        : { ...st.robotModelTexts(), rig: text })
+    if (probe.error) throw httpErr(400, probe.error)
+
+    const sha = sha256Hex(buffer)
+    const base = (filename.split(/[\\/]/).pop()
+      || (which === 'srdf' ? 'robot.srdf' : 'robot.rig.xml'))
+    if (which === 'srdf') st.setSrdf(buffer, base, sha)
+    else st.setRig(buffer, base, sha)
+
+    const metadata = await robotMetadataPayload()
+    if (which === 'srdf') {
+      return sendJson(res, {
+        installed: true,
+        srdf_filename: base,
+        summary: metadata.srdf,
+        warnings: (metadata.warnings || []).filter(w => w.startsWith('SRDF')),
+        group_states: probe.group_states || [],
+        metadata,
+      })
+    }
+    return sendJson(res, {
+      installed: true,
+      rig_filename: base,
+      summary: metadata.rig,
+      warnings: (metadata.warnings || []).filter(w => w.startsWith('rig')),
+      metadata,
+    })
+  } catch (e) {
+    return sendJson(res, { error: e.message || String(e) }, e.status || 400)
+  }
 }
 
 function serveUrdf (res) {
@@ -243,7 +372,9 @@ async function handleUrdfUpload (req, res) {
       model = installFromUrdf(buffer, filename)
     }
     st.setUrdfModel(model)
-    return sendJson(res, { installed: true, ...model.metadata })
+    // describe()-shaped, like the real server: the client wants the
+    // companion summaries and warnings in the same round trip.
+    return sendJson(res, await robotMetadataPayload())
   } catch (e) {
     const code = e.status || 400
     return sendJson(res, { error: e.message || String(e) }, code)
@@ -261,24 +392,51 @@ async function installFromZip (zipBytes, originalFilename) {
 
   let urdfEntry = null
   const meshEntries = []
+  const xmlEntries = []
   zip.forEach((relPath, entry) => {
     if (entry.dir) return
     // Reject any entry whose path tries to escape the bundle root —
-    // same defensive policy as the real URDFStore.
+    // same defensive policy as the real RobotModelStore.
     if (relPath.startsWith('/') || relPath.split('/').includes('..')) return
     const base = relPath.split('/').pop()
     const lower = relPath.toLowerCase()
-    if ((lower.endsWith('.urdf') || lower.endsWith('.xacro')) && !urdfEntry) {
-      urdfEntry = { entry, base, relPath }
+    // Collect every candidate description file for a CONTENT sniff
+    // below. URDF and SRDF share the <robot> root element and are
+    // indistinguishable by tag, so the extension is the least
+    // trustworthy signal available.
+    if (/\.(urdf|srdf|xacro|xml|rig)$/i.test(lower)) {
+      xmlEntries.push({ entry, base, relPath })
     } else {
       const ext = '.' + (base.toLowerCase().split('.').pop() || '')
       if (ALLOWED_MESH_EXT.has(ext)) meshEntries.push({ entry, base, relPath })
     }
   })
 
-  if (!urdfEntry) throw httpErr(400, 'zip contains no .urdf file at any level')
+  // Classify each candidate by content. Mirrors
+  // RobotModelStore._classify_xml, via the same Python that implements
+  // it, so a `robot.srdf.xacro` or a bare `model.xml` routes the same
+  // way here as it would on the real server.
+  let srdfBytes = null, srdfName = ''
+  let rigBytes = null, rigName = ''
+  for (const cand of xmlEntries) {
+    const buf = Buffer.from(await cand.entry.async('uint8array'))
+    const { kind } = await bridge('classify', {
+      data: buf.toString('utf8'), filename: cand.base,
+    })
+    if (kind === 'rig' && !rigBytes) { rigBytes = buf; rigName = cand.base }
+    else if (kind === 'srdf' && !srdfBytes) { srdfBytes = buf; srdfName = cand.base }
+    else if (kind === 'urdf' && !urdfEntry) {
+      urdfEntry = { ...cand, bytes: buf }
+    }
+  }
 
-  const urdfBytes = Buffer.from(await urdfEntry.entry.async('uint8array'))
+  if (!urdfEntry) {
+    throw httpErr(400, 'zip contains no URDF at any level (looked for a '
+      + '<robot> document with <link>/<joint> geometry)')
+  }
+
+  const urdfBytes = urdfEntry.bytes
+    || Buffer.from(await urdfEntry.entry.async('uint8array'))
   const { linkCount, jointCount } = validateUrdf(urdfBytes)
 
   // Key meshes by their path RELATIVE TO THE URDF's directory — the same
@@ -311,9 +469,17 @@ async function installFromZip (zipBytes, originalFilename) {
       mesh_files: meshFiles.sort(),
       link_count: linkCount,
       joint_count: jointCount,
+      srdf_filename: srdfName,
+      srdf_sha256: srdfBytes ? sha256Hex(srdfBytes) : '',
+      srdf_uploaded_at: srdfBytes ? Date.now() / 1000 : 0,
+      rig_filename: rigName,
+      rig_sha256: rigBytes ? sha256Hex(rigBytes) : '',
+      rig_uploaded_at: rigBytes ? Date.now() / 1000 : 0,
     },
     urdfBytes,
     meshes,
+    srdfBytes,
+    rigBytes,
   }
 }
 
@@ -330,9 +496,13 @@ function installFromUrdf (urdfBytes, originalFilename) {
       mesh_files: [],
       link_count: linkCount,
       joint_count: jointCount,
+      srdf_filename: '', srdf_sha256: '', srdf_uploaded_at: 0,
+      rig_filename: '', rig_sha256: '', rig_uploaded_at: 0,
     },
     urdfBytes,
     meshes: new Map(),
+    srdfBytes: null,
+    rigBytes: null,
   }
 }
 

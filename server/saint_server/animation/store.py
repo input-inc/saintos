@@ -179,13 +179,23 @@ class PoseStore:
             raw = self.store.read_raw(pid)
             if not raw:
                 continue
+            setpoints = raw.get("setpoints", [])
             out.append({
                 "id": raw.get("id", pid),
                 "name": raw.get("name", pid),
                 "icon": raw.get("icon", ""),
                 "group": raw.get("group", ""),
                 "description": raw.get("description", ""),
-                "setpoint_count": len(raw.get("setpoints", [])),
+                "setpoint_count": len(setpoints),
+                # Joint-addressed setpoints specifically. A pose can mix
+                # joint and ws_input setpoints, and only the joint ones
+                # matter to an animation pose track or a rig control
+                # target — so the animation editor needs this count, not
+                # the total.
+                "joint_count": sum(
+                    1 for s in setpoints
+                    if s.get("target_kind") == "joint" and s.get("joint")),
+                "source": raw.get("source", ""),
                 "modified": raw.get("modified", ""),
             })
         return out

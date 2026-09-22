@@ -11,7 +11,8 @@
 // in this directory for the action inventory + topic shapes.
 
 import http from 'node:http'
-import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -22,6 +23,7 @@ import {
   managementHandlers, handleCommand, handleRouter, handleControl, handleGeneric,
 } from './mock-handlers.js'
 import { handleHttp } from './mock-http.js'
+import { bridge, stopBridge } from './mock-bridge.js'
 
 const PORT = parseInt(process.env.MOCK_PORT || '8081', 10)
 
@@ -66,6 +68,150 @@ function loadCatalogsFromPython () {
 }
 
 loadCatalogsFromPython()
+
+// Pre-install the example robot model (URDF + SRDF + rig) and import its
+// group_states as poses, so opening the UI shows a working pose library
+// and control rig with nothing to click first. Uploading the same files
+// by hand still exercises the real upload path — this just means the
+// three-file workflow is visible on a cold start.
+//
+// Skipped silently if the files or the Python bridge are missing; the
+// mock is still perfectly usable without a robot model.
+// A demo animation built from POSE tracks, so the timeline shows the
+// feature on a cold start rather than needing one authored first.
+//
+// Deliberately includes a joint track ABOVE the pose tracks: tracks layer
+// bottom-up, so neck_yaw's own track overrides whatever the poses below
+// it say about that joint. Expanding a pose's disclosure shows that —
+// the joint's row reports the post-layering value, not the pose's wish.
+function seedDemoAnimation () {
+  const curve = (name, keys) => ({
+    name,
+    keys: keys.map(([time, value, interp = 1]) => ({
+      time, value, interp, arrive_tangent: 0, leave_tangent: 0,
+    })),
+  })
+  const now = new Date().toISOString()
+  st.animations.set('nod-hello', {
+    id: 'nod-hello',
+    name: 'nod hello',
+    duration: 4,
+    fps: 30,
+    loop: false,
+    icon: 'waving_hand',
+    group: '',
+    value_tracks: [
+      // Bottom layer: ease into "happy" and hold.
+      {
+        id: 'pose.happy', name: 'happy',
+        target_kind: 'pose', target: ['happy'],
+        curve: curve('happy', [[0, 0, 6], [1.2, 1, 6], [3.2, 1, 1], [4, 0.2, 6]]),
+      },
+      // Two quick blinks on top — the "blink" pose only names the eyelid
+      // joints, so it layers over the expression without disturbing it.
+      {
+        id: 'pose.blink', name: 'blink',
+        target_kind: 'pose', target: ['blink'],
+        curve: curve('blink', [
+          [1.4, 0, 0], [1.5, 1, 4], [1.62, 0, 4],
+          [2.6, 0, 0], [2.7, 1, 4], [2.82, 0, 4],
+        ]),
+      },
+      // Top layer: an explicit joint track. Overrides the poses below on
+      // this one joint.
+      {
+        id: 'neck_yaw', name: 'neck_yaw',
+        target_kind: 'urdf_joint', target: [],
+        curve: curve('neck_yaw', [[0, 0, 6], [1.6, -0.35, 6], [3, 0.3, 6], [4, 0, 6]]),
+      },
+    ],
+    trigger_tracks: [],
+    created: now,
+    modified: now,
+  })
+  console.log('[mock] seeded demo animation "nod hello" (2 pose tracks + 1 joint track)')
+}
+
+async function preloadExampleRobotModel () {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const dir = path.resolve(here, '..', '..', 'resources', 'examples')
+  const files = {
+    urdf: path.join(dir, 'example_head.urdf'),
+    srdf: path.join(dir, 'example.srdf'),
+    rig: path.join(dir, 'example.rig.xml'),
+  }
+  let bytes
+  try {
+    bytes = {
+      urdf: fs.readFileSync(files.urdf),
+      srdf: fs.readFileSync(files.srdf),
+      rig: fs.readFileSync(files.rig),
+    }
+  } catch (e) {
+    console.log(`[mock] no example robot model to preload (${e.code || e.message})`)
+    return
+  }
+
+  const probe = await bridge('describe', {
+    urdf: bytes.urdf.toString('utf8'),
+    srdf: bytes.srdf.toString('utf8'),
+    rig: bytes.rig.toString('utf8'),
+  })
+  if (probe.error) {
+    console.error(`[mock] example model preload skipped: ${probe.error}`)
+    return
+  }
+
+  const now = Date.now() / 1000
+  st.setUrdfModel({
+    metadata: {
+      original_filename: 'example_head.zip',
+      urdf_filename: 'example_head.urdf',
+      sha256: createHash('sha256').update(bytes.urdf).digest('hex'),
+      uploaded_at: now,
+      mesh_files: [],
+      link_count: probe.link_count,
+      joint_count: probe.joint_count,
+      robot_name: probe.robot_name,
+      srdf_filename: 'example.srdf',
+      srdf_sha256: createHash('sha256').update(bytes.srdf).digest('hex'),
+      srdf_uploaded_at: now,
+      rig_filename: 'example.rig.xml',
+      rig_sha256: createHash('sha256').update(bytes.rig).digest('hex'),
+      rig_uploaded_at: now,
+    },
+    urdfBytes: bytes.urdf,
+    meshes: new Map(),
+    srdfBytes: bytes.srdf,
+    rigBytes: bytes.rig,
+  })
+
+  // Import the group_states so the rig's pose targets resolve. Goes
+  // through the same handler the UI's import button calls.
+  const res = await managementHandlers.import_group_states(
+    { group: 'Face' }, { activity: () => {} })
+  const imported = res?.data?.imported?.length || 0
+
+  seedDemoAnimation()
+
+  console.log(
+    `[mock] preloaded example robot model: ${probe.robot_name} — `
+    + `${probe.link_count} links, ${probe.joint_count} joints, `
+    + `${probe.srdf?.group_state_count ?? 0} group_states, `
+    + `${probe.rig?.control_count ?? 0} rig controls, `
+    + `${imported} pose(s) imported`,
+  )
+  if (probe.warnings?.length) {
+    console.warn(`[mock] example model has ${probe.warnings.length} unresolved reference(s)`)
+    for (const w of probe.warnings.slice(0, 5)) console.warn(`[mock]   ${w}`)
+  }
+}
+
+// Awaited before listen() below, so a client that connects immediately
+// can't observe a half-installed model.
+const preloadDone = preloadExampleRobotModel().catch((e) => {
+  console.error('[mock] example model preload failed:', e.message)
+})
 
 // Restore the operator's dashboard card order from the previous run —
 // the mock half of "the order survives a restart".
@@ -140,7 +286,7 @@ wss.on('connection', (ws) => {
   ws.on('error', (e) => console.warn(`[mock] ws error for ${clientId}:`, e.message))
 })
 
-function onMessage (client, raw) {
+async function onMessage (client, raw) {
   let msg
   try { msg = JSON.parse(raw.toString('utf8')) }
   catch { return sendJson(client.ws, { status: 'error', message: 'Invalid JSON' }) }
@@ -195,6 +341,16 @@ function onMessage (client, raw) {
     result = { ok: false, message: e.message || 'Handler error' }
   }
 
+  // Handlers that reach the Python bridge are async. Awaiting here keeps
+  // every handler free to be either.
+  if (result && typeof result.then === 'function') {
+    try {
+      result = await result
+    } catch (e) {
+      console.error(`[mock] handler ${msg.type}/${msg.action} rejected:`, e)
+      result = { ok: false, message: e.message || 'Handler error' }
+    }
+  }
   if (!result) result = { ok: true, data: {} }
   if (result.ok) {
     sendJson(client.ws, { id: msg.id, status: 'ok', data: result.data })
@@ -584,11 +740,24 @@ function schedule (fn, ms, label) {
   }, ms)
 }
 
+// Don't leave an orphaned Python worker behind when the mock is killed.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { stopBridge(); process.exit(0) })
+}
+process.on('exit', stopBridge)
+
+await preloadDone
+
 server.listen(PORT, () => {
   console.log(`[mock] SAINT.OS mock server listening on http://localhost:${PORT}`)
   console.log(`[mock] WebSocket: ws://localhost:${PORT}/api/ws`)
   console.log(`[mock] Point Vite at it:`)
   console.log(`[mock]   SAINT_HOST=http://localhost:${PORT} npm run dev`)
+  const rm = st.getUrdfModel()
+  if (rm?.metadata?.rig_filename) {
+    console.log(`[mock] robot model ready — Settings > Robot Model, or the`)
+    console.log(`[mock] Control Rig panel in an animation editor`)
+  }
   schedule(tickSystemStatus,  2000, 'system_status')
   schedule(tickHostPinState,  1000, 'pin_state/host_controller')
   schedule(tickNodePinStates,  250, 'pin_state/<node>')

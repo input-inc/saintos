@@ -109,12 +109,10 @@ export function sampleCurve (curve, time) {
   return keys[keys.length - 1].value
 }
 
-// Sample every value track at a given time. Returns a {trackId: value}
-// map suitable for fanning out to URDFViewer.setJointValue calls.
-export function sampleAllTracks (animation, time) {
-  const out = {}
-  for (const t of animation?.value_tracks || []) {
-    out[t.id] = sampleCurve(t.curve, time)
-  }
-  return out
-}
+// NOTE: `sampleAllTracks` used to live here, mapping every value track's
+// id to its sampled value. It was removed when pose tracks landed,
+// because it ignored `target_kind` — so a ws_input or pose track came
+// back looking like a joint named after the track id, and a pose track's
+// weight would have been fed to a joint as a position. Use
+// `resolveFrame` from ./useFrameResolve instead: it dispatches on target
+// kind and applies the layering rules the server player uses.

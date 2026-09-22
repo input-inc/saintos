@@ -1,5 +1,12 @@
-"""Animation builder support: URDF storage, pose/animation models, playback."""
+"""Animation builder support: robot model storage, pose/animation models, playback.
 
-from saint_server.animation.urdf_store import URDFStore
+The robot model is three files — URDF (structure), SRDF (groups + named
+poses), and the rig file (controls). See docs/RIG_SCHEMA.md.
+"""
 
-__all__ = ["URDFStore"]
+from saint_server.animation.robot_model_store import (
+    RobotModelError,
+    RobotModelStore,
+)
+
+__all__ = ["RobotModelStore", "RobotModelError"]

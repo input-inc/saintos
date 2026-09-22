@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Example SRDF — MoveIt's semantic layer over a URDF.
+
+  Companion to example.rig.xml. Both are annotation layers: every name
+  below is a reference into a URDF, and none of it means anything without
+  one. The <robot name> MUST match the URDF's <robot name> or nothing
+  binds.
+
+  Joint names here are placeholders from a generic animatronic head.
+  Replace them with your own URDF's joint names — Settings → Robot Model
+  lists every actuatable joint after you upload the URDF, and it reports
+  every reference that fails to resolve.
+
+  Values are in URDF-NATIVE units: radians for revolute and continuous
+  joints, metres for prismatic. SAINT.OS converts them to its normalized
+  −1..+1 exactly once, on import, using each joint's <limit>.
+-->
+<robot name="example_head">
+
+  <!-- ── Groups ──────────────────────────────────────────────────────
+       Named collections of joints. Scope both planning and rig controls.
+       A group can list joints directly, name a <chain base_link tip_link>
+       walked through the URDF tree, name <link>s (contributing each
+       link's parent joint), or include other <group>s. -->
+
+  <group name="neck">
+    <chain base_link="base_link" tip_link="head_link"/>
+  </group>
+
+  <group name="eyes">
+    <joint name="eye_l_pan"/>
+    <joint name="eye_l_tilt"/>
+    <joint name="eye_r_pan"/>
+    <joint name="eye_r_tilt"/>
+  </group>
+
+  <group name="brows">
+    <joint name="brow_l_lift"/>
+    <joint name="brow_r_lift"/>
+  </group>
+
+  <group name="mouth">
+    <joint name="jaw_open"/>
+    <joint name="mouth_l_corner"/>
+    <joint name="mouth_r_corner"/>
+  </group>
+
+  <!-- Subgroups compose: "face" is everything expressive. -->
+  <group name="face">
+    <group name="eyes"/>
+    <group name="brows"/>
+    <group name="mouth"/>
+  </group>
+
+  <!-- ── Named poses ─────────────────────────────────────────────────
+       <group_state> is a named list of joint values — which is exactly
+       what a pose is. SAINT.OS offers to import these into the pose
+       library on upload, and they become usable as animation pose
+       tracks and as rig control targets.
+
+       Keep a "neutral" state: the rig file names it as the blend origin
+       (q₀), so every control's contribution is measured from it. -->
+
+  <group_state name="neutral" group="face">
+    <joint name="brow_l_lift"    value="0.0"/>
+    <joint name="brow_r_lift"    value="0.0"/>
+    <joint name="eye_l_pan"      value="0.0"/>
+    <joint name="eye_l_tilt"     value="0.0"/>
+    <joint name="eye_r_pan"      value="0.0"/>
+    <joint name="eye_r_tilt"     value="0.0"/>
+    <joint name="jaw_open"       value="0.0"/>
+    <joint name="mouth_l_corner" value="0.0"/>
+    <joint name="mouth_r_corner" value="0.0"/>
+  </group_state>
+
+  <group_state name="happy" group="face">
+    <joint name="brow_l_lift"    value="0.35"/>
+    <joint name="brow_r_lift"    value="0.35"/>
+    <joint name="eye_l_tilt"     value="-0.05"/>
+    <joint name="eye_r_tilt"     value="-0.05"/>
+    <joint name="jaw_open"       value="0.12"/>
+    <joint name="mouth_l_corner" value="0.40"/>
+    <joint name="mouth_r_corner" value="0.40"/>
+  </group_state>
+
+  <group_state name="mad" group="face">
+    <joint name="brow_l_lift"    value="-0.30"/>
+    <joint name="brow_r_lift"    value="-0.30"/>
+    <joint name="jaw_open"       value="0.05"/>
+    <joint name="mouth_l_corner" value="-0.25"/>
+    <joint name="mouth_r_corner" value="-0.25"/>
+  </group_state>
+
+  <group_state name="surprised" group="face">
+    <joint name="brow_l_lift"    value="0.50"/>
+    <joint name="brow_r_lift"    value="0.50"/>
+    <joint name="jaw_open"       value="0.45"/>
+  </group_state>
+
+  <!-- A pose need not name every joint in its group. Joints it omits are
+       left wherever they are, rather than being pulled to centre — a
+       sparse pose means "don't care", not "zero these". That's what lets
+       "blink" layer over any expression. -->
+  <group_state name="blink" group="eyes">
+    <joint name="eye_l_tilt" value="-0.02"/>
+    <joint name="eye_r_tilt" value="-0.02"/>
+  </group_state>
+
+  <!-- ── Non-actuated joints ─────────────────────────────────────────
+       Joints nothing commands directly. The usual case for an
+       animatronic is the dependent side of a four-bar linkage: URDF is a
+       strict tree and can't express the closed loop, so the URDF models
+       it broken and the rig evaluator (or the pose data) drives both
+       sides. -->
+
+  <passive_joint name="eyelid_l_follower"/>
+  <passive_joint name="eyelid_r_follower"/>
+
+  <!-- ── World attachment ────────────────────────────────────────────
+       The one structural element SRDF adds rather than annotates. -->
+
+  <virtual_joint name="world_joint" type="fixed"
+                 parent_frame="world" child_link="base_link"/>
+
+  <!-- ── Collision pairs to skip ─────────────────────────────────────
+       Usually most of an SRDF by line count, and normally generated
+       (MoveIt's Setup Assistant samples configurations and disables
+       always-, never-, and adjacent-colliding pairs) rather than
+       hand-written. SAINT.OS reads these so the collision checker can
+       use an SRDF-supplied matrix instead of the URDF-only pair
+       whitelist in docs/COLLISION_AVOIDANCE.md. -->
+
+  <disable_collisions link1="base_link" link2="neck_link" reason="Adjacent"/>
+  <disable_collisions link1="neck_link" link2="head_link" reason="Adjacent"/>
+  <disable_collisions link1="head_link" link2="eye_l_link" reason="Adjacent"/>
+  <disable_collisions link1="head_link" link2="eye_r_link" reason="Adjacent"/>
+  <disable_collisions link1="eye_l_link" link2="eye_r_link" reason="Never"/>
+
+</robot>

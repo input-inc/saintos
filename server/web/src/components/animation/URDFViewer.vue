@@ -27,6 +27,12 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import URDFLoader from 'urdf-loader'
 import { resolveMeshUrl } from '@/utils/meshUrl'
 import { buildColliders, computeAdjacency, collidingPairs, samplesToIntervals } from '@/utils/collision'
+import {
+  buildControlShape,
+  disposeRigShapeCache,
+  setShapeHighlight,
+  worldDragAxis,
+} from '@/composables/useRigShapes'
 
 const props = defineProps({
   // Source URL for the URDF text. Null/empty disables loading.
@@ -55,6 +61,12 @@ const emit = defineEmits([
   'joint-rotate',        // (jointName, angle) — live during gizmo drag
   'joint-rotate-commit', // (jointName, angle) — gizmo drag ended; safe to write a keyframe
   'interact',            // () — user is manipulating the view (orbit/zoom/drag)
+  // Control-rig shape interaction. The viewer reports a normalized DRAG
+  // DELTA and the parent turns it into a control value, so the viewport
+  // and the side panel both go through one evaluate path.
+  'rig-control-press',   // (controlName)
+  'rig-control-drag',    // ({ name, delta }) | ({ name, deltaX, deltaY })
+  'rig-control-release', // (controlName)
 ])
 
 const container = ref(null)
@@ -432,6 +444,15 @@ function selectJoint (jointName, cluster = null) {
 
 function onPointerDown (e) {
   if (e.button !== 0) { pressDownPx = null; return }
+  // Rig shapes render on top of everything, so a click that lands on one
+  // belongs to it — check before the joint gizmo or the orbit control
+  // get a say.
+  const rigHit = rigHitAt(e)
+  if (rigHit && beginRigDrag(e, rigHit)) {
+    pressDownPx = null
+    e.preventDefault?.()
+    return
+  }
   // First: did the operator grab a gizmo handle? Raycast against
   // every cyan dot in the current cluster; if any was hit, take
   // ownership of the gesture and use THAT joint's frame for the
@@ -485,6 +506,8 @@ function onPointerDown (e) {
 }
 
 function onPointerMove (e) {
+  if (rigDrag) { updateRigDrag(e); return }
+  updateRigHover(e)
   if (!handleDragging || !limitVisual?.joint) return
   const cur = mouseAngleOnDragPlane(e)
   if (cur == null) return
@@ -502,6 +525,7 @@ function onPointerMove (e) {
 }
 
 function onPointerUp (e) {
+  if (rigDrag) { endRigDrag(); return }
   if (handleDragging) {
     handleDragging = false
     if (controls) controls.enabled = true
@@ -639,6 +663,15 @@ function makeMeshLoader (hooks = {}) {
 }
 
 function clearRobot () {
+  // Rig shapes are children of robot links, so they have to come off
+  // before the tree is disposed — and their geometry is shared from a
+  // cache, which disposeObject3D would free once per shape using it.
+  clearRigShapes()
+  // Before disposeObject3D: it walks the tree disposing geometry, and
+  // edge geometry is cached across meshes, so a shared EdgesGeometry
+  // would be disposed once per mesh referencing it.
+  clearEdges()
+  disposeEdgeCache()
   if (robot) {
     scene?.remove(robot)
     disposeObject3D(robot)
@@ -743,6 +776,10 @@ async function loadUrdf () {
           `ACM ${acm.size} pairs (built ${_acmMs | 0}ms, time-sliced)`)
       }
     }
+    // Outline pass last: the clone above is made with clone(true), so
+    // building edges earlier would give the invisible FK sandbox a
+    // duplicate set of line segments for nothing.
+    buildEdges()
   } catch (e) {
     loadError.value = e?.message || String(e)
     emit('load-error', e)
@@ -798,7 +835,368 @@ function setJointValue (jointName, value) {
   return true
 }
 
-// ── Toolbar controls (Center / Grid / Views) ────────────────────────
+// ── Control rig shapes ──────────────────────────────────────────────
+//
+// One shape per rig control, parented to the URDF link the control is
+// anchored to, so it follows the pose with no per-frame bookkeeping.
+// The Unreal Control Rig arrangement: a shape hung off a bone, grabbed
+// in the viewport rather than driven from a panel.
+//
+// Dragging maps pointer motion onto the widget's declared `axis`
+// (projected to screen) and reports a 0..1 fraction of that axis; the
+// PARENT turns that into a control value and pushes it through the same
+// evaluate call the side panel uses. Keeping the value math out of here
+// is what stops the viewport and the panel from disagreeing.
+
+const showRig = ref(true)
+// Reactive shape count for the toolbar. `rigShapes` below is a plain Map
+// on purpose — it's read on every pointer move and doesn't want proxy
+// overhead — so the template watches this instead of its .size.
+const rigShapeCount = ref(0)
+// control name → THREE.Group. Kept so highlight/visibility/teardown can
+// address a control without walking the scene.
+const rigShapes = new Map()
+let rigControlsById = new Map()      // control name → parsed control
+let rigHovered = null
+let rigDrag = null
+// Controls the evaluator reported it can't handle. Their shapes are drawn
+// as inert wireframes and kept OUT of the hit list, so a drag falls
+// through to the orbit control instead of dead-ending on a handle that
+// does nothing.
+let rigInert = new Set()
+
+function clearRigShapes () {
+  for (const group of rigShapes.values()) {
+    group.parent?.remove(group)
+    group.userData?.mesh?.material?.dispose()
+  }
+  rigShapes.clear()
+  rigShapeCount.value = 0
+  rigHovered = null
+  rigDrag = null
+}
+
+/**
+ * Attach shapes for a rig.
+ *
+ * @param {object} rig      parsed rig ({ controls: [...] })
+ * @param {object} anchors  control name → URDF link name
+ */
+function setRigControls (rig, anchors = {}, inertNames = []) {
+  clearRigShapes()
+  rigControlsById = new Map()
+  rigInert = new Set(inertNames || [])
+  if (!robot || !rig?.controls?.length) return
+
+  for (const control of rig.controls) {
+    rigControlsById.set(control.name, control)
+    if (control.widget?.visible === false) continue
+    const linkName = anchors[control.name] || control.anchor
+    // No anchor means we have nowhere to put it. Skipping beats parking
+    // it at the origin, where a cluster of unrelated handles piles up on
+    // the robot's base and reads as a bug.
+    if (!linkName) continue
+    const link = robot.links?.[linkName] || robot.frames?.[linkName]
+    if (!link) continue
+
+    const group = buildControlShape(control, {
+      inert: rigInert.has(control.name),
+    })
+    group.visible = showRig.value
+    link.add(group)
+    rigShapes.set(control.name, group)
+  }
+  rigShapeCount.value = rigShapes.size
+  lastRigArgs = { rig, anchors }
+  robot.updateMatrixWorld(true)
+}
+
+function setRigVisible (on) {
+  showRig.value = !!on
+  for (const group of rigShapes.values()) group.visible = showRig.value
+  if (!showRig.value) {
+    rigHovered = null
+    rigDrag = null
+  }
+}
+
+function toggleRig () { setRigVisible(!showRig.value) }
+
+/** Mark one control's shape as selected, e.g. from the side panel. */
+function highlightRigControl (name) {
+  for (const [key, group] of rigShapes) {
+    setShapeHighlight(group, key === name ? 'active' : null)
+  }
+}
+
+function rigShapeMeshes () {
+  const out = []
+  for (const group of rigShapes.values()) {
+    if (!group.visible || group.userData?.inert) continue
+    if (group.userData?.mesh) out.push(group.userData.mesh)
+  }
+  return out
+}
+
+/**
+ * Update which controls are inert without rebuilding everything.
+ *
+ * The inert set arrives from the first evaluate, which lands AFTER the
+ * shapes are built, so rebuilding is the simplest correct answer — and
+ * it only happens when the set actually changes, which is essentially
+ * once per rig load.
+ */
+function setRigInert (names) {
+  const next = new Set(names || [])
+  if (next.size === rigInert.size && [...next].every(n => rigInert.has(n))) return
+  rigInert = next
+  if (lastRigArgs) {
+    setRigControls(lastRigArgs.rig, lastRigArgs.anchors, [...rigInert])
+  }
+}
+
+// Remembered so setRigInert can rebuild with the same rig + anchors.
+let lastRigArgs = null
+
+function rigHitAt (e) {
+  if (!showRig.value || !rigShapes.size || !renderer || !camera) return null
+  const rect = renderer.domElement.getBoundingClientRect()
+  ndcPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
+  ndcPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+  raycaster.setFromCamera(ndcPointer, camera)
+  const hits = raycaster.intersectObjects(rigShapeMeshes(), false)
+  if (!hits.length) return null
+  const group = hits[0].object.parent
+  const name = group?.userData?.rigControl
+  return name ? { name, group } : null
+}
+
+/**
+ * Begin a rig drag. Returns true if we took the gesture.
+ *
+ * The drag frame is computed once here: the widget's axis in world
+ * space, projected to a screen-space direction. Pointer movement is then
+ * a simple dot product against it, which behaves the same regardless of
+ * how the camera is oriented — including when the axis points nearly at
+ * the camera, where the projection shortens and the control just gets
+ * less sensitive rather than inverting.
+ */
+function beginRigDrag (e, hit) {
+  const control = rigControlsById.get(hit.name)
+  if (!control) return false
+  hit.group.updateMatrixWorld(true)
+
+  const origin = new THREE.Vector3().setFromMatrixPosition(hit.group.matrixWorld)
+  const axisWorld = worldDragAxis(hit.group, control)
+  const tip = origin.clone().add(axisWorld)
+
+  const rect = renderer.domElement.getBoundingClientRect()
+  const toScreen = (v) => {
+    const p = v.clone().project(camera)
+    return new THREE.Vector2(
+      (p.x * 0.5 + 0.5) * rect.width,
+      (-p.y * 0.5 + 0.5) * rect.height)
+  }
+  const screenDir = toScreen(tip).sub(toScreen(origin))
+  const len = screenDir.length()
+  // Axis pointing straight at the camera: there's no screen direction to
+  // drag along, so fall back to horizontal rather than dividing by ~0
+  // and sending the value to infinity on the first pixel.
+  if (len < 1e-3) screenDir.set(1, 0)
+  else screenDir.divideScalar(len)
+
+  rigDrag = {
+    name: hit.name,
+    group: hit.group,
+    kind: control.kind,
+    startX: e.clientX,
+    startY: e.clientY,
+    screenDir,
+    invertY: !!control.widget?.invert_y,
+  }
+  setShapeHighlight(hit.group, 'active')
+  if (controls) controls.enabled = false
+  setBodySelectNoneForRig(true)
+  emit('rig-control-press', hit.name)
+  return true
+}
+
+// Pixels of drag for one full sweep of a control's range. Generous on
+// purpose: a control shape is small on screen and a twitchy handle is
+// worse than a slow one.
+const RIG_DRAG_PX = 260
+
+function updateRigDrag (e) {
+  if (!rigDrag) return
+  const dx = e.clientX - rigDrag.startX
+  const dy = e.clientY - rigDrag.startY
+
+  if (rigDrag.kind === 'pad') {
+    // Two axes, screen-aligned: a pad is inherently a 2D screen gesture,
+    // and forcing it through the widget's single axis would lose one.
+    const fy = (rigDrag.invertY ? -dy : dy) / RIG_DRAG_PX
+    emit('rig-control-drag', {
+      name: rigDrag.name,
+      deltaX: dx / RIG_DRAG_PX,
+      deltaY: -fy,
+    })
+    return
+  }
+  // Channel / spatial: project onto the widget's declared axis.
+  const along = (dx * rigDrag.screenDir.x + dy * rigDrag.screenDir.y) / RIG_DRAG_PX
+  emit('rig-control-drag', { name: rigDrag.name, delta: along })
+}
+
+function endRigDrag () {
+  if (!rigDrag) return
+  setShapeHighlight(rigDrag.group, null)
+  emit('rig-control-release', rigDrag.name)
+  rigDrag = null
+  if (controls) controls.enabled = true
+  setBodySelectNoneForRig(false)
+}
+
+function setBodySelectNoneForRig (on) {
+  if (typeof document === 'undefined') return
+  document.body.style.userSelect = on ? 'none' : ''
+}
+
+function updateRigHover (e) {
+  if (rigDrag) return
+  const hit = rigHitAt(e)
+  const name = hit?.name || null
+  if (name === rigHovered) return
+  if (rigHovered && rigShapes.has(rigHovered)) {
+    setShapeHighlight(rigShapes.get(rigHovered), null)
+  }
+  rigHovered = name
+  if (name) setShapeHighlight(rigShapes.get(name), 'hover')
+  if (renderer) {
+    renderer.domElement.style.cursor = name ? 'grab' : ''
+  }
+}
+
+// ── Edge overlay ────────────────────────────────────────────────────
+//
+// Draws each mesh's hard edges as line segments on top of the shaded
+// surface. Without it, adjacent links sharing one material read as a
+// single blob — the demo head is a dozen boxes and cylinders in the same
+// grey, and you genuinely cannot tell where the jaw stops and the skull
+// starts. Edges make the articulation legible, which is the whole point
+// of a rig preview.
+//
+// Implementation notes that matter:
+//
+//  * `thresholdAngle` is what keeps this from being a wireframe. At 24°
+//    a box shows its 12 edges and a cylinder shows its two rims and
+//    silhouette, but the ~15° facets of a smooth sphere stay quiet.
+//  * EdgesGeometry is cached per SOURCE geometry. urdf-loader reuses one
+//    geometry across repeated links, and a real model (johnny5) has
+//    hundreds of meshes — rebuilding per instance is the difference
+//    between instant and a visible stall.
+//  * High-poly meshes are skipped. Edge extraction is O(tris) and a
+//    200k-triangle scan mesh produces an unreadable hairball anyway.
+//  * The lines are CHILDREN of their mesh, so they inherit joint
+//    transforms for free and pose correctly with no per-frame work.
+
+const showEdges = ref(true)
+
+// Above this triangle count, skip edge extraction: too slow to build and
+// too dense to read.
+const EDGE_TRI_BUDGET = 60000
+const EDGE_THRESHOLD_DEG = 24
+
+let edgeLines = []                  // LineSegments we added, for disposal
+let edgeMaterial = null
+const edgeGeomCache = new Map()     // source geometry uuid → EdgesGeometry
+
+// Black, deliberately, and the same in both themes. An inked outline
+// reads as a seam between parts rather than as a glowing wireframe over
+// them — which is what makes the articulation legible instead of just
+// busy. It's theme-independent for the same reason: the line is standing
+// in for a physical gap, not for UI chrome.
+const EDGE_COLOR = 0x000000
+
+function ensureEdgeMaterial () {
+  if (edgeMaterial) return edgeMaterial
+  // Opaque: a solid line is crisper than a blended one, and staying out
+  // of the transparent pass avoids sort-order artifacts against the
+  // surfaces it outlines. (polygonOffset is deliberately absent — it
+  // only affects polygon rasterization, so it does nothing for
+  // LineSegments; EdgesGeometry lines sit on creases and silhouettes
+  // where z-fighting isn't a problem in practice.)
+  edgeMaterial = new THREE.LineBasicMaterial({ color: EDGE_COLOR })
+  return edgeMaterial
+}
+
+function edgeGeometryFor (geometry) {
+  if (!geometry?.attributes?.position) return null
+  const cached = edgeGeomCache.get(geometry.uuid)
+  if (cached !== undefined) return cached
+
+  const idx = geometry.index
+  const tris = (idx ? idx.count : geometry.attributes.position.count) / 3
+  if (tris > EDGE_TRI_BUDGET) {
+    edgeGeomCache.set(geometry.uuid, null)   // cache the refusal too
+    return null
+  }
+  let edges = null
+  try {
+    edges = new THREE.EdgesGeometry(geometry, EDGE_THRESHOLD_DEG)
+  } catch (e) {
+    if (import.meta.env?.DEV) console.warn('[viewer] EdgesGeometry failed:', e)
+    edges = null
+  }
+  edgeGeomCache.set(geometry.uuid, edges)
+  return edges
+}
+
+function buildEdges () {
+  clearEdges()
+  if (!robot) return
+
+  // Collect first, THEN add. Object3D.traverse walks a live children
+  // array, so adding children mid-traverse visits the new nodes as well.
+  const meshes = []
+  robot.traverse((o) => {
+    if (o.isMesh && o.geometry && !o.userData.__isEdgeLine) meshes.push(o)
+  })
+
+  const mat = ensureEdgeMaterial()
+  for (const mesh of meshes) {
+    const geom = edgeGeometryFor(mesh.geometry)
+    if (!geom) continue
+    const line = new THREE.LineSegments(geom, mat)
+    line.userData.__isEdgeLine = true
+    // Never let the outline participate in raycasts — clicking an edge
+    // must select the joint, exactly as clicking the surface does.
+    line.raycast = () => {}
+    line.visible = showEdges.value
+    mesh.add(line)
+    edgeLines.push(line)
+  }
+}
+
+function clearEdges () {
+  for (const line of edgeLines) line.parent?.remove(line)
+  edgeLines = []
+  // Geometry stays in the cache — it's keyed by source geometry and
+  // survives a rebuild. clearRobot() disposes it.
+}
+
+function disposeEdgeCache () {
+  for (const geom of edgeGeomCache.values()) geom?.dispose?.()
+  edgeGeomCache.clear()
+  edgeMaterial?.dispose()
+  edgeMaterial = null
+}
+
+function toggleEdges () {
+  showEdges.value = !showEdges.value
+  for (const line of edgeLines) line.visible = showEdges.value
+}
+
+// ── Toolbar controls (Center / Grid / Edges / Collision / Views) ─────
 
 function toggleGrid () {
   showGrid.value = !showGrid.value
@@ -1064,7 +1462,10 @@ watch(viewMenuOpen, (open) => {
   }
 })
 
-defineExpose({ setJointValue, selectJoint, collisionsAtCurrent, scanTimeline, highlightCollision, cancelScan })
+defineExpose({
+  setRigControls, setRigVisible, setRigInert, toggleRig,
+  highlightRigControl, showRig,
+  setJointValue, selectJoint, collisionsAtCurrent, scanTimeline, highlightCollision, cancelScan })
 
 onMounted(() => {
   setupScene()
@@ -1080,6 +1481,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (rafHandle) cancelAnimationFrame(rafHandle)
+  clearRigShapes()
+  disposeRigShapeCache()
+  clearEdges()
+  disposeEdgeCache()
   resizeObserver?.disconnect()
   window.removeEventListener('resize', onResize)
   if (renderer?.domElement) {
@@ -1152,6 +1557,28 @@ watch(() => display.theme, () => {
               :title="showGrid ? 'Hide grid' : 'Show grid'"
               @click="toggleGrid">
         <span class="material-icons icon-sm">{{ showGrid ? 'grid_on' : 'grid_off' }}</span>
+      </button>
+      <!-- Control rig overlay. Hidden entirely when no rig is loaded, so
+           the button never offers to toggle nothing. -->
+      <button v-if="rigShapeCount"
+              class="viewer-btn pointer-events-auto"
+              :class="{ 'viewer-btn-active': showRig }"
+              :title="showRig
+                ? 'Hide control rig'
+                : `Show control rig (${rigShapeCount} controls)`"
+              @click="toggleRig">
+        <span class="material-icons icon-sm">
+          {{ showRig ? 'gamepad' : 'radio_button_unchecked' }}
+        </span>
+      </button>
+      <!-- Edge overlay. On by default: links sharing one material read as
+           a single blob without it, and telling them apart is the point
+           of a rig preview. -->
+      <button class="viewer-btn pointer-events-auto"
+              :class="{ 'viewer-btn-active': showEdges }"
+              :title="showEdges ? 'Hide edges' : 'Show edges'"
+              @click="toggleEdges">
+        <span class="material-icons icon-sm">{{ showEdges ? 'deselect' : 'select_all' }}</span>
       </button>
       <!-- Hidden entirely on preview-only embeds: collision geometry was
            never parsed, so the toggle would flip an empty overlay. -->

@@ -1,0 +1,360 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Demo animatronic head — the URDF half of the example set.
+
+  Deliberately primitive-only (boxes, cylinders, spheres) so it needs no
+  mesh files and the whole set fits in one small zip. Joint names match
+  example.srdf and example.rig.xml exactly, so uploading all three
+  together gives a working pose library and control rig with nothing to
+  wire up.
+
+  Points worth noticing while reading:
+
+  * Limits are ASYMMETRIC on several joints on purpose (jaw_open travels
+    -0.05..0.55, head_pitch -0.45..0.60). Normalized 0 is the MIDPOINT of
+    travel, so native 0 is not normalized 0 on those — which is exactly
+    the case that goes unnoticed until every imported pose leans.
+  * eyelid_l/r_follower carry <mimic> off the brow lift. That's the
+    linear-coupling primitive every consumer honours, and the rig
+    evaluator applies it last, in native units.
+  * ctrl_lookat is a massless link on a fixed joint — the standard way to
+    put a control's anchor frame into tf. It is not actuatable and never
+    appears as a keyable joint.
+-->
+<robot name="example_head">
+
+  <!-- ── Materials ──────────────────────────────────────────────── -->
+  <material name="shell"><color rgba="0.28 0.30 0.34 1.0"/></material>
+  <material name="accent"><color rgba="0.13 0.72 0.81 1.0"/></material>
+  <material name="eye"><color rgba="0.92 0.94 0.96 1.0"/></material>
+  <material name="warm"><color rgba="0.85 0.45 0.20 1.0"/></material>
+
+  <!-- ── Base and neck ──────────────────────────────────────────── -->
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.02"/>
+      <geometry><box size="0.18 0.18 0.04"/></geometry>
+      <material name="shell"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.02"/>
+      <geometry><box size="0.18 0.18 0.04"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
+  </link>
+
+  <link name="neck_link">
+    <visual>
+      <origin xyz="0 0 0.05"/>
+      <geometry><cylinder radius="0.03" length="0.10"/></geometry>
+      <material name="accent"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.05"/>
+      <geometry><cylinder radius="0.03" length="0.10"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.3"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <joint name="neck_yaw" type="revolute">
+    <parent link="base_link"/><child link="neck_link"/>
+    <origin xyz="0 0 0.04"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.4" upper="1.4" velocity="3.0" effort="8.0"/>
+  </joint>
+
+  <link name="neck_upper_link">
+    <visual>
+      <origin xyz="0 0 0.02"/>
+      <geometry><cylinder radius="0.028" length="0.04"/></geometry>
+      <material name="accent"/>
+    </visual>
+    <inertial>
+      <mass value="0.2"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <joint name="neck_pitch" type="revolute">
+    <parent link="neck_link"/><child link="neck_upper_link"/>
+    <origin xyz="0 0 0.10"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.50" upper="0.50" velocity="3.0" effort="8.0"/>
+  </joint>
+
+  <link name="neck_roll_link">
+    <visual>
+      <origin xyz="0 0 0.015"/>
+      <geometry><cylinder radius="0.026" length="0.03"/></geometry>
+      <material name="accent"/>
+    </visual>
+    <inertial>
+      <mass value="0.15"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <joint name="neck_roll" type="revolute">
+    <parent link="neck_upper_link"/><child link="neck_roll_link"/>
+    <origin xyz="0 0 0.04"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.40" upper="0.40" velocity="3.0" effort="6.0"/>
+  </joint>
+
+  <!-- ── Head ───────────────────────────────────────────────────── -->
+
+  <link name="head_pitch_link">
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+
+  <!-- Asymmetric on purpose: native 0 is NOT normalized 0 here. -->
+  <joint name="head_pitch" type="revolute">
+    <parent link="neck_roll_link"/><child link="head_pitch_link"/>
+    <origin xyz="0 0 0.03"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.45" upper="0.60" velocity="4.0" effort="5.0"/>
+  </joint>
+
+  <link name="head_link">
+    <visual>
+      <origin xyz="0.01 0 0.055"/>
+      <geometry><box size="0.15 0.13 0.13"/></geometry>
+      <material name="shell"/>
+    </visual>
+    <collision>
+      <origin xyz="0.01 0 0.055"/>
+      <geometry><box size="0.15 0.13 0.13"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.8"/>
+      <inertia ixx="0.004" ixy="0" ixz="0" iyy="0.004" iyz="0" izz="0.004"/>
+    </inertial>
+  </link>
+
+  <joint name="head_roll" type="revolute">
+    <parent link="head_pitch_link"/><child link="head_link"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.35" upper="0.35" velocity="4.0" effort="5.0"/>
+  </joint>
+
+  <!-- ── Eyes ───────────────────────────────────────────────────── -->
+
+  <link name="eye_l_pan_link">
+    <inertial><mass value="0.005"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="eye_l_pan" type="revolute">
+    <parent link="head_link"/><child link="eye_l_pan_link"/>
+    <origin xyz="0.07 0.032 0.075"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.40" upper="0.40" velocity="8.0" effort="0.5"/>
+  </joint>
+
+  <link name="eye_l_link">
+    <visual>
+      <geometry><sphere radius="0.017"/></geometry>
+      <material name="eye"/>
+    </visual>
+    <collision><geometry><sphere radius="0.017"/></geometry></collision>
+    <inertial><mass value="0.01"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="eye_l_tilt" type="revolute">
+    <parent link="eye_l_pan_link"/><child link="eye_l_link"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.30" upper="0.30" velocity="8.0" effort="0.5"/>
+  </joint>
+
+  <link name="eye_r_pan_link">
+    <inertial><mass value="0.005"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="eye_r_pan" type="revolute">
+    <parent link="head_link"/><child link="eye_r_pan_link"/>
+    <origin xyz="0.07 -0.032 0.075"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.40" upper="0.40" velocity="8.0" effort="0.5"/>
+  </joint>
+
+  <link name="eye_r_link">
+    <visual>
+      <geometry><sphere radius="0.017"/></geometry>
+      <material name="eye"/>
+    </visual>
+    <collision><geometry><sphere radius="0.017"/></geometry></collision>
+    <inertial><mass value="0.01"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="eye_r_tilt" type="revolute">
+    <parent link="eye_r_pan_link"/><child link="eye_r_link"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.30" upper="0.30" velocity="8.0" effort="0.5"/>
+  </joint>
+
+  <!-- ── Brows ──────────────────────────────────────────────────── -->
+
+  <link name="brow_l_link">
+    <visual>
+      <geometry><box size="0.012 0.048 0.010"/></geometry>
+      <material name="warm"/>
+    </visual>
+    <collision><geometry><box size="0.012 0.048 0.010"/></geometry></collision>
+    <inertial><mass value="0.01"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="brow_l_lift" type="revolute">
+    <parent link="head_link"/><child link="brow_l_link"/>
+    <origin xyz="0.075 0.034 0.100"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.35" upper="0.55" velocity="6.0" effort="0.5"/>
+  </joint>
+
+  <link name="brow_r_link">
+    <visual>
+      <geometry><box size="0.012 0.048 0.010"/></geometry>
+      <material name="warm"/>
+    </visual>
+    <collision><geometry><box size="0.012 0.048 0.010"/></geometry></collision>
+    <inertial><mass value="0.01"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="brow_r_lift" type="revolute">
+    <parent link="head_link"/><child link="brow_r_link"/>
+    <origin xyz="0.075 -0.034 0.100"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.35" upper="0.55" velocity="6.0" effort="0.5"/>
+  </joint>
+
+  <!-- ── Eyelids: mimic the brows ───────────────────────────────────
+       The one real coupling primitive in URDF. Travel here is WIDER than
+       the brow's, which is what makes applying the multiplier in
+       normalized space wrong — the evaluator round-trips through these
+       limits instead. -->
+
+  <link name="eyelid_l_link">
+    <visual>
+      <origin xyz="0.002 0 0.008"/>
+      <geometry><box size="0.020 0.038 0.006"/></geometry>
+      <material name="shell"/>
+    </visual>
+    <inertial><mass value="0.005"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="eyelid_l_follower" type="revolute">
+    <parent link="head_link"/><child link="eyelid_l_link"/>
+    <origin xyz="0.072 0.032 0.086"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.90" upper="0.90" velocity="6.0" effort="0.3"/>
+    <mimic joint="brow_l_lift" multiplier="0.6" offset="0"/>
+  </joint>
+
+  <link name="eyelid_r_link">
+    <visual>
+      <origin xyz="0.002 0 0.008"/>
+      <geometry><box size="0.020 0.038 0.006"/></geometry>
+      <material name="shell"/>
+    </visual>
+    <inertial><mass value="0.005"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="eyelid_r_follower" type="revolute">
+    <parent link="head_link"/><child link="eyelid_r_link"/>
+    <origin xyz="0.072 -0.032 0.086"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.90" upper="0.90" velocity="6.0" effort="0.3"/>
+    <mimic joint="brow_r_lift" multiplier="0.6" offset="0"/>
+  </joint>
+
+  <!-- ── Jaw and mouth ──────────────────────────────────────────── -->
+
+  <link name="jaw_link">
+    <visual>
+      <origin xyz="0.03 0 -0.012"/>
+      <geometry><box size="0.09 0.10 0.025"/></geometry>
+      <material name="shell"/>
+    </visual>
+    <collision>
+      <origin xyz="0.03 0 -0.012"/>
+      <geometry><box size="0.09 0.10 0.025"/></geometry>
+    </collision>
+    <inertial><mass value="0.1"/>
+      <inertia ixx="0.0005" ixy="0" ixz="0" iyy="0.0005" iyz="0" izz="0.0005"/>
+    </inertial>
+  </link>
+  <!-- Asymmetric: a jaw can close a little past neutral but opens far. -->
+  <joint name="jaw_open" type="revolute">
+    <parent link="head_link"/><child link="jaw_link"/>
+    <origin xyz="0.02 0 0.012"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.05" upper="0.55" velocity="5.0" effort="2.0"/>
+  </joint>
+
+  <link name="mouth_l_link">
+    <visual>
+      <geometry><sphere radius="0.008"/></geometry>
+      <material name="warm"/>
+    </visual>
+    <inertial><mass value="0.005"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="mouth_l_corner" type="revolute">
+    <parent link="head_link"/><child link="mouth_l_link"/>
+    <origin xyz="0.080 0.030 0.020"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.45" upper="0.45" velocity="6.0" effort="0.5"/>
+  </joint>
+
+  <link name="mouth_r_link">
+    <visual>
+      <geometry><sphere radius="0.008"/></geometry>
+      <material name="warm"/>
+    </visual>
+    <inertial><mass value="0.005"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="mouth_r_corner" type="revolute">
+    <parent link="head_link"/><child link="mouth_r_link"/>
+    <origin xyz="0.080 -0.030 0.020"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.45" upper="0.45" velocity="6.0" effort="0.5"/>
+  </joint>
+
+  <!-- ── Control anchor frame ───────────────────────────────────────
+       A massless link on a fixed joint. 100% standard URDF, and it puts
+       the look-at control's frame into tf so any consumer knows where
+       the gizmo lives without being told. Not actuatable — it will never
+       show up as a keyable joint. -->
+
+  <link name="ctrl_lookat"/>
+  <joint name="ctrl_lookat_mount" type="fixed">
+    <parent link="head_link"/><child link="ctrl_lookat"/>
+    <!-- 18 cm ahead of the face. Far enough to read as a gaze target,
+         close enough that it doesn't dominate the frame as the nearest
+         object to the camera. -->
+    <origin xyz="0.18 0 0.075"/>
+  </joint>
+
+</robot>

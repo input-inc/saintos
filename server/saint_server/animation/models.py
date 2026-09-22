@@ -19,6 +19,46 @@ from saint_server.unreal.animation import (
 )
 
 
+# ── curve (de)serialization ─────────────────────────────────────────
+#
+# Shared by a track's own curve and by its per-joint override curves, so
+# the two can't drift on tangent or interp handling.
+
+
+def _curve_to_dict(curve: AnimationCurve) -> Dict[str, Any]:
+    return {
+        "name": curve.name,
+        "keys": [
+            {
+                "time": k.time,
+                "value": k.value,
+                "interp": int(k.interp),
+                "arrive_tangent": k.arrive_tangent,
+                "leave_tangent": k.leave_tangent,
+            }
+            for k in curve.keys
+        ],
+    }
+
+
+def _curve_from_dict(d: Dict[str, Any], default_name: str = "") -> AnimationCurve:
+    keys = [
+        CurveKey(
+            time=float(k.get("time", 0.0)),
+            value=float(k.get("value", 0.0)),
+            interp=CurveInterpolation(int(k.get("interp", 1))),
+            arrive_tangent=float(k.get("arrive_tangent", 0.0)),
+            leave_tangent=float(k.get("leave_tangent", 0.0)),
+        )
+        for k in (d.get("keys") or [])
+    ]
+    # Keys arrive sorted from the editor, but a hand-edited file or a
+    # retimed key can break that, and every consumer walks them assuming
+    # ascending time.
+    keys.sort(key=lambda k: k.time)
+    return AnimationCurve(name=str(d.get("name", default_name)), keys=keys)
+
+
 # ── value tracks ────────────────────────────────────────────────────
 
 
@@ -46,50 +86,50 @@ class ValueTrack:
     curve: AnimationCurve
     target_kind: str = "urdf_joint"
     target: List[str] = field(default_factory=list)
+    # ``pose`` tracks only. joint name → curve of ABSOLUTE joint values
+    # that refines one joint inside the clip, leaving the rest of the pose
+    # alone. Only the operator's own keys are stored; the locked anchors
+    # at the pose track's keyframe times are derived at resolve time
+    # (see frame.effective_override_keys), so retiming the pose moves its
+    # anchors with it instead of stranding a stale copy.
+    joint_overrides: Dict[str, AnimationCurve] = field(default_factory=dict)
 
     def value_at(self, t: float) -> float:
         return self.curve.get_value_at_time(t)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "id": self.id,
             "name": self.name,
             "target_kind": self.target_kind,
             "target": list(self.target),
-            "curve": {
-                "name": self.curve.name,
-                "keys": [
-                    {
-                        "time": k.time,
-                        "value": k.value,
-                        "interp": int(k.interp),
-                        "arrive_tangent": k.arrive_tangent,
-                        "leave_tangent": k.leave_tangent,
-                    }
-                    for k in self.curve.keys
-                ],
-            },
+            "curve": _curve_to_dict(self.curve),
         }
+        # Omitted when empty: every track authored before per-joint
+        # overrides existed stays byte-identical on re-save.
+        if self.joint_overrides:
+            out["joint_overrides"] = {
+                joint: _curve_to_dict(curve)
+                for joint, curve in self.joint_overrides.items()
+                if curve.keys
+            }
+        return out
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ValueTrack":
-        curve_d = d.get("curve") or {}
-        keys = [
-            CurveKey(
-                time=float(k.get("time", 0.0)),
-                value=float(k.get("value", 0.0)),
-                interp=CurveInterpolation(int(k.get("interp", 1))),
-                arrive_tangent=float(k.get("arrive_tangent", 0.0)),
-                leave_tangent=float(k.get("leave_tangent", 0.0)),
-            )
-            for k in curve_d.get("keys", [])
-        ]
+        overrides_d = d.get("joint_overrides") or {}
+        overrides = {}
+        for joint, curve_d in overrides_d.items():
+            curve = _curve_from_dict(curve_d, default_name=str(joint))
+            if curve.keys:
+                overrides[str(joint)] = curve
         return cls(
             id=str(d["id"]),
             name=str(d.get("name", "")),
             target_kind=str(d.get("target_kind", "urdf_joint")),
             target=[str(p) for p in (d.get("target") or [])],
-            curve=AnimationCurve(name=str(curve_d.get("name", "")), keys=keys),
+            curve=_curve_from_dict(d.get("curve") or {}),
+            joint_overrides=overrides,
         )
 
 
@@ -243,28 +283,63 @@ class Animation:
 class PoseSetpoint:
     """A single value to push into the routing graph when a pose applies.
 
-    Setpoints address WS inputs by ``(sheet_id, ws_input_id)`` — the
-    same convention the controller gamepad bindings use. Applying a
-    pose is just a fan-out of ``routing_evaluator.set_ws_input`` calls.
+    ``target_kind`` selects the address space, mirroring ValueTrack's
+    target model:
+
+      * ``"ws_input"`` (default) — ``(sheet_id, ws_input_id)``, the same
+        convention the controller gamepad bindings use. Applying the
+        pose fans out ``routing_evaluator.set_ws_input`` calls.
+        Backward-compatible with every pose authored before joint
+        setpoints existed (those have no ``target_kind`` and deserialize
+        to this).
+      * ``"joint"`` — ``joint`` is a URDF joint name and the value goes
+        to ``set_urdf_joint_value``, the same path animation value
+        tracks use. This is what SRDF ``<group_state>`` import produces:
+        a group_state is literally a named list of joint values, and
+        there's no way to express it as WS inputs without a pre-existing
+        routing binding for every joint.
+
+    ``value`` is always **normalized −1..+1**, never radians. SRDF
+    group_states are authored in URDF-native units and converted exactly
+    once, at import, against each joint's ``<limit>`` — see
+    ``srdf.GroupState.normalized_values``. Storing radians here would
+    put an unconverted value one hop from a servo.
     """
-    sheet_id: str
-    ws_input_id: str
-    value: float
+    sheet_id: str = ""
+    ws_input_id: str = ""
+    value: float = 0.0
+    target_kind: str = "ws_input"
+    joint: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "sheet_id": self.sheet_id,
             "ws_input_id": self.ws_input_id,
             "value": self.value,
+            "target_kind": self.target_kind,
+            "joint": self.joint,
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "PoseSetpoint":
+        # sheet_id / ws_input_id are optional now: a joint setpoint has
+        # neither. Poses saved before joint setpoints existed always
+        # carry both and default to target_kind="ws_input".
         return cls(
-            sheet_id=str(d["sheet_id"]),
-            ws_input_id=str(d["ws_input_id"]),
+            sheet_id=str(d.get("sheet_id") or ""),
+            ws_input_id=str(d.get("ws_input_id") or ""),
             value=float(d.get("value", 0.0)),
+            target_kind=str(d.get("target_kind") or "ws_input"),
+            joint=str(d.get("joint") or ""),
         )
+
+    @property
+    def is_joint(self) -> bool:
+        return self.target_kind == "joint"
+
+    def address(self) -> str:
+        """Human-readable target, for skip lists and log lines."""
+        return self.joint if self.is_joint else f"{self.sheet_id}/{self.ws_input_id}"
 
 
 @dataclass
@@ -275,6 +350,14 @@ class Pose:
     group: str = ""       # single-level group ("" → Ungrouped bucket)
     setpoints: List[PoseSetpoint] = field(default_factory=list)
     description: str = ""
+    # Provenance. ``"srdf"`` marks a pose imported from an SRDF
+    # ``<group_state>``, with ``source_ref`` holding the group_state name
+    # it came from. Lets the UI badge imported poses and lets a re-import
+    # recognize what it would be overwriting — an operator who edited an
+    # imported pose in the UI should not silently lose that work when
+    # they upload a revised SRDF.
+    source: str = ""
+    source_ref: str = ""
     created: str = ""
     modified: str = ""
 
@@ -285,6 +368,8 @@ class Pose:
             "icon": self.icon,
             "group": self.group,
             "description": self.description,
+            "source": self.source,
+            "source_ref": self.source_ref,
             "setpoints": [s.to_dict() for s in self.setpoints],
             "created": self.created,
             "modified": self.modified,
@@ -298,10 +383,22 @@ class Pose:
             icon=str(d.get("icon", "")),
             group=str(d.get("group", "")),
             description=str(d.get("description", "")),
+            source=str(d.get("source", "")),
+            source_ref=str(d.get("source_ref", "")),
             setpoints=[PoseSetpoint.from_dict(s) for s in d.get("setpoints", [])],
             created=str(d.get("created", "")),
             modified=str(d.get("modified", "")),
         )
+
+    def joint_values(self) -> Dict[str, float]:
+        """Joint-addressed setpoints as ``{joint: normalized}``.
+
+        The shape the rig evaluator wants for a pose target, and what an
+        animation pose track blends. WS-input setpoints are excluded —
+        they have no joint to name.
+        """
+        return {s.joint: s.value for s in self.setpoints
+                if s.is_joint and s.joint}
 
     def stamp(self) -> None:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

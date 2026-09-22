@@ -10,7 +10,7 @@ use std::thread;
 #[cfg(target_os = "linux")]
 use super::steamdeck_hid::SteamDeckHidReader;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InputState {
     pub gamepad: GamepadState,
     pub gyro: GyroState,

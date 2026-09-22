@@ -3,8 +3,14 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, provide, re
 import { useRoute, useRouter } from 'vue-router'
 import { useRobotModelStore } from '@/stores/robotModel'
 import { useAnimationsStore } from '@/stores/animations'
+import { usePosesStore } from '@/stores/poses'
 import { useWsStore } from '@/stores/ws'
-import { sampleAllTracks, sampleCurve } from '@/composables/useCurveSampling'
+import {
+  frameToPreviewValues,
+  referencedPoseIds,
+  relaxedFrame,
+  resolveFrame,
+} from '@/composables/useFrameResolve'
 import TimelineEditor from '@/components/animation/TimelineEditor.vue'
 
 const props = defineProps({
@@ -17,11 +23,15 @@ const URDFViewer = defineAsyncComponent(
 const PropsPanel = defineAsyncComponent(
   () => import('@/components/animation/PropsPanel.vue')
 )
+const RigControls = defineAsyncComponent(
+  () => import('@/components/animation/RigControls.vue')
+)
 
 const route = useRoute()
 const router = useRouter()
 const robot = useRobotModelStore()
 const animations = useAnimationsStore()
+const poses = usePosesStore()
 const ws = useWsStore()
 
 // ── Shared state (provided to descendants) ─────────────────────────
@@ -46,6 +56,52 @@ const anim = computed(() => animations.editing)
 const editingId = computed(() => anim.value?.id || null)
 const trackIds = computed(() => new Set((anim.value?.value_tracks || []).map(t => t.id)))
 const unboundJoints = computed(() => jointNames.value.filter(n => !trackIds.value.has(n)))
+
+// ── Pose resolution ────────────────────────────────────────────────
+//
+// Pose tracks need joint values, and the pose LIST only carries
+// summaries — so each referenced pose is fetched once and cached. The
+// cache is keyed by pose id and invalidated when the pose library
+// reloads, which is what makes editing a pose show up in the viewport
+// without a page refresh.
+const poseJoints = ref({})          // pose id → { joint: normalized }
+
+async function ensurePosesLoaded (ids) {
+  const missing = ids.filter(id => !(id in poseJoints.value))
+  if (!missing.length) return
+  const fetched = {}
+  for (const id of missing) {
+    try {
+      const r = await ws.management('get_pose', { id })
+      const setpoints = r?.pose?.setpoints || []
+      const joints = {}
+      for (const s of setpoints) {
+        if (s.target_kind === 'joint' && s.joint) joints[s.joint] = s.value
+      }
+      // Cache the miss too (as null), so a track pointing at a deleted
+      // pose doesn't re-request on every frame.
+      fetched[id] = r?.pose ? joints : null
+    } catch (e) {
+      console.warn(`get_pose(${id}) failed:`, e)
+      fetched[id] = null
+    }
+  }
+  poseJoints.value = { ...poseJoints.value, ...fetched }
+}
+
+const poseLookup = (id) => poseJoints.value[id] || null
+
+// Resolved joint values at the playhead, published to the timeline so a
+// pose track's disclosed joint rows can show real numbers.
+const resolvedJoints = ref({})
+
+// Tracks referencing a pose that no longer exists. Surfaced rather than
+// silently doing nothing — a track that quietly stopped contributing is
+// the hardest kind of animation bug to find.
+const missingPoses = computed(() =>
+  referencedPoseIds(anim.value || {})
+    .filter(id => id in poseJoints.value && poseJoints.value[id] === null))
+
 
 const playingState = computed(() => {
   if (!anim.value) return null
@@ -181,10 +237,18 @@ provide('trigger-targets', { wsInputs: wsInputCatalog, topics: topicCatalogForTr
 // ── URDF live driving from the curve ───────────────────────────────
 
 function driveUrdfFromPlayhead () {
+  if (!anim.value) return
+  // Shared resolver — same layering rules the server player uses, so
+  // the viewport can't disagree with the robot. Pose tracks layer in
+  // list order over the joint tracks below them.
+  const { joints } = resolveFrame(anim.value, playerPos.value, { poseLookup })
+  // Kept for the timeline: a joint disclosed under a pose track shows
+  // its POST-layering value, so a track above the pose overriding it is
+  // visible rather than confusing.
+  resolvedJoints.value = joints
   const v = viewerRef?.value
-  if (!v?.setJointValue || !anim.value) return
-  const sampled = sampleAllTracks(anim.value, playerPos.value)
-  for (const [jointName, val] of Object.entries(sampled)) {
+  if (!v?.setJointValue) return
+  for (const [jointName, val] of Object.entries(joints)) {
     v.setJointValue(jointName, val)
   }
   // Posing is cheap and must stay smooth; the collision check + 3D re-tint is
@@ -246,7 +310,8 @@ async function runCollisionScan () {
   try {
     // Non-blocking: scanTimeline runs on the viewer's hidden clone and yields
     // between slices; interaction aborts it (returns null) via cancelScan.
-    res = await v.scanTimeline((t) => sampleAllTracks(a, t), dur, steps)
+    res = await v.scanTimeline(
+      (t) => resolveFrame(a, t, { poseLookup }).joints, dur, steps)
   } catch (_) {
     res = []
   }
@@ -328,19 +393,13 @@ function livePreviewActive () {
   return livePreview.value && !!anim.value && !playingState.value?.running
 }
 
-// Build the value-track frame at time t: ws_input-bound tracks address
-// (sheet, input); everything else is a URDF joint keyed by track id.
+// Build the value-track frame at time t. Pose tracks are resolved to
+// joint values HERE rather than on the server, so the preview path
+// carries only the two concrete target kinds and there's exactly one
+// place that knows how pose layering works on each side.
 function buildPreviewValues (t) {
-  const out = []
-  for (const tr of anim.value?.value_tracks || []) {
-    const v = sampleCurve(tr.curve, t)
-    if (tr.target_kind === 'ws_input' && tr.target?.length >= 2) {
-      out.push({ target_kind: 'ws_input', target: tr.target, value: v })
-    } else {
-      out.push({ target_kind: 'urdf_joint', id: tr.id, value: v })
-    }
-  }
-  return out
+  return frameToPreviewValues(
+    resolveFrame(anim.value || {}, t, { poseLookup }))
 }
 // Triggers whose time falls in the (prev, now] window — forward only,
 // matching the player so a backward scrub doesn't re-fire events.
@@ -376,15 +435,16 @@ function sendLivePreview (t, triggers) {
   if (wait <= 0) flush()
   else _previewTimer = setTimeout(flush, wait)
 }
-// Relax the rig (all value targets → 0) when Live Preview turns off or
-// the editor unmounts, mirroring the player's stop-settles-to-neutral
-// behavior so the rig doesn't hold the last previewed pose.
+// Relax the rig when Live Preview turns off or the editor unmounts,
+// mirroring the player's stop-settles-to-neutral behavior so the rig
+// doesn't hold the last previewed pose. Note this is NOT "resolve the
+// frame with zero weights" — a pose track at weight 0 contributes
+// nothing, which would strand the joints it was moving. relaxedFrame
+// collects them explicitly.
 function relaxLivePreview () {
-  const zeros = (anim.value?.value_tracks || []).map(tr =>
-    (tr.target_kind === 'ws_input' && tr.target?.length >= 2)
-      ? { target_kind: 'ws_input', target: tr.target, value: 0 }
-      : { target_kind: 'urdf_joint', id: tr.id, value: 0 })
-  if (zeros.length) animations.previewFrame(zeros, [])
+  const values = frameToPreviewValues(
+    relaxedFrame(anim.value || {}, { poseLookup }))
+  if (values.length) animations.previewFrame(values, [])
 }
 watch(livePreview, (on) => {
   if (on) sendLivePreview(playerPos.value, [])   // snap rig to current frame
@@ -474,6 +534,147 @@ function addWsInputTrack (payload) {
   animations.markDirty()
   selection.value = { kind: 'track', trackId: id }
 }
+// Default clip length for a new pose track, in seconds.
+const POSE_CLIP_SECONDS = 1
+
+// Layer a whole named pose as one track. The curve is the pose's WEIGHT
+// (0..1), not a joint value.
+//
+// Creates a SPAN (two keys), not a single key: a pose track is a clip and
+// only contributes between its first and last keyframe, so a lone key
+// would be a zero-length clip that does essentially nothing. See
+// useFrameResolve.js.
+async function addPoseTrack (payload) {
+  if (!anim.value || !payload?.pose_id) return
+  animations.snapshot({ force: true })
+  const label = payload.label || payload.pose_id
+  const id = ensureUniqueTrackId(`pose.${payload.pose_id}`)
+  const dur = Number(anim.value.duration) || 0
+  let start = Math.max(0, Number(playerPos.value) || 0)
+  let end = start + POSE_CLIP_SECONDS
+  if (dur > 0) {
+    end = Math.min(end, dur)
+    // Playhead parked at the very end: lay the clip out backwards rather
+    // than collapsing it to nothing.
+    if (end - start < 1e-6) start = Math.max(0, end - POSE_CLIP_SECONDS)
+  }
+  const key = (time) => ({ time, value: 1, interp: 1,
+                           arrive_tangent: 0, leave_tangent: 0 })
+  anim.value.value_tracks.push({
+    id, name: label,
+    target_kind: 'pose',
+    target: [payload.pose_id],
+    curve: { name: label, keys: [key(start), key(end)] },
+  })
+  animations.markDirty()
+  selection.value = { kind: 'track', trackId: id }
+  await ensurePosesLoaded([payload.pose_id])
+  driveUrdfFromPlayhead()
+}
+
+// ── Per-joint overrides on a pose track ────────────────────────────
+//
+// A pose track's disclosed joint rows are keyable: the anchors at the
+// pose's own keyframe times are locked, and the operator's keys go
+// between them. Stored as `joint_overrides[joint]` on the track; the
+// anchors are derived at resolve time so retiming the pose carries them
+// along instead of stranding a stale copy.
+
+function findTrack (trackId) {
+  return anim.value?.value_tracks?.find(t => t.id === trackId) || null
+}
+
+function overrideKeys (track, joint, { create = false } = {}) {
+  if (!track) return null
+  if (!track.joint_overrides) {
+    if (!create) return null
+    track.joint_overrides = {}
+  }
+  if (!track.joint_overrides[joint]) {
+    if (!create) return null
+    track.joint_overrides[joint] = { name: joint, keys: [] }
+  }
+  return track.joint_overrides[joint].keys
+}
+
+function addOverrideKey ({ trackId, joint, time, value }) {
+  const track = findTrack(trackId)
+  if (!track || !joint) return
+  animations.snapshot({ force: true })
+  const keys = overrideKeys(track, joint, { create: true })
+  const insertAt = keys.findIndex(k => k.time > time)
+  // Inherit the preceding key's easing so adding a point to an eased
+  // stretch continues that curve instead of forcing a linear kink —
+  // same rule as the main keyframe path.
+  const prevIdx = insertAt === -1 ? keys.length - 1 : insertAt - 1
+  const key = {
+    time, value: Number(value) || 0,
+    interp: prevIdx >= 0 ? (keys[prevIdx].interp ?? 1) : 1,
+    arrive_tangent: 0, leave_tangent: 0,
+  }
+  if (insertAt === -1) keys.push(key)
+  else keys.splice(insertAt, 0, key)
+  animations.markDirty()
+  selection.value = { kind: 'override-keyframe', trackId, joint, time }
+  driveUrdfFromPlayhead()
+}
+
+// One handler for both axes of the drag: horizontal retimes, vertical
+// changes value. `value` is optional so a caller that only wants to
+// retime doesn't have to know the current value.
+function moveOverrideKey ({ trackId, joint, fromTime, toTime, value }) {
+  const keys = overrideKeys(findTrack(trackId), joint)
+  if (!keys) return
+  const k = keys.find(x => Math.abs(x.time - fromTime) < 1e-6)
+  if (!k) return
+  k.time = toTime
+  if (value !== undefined && Number.isFinite(Number(value))) {
+    k.value = Number(value)
+  }
+  keys.sort((a, b) => a.time - b.time)
+  animations.markDirty()
+  // Keep the selection pinned to the key as it moves, so the Properties
+  // panel doesn't blink out mid-drag.
+  selection.value = { kind: 'override-keyframe', trackId, joint, time: toTime }
+  driveUrdfFromPlayhead()
+}
+
+function removeOverrideKey ({ trackId, joint, time }) {
+  const track = findTrack(trackId)
+  const keys = overrideKeys(track, joint)
+  if (!keys) return
+  const idx = keys.findIndex(x => Math.abs(x.time - time) < 1e-6)
+  if (idx < 0) return
+  animations.snapshot({ force: true })
+  keys.splice(idx, 1)
+  // Drop the whole override once its last key goes, so the joint returns
+  // to being driven by the pose blend rather than by an empty curve that
+  // still counts as "overridden".
+  if (!keys.length) {
+    delete track.joint_overrides[joint]
+    if (!Object.keys(track.joint_overrides).length) delete track.joint_overrides
+  }
+  if (selection.value?.kind === 'override-keyframe') {
+    selection.value = { kind: null }
+  }
+  animations.markDirty()
+  driveUrdfFromPlayhead()
+}
+
+// Move a value track within the list. Order is semantic: tracks layer
+// bottom-up, so this changes the resolved output, not just the display.
+function reorderTracks ({ from, to }) {
+  const tracks = anim.value?.value_tracks
+  if (!tracks) return
+  if (from === to || from < 0 || to < 0 ||
+      from >= tracks.length || to >= tracks.length) return
+  animations.snapshot({ force: true })
+  const [moved] = tracks.splice(from, 1)
+  tracks.splice(to, 0, moved)
+  animations.markDirty()
+  driveUrdfFromPlayhead()
+}
+
 function renameTrack (track, newName) {
   track.name = newName
   animations.markDirty()
@@ -554,6 +755,95 @@ watch(selection, (s) => {
     v.selectJoint(null)
   }
 }, { deep: true, immediate: true })
+
+// ── Control rig ────────────────────────────────────────────────────
+//
+// The rig panel evaluates server-side and hands back resolved joint
+// values. Those go straight to the viewer so the operator sees the pose
+// as they drag — but they are NOT keyframes until asked for, so a rig
+// control can be used to explore without dirtying the animation.
+
+const rigPanelOpen = ref(true)
+const rigJoints = ref({})
+const rigPanelRef = ref(null)
+// The 3D shapes are the primary interface; the side panel is the precise
+// one. Both drive the same evaluate call, so they can't disagree.
+const rigOverlay = ref(true)
+
+// The viewer owns the meshes, so it needs the parsed rig and the anchor
+// map to build them. Deferred until the viewer exists — the panel can
+// finish loading before the async URDFViewer chunk has mounted.
+let pendingRig = null
+function onRigLoaded (rig, anchors) {
+  pendingRig = { rig, anchors }
+  applyRigToViewer()
+}
+function applyRigToViewer () {
+  const v = viewerRef?.value
+  if (!v?.setRigControls || !pendingRig) return
+  v.setRigControls(pendingRig.rig, pendingRig.anchors, rigInert.value)
+  v.setRigVisible(rigOverlay.value)
+}
+watch(rigOverlay, (on) => viewerRef?.value?.setRigVisible?.(on))
+
+// Grabbing a shape in the viewport routes through the panel so the value
+// math lives in exactly one place.
+function onRigPress (name) {
+  rigPanelRef.value?.beginOverlayDrag?.(name)
+  viewerRef?.value?.highlightRigControl?.(name)
+}
+function onRigDrag (payload) {
+  rigPanelRef.value?.applyOverlayDrag?.(payload)
+}
+function onRigRelease () {
+  rigPanelRef.value?.endOverlayDrag?.()
+  viewerRef?.value?.highlightRigControl?.(null)
+}
+// Hovering a panel row lights up its shape — how you find one control's
+// handle among a dozen on a busy model.
+function onRigHover (name) {
+  viewerRef?.value?.highlightRigControl?.(name || null)
+}
+// Controls the evaluator can't handle (today: gaze). Their shapes are
+// drawn as dim wireframes and taken out of hit-testing, so a drag falls
+// through to the camera instead of dead-ending on an inert handle.
+const rigInert = ref([])
+function onRigInert (names) {
+  rigInert.value = names || []
+  viewerRef?.value?.setRigInert?.(rigInert.value)
+}
+
+// Shapes are parented to URDF links, so a robot reload destroys them and
+// they have to be rebuilt against the new tree.
+function onViewerLoaded () {
+  requestCollisionScan()
+  applyRigToViewer()
+}
+
+function onRigJoints (joints) {
+  rigJoints.value = joints || {}
+  const v = viewerRef?.value
+  if (!v?.setJointValue) return
+  for (const [jointName, val] of Object.entries(rigJoints.value)) {
+    v.setJointValue(jointName, val)
+  }
+  scheduleLiveCollision()
+}
+
+// Commit the rig's current pose as keyframes at the playhead — one per
+// joint the controls are driving. This is the bridge between posing with
+// a rig and authoring a timeline: the rig is the input device, and the
+// tracks stay the animation's source of truth (a saved animation must
+// play back without the rig file present).
+function onRigKeyFrame () {
+  if (!anim.value) return
+  const joints = Object.entries(rigJoints.value)
+  if (!joints.length) return
+  animations.snapshot({ force: true })
+  for (const [jointName, value] of joints) {
+    setKeyframeAtPlayhead(jointName, value)
+  }
+}
 
 function onGizmoRotate (jointName, angle) {
   liveJointAngle.value = { name: jointName, angle }
@@ -637,10 +927,19 @@ async function loadFromRoute () {
   if (!anim.value) router.replace({ name: 'animations' })
 }
 watch(() => route.params?.id, loadFromRoute)
-watch(editingId, () => {
+watch(editingId, async () => {
   playerPos.value = 0
-  driveUrdfFromPlayhead()
   selection.value = { kind: null }
+  await ensurePosesLoaded(referencedPoseIds(anim.value || {}))
+  driveUrdfFromPlayhead()
+})
+// A track pointing at a pose we haven't fetched yet contributes nothing,
+// so any change to the referenced set triggers a fetch. Covers undo/redo
+// reinstating a pose track as well as adding one.
+watch(() => referencedPoseIds(anim.value || {}).join('|'), async (ids) => {
+  if (!ids) return
+  await ensurePosesLoaded(ids.split('|'))
+  driveUrdfFromPlayhead()
 })
 
 // ── Lifecycle ──────────────────────────────────────────────────────
@@ -658,12 +957,16 @@ onMounted(async () => {
   document.addEventListener('keydown', onActivity, true)
   document.addEventListener('input', onActivity, true)
   document.addEventListener('change', onActivity, true)
-  await Promise.all([robot.refresh(), animations.reload()])
+  await Promise.all([robot.refresh(), animations.reload(), poses.reload()])
   // Load the WS-input catalog up front so the timeline's "+ Input"
   // dropdown is populated immediately — value tracks can bind a
   // controller sheet input even when no URDF is installed.
   loadTriggerTargets()
   await loadFromRoute()
+  // Pose tracks can't drive anything until their joint values are in,
+  // so fetch them before the first frame rather than showing a pose
+  // track that visibly pops in a moment later.
+  await ensurePosesLoaded(referencedPoseIds(anim.value || {}))
   // Land at t=0 with the URDF reflecting any saved keyframes.
   playerPos.value = 0
   driveUrdfFromPlayhead()
@@ -765,7 +1068,10 @@ onBeforeUnmount(() => {
                         :urdf-url="robot.urdfUrl"
                         :meshes-base="robot.meshesBase"
                         height="100%"
-                        @loaded="requestCollisionScan"
+                        @loaded="onViewerLoaded"
+                        @rig-control-press="onRigPress"
+                        @rig-control-drag="onRigDrag"
+                        @rig-control-release="onRigRelease"
                         @interact="deferCollisionScan"
                         @joints="onJointsChanged"
                         @joint-click="onJointClicked"
@@ -788,7 +1094,41 @@ onBeforeUnmount(() => {
             <span class="material-icons" style="font-size:14px">warning</span>
             Collision
           </div>
+          <!-- A pose track whose pose was deleted contributes nothing.
+               Silently doing nothing is the hardest animation bug to
+               find, so say so. -->
+          <div v-if="missingPoses.length"
+               class="absolute bottom-2 left-2 z-10 flex items-center gap-1 rounded bg-amber-600/90 text-white text-xs px-2 py-1"
+               :title="`Missing pose(s): ${missingPoses.join(', ')} — these tracks do nothing until the pose is restored or the track removed.`">
+            <span class="material-icons" style="font-size:14px">help_outline</span>
+            {{ missingPoses.length }} missing pose{{ missingPoses.length === 1 ? '' : 's' }}
+          </div>
         </div>
+
+        <!-- Rig controls: the input device for posing. Sits between the
+             viewport and the properties panel because it's used WITH the
+             3D view, not read like a form. Collapsible — a rig with a
+             dozen controls would otherwise crowd out the viewport. -->
+        <aside v-if="anim && robot.hasRig" class="editor-rig"
+               :class="{ 'is-collapsed': !rigPanelOpen }">
+          <button class="editor-rig-toggle"
+                  :title="rigPanelOpen ? 'Collapse the control rig' : 'Expand the control rig'"
+                  @click="rigPanelOpen = !rigPanelOpen">
+            <span class="material-icons icon-sm">
+              {{ rigPanelOpen ? 'chevron_right' : 'tune' }}
+            </span>
+          </button>
+          <div v-if="rigPanelOpen" class="editor-rig-body">
+            <RigControls ref="rigPanelRef"
+                         :live="livePreview"
+                         v-model:overlay="rigOverlay"
+                         @joints="onRigJoints"
+                         @key-frame="onRigKeyFrame"
+                         @rig-loaded="onRigLoaded"
+                         @hover-control="onRigHover"
+                         @inert-controls="onRigInert" />
+          </div>
+        </aside>
 
         <aside v-if="anim" class="editor-props">
           <div class="editor-props-header">Properties</div>
@@ -798,7 +1138,8 @@ onBeforeUnmount(() => {
                         :animations="animations.list"
                         @dirty="animations.markDirty()"
                         @select="onPropsSelect"
-                        @delete-keyframe="onDeleteKeyframe" />
+                        @delete-keyframe="onDeleteKeyframe"
+                        @delete-override-key="removeOverrideKey" />
           </div>
         </aside>
       </div>
@@ -813,17 +1154,25 @@ onBeforeUnmount(() => {
                         :playing="!!playingState?.running"
                         :unbound-joints="unboundJoints"
                         :ws-inputs="wsInputCatalog"
+                        :poses="poses.list"
+                        :pose-joints="poseJoints"
+                        :resolved-joints="resolvedJoints"
                         @update:player-pos="onTimelineScrub"
                         @select="onTimelineSelect"
                         @dirty="animations.markDirty()"
                         @rename-track="renameTrack"
                         @remove-track="removeTrack"
+                        @reorder-tracks="reorderTracks"
                         @rename-trigger-track="renameTriggerTrack"
                         @remove-trigger-track="removeTriggerTrack"
                         @play="play"
                         @stop="stopPlayback"
                         @add-joint="addJointTrack"
-                        @add-ws-input="addWsInputTrack" />
+                        @add-ws-input="addWsInputTrack"
+                        @add-pose="addPoseTrack"
+                        @add-override-key="addOverrideKey"
+                        @move-override-key="moveOverrideKey"
+                        @remove-override-key="removeOverrideKey" />
       </div>
     </div>
   </section>

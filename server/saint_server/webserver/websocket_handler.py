@@ -1564,6 +1564,47 @@ class WebSocketHandler:
                         params.get('values') or [],
                         params.get('triggers') or [])}
 
+        # ── control rig ───────────────────────────────────────────────
+        elif action == 'get_rig':
+            # Full parsed rig, for building the on-screen control panel.
+            return {"status": "ok", "data": self.state_manager.get_rig()}
+
+        elif action == 'evaluate_rig':
+            # Evaluate the rig at the given control values and return the
+            # resolved joint values, so the client can drive its 3D
+            # viewport from the same evaluation that drives the robot.
+            # `apply` also pushes the frame into the routing graph.
+            values = params.get('values')
+            if values is not None and not isinstance(values, dict):
+                return {"status": "error", "message": "values must be an object"}
+            return {"status": "ok",
+                    "data": self.state_manager.evaluate_rig(
+                        values=values or {},
+                        apply=bool(params.get('apply')))}
+
+        # ── SRDF group_state import ───────────────────────────────────
+        elif action == 'list_group_states':
+            # Importable pose candidates from the installed SRDF, each
+            # annotated with whether a pose of that name already exists
+            # and whether it has been edited since import.
+            return {"status": "ok",
+                    "data": self.state_manager.list_group_states()}
+
+        elif action == 'import_group_states':
+            # Create poses from SRDF <group_state> definitions. `names`
+            # omitted means all of them. Existing poses are skipped
+            # unless overwrite, so a re-uploaded SRDF can't silently
+            # discard hand-tuned values.
+            names = params.get('names')
+            if names is not None and not isinstance(names, list):
+                return {"status": "error", "message": "names must be a list"}
+            return {"status": "ok",
+                    "data": self.state_manager.import_group_states(
+                        names=names,
+                        group=str(params.get('group') or ''),
+                        icon=str(params.get('icon') or ''),
+                        overwrite=bool(params.get('overwrite')))}
+
         # ── soundboard ────────────────────────────────────────────────
         elif action == 'list_sounds':
             return {"status": "ok",

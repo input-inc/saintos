@@ -2,14 +2,14 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct GyroState {
     pub pitch: f32,
     pub roll: f32,
     pub yaw: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct TouchpadState {
     pub x: f32,      // -1 to 1
     pub y: f32,      // -1 to 1

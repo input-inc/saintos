@@ -792,6 +792,32 @@ body.animations-fullwidth main {
   font-weight: 600; color: var(--color-fg-strong); font-size: 0.875rem;
 }
 .editor-props-body { padding: 0.75rem 1rem; }
+
+/* Control rig — the posing input device, so it sits next to the 3D view
+   rather than in the properties form. Collapsible because a rig with a
+   dozen controls would otherwise crowd out the viewport it's used with. */
+.editor-rig {
+  width: 15rem; min-width: 13rem; flex-shrink: 0;
+  position: relative;
+  background: var(--color-canvas);
+  border-left: 1px solid var(--color-panel);
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+}
+.editor-rig.is-collapsed {
+  width: 2rem; min-width: 2rem; overflow: visible;
+}
+.editor-rig-body { padding: 0.75rem; padding-top: 2.25rem; }
+.editor-rig-toggle {
+  position: absolute; top: 0.375rem; right: 0.375rem; z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  width: 1.5rem; height: 1.5rem; border-radius: 0.25rem;
+  color: var(--color-fg-muted); cursor: pointer;
+  transition: background-color 0.1s, color 0.1s;
+}
+.editor-rig-toggle:hover {
+  background: var(--color-surface); color: var(--color-fg-strong);
+}
 .editor-timeline {
   flex: 1 1 50%;
   min-height: 14rem;
@@ -1047,6 +1073,16 @@ body.animations-fullwidth main {
     border-left: none;
     border-top: 1px solid var(--color-panel);
   }
+  /* Stacked layout: the rig panel becomes a full-width band, and its
+     collapsed state has to shed the fixed width or it renders as a
+     2rem-tall sliver with the toggle floating over nothing. */
+  .editor-rig {
+    width: 100%;
+    min-width: 0;
+    border-left: none;
+    border-top: 1px solid var(--color-panel);
+  }
+  .editor-rig.is-collapsed { width: 100%; min-width: 0; height: 2rem; }
   .editor-preview-row { flex-direction: column; }
 }
 

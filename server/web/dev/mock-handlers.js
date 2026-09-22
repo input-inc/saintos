@@ -8,6 +8,21 @@
 // Mutating handlers may emit broadcasts via ctx.broadcast(topic, data).
 
 import * as st from './mock-state.js'
+import { bridge } from './mock-bridge.js'
+
+// Which poses a rig references only changes when the rig file does, but
+// evaluate_rig needs it on every slider tick. Cache on the rig text so a
+// drag doesn't pay for it ~30 times a second.
+let _refsCacheKey = null
+let _refsCacheVal = null
+async function referencedPoses (rigText) {
+  if (_refsCacheKey === rigText && _refsCacheVal) return _refsCacheVal
+  const r = await bridge('referenced_poses', { rig: rigText })
+  if (r.error) return r
+  _refsCacheKey = rigText
+  _refsCacheVal = r
+  return r
+}
 
 // ── Registry ─────────────────────────────────────────────────────────
 
@@ -507,6 +522,12 @@ export const managementHandlers = {
       icon: p.icon || '', group: p.group || '',
       description: p.description || '',
       setpoint_count: p.setpoints?.length || 0,
+      // Joint-addressed setpoints specifically. Only these matter to an
+      // animation pose track or a rig control target, so the editor's
+      // + Pose menu shows this rather than the total.
+      joint_count: (p.setpoints || []).filter(
+        sp => sp.target_kind === 'joint' && sp.joint).length,
+      source: p.source || '',
       modified: p.modified || '',
     })),
   }),
@@ -532,12 +553,140 @@ export const managementHandlers = {
   apply_pose: ({ id }, ctx) => {
     const p = st.poses.get(id)
     if (!p) return err('Pose not found')
-    // Mock can't actually write into the routing evaluator's ws_input
-    // cache, but reporting success lines up with what the UI shows
-    // when the real server applies a pose.
-    const applied = (p.setpoints || []).length
+    // Joint-addressed setpoints DO land in the joint cache — that's the
+    // same path animation value tracks use, and it makes an applied pose
+    // visible on the routing canvas. ws_input setpoints can't be
+    // simulated here, so they're only counted.
+    let applied = 0
+    for (const sp of p.setpoints || []) {
+      if (sp.target_kind === 'joint' && sp.joint) {
+        st.setUrdfJointValue(`_pose_${id}`, sp.joint, sp.value)
+      }
+      applied++
+    }
     ctx.activity?.(`Applied pose ${p.name || id} (${applied} setpoint${applied === 1 ? '' : 's'})`, 'info')
     return ok({ success: true, applied, skipped: [] })
+  },
+
+  // SRDF group_state import ────────────────────────────────────────
+  list_group_states: async () => {
+    const r = await bridge('group_states', {
+      ...st.robotModelTexts(),
+      existing_pose_ids: [...st.poses.keys()],
+    })
+    if (r.error) return err(r.error)
+    // Annotate with whether an existing pose has been edited since
+    // import — the prompt needs it to avoid clobbering hand-tuning.
+    const states = (r.group_states || []).map(gs => {
+      const prior = st.poses.get(gs.pose_id)
+      return {
+        ...gs,
+        locally_edited: !!(prior && prior.modified && prior.modified !== prior.created),
+      }
+    })
+    return ok({ success: true, group_states: states })
+  },
+
+  import_group_states: async ({ names, group, icon, overwrite }, ctx) => {
+    if (!st.getUrdfModel()) return ok({ success: false, message: 'No URDF installed' })
+    const r = await bridge('group_states', {
+      ...st.robotModelTexts(),
+      existing_pose_ids: [...st.poses.keys()],
+    })
+    if (r.error) return err(r.error)
+    const candidates = r.group_states || []
+    if (!candidates.length) {
+      return ok({ success: false,
+        message: 'No SRDF group_states found — is an SRDF installed?' })
+    }
+
+    const wanted = Array.isArray(names) && names.length ? new Set(names) : null
+    const imported = [], skipped = [], warnings = []
+    const now = new Date().toISOString()
+
+    for (const gs of candidates) {
+      if (wanted && !wanted.has(gs.name)) continue
+      if (!Object.keys(gs.normalized || {}).length) {
+        skipped.push({ name: gs.name, reason: 'no joints resolved against the URDF' })
+        continue
+      }
+      const existing = st.poses.get(gs.pose_id)
+      if (existing && !overwrite) {
+        skipped.push({ name: gs.name, reason: `pose '${gs.pose_id}' already exists` })
+        continue
+      }
+      // Values are already normalized -1..+1 by the bridge, converted
+      // once from the SRDF's native radians using each joint's <limit>.
+      const setpoints = Object.keys(gs.normalized).sort().map(joint => ({
+        target_kind: 'joint', joint, value: gs.normalized[joint],
+        sheet_id: '', ws_input_id: '',
+      }))
+      st.poses.set(gs.pose_id, {
+        id: gs.pose_id,
+        name: gs.name,
+        icon: icon || '',
+        group: group || gs.group || '',
+        description: `Imported from SRDF group_state '${gs.name}'`,
+        source: 'srdf',
+        source_ref: gs.name,
+        setpoints,
+        created: existing?.created || now,
+        modified: now,
+      })
+      imported.push({ id: gs.pose_id, name: gs.name, joint_count: setpoints.length })
+      if (gs.unresolved?.length) {
+        warnings.push(`'${gs.name}': dropped ${gs.unresolved.length} joint(s) `
+          + `not in the URDF (${gs.unresolved.slice(0, 4).join(', ')})`)
+      }
+    }
+    if (imported.length) {
+      ctx.activity?.(`Imported ${imported.length} SRDF group_state(s) as poses`, 'info')
+    }
+    return ok({ success: true, imported, skipped, warnings })
+  },
+
+  // Control rig ────────────────────────────────────────────────────
+  get_rig: async () => {
+    const texts = st.robotModelTexts()
+    if (!texts.rig) return ok({ success: true, rig: null })
+    const r = await bridge('rig', { ...texts, pose_names: [...st.poses.keys()] })
+    if (r.error) return err(r.error)
+    return ok(r)
+  },
+
+  // Evaluated by the REAL Python evaluator via the bridge, so the mock
+  // demonstrates the actual blend math, clamp policy, and mimic
+  // round-trip rather than a JS approximation of them.
+  evaluate_rig: async ({ values, apply }, ctx) => {
+    const texts = st.robotModelTexts()
+    if (!texts.rig) return ok({ success: false, message: 'No rig file installed' })
+
+    // Send only the poses the rig references, matching the real server
+    // (loading the whole library per slider tick would read every pose
+    // file off disk).
+    const refs = await referencedPoses(texts.rig)
+    const wanted = new Set([...(refs.poses || []), refs.neutral].filter(Boolean))
+    const poses = {}
+    for (const name of wanted) {
+      const pose = st.poses.get(st.slugify(name)) || st.poses.get(name)
+      if (!pose) continue
+      const joints = {}
+      for (const sp of pose.setpoints || []) {
+        if (sp.target_kind === 'joint' && sp.joint) joints[sp.joint] = sp.value
+      }
+      poses[name] = joints
+    }
+
+    const frame = await bridge('evaluate_rig', { ...texts, poses, values: values || {} })
+    if (frame.error) return err(frame.error)
+
+    if (apply) {
+      for (const [joint, value] of Object.entries(frame.joints || {})) {
+        st.setUrdfJointValue('_rig', joint, value)
+      }
+      frame.applied = Object.keys(frame.joints || {}).length
+    }
+    return ok(frame)
   },
 
 }

@@ -13,15 +13,18 @@ from typing import Optional, Dict, Any
 
 from aiohttp import web
 
-from saint_server.animation.urdf_store import URDFStore, URDFStoreError
+from saint_server.animation.robot_model_store import (
+    RobotModelError,
+    RobotModelStore,
+)
 from saint_server.webserver.state_manager import StateManager
 from saint_server.webserver.websocket_handler import WebSocketHandler
 
 
-# Hard cap on URDF + mesh bundle uploads. 64 MB is generous for any
-# real robot — meshes are typically a few MB each, and we expect tens
-# of links at most. Larger bundles probably contain unrelated assets
-# (textures, animations) that don't belong in the URDF store.
+# Hard cap on robot model bundle uploads. 64 MB is generous for any real
+# robot — meshes are typically a few MB each, and we expect tens of
+# links at most. Larger bundles probably contain unrelated assets
+# (textures, animations) that don't belong in the robot model store.
 MAX_URDF_UPLOAD_BYTES = 64 * 1024 * 1024
 
 
@@ -118,11 +121,16 @@ class WebServer:
         )
         self.ws_handler = WebSocketHandler(self.state_manager, logger=logger)
 
-        # URDF + mesh store. Sits beside the rest of the runtime
-        # config (nodes/, system_routing.yaml). The store handles the
-        # safe-extract + validate flow; the HTTP layer just shuttles
-        # bytes back and forth.
-        self.urdf_store = URDFStore(self.state_manager.config_dir, logger=logger)
+        # Robot model store: URDF + meshes, SRDF, and rig file. Sits
+        # beside the rest of the runtime config (nodes/,
+        # system_routing.yaml). The store handles the safe-extract +
+        # validate flow; the HTTP layer just shuttles bytes back and
+        # forth.
+        self.robot_store = RobotModelStore(
+            self.state_manager.config_dir, logger=logger)
+        # The state manager needs the same store to resolve group_state
+        # imports and evaluate the rig, and it's constructed before us.
+        self.state_manager.robot_store = self.robot_store
 
         # aiohttp components
         self.app: Optional[web.Application] = None
@@ -180,18 +188,33 @@ class WebServer:
         self.app.router.add_post('/api/update/upload', self._handle_update_upload)
         self.app.router.add_get('/api/update/log', self._handle_update_log)
 
-        # Robot URDF routes — uploaded model + meshes served back to
-        # the animation builder UI (and, in a follow-on phase, the
-        # controller's 3D viewer).
-        self.app.router.add_get('/api/robot/metadata', self._handle_urdf_metadata)
+        # Robot model routes — the three description files plus meshes,
+        # served back to the animation builder UI and the controller's
+        # 3D viewer. One endpoint per file, mirroring how ROS publishes
+        # them as three separate parameters (robot_description,
+        # robot_description_semantic, robot_description_rig).
+        self.app.router.add_get('/api/robot/metadata', self._handle_robot_metadata)
+
         self.app.router.add_get('/api/robot/urdf', self._handle_urdf_get)
         self.app.router.add_post('/api/robot/urdf', self._handle_urdf_upload)
         self.app.router.add_delete('/api/robot/urdf', self._handle_urdf_delete)
+
+        self.app.router.add_get('/api/robot/srdf', self._handle_srdf_get)
+        self.app.router.add_post('/api/robot/srdf', self._handle_srdf_upload)
+        self.app.router.add_delete('/api/robot/srdf', self._handle_srdf_delete)
+
+        self.app.router.add_get('/api/robot/rig', self._handle_rig_get)
+        self.app.router.add_post('/api/robot/rig', self._handle_rig_upload)
+        self.app.router.add_delete('/api/robot/rig', self._handle_rig_delete)
+
         self.app.router.add_get('/api/robot/joints', self._handle_urdf_joints)
+        self.app.router.add_get('/api/robot/groups', self._handle_robot_groups)
+        self.app.router.add_get('/api/robot/group_states',
+                                self._handle_robot_group_states)
         # `:.+` lets the mesh path carry subdirectories — meshes are
         # stored under their URDF-relative paths (Meshes/Foo/bar.stl)
         # so same-named files in different folders stay distinct.
-        # Traversal safety lives in urdf_store.get_mesh_path.
+        # Traversal safety lives in robot_model_store.get_mesh_path.
         self.app.router.add_get('/api/robot/meshes/{filename:.+}', self._handle_urdf_mesh)
 
         # Animation import — Pololu Maestro save-file conversion.
@@ -582,16 +605,40 @@ class WebServer:
             'done': False,
         }, headers=self.NO_CACHE_HEADERS)
 
-    # ── URDF model routes ───────────────────────────────────────────
+    # ── Robot model routes (URDF + SRDF + rig) ──────────────────────
 
-    async def _handle_urdf_metadata(self, request: web.Request) -> web.Response:
-        meta = self.urdf_store.get_metadata()
-        if meta is None:
-            return web.json_response({'installed': False})
-        return web.json_response({'installed': True, **meta.to_dict()})
+    def _pose_names(self):
+        """Pose-library ids, for validating rig pose references.
+
+        The store doesn't own the pose store, so the ids have to come
+        from here. Tolerant of a state manager without one (headless
+        setups) since this only sharpens a warning list.
+        """
+        try:
+            return [p["id"] for p in self.state_manager.list_poses()]
+        except Exception:
+            return None
+
+    async def _handle_robot_metadata(self, request: web.Request) -> web.Response:
+        """Full description of the installed model.
+
+        Carries the URDF metadata plus each companion file's parsed
+        summary and every unresolved cross-file reference. The warnings
+        matter more here than they look: an SRDF or rig file is almost
+        entirely references into the URDF, and an unresolved one is a
+        silent no-op rather than a load error, so the UI is the only
+        place an operator will ever find out.
+        """
+        # Pose ids come from the state manager, not the store — a pose
+        # authored in the UI never appears in a group_state, so checking
+        # rig references against the SRDF alone would report a working
+        # reference as broken.
+        return web.json_response(
+            self.robot_store.describe(pose_names=self._pose_names()),
+            headers=self.NO_CACHE_HEADERS)
 
     async def _handle_urdf_get(self, request: web.Request) -> web.Response:
-        urdf_path = self.urdf_store.get_urdf_path()
+        urdf_path = self.robot_store.get_urdf_path()
         if not urdf_path:
             return web.Response(text='No URDF installed', status=404)
         return web.FileResponse(
@@ -602,47 +649,79 @@ class WebServer:
             },
         )
 
-    async def _handle_urdf_joints(self, request: web.Request) -> web.Response:
-        """Return the list of actuatable joints in the installed URDF.
+    async def _handle_srdf_get(self, request: web.Request) -> web.Response:
+        path = self.robot_store.get_srdf_path()
+        if not path:
+            return web.Response(text='No SRDF installed', status=404)
+        return web.FileResponse(
+            path,
+            headers={**self.NO_CACHE_HEADERS, 'Content-Type': 'application/xml'},
+        )
 
-        Powers the URDF-joint picker in the routing UI's Add Input
-        modal. Returns an empty list when no URDF is installed — the
-        frontend disables the URDF-joint option in that case.
+    async def _handle_rig_get(self, request: web.Request) -> web.Response:
+        path = self.robot_store.get_rig_path()
+        if not path:
+            return web.Response(text='No rig file installed', status=404)
+        return web.FileResponse(
+            path,
+            headers={**self.NO_CACHE_HEADERS, 'Content-Type': 'application/xml'},
+        )
+
+    async def _handle_urdf_joints(self, request: web.Request) -> web.Response:
+        """Actuatable joints in the installed URDF, with their limits.
+
+        Powers the joint picker in the routing UI's Add Input modal and
+        the animation editor's + Joint dropdown. Returns an empty list
+        when no URDF is installed — the frontend disables the joint
+        option in that case.
         """
-        joints = self.urdf_store.list_joints()
+        joints = self.robot_store.list_joints()
         return web.json_response({'joints': joints}, headers=self.NO_CACHE_HEADERS)
+
+    async def _handle_robot_groups(self, request: web.Request) -> web.Response:
+        """SRDF joint groups, expanded to their actuatable joint lists."""
+        return web.json_response({'groups': self.robot_store.list_groups()},
+                                 headers=self.NO_CACHE_HEADERS)
+
+    async def _handle_robot_group_states(self, request: web.Request) -> web.Response:
+        """SRDF group_states as importable pose candidates.
+
+        Each entry carries the native (radian/metre) values as authored,
+        the normalized −1..+1 the pose library actually stores, and any
+        joints that didn't resolve. The import prompt needs all three.
+        """
+        return web.json_response(
+            {'group_states': self.robot_store.list_group_states()},
+            headers=self.NO_CACHE_HEADERS)
 
     async def _handle_urdf_mesh(self, request: web.Request) -> web.Response:
         filename = request.match_info.get('filename', '')
-        mesh_path = self.urdf_store.get_mesh_path(filename)
+        mesh_path = self.robot_store.get_mesh_path(filename)
         if not mesh_path:
             return web.Response(text='Mesh not found', status=404)
         return web.FileResponse(mesh_path, headers=self.NO_CACHE_HEADERS)
 
-    async def _handle_urdf_upload(self, request: web.Request) -> web.Response:
-        """Accept a multipart upload with a single file part.
+    async def _read_upload(self, request: web.Request):
+        """Read a single-part multipart upload into memory.
 
-        The part's filename determines treatment:
-          * ``.zip`` — extracted as a URDF bundle (URDF + optional meshes/)
-          * ``.urdf`` / ``.xacro`` — installed as a single primitive-only model
+        Returns ``(filename, bytes)`` or ``(None, web.Response)`` on
+        failure, so each upload handler can bail with the right status
+        without repeating the streaming + size-cap dance.
         """
-        if request.content_length is not None and request.content_length > MAX_URDF_UPLOAD_BYTES:
-            return web.json_response(
+        if request.content_length is not None and \
+                request.content_length > MAX_URDF_UPLOAD_BYTES:
+            return None, web.json_response(
                 {'error': f'Upload exceeds {MAX_URDF_UPLOAD_BYTES} byte limit'},
-                status=413,
-            )
-
+                status=413)
         try:
             reader = await request.multipart()
         except Exception as e:
-            return web.json_response(
-                {'error': f'Expected multipart upload: {e}'},
-                status=400,
-            )
+            return None, web.json_response(
+                {'error': f'Expected multipart upload: {e}'}, status=400)
 
         field = await reader.next()
         if field is None:
-            return web.json_response({'error': 'No upload field'}, status=400)
+            return None, web.json_response({'error': 'No upload field'}, status=400)
 
         filename = (field.filename or 'upload.bin').strip()
         # Bound the read so a giant multipart can't drain memory.
@@ -653,27 +732,87 @@ class WebServer:
                 break
             buf.extend(chunk)
             if len(buf) > MAX_URDF_UPLOAD_BYTES:
-                return web.json_response(
+                return None, web.json_response(
                     {'error': f'Upload exceeds {MAX_URDF_UPLOAD_BYTES} byte limit'},
-                    status=413,
-                )
+                    status=413)
+        return filename, bytes(buf)
+
+    async def _handle_urdf_upload(self, request: web.Request) -> web.Response:
+        """Accept a multipart upload with a single file part.
+
+        The part's filename determines treatment:
+          * ``.zip`` — extracted as a full bundle (URDF + optional
+            meshes/ + optional SRDF + optional rig file)
+          * anything else — installed as a single primitive-only URDF
+
+        A bundle without an SRDF or rig file preserves any already
+        installed, then re-validates them; see
+        RobotModelStore._carry_over_companions.
+        """
+        filename, payload = await self._read_upload(request)
+        if filename is None:
+            return payload           # already a web.Response
 
         try:
             if filename.lower().endswith('.zip'):
-                meta = self.urdf_store.install_from_zip(bytes(buf), filename)
+                meta = self.robot_store.install_from_zip(payload, filename)
             else:
-                meta = self.urdf_store.install_from_urdf(bytes(buf), filename)
-        except URDFStoreError as e:
+                meta = self.robot_store.install_from_urdf(payload, filename)
+        except RobotModelError as e:
             return web.json_response({'error': str(e)}, status=400)
         except Exception as e:
-            self.log('error', f'URDF install failed: {e}')
+            self.log('error', f'Robot model install failed: {e}')
             return web.json_response({'error': f'Install failed: {e}'}, status=500)
 
-        return web.json_response({'installed': True, **meta.to_dict()})
+        # describe() rather than meta.to_dict(): the client wants the
+        # companion summaries and warnings in the same round trip.
+        return web.json_response(
+            self.robot_store.describe(pose_names=self._pose_names()))
+
+    async def _handle_srdf_upload(self, request: web.Request) -> web.Response:
+        """Install an SRDF alongside the existing URDF.
+
+        The response carries the parsed ``group_states``, which is what
+        lets the UI immediately offer to import them as poses instead of
+        making the operator go find them.
+        """
+        filename, payload = await self._read_upload(request)
+        if filename is None:
+            return payload
+
+        try:
+            result = self.robot_store.install_srdf(payload, filename)
+        except RobotModelError as e:
+            return web.json_response({'error': str(e)}, status=400)
+        except Exception as e:
+            self.log('error', f'SRDF install failed: {e}')
+            return web.json_response({'error': f'Install failed: {e}'}, status=500)
+        return web.json_response(result)
+
+    async def _handle_rig_upload(self, request: web.Request) -> web.Response:
+        """Install a rig file alongside the existing URDF."""
+        filename, payload = await self._read_upload(request)
+        if filename is None:
+            return payload
+
+        try:
+            result = self.robot_store.install_rig(payload, filename)
+        except RobotModelError as e:
+            return web.json_response({'error': str(e)}, status=400)
+        except Exception as e:
+            self.log('error', f'Rig install failed: {e}')
+            return web.json_response({'error': f'Install failed: {e}'}, status=500)
+        return web.json_response(result)
 
     async def _handle_urdf_delete(self, request: web.Request) -> web.Response:
-        removed = self.urdf_store.delete()
+        removed = self.robot_store.delete()
         return web.json_response({'removed': removed})
+
+    async def _handle_srdf_delete(self, request: web.Request) -> web.Response:
+        return web.json_response({'removed': self.robot_store.delete_srdf()})
+
+    async def _handle_rig_delete(self, request: web.Request) -> web.Response:
+        return web.json_response({'removed': self.robot_store.delete_rig()})
 
     # ── Animation import ────────────────────────────────────────────
 

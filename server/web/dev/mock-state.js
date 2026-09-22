@@ -530,15 +530,65 @@ export const poses      = new Map()   // id → Pose JSON
 // live.animationValues so the routing canvas lights up.
 export const animationPlayers = new Map()
 
-// URDF model — single slot, replaced on every upload.
+// Robot model — single slot, replaced when the URDF is replaced.
 //
-// Shape: { metadata: {…}, urdfBytes: Buffer, meshes: Map<string, Buffer> }
-// `metadata` matches what the real server's URDFStore writes to
+// Shape: { metadata: {…}, urdfBytes: Buffer, meshes: Map<string, Buffer>,
+//          srdfBytes: Buffer|null, rigBytes: Buffer|null }
+// `metadata` matches what the real server's RobotModelStore writes to
 // metadata.json — original_filename, urdf_filename, sha256, uploaded_at,
-// mesh_files (filenames only), link_count, joint_count.
+// mesh_files, link_count, joint_count, robot_name, and the srdf_*/rig_*
+// companion fields.
+//
+// The companion setters mutate in place rather than replacing the slot:
+// an SRDF or rig install is an annotation, and wiping the URDF to accept
+// one would be absurd (the real store makes the same distinction).
 export let urdfModel = null
 export function setUrdfModel (model) { urdfModel = model }
 export function getUrdfModel ()      { return urdfModel }
+
+export function setSrdf (bytes, filename, sha) {
+  if (!urdfModel) return false
+  urdfModel.srdfBytes = bytes
+  urdfModel.metadata.srdf_filename = filename
+  urdfModel.metadata.srdf_sha256 = sha
+  urdfModel.metadata.srdf_uploaded_at = Date.now() / 1000
+  return true
+}
+export function clearSrdf () {
+  if (!urdfModel?.metadata?.srdf_filename) return false
+  urdfModel.srdfBytes = null
+  urdfModel.metadata.srdf_filename = ''
+  urdfModel.metadata.srdf_sha256 = ''
+  urdfModel.metadata.srdf_uploaded_at = 0
+  return true
+}
+export function setRig (bytes, filename, sha) {
+  if (!urdfModel) return false
+  urdfModel.rigBytes = bytes
+  urdfModel.metadata.rig_filename = filename
+  urdfModel.metadata.rig_sha256 = sha
+  urdfModel.metadata.rig_uploaded_at = Date.now() / 1000
+  return true
+}
+export function clearRig () {
+  if (!urdfModel?.metadata?.rig_filename) return false
+  urdfModel.rigBytes = null
+  urdfModel.metadata.rig_filename = ''
+  urdfModel.metadata.rig_sha256 = ''
+  urdfModel.metadata.rig_uploaded_at = 0
+  return true
+}
+
+/** File texts for the bridge, which takes strings not Buffers. */
+export function robotModelTexts () {
+  const m = urdfModel
+  if (!m) return {}
+  return {
+    urdf: m.urdfBytes ? m.urdfBytes.toString('utf8') : undefined,
+    srdf: m.srdfBytes ? m.srdfBytes.toString('utf8') : undefined,
+    rig: m.rigBytes ? m.rigBytes.toString('utf8') : undefined,
+  }
+}
 
 // URDF-joint cache — animation players write here per tick and every
 // URDF-joint input on every sheet reads from here. Keyed by joint

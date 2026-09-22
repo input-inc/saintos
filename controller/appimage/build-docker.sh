@@ -103,13 +103,49 @@ if [ -e "$NODE_MODULES" ] && [ ! -L "$NODE_MODULES" ]; then
     rm -rf "$NODE_MODULES"
 fi
 
-# Plain bind mounts. No --privileged, no --security-opt, no named
-# volume — none of the flatpak workarounds are needed because no
-# kernel-level sandboxing happens inside.
+# Bind mounts for the repo and the cache; no --privileged, no
+# --security-opt — none of the flatpak workarounds are needed because
+# no kernel-level sandboxing happens inside.
+#
+# The third mount is an *anonymous Docker volume* (real ext4 inside the
+# Linux VM, removed with the container by --rm) shadowing the one
+# directory linuxdeploy writes into. It is not an optimization; the
+# build cannot complete without it on Docker Desktop for Mac:
+#
+#   linuxdeploy copies every ldd-discovered .so into the AppDir with
+#   C++ std::filesystem::copy_file(). libstdc++ implements that as
+#   open(dst, O_WRONLY|O_CREAT|O_TRUNC, S_IWUSR) — mode 0200 — and
+#   fchmod()s the real permissions on afterwards. Creating a file with
+#   no owner-read bit is exactly what Docker Desktop's virtiofs share
+#   refuses: the open() comes back EACCES (the macOS-side file server
+#   has to reopen what it just created, and 0200 locks it out of its
+#   own file). Every copy then fails with
+#
+#     ERROR: Failed to copy file /lib/x86_64-linux-gnu/libXau.so.6 ...
+#            filesystem error: cannot copy file: Permission denied
+#
+#   leaving a trail of 0-byte, mode-0200 stubs in AppDir/usr/lib. Plain
+#   cp(1) over the same mount works fine — it creates the destination
+#   readable and chmods after — which is why the rest of the build
+#   (cargo, npm, tauri's own bundler) never trips over this.
+#
+# Keeping target/ itself on the bind mount preserves the cargo
+# incremental cache; only target/release/bundle/ — the AppDir and the
+# finished .AppImage, both rebuilt from scratch every run — moves onto
+# ext4. build-bundle.sh copies the .AppImage out to
+# server/resources/firmware/controller/ under /work with cp, so nothing
+# the build produces is lost when the volume goes away.
+#
+# Stale 0-byte stubs from a pre-fix run would be invisible under the
+# volume but confusing on the host, so clear the shadowed path first.
+rm -rf "$CACHE_ROOT/target/release/bundle"
+mkdir -p "$CACHE_ROOT/target/release/bundle"
+
 docker run --rm \
     --platform=linux/amd64 \
     --volume "$REPO_ROOT:/work" \
     --volume "$CACHE_ROOT:/build" \
+    --volume /build/target/release/bundle \
     --env REPO_ROOT=/work \
     --env BUILD_DIR=/build \
     "$IMAGE_TAG"

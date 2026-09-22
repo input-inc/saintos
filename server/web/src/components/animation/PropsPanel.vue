@@ -26,6 +26,7 @@ const props = defineProps({
 const emit = defineEmits([
   'dirty',
   'delete-keyframe',
+  'delete-override-key',
   'select',
 ])
 
@@ -84,6 +85,57 @@ const selectedKeyframe = computed(() => {
   if (s?.kind !== 'keyframe' || !selectedTrack.value) return null
   return selectedTrack.value.curve?.keys?.[s.kfIdx] || null
 })
+// ── Per-joint override keys on a pose track ────────────────────────
+//
+// A pose track's disclosed joint rows carry the operator's own keys
+// between the locked anchors. The anchors aren't editable here — the pose
+// owns those times — so this editor only ever sees a user key.
+
+const overrideTrack = computed(() => {
+  const s = props.selection
+  if (s?.kind !== 'override-keyframe') return null
+  return props.animation.value_tracks?.find(t => t.id === s.trackId) || null
+})
+const overrideKeys = computed(() =>
+  overrideTrack.value?.joint_overrides?.[props.selection?.joint]?.keys || null)
+const selectedOverrideKey = computed(() => {
+  const keys = overrideKeys.value
+  const t = props.selection?.time
+  if (!keys || t === undefined) return null
+  return keys.find(k => Math.abs(k.time - t) < 1e-6) || null
+})
+// Keys only evaluate inside the pose track's clip, so time edits clamp
+// to it rather than letting a key wander somewhere it does nothing.
+const overrideClip = computed(() => {
+  const keys = overrideTrack.value?.curve?.keys || []
+  if (!keys.length) return null
+  const times = keys.map(k => Number(k.time) || 0)
+  return [Math.min(...times), Math.max(...times)]
+})
+
+function setOverrideTime (raw) {
+  const key = selectedOverrideKey.value
+  if (!key) return
+  let t = Number(Number(raw).toFixed(3))
+  if (!Number.isFinite(t)) return
+  const clip = overrideClip.value
+  if (clip) t = Math.max(clip[0], Math.min(clip[1], t))
+  key.time = t
+  overrideKeys.value.sort((a, b) => a.time - b.time)
+  onChange()
+  // Selection is keyed by time, so it has to follow the edit or the
+  // panel would blank out mid-type.
+  emit('select', { ...props.selection, time: t })
+}
+
+function deleteOverrideKey () {
+  const s = props.selection
+  if (s?.kind !== 'override-keyframe') return
+  animations.snapshot({ force: true })
+  emit('delete-override-key', { trackId: s.trackId, joint: s.joint, time: s.time })
+  emit('select', null)
+}
+
 // Both ws_input tracks and URDF-joint tracks now carry −1..+1 control
 // scalars, so the keyframe value editor uses the same range for either.
 const selectedTrackIsWs = computed(() =>
@@ -282,6 +334,61 @@ function onIconChange (value) {
               @click="deleteKey">
         <span class="material-icons icon-sm">delete</span>
         Delete keyframe
+      </button>
+    </template>
+
+    <!-- Per-joint override key on a pose track's disclosed row -->
+    <template v-else-if="selection?.kind === 'override-keyframe' && selectedOverrideKey">
+      <div class="text-xs text-fg-muted">
+        Pose <span class="text-fg-strong">{{ overrideTrack?.name || overrideTrack?.id }}</span>
+        · joint <span class="text-fg-strong font-mono">{{ selection.joint }}</span>
+      </div>
+      <p class="text-[11px] text-fg-faint">
+        Overrides this one joint inside the clip. The pose keeps driving every
+        other joint it names; the locked anchors are set on the pose row.
+      </p>
+
+      <label class="block">
+        <span class="block text-fg-muted text-xs mb-1">
+          Time (s)<span v-if="overrideClip" class="text-fg-faint">
+            — clip {{ fmt2(overrideClip[0]) }}–{{ fmt2(overrideClip[1]) }}</span>
+        </span>
+        <input type="number" step="0.01"
+               :min="overrideClip ? overrideClip[0] : 0"
+               :max="overrideClip ? overrideClip[1] : animation.duration"
+               class="input-field w-full"
+               :value="fmt2(selectedOverrideKey.time)"
+               @input="e => setOverrideTime(e.target.value)" />
+      </label>
+
+      <label class="block">
+        <span class="block text-fg-muted text-xs mb-1">Value (drag to pose the joint)</span>
+        <div class="space-y-1">
+          <input type="range" :min="-JOINT_RANGE" :max="JOINT_RANGE" step="0.005"
+                 v-model.number="selectedOverrideKey.value"
+                 @input="onChange"
+                 class="w-full accent-amber-400" />
+          <input type="number" step="0.01" class="input-field w-full"
+                 :value="fmt2(selectedOverrideKey.value)"
+                 @input="e => { selectedOverrideKey.value = Number(Number(e.target.value).toFixed(2)); onChange() }" />
+        </div>
+      </label>
+
+      <label class="block">
+        <span class="block text-fg-muted text-xs mb-1">Interpolation</span>
+        <select class="input-field w-full"
+                v-model.number="selectedOverrideKey.interp"
+                @change="onChange">
+          <optgroup v-for="g in easingGroups" :key="g.category" :label="g.category">
+            <option v-for="o in g.items" :key="o.code" :value="o.code">{{ o.label }}</option>
+          </optgroup>
+        </select>
+      </label>
+
+      <button class="btn-sm w-full bg-surface hover:bg-red-600 text-fg-strong hover:text-fg-strong justify-center"
+              @click="deleteOverrideKey">
+        <span class="material-icons icon-sm">delete</span>
+        Delete override key
       </button>
     </template>
 

@@ -198,6 +198,8 @@ development or to cut your own release — see [BUILD.md](docs/BUILD.md).
 - [docs/HARDWARE.md](docs/HARDWARE.md) — Hardware requirements and supported platforms
 - [docs/MAESTRO_BRINGUP.md](docs/MAESTRO_BRINGUP.md) — Pololu Maestro servo controller bring-up
 - [docs/SOUNDBOARD.md](docs/SOUNDBOARD.md) — Per-node audio: register and trigger clips
+- [docs/ROBOT_MODEL.md](docs/ROBOT_MODEL.md) — The robot model (URDF + SRDF + rig file): upload, import SRDF poses, animate with pose tracks, drive the control rig
+- [docs/RIG_SCHEMA.md](docs/RIG_SCHEMA.md) — Rig file reference: controls, blend curves, bindings, widget hints
 - [controller/docs/SHEETS_BINDINGS.md](controller/docs/SHEETS_BINDINGS.md) — Binding controller inputs to routing-sheet WebSocket inputs
 - [controller/docs/BINDINGS_SYSTEM.md](controller/docs/BINDINGS_SYSTEM.md) — Bindings data model (input sources, action types, preset panels)
 
