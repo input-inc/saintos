@@ -133,8 +133,23 @@
         @apply bg-saint-background text-saint-text;
     }
 
+    /* Connection dots. Colour carries the state: green connected, red
+       disconnected, amber connecting.
+
+       Only the TRANSIENT state animates. `connected` used to pulse too,
+       which meant the one steady state the app spends all its time in
+       was also the one running a never-ending animation — an active CSS
+       animation keeps the page in an animating state, so the compositor
+       never reaches an idle, no-repaint frame. On a battery-powered
+       handheld sitting connected on a bench that is a permanent cost for
+       a dot that conveys nothing the colour doesn't already say.
+       (animate-pulse animates opacity, so it's compositor-only and cheap
+       per frame — the cost is that it never stops.)
+
+       `connecting` keeps its pulse: there the motion means something —
+       work in progress — and the state resolves in seconds. */
     .status-indicator { @apply w-3 h-3 rounded-full; }
-    .status-connected { @apply bg-saint-success animate-pulse; }
+    .status-connected { @apply bg-saint-success; }
     .status-disconnected { @apply bg-saint-error; }
     .status-connecting { @apply bg-saint-warning animate-pulse; }
 

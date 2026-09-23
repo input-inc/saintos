@@ -145,6 +145,28 @@ static char command_buffer[512];
 static std_msgs__msg__String state_msg;
 static char state_buffer[2048];
 
+/* Hard cap on what /state may put on the wire, independent of the
+ * buffer above.
+ *
+ * The XRCE-DDS client's best-effort output stream holds
+ * RMW_UXRCE_STREAM_HISTORY_OUTPUT (4) buffers of
+ * UXR_CONFIG_UDP_TRANSPORT_MTU (512) bytes. A message larger than one
+ * MTU fragments across several of those slots, and /state, /announce
+ * and /log all draw from the same pool in the same executor dispatch.
+ *
+ * Learned the hard way (2026-09-22): a ~1.4 KB state message — three
+ * slots every second — left no room for /announce, which then failed
+ * every publish with `rcl_publish` rcl_ret=1. The node ran perfectly
+ * and was completely invisible to the server, because announcements
+ * are how it is seen at all. Symptom on the bench: "flashed it and it
+ * never came back up".
+ *
+ * One frame, so /state can never crowd out the topic that makes this
+ * node discoverable. 448 leaves headroom under 512 for XRCE submessage
+ * overhead. pin_control_state_to_json truncates gracefully at this cap
+ * (partial telemetry, valid JSON) rather than dropping the message. */
+#define STATE_WIRE_BUDGET_BYTES 448
+
 static std_msgs__msg__String log_msg;
 static char log_buffer[256];               // One log line at a time
 
@@ -264,6 +286,23 @@ static volatile uint32_t g_periph_update_max_ms = 0;
 #define CONNECTION_TIMEOUT_MS        45000
 #define MAX_RECONNECT_ATTEMPTS       10     // Max consecutive failures before error state
 #define ERROR_RECOVERY_DELAY_MS      30000  // Stay in ERROR for 30s, then try again
+
+/* Idle-keepalive constants, retained for the record.
+ *
+ * The liveness signal above is RX-only and nothing guarantees the agent
+ * sends anything: our publishers are best-effort (no ACK traffic back)
+ * and an idle robot generates no /control or /config writes. So a
+ * HEALTHY node with no operator input goes quiet, trips
+ * CONNECTION_TIMEOUT_MS, and tears down a working session — the ~60 s
+ * offline/reconnect cycle seen on the Head Node with firmware uptime
+ * climbing the whole time.
+ *
+ * The obvious fix — rmw_uros_ping_agent() from check_agent_connection —
+ * hard-faults the chip (SRSR=0x2) at exactly AGENT_PING_IDLE_MS into
+ * every boot. Do not reintroduce it there. The server-side keepalive
+ * described in check_agent_connection is the route that does not
+ * require touching the XRCE session from outside the executor. */
+#define AGENT_PING_IDLE_MS           10000  /* unused; see above */
 
 static uint32_t last_successful_comm = 0;   // legacy — TX-based, not trustworthy on NativeEthernet
 static uint32_t last_connection_check = 0;
@@ -661,17 +700,48 @@ static void publish_state(void)
     pin_control_update_state();
 
     int len = pin_control_state_to_json(
-        state_buffer, sizeof(state_buffer), g_node.node_id);
+        state_buffer, STATE_WIRE_BUDGET_BYTES, g_node.node_id);
+
+    /* Telemetry health. Both failure paths used to be invisible from
+     * the outside: a builder overflow returned -1 and we bailed before
+     * rcl_publish (so even g_state_publish_fail stayed at zero), and a
+     * publish rejection only bumped a counter nothing ever read. A node
+     * could therefore publish NOTHING, indefinitely, while announcing
+     * "ACTIVE" every second — which is exactly what the Head Node was
+     * doing. Report both on /log, rate-limited so a persistent fault
+     * can't flood the topic. */
+    static uint32_t last_health_log_ms = 0;
+    static uint32_t last_trunc_seen = 0;
+    static uint32_t last_fail_seen = 0;
+    uint32_t trunc_now = pin_control_state_truncations();
+    uint32_t now_ms = millis();
+    bool worsened = (trunc_now != last_trunc_seen)
+                 || (g_state_publish_fail != last_fail_seen);
+    if (worsened && (uint32_t)(now_ms - last_health_log_ms) > 30000u) {
+        last_health_log_ms = now_ms;
+        last_trunc_seen = trunc_now;
+        last_fail_seen = g_state_publish_fail;
+        saint_log_publish("warn",
+            "state telemetry degraded: %lu records truncated, %lu publishes failed",
+            (unsigned long)trunc_now, (unsigned long)g_state_publish_fail);
+    }
+
     if (len < 0) return;
 
     state_msg.data.data = state_buffer;
     state_msg.data.size = (size_t)len;
     state_msg.data.capacity = sizeof(state_buffer);
 
-    static bool state_size_logged = false;
-    if (!state_size_logged) {
-        Serial.printf("State JSON size: %d bytes (uxr MTU=512)\n", len);
-        state_size_logged = true;
+    /* Size telemetry on the wire budget. Printed whenever it changes
+     * (not once per boot) because the payload grows with configuration
+     * — a peripheral added at runtime is exactly when you want to see
+     * the new number. Measuring this is not optional: shipping a state
+     * message sized by estimate is what wedged this node. */
+    static int last_logged_len = -1;
+    if (len != last_logged_len) {
+        last_logged_len = len;
+        Serial.printf("State JSON size: %d bytes (budget %d, uxr MTU=512)\n",
+                      len, (int)STATE_WIRE_BUDGET_BYTES);
     }
 
     rcl_ret_t ret = rcl_publish(&state_pub, &state_msg, NULL);
@@ -687,6 +757,21 @@ static void state_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         publish_state();
         g_loop_stage = 21;
     }
+}
+
+/* True when at least one pin_config entry belongs to this driver —
+ * i.e. the operator has this peripheral on this node. Used to keep
+ * /announce proportional to the rig (see publish_announcement). */
+static bool driver_is_configured(const peripheral_driver_t* drv)
+{
+    if (!drv) return false;
+    uint8_t count = 0;
+    const pin_config_t* configs = pin_config_get_all(&count);
+    if (!configs) return false;
+    for (uint8_t i = 0; i < count; i++) {
+        if (configs[i].mode == drv->pin_mode) return true;
+    }
+    return false;
 }
 
 static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
@@ -749,15 +834,34 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         (unsigned long)g_last_config_save_ok_ms
     );
 
-    // Add peripheral connection status
+    /* Peripheral connection status — ONLY for drivers this node
+     * actually has.
+     *
+     * Emitting all nine registered drivers cost ~246 bytes of a 512
+     * byte MTU, eight of them `false` for hardware that isn't on the
+     * board. On the Head Node that pushed /announce to 505 bytes, past
+     * what a best-effort XRCE stream can put in one frame, and every
+     * publish failed with rcl_ret=1 — a node running perfectly and
+     * invisible to the server, because /announce is how it is seen at
+     * all. Keep this map proportional to the rig, not to the driver
+     * table, or it will creep back over the line the next time a
+     * driver is added.
+     *
+     * "Has" = configured in pin_config, OR currently reporting
+     * connected. Configured-but-disconnected must still be reported,
+     * since `false` is exactly the signal the dashboard needs for a
+     * peripheral that has dropped off. */
+    bool first_periph = true;
     for (uint8_t d = 0; d < peripheral_get_count(); d++) {
         const peripheral_driver_t* drv = peripheral_get(d);
         if (!drv) continue;
         bool connected = drv->is_connected ? drv->is_connected() : false;
+        if (!connected && !driver_is_configured(drv)) continue;
         ann_len += snprintf(announcement_buffer + ann_len,
             sizeof(announcement_buffer) - ann_len,
             "%s\"%s_connected\":%s",
-            d > 0 ? "," : "", drv->name, connected ? "true" : "false");
+            first_periph ? "" : ",", drv->name, connected ? "true" : "false");
+        first_periph = false;
     }
 
     snprintf(announcement_buffer + ann_len,
@@ -768,11 +872,16 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
     announcement_msg.data.size = strlen(announcement_buffer);
     announcement_msg.data.capacity = sizeof(announcement_buffer);
 
-    static bool size_logged = false;
-    if (!size_logged) {
-        Serial.printf("Announce JSON size: %u bytes (uxr MTU=512)\n",
+    /* Size AND content, whenever the size changes. Size alone was not
+     * enough to debug this: knowing it was 505 bytes said nothing
+     * about WHICH field had grown. The payload is small and this is
+     * serial-only, so print it. */
+    static size_t last_logged_size = 0;
+    if (announcement_msg.data.size != last_logged_size) {
+        last_logged_size = announcement_msg.data.size;
+        Serial.printf("Announce JSON size: %u bytes (uxr MTU=512, keep <480)\n",
                       (unsigned)announcement_msg.data.size);
-        size_logged = true;
+        Serial.printf("Announce JSON: %s\n", announcement_buffer);
     }
     g_loop_stage = 12;
     rcl_ret_t ret = rcl_publish(&announcement_pub, &announcement_msg, NULL);
@@ -1018,6 +1127,18 @@ extern "C" uint32_t saint_log_uptime_ms(void)
 // Connection Monitoring
 // ============================================================================
 
+/* Milliseconds since the last RX, wrap-safe in both directions.
+ *
+ * A stamp slightly in the FUTURE (the keepalive ping sets it from a
+ * fresher millis() than the caller's cached `now`) must read as "just
+ * now", not as the ~49-day underflow that a plain subtraction
+ * produces. The same clamp covers the real 49-day millis() rollover. */
+static uint32_t ms_since_rx(void)
+{
+    uint32_t delta = (uint32_t)(millis() - g_transport_last_rx_ms);
+    return (delta > (UINT32_MAX / 2)) ? 0u : delta;
+}
+
 static void mark_agent_communication(void)
 {
     last_successful_comm = millis();
@@ -1077,10 +1198,28 @@ static bool check_agent_connection(void)
      * RP2040 uses last_successful_comm (TX-based) for the same purpose
      * — its W5500 stack propagates true link status so TX is a valid
      * signal there. See firmware/rp2040/src/main.c. */
+    /* NO keepalive ping here — see AGENT_PING_IDLE_MS.
+     *
+     * rmw_uros_ping_agent() from this context hard-faults the chip:
+     * every boot crashed ~9.7 s in (SRSR=0x2, "software SYSRESETREQ or
+     * CPU lockup"), which is AGENT_PING_IDLE_MS to the tenth of a
+     * second — the node's very first idle ping. A crash loop is far
+     * worse than the idle disconnect the ping was meant to fix, so the
+     * call is gone until the keepalive can be done without reaching
+     * into the XRCE session from outside the executor.
+     *
+     * The flap this was meant to fix is still real (a healthy but idle
+     * node trips CONNECTION_TIMEOUT_MS because nothing sends it
+     * traffic). The safe fix lives on the SERVER: have it publish a
+     * periodic no-op to each node's /control topic, which produces RX
+     * here through the normal transport path and needs no micro-ROS
+     * internals on the firmware side. */
+
     if (agent_connected && g_transport_last_rx_ms > 0) {
-        if ((uint32_t)(now - g_transport_last_rx_ms) > CONNECTION_TIMEOUT_MS) {
+        uint32_t quiet_ms = ms_since_rx();
+        if (quiet_ms > CONNECTION_TIMEOUT_MS) {
             Serial.printf("Agent silent: no RX for %lu ms\n",
-                          (unsigned long)(now - g_transport_last_rx_ms));
+                          (unsigned long)quiet_ms);
             agent_connected = false;
         }
     }

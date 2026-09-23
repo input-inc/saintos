@@ -130,7 +130,7 @@ def _make_evaluator(routing):
 
     sends = {"n": 0}
 
-    def send_channel(*_a):
+    def send_channel(*_a, **_kw):
         sends["n"] += 1
 
     # Production-like: a values-changed broadcaster that builds (and here,

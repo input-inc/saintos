@@ -13,7 +13,7 @@
  * Tauri IPC and useConnection are mocked; timers are simulated.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { computed, nextTick } from 'vue';
+import { computed, effectScope, nextTick, type EffectScope } from 'vue';
 import type { SurveyChannel } from '../useWifi';
 
 const h = vi.hoisted(() => {
@@ -52,11 +52,21 @@ function fire(event: string, payload: unknown): void {
     cb({ payload });
 }
 
+// Scopes opened by freshWifi, stopped in afterEach so a test's telemetry
+// hold doesn't outlive it.
+const openScopes: EffectScope[] = [];
+
 /** Fresh module instance per test — useWifi is a module singleton. */
 async function freshWifi() {
     vi.resetModules();
     const mod = await import('../useWifi');
-    const wifi = mod.useWifi();
+    // Inside an effect scope so useWifi's ref-counted pin_state
+    // subscription has something to be released by — that's what a real
+    // component provides, and calling it bare warns about holding
+    // telemetry for the session.
+    const scope = effectScope();
+    openScopes.push(scope);
+    const wifi = scope.run(() => mod.useWifi())!;
     // Drain ensureInit's listener registration + the immediate watch.
     for (let i = 0; i < 10; i++) await Promise.resolve();
     await nextTick();
@@ -91,6 +101,7 @@ describe('useWifi channel-switch flow', () => {
 
     afterEach(() => {
         vi.useRealTimers();
+        while (openScopes.length) openScopes.pop()!.stop();
     });
 
     it('switch ACK enters the restarting state with a readable detail', async () => {
@@ -173,6 +184,7 @@ describe('useWifi survey + telemetry', () => {
 
     afterEach(() => {
         vi.useRealTimers();
+        while (openScopes.length) openScopes.pop()!.stop();
     });
 
     it('survey lifecycle: loading → results', async () => {

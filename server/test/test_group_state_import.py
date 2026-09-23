@@ -18,6 +18,9 @@ import io
 import zipfile
 
 import pytest
+from contextlib import contextmanager
+
+from saint_server.channel_arbiter import BOARD
 
 from saint_server.animation.models import Pose, PoseSetpoint
 from saint_server.animation.robot_model_store import RobotModelStore
@@ -77,6 +80,16 @@ class PerSetpointEvaluator:
     def __init__(self):
         self.joint_values = {}
         self.ws_values = {}
+        self.dispatch_owners = []
+
+    @contextmanager
+    def dispatch_as(self, owner, tally=None):
+        """Real evaluators mark dispatch ownership so a pose activation
+        force-sends (channel_arbiter.BOARD). Recorded here so the tests
+        can assert a pose applies with board authority rather than as an
+        ordinary stream write."""
+        self.dispatch_owners.append(owner)
+        yield tally
 
     def set_urdf_joint_value(self, joint, value):
         self.joint_values[joint] = value
@@ -374,3 +387,22 @@ def test_setpoint_round_trips_through_dict():
     assert PoseSetpoint.from_dict(s.to_dict()) == s
     w = PoseSetpoint(sheet_id="s", ws_input_id="i", value=0.5)
     assert PoseSetpoint.from_dict(w.to_dict()) == w
+
+
+def test_apply_pose_dispatches_with_board_authority(sm_loaded):
+    """A pose board is latched operator authority: its writes must
+    bypass the change gate, which is what makes re-activating a board
+    re-assert channels a slider (or a dropped frame) left elsewhere."""
+    sm_loaded.import_group_states(names=["happy"])
+    sm_loaded.apply_pose("happy")
+    assert sm_loaded._routing_evaluator.dispatch_owners == [BOARD]
+
+
+def test_apply_pose_reports_channels_dispatched(sm_loaded):
+    """`applied` counts setpoints accepted by the evaluator; operators
+    mean "did the hardware move", so the result also carries the number
+    of channels actually pushed. A fake evaluator dispatches none, which
+    is exactly the honest answer here."""
+    sm_loaded.import_group_states(names=["happy"])
+    result = sm_loaded.apply_pose("happy")
+    assert "dispatched" in result and "suppressed" in result

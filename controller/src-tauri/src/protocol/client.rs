@@ -58,6 +58,47 @@ const DROP_WARN_INTERVAL_MS: u64 = 5000;
 /// rate. 256 is far above any realistic binding sheet.
 const STREAM_TOKEN_CAPACITY: usize = 256;
 
+/// Returned by `stage_stream_send` when the token channel is saturated.
+/// Transient and already rate-limit-warned at the drop site, so callers
+/// retry on it quietly rather than logging per occurrence.
+pub const STREAM_QUEUE_FULL: &str = "Stream queue full";
+
+/// Returned whenever there is no live link. Also transient and also
+/// noisy at input-loop rate, so callers treat it the same way.
+pub const NOT_CONNECTED: &str = "Not connected";
+
+/// Returned when a streaming write lands inside its target's
+/// THROTTLE_MS window and is therefore NOT sent.
+///
+/// This used to return Ok, which quietly lost the value: the mapper had
+/// already committed it to `last_analog_values`, so a mid-stroke
+/// setpoint dropped on the throttle's trailing edge was never re-offered
+/// until the value changed again or the 500 ms heartbeat fired. The
+/// mapper papered over that by re-emitting every non-zero value on every
+/// 4 ms tick — ~230 of every 250 emissions existed only to outlast this
+/// window. Reporting the deferral lets the mapper retry just the writes
+/// that were actually dropped, which is what allowed the blanket
+/// re-emit to go.
+///
+/// Only the two streaming paths (set_ws_input / set_topic_channel) do
+/// this. The legacy send_command / send_function_control throttles keep
+/// returning Ok: nothing retries them, so a deferral there has no one to
+/// report to.
+pub const THROTTLED: &str = "Throttled";
+
+/// Whether a send error means "not sent, try again shortly" rather than
+/// a real failure. Tauri command wrappers map this to Ok so a one-shot
+/// UI push doesn't look broken.
+pub fn is_throttled(err: &str) -> bool {
+    err.contains(THROTTLED)
+}
+
+/// Whether a send error is an expected transient the caller should
+/// silently retry instead of logging at error level.
+pub fn is_transient_send_error(err: &str) -> bool {
+    err.contains(NOT_CONNECTED) || err.contains(STREAM_QUEUE_FULL) || is_throttled(err)
+}
+
 /// Latest-wins coalescing slots for streaming control values.
 ///
 /// The old design pushed every streaming send into the shared FIFO
@@ -98,8 +139,10 @@ impl StreamCoalescer {
     }
 
     /// Drop all pending values. Called on (re)connect so a value staged
-    /// while disconnected can't replay stale motion onto a fresh link —
-    /// the mapper's 500 ms heartbeat re-asserts current stick state.
+    /// while disconnected can't replay stale motion onto a fresh link.
+    /// The input loop pairs this with InputMapper::forget_all_sends() on
+    /// the same transition, which re-asserts current stick state on the
+    /// next ~4 ms tick (this used to wait on the 500 ms heartbeat).
     fn clear(&self) {
         self.slots.lock().clear();
     }
@@ -174,12 +217,17 @@ impl WebSocketClient {
                 // >STREAM_TOKEN_CAPACITY distinct pending targets —
                 // pathological. Un-stage the value so the slot doesn't
                 // strand token-less (offer() would report it as already
-                // pending and never re-token it); the mapper's per-tick
-                // re-emit / 500 ms heartbeat retries it. Surface like
-                // the old queue-full drop.
+                // pending and never re-token it).
+                //
+                // Report this as an Err rather than swallowing it: the
+                // caller hands the failure to Mapper::note_send_failed,
+                // which clears the optimistic "already sent" bookkeeping
+                // so the next ~4 ms tick retries. Returning Ok here left
+                // the mapper believing a dropped STOP had landed, with
+                // only the 500 ms heartbeat to undo it.
                 self.coalescer.take(key);
                 self.note_dropped_write(drop_label);
-                Ok(())
+                Err(STREAM_QUEUE_FULL.to_string())
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 Err("Connection closed".to_string())
@@ -464,22 +512,31 @@ impl WebSocketClient {
             );
             return Ok(());
         }
+        let is_stop_command = is_stop_value(&value);
         // E-Stop gate. Server's routing evaluator drops these too, but
         // we drop at the client to keep the WS quiet (an engaged
         // estop on a tank with both sticks deflected would otherwise
         // dump 100 Hz of unused traffic into the socket for every
         // axis).
-        if self.state.read().estop_active {
+        //
+        // A STOP is exempt. Gating it here dropped the one message that
+        // makes the mapper's state true — it records the zero as sent
+        // either way — so releasing the stick while estopped left the
+        // server holding the last deflection, ready to re-apply it the
+        // moment the estop cleared. A zero is also exactly what an
+        // engaged estop wants on the wire, so there is nothing to save
+        // by suppressing it.
+        if !is_stop_command && self.state.read().estop_active {
             return Ok(());
         }
-        let is_stop_command = is_stop_value(&value);
         let throttle_key = format!("ws::{}::{}", sheet_id, input_id);
         if !is_stop_command {
             let mut times = self.last_command_times.write();
             let now = Instant::now();
             if let Some(last_time) = times.get(&throttle_key) {
                 if now.duration_since(*last_time) < Duration::from_millis(THROTTLE_MS) {
-                    return Ok(());
+                    // Deferred, not delivered — see THROTTLED.
+                    return Err(THROTTLED.to_string());
                 }
             }
             times.insert(throttle_key.clone(), now);
@@ -513,18 +570,20 @@ impl WebSocketClient {
             );
             return Ok(());
         }
-        // E-Stop gate — same rationale as send_ws_input_value.
-        if self.state.read().estop_active {
+        let is_stop_command = is_stop_value(&value);
+        // E-Stop gate — same rationale as send_ws_input_value, stop
+        // values included: a zero always goes out.
+        if !is_stop_command && self.state.read().estop_active {
             return Ok(());
         }
-        let is_stop_command = is_stop_value(&value);
         let throttle_key = format!("{}::{}", topic, channel);
         if !is_stop_command {
             let mut times = self.last_command_times.write();
             let now = Instant::now();
             if let Some(last_time) = times.get(&throttle_key) {
                 if now.duration_since(*last_time) < Duration::from_millis(THROTTLE_MS) {
-                    return Ok(());
+                    // Deferred, not delivered — see THROTTLED.
+                    return Err(THROTTLED.to_string());
                 }
             }
             times.insert(throttle_key.clone(), now);
@@ -564,6 +623,24 @@ impl WebSocketClient {
             .ok_or_else(|| "Not connected".to_string())?;
         tx.blocking_send(OutgoingMessage::subscribe_owned(&topics))
             .map_err(|e| format!("Failed to send subscribe: {}", e))
+    }
+
+    /// Stop receiving broadcasts for a set of state topics.
+    ///
+    /// Best-effort by nature: if the link is already down the server has
+    /// forgotten our subscriptions anyway (they live on the per-connection
+    /// client object), so callers treat "Not connected" as success.
+    pub fn unsubscribe_topics(&self, topics: Vec<String>) -> Result<(), String> {
+        if topics.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::unsubscribe_owned(&topics))
+            .map_err(|e| format!("Failed to send unsubscribe: {}", e))
     }
 
     /// Ask for the AP's current WiFi config (SSID, band, channel).
@@ -731,7 +808,7 @@ async fn run_connection_loop<R: Runtime>(
                 }
             }
             Err(e) => {
-                tracing::error!("Connection failed: {}", e);
+                log::error!("Connection failed: {}", e);
                 {
                     let mut s = state.write();
                     s.status = ConnectionStatus::Error;
@@ -746,7 +823,7 @@ async fn run_connection_loop<R: Runtime>(
             break;
         }
 
-        tracing::info!("Reconnecting in {}ms", reconnect_delay);
+        log::info!("Reconnecting in {}ms", reconnect_delay);
         tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
         reconnect_delay = next_reconnect_delay(reconnect_delay);
     }
@@ -765,13 +842,13 @@ async fn connect_ws<R: Runtime>(
     state: &Arc<RwLock<ConnectionState>>,
     app_handle: &AppHandle<R>,
 ) -> Result<WsStream, String> {
-    tracing::info!("Connecting to {}", url);
+    log::info!("Connecting to {}", url);
 
     let (ws_stream, _) = connect_async(url)
         .await
         .map_err(|e| format!("WebSocket connection failed: {}", e))?;
 
-    tracing::info!("WebSocket connected, waiting for server greeting...");
+    log::info!("WebSocket connected, waiting for server greeting...");
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -790,7 +867,7 @@ async fn connect_ws<R: Runtime>(
             return Err(format!("Expected 'connected' message, got '{}'", msg.msg_type));
         }
 
-        tracing::info!("Received server greeting, authenticating...");
+        log::info!("Received server greeting, authenticating...");
     } else {
         return Err("Unexpected message type from server".to_string());
     }
@@ -820,7 +897,7 @@ async fn connect_ws<R: Runtime>(
             IncomingMessage::from_json(&text).map_err(|e| format!("Invalid auth response: {}", e))?;
 
         if msg.is_auth_success() {
-            tracing::info!("Authentication successful");
+            log::info!("Authentication successful");
             {
                 let mut s = state.write();
                 s.status = ConnectionStatus::Connected;
@@ -860,11 +937,11 @@ async fn handle_connection<R: Runtime>(
     // change) still blocks motor commands.
     let estop_subscribe = OutgoingMessage::subscribe(&["estop"]);
     if let Err(e) = write.send(Message::Text(estop_subscribe.to_json())).await {
-        tracing::warn!("Failed to subscribe to estop topic: {}", e);
+        log::warn!("Failed to subscribe to estop topic: {}", e);
     }
     let estop_query = OutgoingMessage::get_estop_state();
     if let Err(e) = write.send(Message::Text(estop_query.to_json())).await {
-        tracing::warn!("Failed to query initial estop state: {}", e);
+        log::warn!("Failed to query initial estop state: {}", e);
     }
 
     // Subscribe to animation playback state so the preset panel can show
@@ -873,7 +950,7 @@ async fn handle_connection<R: Runtime>(
     // final frame when the last one stops.
     let anim_subscribe = OutgoingMessage::subscribe(&["animation_state"]);
     if let Err(e) = write.send(Message::Text(anim_subscribe.to_json())).await {
-        tracing::warn!("Failed to subscribe to animation_state topic: {}", e);
+        log::warn!("Failed to subscribe to animation_state topic: {}", e);
     }
 
     // Latency probe: send a WebSocket Ping every 2s and time the Pong the
@@ -893,49 +970,49 @@ async fn handle_connection<R: Runtime>(
                         // arrive several times a second once the battery
                         // panel subscribes and would otherwise flood the log.
                         if text.contains("\"pin_state/") {
-                            tracing::trace!("Received pin_state frame ({} bytes)", text.len());
+                            log::trace!("Received pin_state frame ({} bytes)", text.len());
                         } else {
-                            tracing::info!("Received from server: {}", text);
+                            log::info!("Received from server: {}", text);
                         }
                         if let Ok(incoming) = IncomingMessage::from_json(&text) {
-                            tracing::debug!("Parsed message: type={}, status={:?}", incoming.msg_type, incoming.status);
+                            log::debug!("Parsed message: type={}, status={:?}", incoming.msg_type, incoming.status);
 
                             // Forward discovery responses to the frontend
                             if incoming.status.as_deref() == Some("ok") {
                                 if let Some(ref data) = incoming.data {
                                     // Check for controllable functions response
                                     if data.get("controllable").is_some() {
-                                        tracing::info!("Emitting discovery-controllable event to frontend");
+                                        log::info!("Emitting discovery-controllable event to frontend");
                                         if let Err(e) = app_handle.emit("discovery-controllable", data) {
-                                            tracing::error!("Failed to emit discovery-controllable: {}", e);
+                                            log::error!("Failed to emit discovery-controllable: {}", e);
                                         }
                                     }
                                     // Check for roles response
                                     if data.get("roles").is_some() {
-                                        tracing::info!("Emitting discovery-roles event to frontend");
+                                        log::info!("Emitting discovery-roles event to frontend");
                                         if let Err(e) = app_handle.emit("discovery-roles", data) {
-                                            tracing::error!("Failed to emit discovery-roles: {}", e);
+                                            log::error!("Failed to emit discovery-roles: {}", e);
                                         }
                                     }
                                     // Check for active roles response
                                     if data.get("active_roles").is_some() {
-                                        tracing::info!("Emitting discovery-active-roles event to frontend");
+                                        log::info!("Emitting discovery-active-roles event to frontend");
                                         if let Err(e) = app_handle.emit("discovery-active-roles", data) {
-                                            tracing::error!("Failed to emit discovery-active-roles: {}", e);
+                                            log::error!("Failed to emit discovery-active-roles: {}", e);
                                         }
                                     }
                                     // Check for topic-channels response (legacy bindings picker).
                                     if data.get("topics").is_some() {
-                                        tracing::info!("Emitting discovery-topic-channels event to frontend");
+                                        log::info!("Emitting discovery-topic-channels event to frontend");
                                         if let Err(e) = app_handle.emit("discovery-topic-channels", data) {
-                                            tracing::error!("Failed to emit discovery-topic-channels: {}", e);
+                                            log::error!("Failed to emit discovery-topic-channels: {}", e);
                                         }
                                     }
                                     // Check for WS-input response (new bindings picker).
                                     if data.get("ws_inputs").is_some() {
-                                        tracing::info!("Emitting discovery-ws-inputs event to frontend");
+                                        log::info!("Emitting discovery-ws-inputs event to frontend");
                                         if let Err(e) = app_handle.emit("discovery-ws-inputs", data) {
-                                            tracing::error!("Failed to emit discovery-ws-inputs: {}", e);
+                                            log::error!("Failed to emit discovery-ws-inputs: {}", e);
                                         }
                                     }
                                     // Response to our list_adopted request (battery
@@ -944,7 +1021,7 @@ async fn handle_connection<R: Runtime>(
                                     // `nodes` key unambiguously means the adopted list.
                                     if data.get("nodes").is_some() {
                                         if let Err(e) = app_handle.emit("adopted-nodes", data) {
-                                            tracing::error!("Failed to emit adopted-nodes: {}", e);
+                                            log::error!("Failed to emit adopted-nodes: {}", e);
                                         }
                                     }
                                     // WiFi survey response — the only ok-response
@@ -956,7 +1033,7 @@ async fn handle_connection<R: Runtime>(
                                         && data.get("current_channel").is_some()
                                     {
                                         if let Err(e) = app_handle.emit("wifi-survey", data) {
-                                            tracing::error!("Failed to emit wifi-survey: {}", e);
+                                            log::error!("Failed to emit wifi-survey: {}", e);
                                         }
                                     }
                                     // WiFi config response — `ssid` appears in no
@@ -971,7 +1048,7 @@ async fn handle_connection<R: Runtime>(
                                             obj.remove("password");
                                         }
                                         if let Err(e) = app_handle.emit("wifi-config", sanitized) {
-                                            tracing::error!("Failed to emit wifi-config: {}", e);
+                                            log::error!("Failed to emit wifi-config: {}", e);
                                         }
                                     }
                                     // wifi_set_channel / wifi_set_credentials ACK —
@@ -980,26 +1057,26 @@ async fn handle_connection<R: Runtime>(
                                     // reconnect state until the link comes back.
                                     if data.get("switching").is_some() {
                                         if let Err(e) = app_handle.emit("wifi-switching", data) {
-                                            tracing::error!("Failed to emit wifi-switching: {}", e);
+                                            log::error!("Failed to emit wifi-switching: {}", e);
                                         }
                                     }
                                     // Response to list_animations — shape
                                     // { animations: [{id, name, icon, …}] }.
                                     if data.get("animations").is_some() {
                                         if let Err(e) = app_handle.emit("library-animations", data) {
-                                            tracing::error!("Failed to emit library-animations: {}", e);
+                                            log::error!("Failed to emit library-animations: {}", e);
                                         }
                                     }
                                     // Response to list_poses — { poses: [{id, name, icon, …}] }.
                                     if data.get("poses").is_some() {
                                         if let Err(e) = app_handle.emit("library-poses", data) {
-                                            tracing::error!("Failed to emit library-poses: {}", e);
+                                            log::error!("Failed to emit library-poses: {}", e);
                                         }
                                     }
                                     // Response to list_sounds — { sounds: [{id, name, icon, …}] }.
                                     if data.get("sounds").is_some() {
                                         if let Err(e) = app_handle.emit("library-sounds", data) {
-                                            tracing::error!("Failed to emit library-sounds: {}", e);
+                                            log::error!("Failed to emit library-sounds: {}", e);
                                         }
                                     }
                                     // Response to our get_estop_state bootstrap.
@@ -1042,7 +1119,7 @@ async fn handle_connection<R: Runtime>(
                             {
                                 if let Some(ref data) = incoming.data {
                                     if let Err(e) = app_handle.emit("animation-state", data) {
-                                        tracing::error!("Failed to emit animation-state: {}", e);
+                                        log::error!("Failed to emit animation-state: {}", e);
                                     }
                                 }
                             }
@@ -1060,17 +1137,17 @@ async fn handle_connection<R: Runtime>(
                                             "data": incoming.data,
                                         });
                                         if let Err(e) = app_handle.emit("pin-state", payload) {
-                                            tracing::error!("Failed to emit pin-state: {}", e);
+                                            log::error!("Failed to emit pin-state: {}", e);
                                         }
                                     }
                                 }
                             }
                         } else {
-                            tracing::warn!("Failed to parse incoming message");
+                            log::warn!("Failed to parse incoming message");
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
-                        tracing::info!("Connection closed by server");
+                        log::info!("Connection closed by server");
                         {
                             let mut s = state.write();
                             s.status = ConnectionStatus::Disconnected;
@@ -1080,7 +1157,7 @@ async fn handle_connection<R: Runtime>(
                     }
                     Some(Ok(Message::Ping(data))) => {
                         if let Err(e) = write.send(Message::Pong(data)).await {
-                            tracing::error!("Failed to send pong: {}", e);
+                            log::error!("Failed to send pong: {}", e);
                             return true;
                         }
                     }
@@ -1092,7 +1169,7 @@ async fn handle_connection<R: Runtime>(
                         }
                     }
                     Some(Err(e)) => {
-                        tracing::error!("WebSocket error: {}", e);
+                        log::error!("WebSocket error: {}", e);
                         {
                             let mut s = state.write();
                             s.status = ConnectionStatus::Error;
@@ -1108,12 +1185,12 @@ async fn handle_connection<R: Runtime>(
             cmd = command_rx.recv() => {
                 if let Some(cmd) = cmd {
                     let json = cmd.to_json();
-                    tracing::info!("Sending to server: {}", json);
+                    log::info!("Sending to server: {}", json);
                     if let Err(e) = write.send(Message::Text(json)).await {
-                        tracing::error!("Failed to send command: {}", e);
+                        log::error!("Failed to send command: {}", e);
                         return true;
                     }
-                    tracing::debug!("Command sent successfully");
+                    log::debug!("Command sent successfully");
                 }
             }
 
@@ -1129,9 +1206,9 @@ async fn handle_connection<R: Runtime>(
                         // debug, not info: this is the 50 Hz-per-target
                         // hot path — per-send info logging would slow
                         // the very drain this design exists to keep fast.
-                        tracing::debug!("Sending stream value to server: {}", json);
+                        log::debug!("Sending stream value to server: {}", json);
                         if let Err(e) = write.send(Message::Text(json)).await {
-                            tracing::error!("Failed to send stream value: {}", e);
+                            log::error!("Failed to send stream value: {}", e);
                             return true;
                         }
                     }
@@ -1143,13 +1220,13 @@ async fn handle_connection<R: Runtime>(
                 // Pong handler can measure the round-trip.
                 last_ping_sent = Some(Instant::now());
                 if let Err(e) = write.send(Message::Ping(Vec::new())).await {
-                    tracing::error!("Failed to send ping: {}", e);
+                    log::error!("Failed to send ping: {}", e);
                     return true;
                 }
             }
 
             _ = shutdown_rx.recv() => {
-                tracing::info!("Shutdown requested");
+                log::info!("Shutdown requested");
                 let _ = write.send(Message::Close(None)).await;
                 return false;
             }
@@ -1175,19 +1252,19 @@ fn update_estop_state<R: Runtime>(
         s.estop_active = active;
     }
     if changed {
-        tracing::warn!(
+        log::warn!(
             "E-STOP state from server: {}",
             if active { "ENGAGED" } else { "RELEASED" }
         );
     }
     if let Err(e) = app_handle.emit("estop-state", serde_json::json!({ "active": active })) {
-        tracing::error!("Failed to emit estop-state event: {}", e);
+        log::error!("Failed to emit estop-state event: {}", e);
     }
 }
 
 fn emit_state<R: Runtime>(app_handle: &AppHandle<R>, state: &ConnectionState) {
     if let Err(e) = app_handle.emit("connection-status", state) {
-        tracing::error!("Failed to emit connection state: {}", e);
+        log::error!("Failed to emit connection state: {}", e);
     }
 }
 
@@ -1316,14 +1393,96 @@ mod tests {
     }
 
     #[test]
-    fn estop_gate_swallows_streaming_sends_before_throttle() {
+    fn estop_gate_swallows_active_streaming_sends_before_throttle() {
         let c = WebSocketClient::new();
         c.state.write().estop_active = true;
-        // While estop is engaged the client drops streaming writes
-        // outright (Ok, never reaches the connection check) so a
+        // While estop is engaged the client drops ACTIVE streaming
+        // writes outright (Ok, never reaches the connection check) so a
         // deflected stick doesn't pour dead traffic into the socket.
         assert!(c.send_ws_input_value("sheet", "input", json!(0.5)).is_ok());
         assert!(c.send_topic_channel_value("/tracks", "left", json!(0.5)).is_ok());
+    }
+
+    #[test]
+    fn estop_gate_never_swallows_a_stop() {
+        let c = WebSocketClient::new();
+        c.state.write().estop_active = true;
+        // A stop must pass the gate and reach the connection check —
+        // Err here is the disconnected-client signal that it got that
+        // far, as opposed to the silent Ok the gate returns.
+        //
+        // Why this matters: the mapper records a zero as sent whether or
+        // not the client accepts it. Swallowing the zero while estopped
+        // meant releasing the stick under estop left the server holding
+        // the last deflection, primed to re-apply it on estop clear.
+        assert!(
+            c.send_ws_input_value("sheet", "input", json!(0.0)).is_err(),
+            "stop must not be swallowed by the estop gate",
+        );
+        assert!(
+            c.send_topic_channel_value("/tracks", "left", json!(0.0)).is_err(),
+            "stop must not be swallowed by the estop gate",
+        );
+    }
+
+    #[test]
+    fn streaming_throttle_reports_deferral_not_success() {
+        let (c, _rx) = client_with_stream_channel(STREAM_TOKEN_CAPACITY);
+        // First write for a target opens its throttle window.
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.4)).is_ok());
+
+        // A second write inside the window is NOT sent. It must say so:
+        // returning Ok let the mapper believe a mid-stroke setpoint had
+        // landed, so the value waited on the 500 ms heartbeat.
+        let err = c
+            .send_topic_channel_value("/tracks", "left", json!(0.45))
+            .expect_err("a throttled write must report the deferral");
+        assert!(is_throttled(&err));
+        assert!(is_transient_send_error(&err), "callers must retry, not shout");
+
+        // Same contract on the ws-input path.
+        assert!(c.send_ws_input_value("sheet", "in", json!(0.4)).is_ok());
+        assert!(is_throttled(
+            &c.send_ws_input_value("sheet", "in", json!(0.45)).unwrap_err()
+        ));
+    }
+
+    #[test]
+    fn a_stop_is_never_throttled() {
+        let (c, _rx) = client_with_stream_channel(STREAM_TOKEN_CAPACITY);
+        assert!(c.send_topic_channel_value("/tracks", "left", json!(0.4)).is_ok());
+        // Stops bypass the window entirely, so they can never come back
+        // as THROTTLED — a deferred stop is the one thing this system
+        // must never produce.
+        assert!(
+            c.send_topic_channel_value("/tracks", "left", json!(0.0)).is_ok(),
+            "a stop inside the throttle window must still go out",
+        );
+    }
+
+    /// The legacy one-shot paths keep returning Ok on throttle: nothing
+    /// retries them, so a deferral there would just surface as an error
+    /// with no one to act on it.
+    #[test]
+    fn legacy_send_paths_still_swallow_their_throttle() {
+        let c = WebSocketClient::new();
+        // Not connected, so these fail on the connection check rather
+        // than the throttle — what matters is that neither reports
+        // THROTTLED.
+        for err in [
+            c.send_command("node", 1, json!(0.5)).unwrap_err(),
+            c.send_function_control("role", "fn", json!(0.5)).unwrap_err(),
+        ] {
+            assert!(!is_throttled(&err), "legacy paths must not report THROTTLED: {err}");
+        }
+    }
+
+    #[test]
+    fn transient_send_errors_are_classified() {
+        assert!(is_transient_send_error(NOT_CONNECTED));
+        assert!(is_transient_send_error(STREAM_QUEUE_FULL));
+        assert!(is_transient_send_error(THROTTLED));
+        assert!(!is_transient_send_error("Connection closed"));
     }
 
     // ── latest-wins stream coalescing (2026-08 deadstick run-on fix) ───
@@ -1434,9 +1593,22 @@ mod tests {
         // must be counted.
         let (c, mut rx) = client_with_stream_channel(1);
         assert!(c.send_topic_channel_value("/tracks", "left", json!(0.0)).is_ok());
-        assert!(c.send_topic_channel_value("/tracks", "right", json!(0.0)).is_ok());
+
+        // The drop is reported, not swallowed: lib.rs hands the Err to
+        // Mapper::note_send_failed, which un-commits the optimistic
+        // "already sent" record so the retry lands on the next ~4 ms
+        // tick. Returning Ok here left the mapper believing a dropped
+        // STOP had arrived, with only the 500 ms heartbeat to undo it.
+        let err = c
+            .send_topic_channel_value("/tracks", "right", json!(0.0))
+            .expect_err("a dropped write must surface as Err");
+        assert!(
+            is_transient_send_error(&err),
+            "queue-full is a retryable transient, not a shout-worthy error: {err}",
+        );
         assert_eq!(c.drop_stats.read().total, 1);
         assert_eq!(c.coalescer.pending_len(), 1, "failed target must be un-staged");
+
         // The retry (mapper re-emit / heartbeat) succeeds once the
         // writer drains the token backlog.
         let key = rx.try_recv().unwrap();

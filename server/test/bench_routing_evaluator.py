@@ -123,7 +123,7 @@ def run_scenario(label: str, on_values_changed: Callable | None,
 
     sends = {"n": 0}
 
-    def send_channel(*_a):
+    def send_channel(*_a, **_kw):
         sends["n"] += 1
 
     evaluator = RoutingEvaluator(

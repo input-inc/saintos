@@ -4,6 +4,14 @@ Documentation=https://github.com/input-inc/saintos
 After=network-online.target
 Wants=network-online.target
 
+
+# Give up after 5 starts in 60s and sit in `failed`, rather than
+# crash-looping on a broken payload forever. These keys belong in
+# [Unit] — systemd 229+ ignores them in [Service] with only a warning,
+# so a copy placed there would look configured and do nothing.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=@USER@
@@ -24,9 +32,23 @@ Environment=SAINT_LOG_DIR=@LOG_DIR@
 
 ExecStart=/bin/bash -lc 'source /opt/ros/@ROS_DISTRO@/install/setup.bash && source @PREFIX@/install/setup.bash && exec ros2 launch saint_os server.launch.py'
 
-Restart=on-failure
+# Restart=always, NOT on-failure.
+#
+# `ros2 launch` returns 0 even when one of its nodes died: launch's
+# return_code is set to 1 only by an exception inside its own run loop
+# (see launch_service.py), never by a child's non-zero exit. So when
+# saint_server crashes and the launch shuts down in response (see the
+# OnProcessExit handler in server.launch.py), the unit exits CLEANLY and
+# on-failure would decline to restart it — leaving the server down with
+# nothing obviously wrong.
+#
+# With always, a transient crash recovers on its own, and a permanently
+# broken payload crash-loops into `failed` via the StartLimit in
+# [Unit] above — visible in `systemctl status` instead of silent.
+Restart=always
 RestartSec=5
 TimeoutStopSec=15
+
 
 # Capability for binding port 80 without running as root. Ambient
 # capability — granted to the process at start, no setuid binary

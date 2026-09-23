@@ -16,6 +16,7 @@ from typing import Dict, Set, Any, Optional, Callable, Awaitable
 
 from aiohttp import web, WSMsgType
 
+from saint_server.channel_arbiter import SLIDER
 from saint_server.webserver.state_manager import StateManager
 from saint_server.robots import RobotManager
 
@@ -236,9 +237,10 @@ class WebSocketHandler:
         # Throttle tracking: (node_id, gpio) -> last_send_time
         # Per-gpio throttling allows controlling multiple pins simultaneously
         self._control_throttle: Dict[tuple, float] = {}
-        # Last value actually SENT per (node, peripheral, channel) — used
-        # to suppress redundant resends (see CONTROL_CHANGE_EPSILON).
-        self._control_last_value: Dict[tuple, float] = {}
+        # Redundant-resend suppression moved to channel_arbiter, which
+        # every writer shares. This path's private copy is what let a
+        # pose board and a State slider silently cancel each other's
+        # writes — each believed the firmware already held its value.
 
         # LiveLink callbacks (set by server_node)
         self._livelink_get_status: Optional[Callable[[], Dict[str, Any]]] = None
@@ -1271,17 +1273,15 @@ class WebSocketHandler:
                 return {"status": "error", "message": "No peripheral configuration to sync"}
             if self._sync_config_callback:
                 self._sync_config_callback(node_id, config_json)
-                # Drop the control change-filter / throttle state for this
-                # node. A sync re-applies extents on the node and re-homes
-                # its servos, so the last value the operator commanded no
-                # longer reflects where the hardware sits. Without this,
-                # the dedupe (which never expires for a non-Maestro servo,
-                # idle_disengage_ms == 0) would swallow a re-command of the
-                # same normalized position — the exact case when someone
-                # edits an extent and drags the slider back to test it.
-                stale = [k for k in self._control_last_value if k[0] == node_id]
+                # A sync re-applies extents on the node and re-homes its
+                # servos, so the last value the operator commanded no
+                # longer reflects where the hardware sits. Drop the
+                # shared channel cache for this node (every writer reads
+                # it) plus this path's throttle stamps.
+                self.state_manager._invalidate_channel_cache(
+                    node_id, "peripheral config sync")
+                stale = [k for k in self._control_throttle if k[0] == node_id]
                 for k in stale:
-                    self._control_last_value.pop(k, None)
                     self._control_throttle.pop(k, None)
                 await self.broadcast_activity(f'Syncing peripherals to node {node_id}', 'info')
                 return {"status": "ok", "data": {"message": "Sync initiated", "success": True}}
@@ -2260,28 +2260,19 @@ class WebSocketHandler:
             # any continuous drag, not bypass the throttle.
             is_neutral = raw_us is None and is_neutral_value(value)
 
-            # Change filter: skip values the firmware already has. Applies
-            # to the normalized path only (a raw_us preview always passes —
-            # the operator is actively dialing). Covers the held-position
-            # AND repeated-stop floods; the first transition still differs
-            # from the last sent value, so it always goes through.
+            # Redundant-value filtering now lives in channel_arbiter,
+            # consulted inside send_channel_command, so every writer
+            # shares one view of what the firmware holds. This path used
+            # to keep its own cache (_control_last_value) that pose
+            # boards could not see: after a board moved a channel,
+            # dragging the slider back to the value THIS cache last
+            # recorded was answered with {"unchanged": true} and nothing
+            # was sent — a dead slider with a success response.
             #
-            # BUT: the dedupe only holds while the channel is still
-            # engaged. A Maestro channel idle-disengages (drops PWM, goes
-            # limp) after its idle_disengage_ms with no SET_TARGET; once
-            # that window has elapsed the firmware needs a fresh target to
-            # re-engage, so a repeat of the held value MUST go through to
-            # wake it — otherwise a State slider (or pose) can never revive
-            # a slept channel. Expire the dedupe at idle_disengage_ms;
-            # 0 (always-on / non-Maestro) keeps the original behavior.
-            if raw_us is None and value is not None:
-                last_value = self._control_last_value.get(throttle_key)
-                if (last_value is not None
-                        and abs(value - last_value) < CONTROL_CHANGE_EPSILON):
-                    idle_ms = self.state_manager.channel_idle_disengage_ms(
-                        node_id, peripheral_id, channel_id)
-                    if idle_ms <= 0 or (now - last_send) < idle_ms:
-                        return {"status": "ok", "data": {"unchanged": True}}
+            # A slider is also operator authority (channel_arbiter.SLIDER):
+            # a hand on a control is never a flood risk, so it is not
+            # change-gated at all. Only the throttle below still applies,
+            # to bound drag streams.
 
             if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
                 self.log('debug', f'[Control] THROTTLED {node_id} '
@@ -2294,15 +2285,19 @@ class WebSocketHandler:
                 # for the status LED) without needing to know the
                 # operator-chosen instance id.
                 peripheral_type = target.get("peripheral_type", "")
-                self._send_channel_callback(node_id, peripheral_id, channel_id,
-                                            value if value is not None else 0.0,
-                                            peripheral_type, raw_us=raw_us)
+                sent = self._send_channel_callback(
+                    node_id, peripheral_id, channel_id,
+                    value if value is not None else 0.0,
+                    peripheral_type, raw_us=raw_us, owner=SLIDER)
+                # Arbitration may judge the write redundant (the
+                # firmware verifiably already holds this value). Say so
+                # rather than reporting a send that never happened — the
+                # client uses this to know whether its optimistic slider
+                # position is real. `sent is None` means an older
+                # callback that returns nothing; treat that as sent.
+                if sent is False:
+                    return {"status": "ok", "data": {"unchanged": True}}
                 self._control_throttle[throttle_key] = now
-                # Record the value we just sent so identical follow-ups
-                # dedupe. Don't record for raw_us previews — those don't
-                # change the routed value the firmware tracks.
-                if raw_us is None and value is not None:
-                    self._control_last_value[throttle_key] = value
                 bypass_note = ' [STOP]' if is_neutral else ''
                 self.log('info', f'[Control] SENT{bypass_note} {node_id} '
                                  f'{peripheral_id}/{channel_id}: {detail}')

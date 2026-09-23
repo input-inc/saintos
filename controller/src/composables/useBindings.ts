@@ -36,7 +36,12 @@ export type AnalogInput =
     | 'left_pad_x'
     | 'left_pad_y'
     | 'right_pad_x'
-    | 'right_pad_y';
+    | 'right_pad_y'
+    // IMU angular rates, normalized -1..1 by the Rust mapper. The
+    // sensor is only powered while one of these is bound.
+    | 'gyro_pitch'
+    | 'gyro_roll'
+    | 'gyro_yaw';
 
 export type DigitalInput =
     | 'a' | 'b' | 'x' | 'y'

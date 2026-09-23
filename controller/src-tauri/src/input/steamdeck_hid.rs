@@ -3,6 +3,7 @@
 //! This bypasses Steam Input to get raw sensor and button data.
 
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -13,9 +14,17 @@ const STEAM_DECK_PID: u16 = 0x1205;
 
 // Feature report ID for the Steam Controller protocol: enable
 // gyro/sensors. (0x81 "clear mappings" is deliberately never sent —
-// see enable_sensors() — and 0x83 "get settings" is used inline there,
+// see set_sensors() — and 0x83 "get settings" is used inline there,
 // so neither needs a named constant.)
 const STEAM_FEATURE_REPORT_ENABLE_SENSORS: u8 = 0x87;
+
+// Setting id + values written through that report to control the IMU.
+// 0x18 streams raw gyro+accel; 0x00 stops the sensor, which is the
+// default state — it is only switched on while something is bound to
+// it or the diagnostics view is open.
+const STEAM_SETTING_GYRO_MODE: u8 = 0x30;
+const STEAM_GYRO_MODE_RAW: u8 = 0x18;
+const STEAM_GYRO_MODE_OFF: u8 = 0x00;
 
 // Button masks for ulButtonsL (lower 32 bits). Only the inputs the
 // standard gamepad API can't surface are decoded here: the Steam/QAM
@@ -82,24 +91,41 @@ pub struct SteamDeckHidState {
 pub struct SteamDeckHidReader {
     state: Arc<RwLock<SteamDeckHidState>>,
     running: Arc<RwLock<bool>>,
+    /// Whether anything currently wants IMU data. The HID loop watches
+    /// this and sends the enable/disable feature report on transition.
+    /// Starts false: the sensor is powered on demand, never by default.
+    sensors_wanted: Arc<RwLock<bool>>,
 }
 
 impl SteamDeckHidReader {
     pub fn new() -> Self {
         let state = Arc::new(RwLock::new(SteamDeckHidState::default()));
         let running = Arc::new(RwLock::new(false));
+        let sensors_wanted = Arc::new(RwLock::new(false));
 
-        Self { state, running }
+        Self { state, running, sensors_wanted }
     }
 
-    pub fn start(&self) {
+    /// Turn IMU streaming on or off. Cheap and idempotent — it only
+    /// sets a flag; the HID thread notices on its next pass and issues
+    /// the feature report, so callers never block on USB.
+    pub fn set_sensors_enabled(&self, enabled: bool) {
+        *self.sensors_wanted.write() = enabled;
+    }
+
+    /// `focused` pauses the read loop while the app is backgrounded. The
+    /// reports it would have consumed are dropped by hidapi's ring
+    /// buffer, which is correct — stale input from minutes ago must never
+    /// reach the mapper, and the processing loop is paused anyway.
+    pub fn start(&self, focused: Arc<AtomicBool>) {
         let state = self.state.clone();
         let running = self.running.clone();
+        let sensors_wanted = self.sensors_wanted.clone();
 
         *running.write() = true;
 
         thread::spawn(move || {
-            Self::run_hid_loop(state, running);
+            Self::run_hid_loop(state, running, sensors_wanted, focused);
         });
     }
 
@@ -116,7 +142,12 @@ impl SteamDeckHidReader {
     }
 
     #[cfg(target_os = "linux")]
-    fn run_hid_loop(state: Arc<RwLock<SteamDeckHidState>>, running: Arc<RwLock<bool>>) {
+    fn run_hid_loop(
+        state: Arc<RwLock<SteamDeckHidState>>,
+        running: Arc<RwLock<bool>>,
+        sensors_wanted: Arc<RwLock<bool>>,
+        focused: Arc<AtomicBool>,
+    ) {
         use hidapi::HidApi;
 
         log::info!("Starting Steam Deck HID reader...");
@@ -218,10 +249,17 @@ impl SteamDeckHidReader {
             }
         };
 
-        // Try to enable gyro/sensors by sending feature reports
-        Self::enable_sensors(&device);
-
+        // NOTE: sensors are NOT enabled here. The IMU streams (and
+        // draws power) for as long as it's on, and for most of a
+        // session nothing wants it — see set_sensors_enabled. The loop
+        // below applies whatever the current demand is, starting from
+        // an explicit "off" on the first pass so a sensor left enabled
+        // by a previous run or by Steam gets turned back off.
         log::info!("Steam Deck HID reader running");
+
+        // None = nothing applied yet, so the first pass always writes
+        // the desired state rather than assuming the hardware matches.
+        let mut sensors_applied: Option<bool> = None;
 
         let mut buf = [0u8; 64];
         let mut report_count = 0u64;
@@ -229,6 +267,40 @@ impl SteamDeckHidReader {
         let mut last_value_log_time = std::time::Instant::now();
 
         while *running.read() {
+            if !focused.load(Ordering::Relaxed) {
+                // Backgrounded. Drop the IMU too if it was on — nothing
+                // is consuming rates, and the sensor is the expensive
+                // part. It comes back via the demand flag on refocus.
+                if sensors_applied == Some(true) {
+                    Self::set_sensors(&device, false);
+                    sensors_applied = Some(false);
+                    let mut s = state.write();
+                    s.gyro_pitch = 0.0;
+                    s.gyro_roll = 0.0;
+                    s.gyro_yaw = 0.0;
+                }
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            let want_sensors = *sensors_wanted.read();
+            if sensors_applied != Some(want_sensors) {
+                Self::set_sensors(&device, want_sensors);
+                if !want_sensors {
+                    // The sensor stops reporting but the last rates it
+                    // sent are still sitting in shared state, and the
+                    // merge in manager.rs treats any non-zero gyro as
+                    // "HID has live data". Left as-is, a binding would
+                    // hold whatever rate the wrist happened to be at
+                    // when the IMU switched off.
+                    let mut s = state.write();
+                    s.gyro_pitch = 0.0;
+                    s.gyro_roll = 0.0;
+                    s.gyro_yaw = 0.0;
+                }
+                sensors_applied = Some(want_sensors);
+            }
+
             match device.read_timeout(&mut buf, 16) {
                 Ok(size) if size > 0 => {
                     report_count += 1;
@@ -274,34 +346,49 @@ impl SteamDeckHidReader {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn run_hid_loop(_state: Arc<RwLock<SteamDeckHidState>>, _running: Arc<RwLock<bool>>) {
+    fn run_hid_loop(
+        _state: Arc<RwLock<SteamDeckHidState>>,
+        _running: Arc<RwLock<bool>>,
+        _sensors_wanted: Arc<RwLock<bool>>,
+        _focused: Arc<AtomicBool>,
+    ) {
         log::info!("Steam Deck HID reader not available on this platform");
     }
 
     #[cfg(target_os = "linux")]
-    fn enable_sensors(device: &hidapi::HidDevice) {
-        // Send feature reports to enable gyro and sensors
-        // Based on SDL's Steam Controller initialization
+    /// Turn IMU streaming on or off via the Steam Controller settings
+    /// feature report. Based on SDL's Steam Controller initialization.
+    ///
+    /// Called only on a demand transition, never per frame — each call
+    /// is a synchronous USB control transfer.
+    fn set_sensors(device: &hidapi::HidDevice, enabled: bool) {
+        // 0x87 = set settings; setting 0x30 is the gyro mode, whose
+        // value is a bitfield of what the controller should stream.
+        // 0x18 = raw gyro + accel, 0x00 = nothing (sensor idle).
+        let mut set_gyro = [0u8; 64];
+        set_gyro[0] = STEAM_FEATURE_REPORT_ENABLE_SENSORS; // 0x87
+        set_gyro[1] = 0x03; // Length
+        set_gyro[2] = STEAM_SETTING_GYRO_MODE; // 0x30
+        set_gyro[3] = if enabled { STEAM_GYRO_MODE_RAW } else { STEAM_GYRO_MODE_OFF };
+        set_gyro[4] = 0x00;
 
-        // Feature report to enable gyro (0x87 = set settings)
-        // This tells the controller to include gyro data in input reports
-        let mut enable_gyro = [0u8; 64];
-        enable_gyro[0] = STEAM_FEATURE_REPORT_ENABLE_SENSORS; // 0x87
-        enable_gyro[1] = 0x03; // Length
-        enable_gyro[2] = 0x30; // Setting: Enable gyro
-        enable_gyro[3] = 0x18; // Gyro mode (raw)
-        enable_gyro[4] = 0x00;
-
-        match device.send_feature_report(&enable_gyro) {
-            Ok(_) => log::info!("Sent gyro enable feature report"),
-            Err(e) => log::warn!("Failed to send gyro enable: {} (this may be expected)", e),
+        let what = if enabled { "enable" } else { "disable" };
+        match device.send_feature_report(&set_gyro) {
+            Ok(_) => log::info!("Sent gyro {} feature report", what),
+            Err(e) => log::warn!("Failed to send gyro {}: {} (this may be expected)", what, e),
         }
-
-        thread::sleep(Duration::from_millis(50));
 
         // NOTE: We intentionally do NOT send the "clear mappings" (0x81) feature report here.
         // That would disable Steam Input's button mappings, breaking features like
         // X button → "Show Keyboard" in Desktop Mode.
+
+        if !enabled {
+            // Nothing downstream should read a stale rate as live motion
+            // once the sensor stops reporting.
+            return;
+        }
+
+        thread::sleep(Duration::from_millis(50));
 
         // Request settings to confirm device is responsive
         let mut get_settings = [0u8; 64];

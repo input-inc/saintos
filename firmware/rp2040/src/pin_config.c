@@ -34,6 +34,14 @@
 
 // Current pin configurations (runtime state)
 static pin_config_t pin_configs[PIN_CONFIG_MAX_PINS];
+
+/* See teensy41/src/pin_config.cpp for the incident these guard. */
+_Static_assert(PIN_CONFIG_MAX_PINS <= FLASH_PIN_CONFIG_MAX_PINS,
+               "PIN_CONFIG_MAX_PINS exceeds FLASH_PIN_CONFIG_MAX_PINS — "
+               "pin_config_save would overrun the flash struct");
+/* RP2040 stores the blob in one 4096-byte flash sector. */
+_Static_assert(sizeof(flash_storage_data_t) <= 4096,
+               "flash_storage_data_t no longer fits the RP2040 flash sector");
 static uint8_t pin_config_count = 0;
 
 static bool initialized = false;
@@ -629,9 +637,14 @@ bool pin_config_save(void)
 
     // Copy pin configurations to storage
     storage.pin_config.version = PIN_CONFIG_VERSION;
-    storage.pin_config.pin_count = pin_config_count;
+    storage.pin_config.pin_count =
+        (pin_config_count > FLASH_PIN_CONFIG_MAX_PINS)
+            ? FLASH_PIN_CONFIG_MAX_PINS : pin_config_count;
 
-    for (uint8_t i = 0; i < pin_config_count && i < PIN_CONFIG_MAX_PINS; i++) {
+    /* Bound by the FLASH capacity — see the Teensy equivalent. RP2040's
+     * RAM array happens to match it today (16), but binding to the RAM
+     * constant is the bug shape, not the value. */
+    for (uint8_t i = 0; i < pin_config_count && i < FLASH_PIN_CONFIG_MAX_PINS; i++) {
         storage.pin_config.pins[i].gpio = pin_configs[i].gpio;
         storage.pin_config.pins[i].mode = (uint8_t)pin_configs[i].mode;
         strncpy(storage.pin_config.pins[i].logical_name,
@@ -696,7 +709,11 @@ bool pin_config_load(void)
     pin_config_reset();
 
     // Load configurations
-    for (uint8_t i = 0; i < storage.pin_config.pin_count && i < PIN_CONFIG_MAX_PINS; i++) {
+    uint8_t stored_pins = storage.pin_config.pin_count;
+    if (stored_pins > FLASH_PIN_CONFIG_MAX_PINS) {
+        stored_pins = FLASH_PIN_CONFIG_MAX_PINS;
+    }
+    for (uint8_t i = 0; i < stored_pins && i < PIN_CONFIG_MAX_PINS; i++) {
         uint8_t gpio = storage.pin_config.pins[i].gpio;
         pin_mode_t mode = (pin_mode_t)storage.pin_config.pins[i].mode;
         const char* name = storage.pin_config.pins[i].logical_name;

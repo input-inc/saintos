@@ -512,7 +512,12 @@ static bool drv_load(const void* storage)
  * card. connected reflects the WHOAMI poll (bus open != board present). */
 static int drv_state_emit_channels(char* buf, size_t cap, bool* first)
 {
-    if (!g_initialized) return 0;
+    /* g_initialized only means the DRIVER registered — every node
+     * registers every driver. Without the id check this emitted three
+     * records (~200 bytes) on nodes with no Servo2040 at all, which on
+     * the Head Node was exactly the overage that pushed /state past its
+     * wire budget. Emit for hardware that exists, like /announce does. */
+    if (!g_initialized || !g_peripheral_id[0]) return 0;
     bool connected = g_board_present;
 
     int total = 0, n;

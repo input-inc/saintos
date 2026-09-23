@@ -1,8 +1,13 @@
 /**
  * Input composable — Vue equivalent of the Angular `InputService`.
- * Listens for `input-state` Tauri events (emitted by the Rust input
- * manager on every gamepad poll) and exposes the latest gamepad /
- * gyro / touchpad state as reactive refs.
+ * Listens for `input-state` Tauri events and exposes the latest
+ * gamepad / gyro / touchpad state as reactive refs.
+ *
+ * The Rust side publishes these at a UI cadence (UI_EMIT_MS in lib.rs,
+ * ~60 Hz) and only when the state actually changed — NOT at the input
+ * sample rate. So an idle controller delivers roughly one event per
+ * second, and a moving one at most ~60. Don't treat event arrival as a
+ * clock; read the refs.
  *
  * Also publishes button press/release edges through `onButtonEvent` —
  * components subscribe with a callback that fires once per state
@@ -11,7 +16,7 @@
  * + Subscription) which fits Vue's lifecycle hooks.
  */
 
-import { computed, ref } from 'vue';
+import { computed, shallowRef } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
@@ -74,11 +79,22 @@ const DEFAULT_INPUT_STATE: InputState = {
 
 // ─── Module-level singleton state ────────────────────────────────────
 
-const inputStateRef = ref<InputState>(DEFAULT_INPUT_STATE);
+// shallowRef, not ref: this is only ever REPLACED wholesale (the Tauri
+// event hands over a freshly deserialized object) and every consumer
+// reads it. Deep `ref` would walk the payload and wrap gamepad, the
+// button map, gyro and both touchpads in reactive proxies on every
+// single event — allocation and proxy setup buying reactivity that
+// nothing uses, since no code mutates a nested field in place.
+//
+// It also stops Vue making DEFAULT_INPUT_STATE reactive: that's a
+// module-level shared const, and deep reactivity on it is a footgun
+// waiting for the first person who writes through it.
+const inputStateRef = shallowRef<InputState>(DEFAULT_INPUT_STATE);
 let previousButtons: { [key: string]: boolean } = {};
 const buttonListeners = new Set<ButtonEventListener>();
 
 let initialized = false;
+let sawFirstEvent = false;
 const unlistenFns: UnlistenFn[] = [];
 
 async function ensureInit(): Promise<void> {
@@ -88,16 +104,35 @@ async function ensureInit(): Promise<void> {
     unlistenFns.push(
         await listen<InputState>('input-state', event => {
             const state = event.payload;
+            sawFirstEvent = true;
             detectButtonChanges(state.gamepad.buttons);
             inputStateRef.value = state;
         }),
     );
+
+    // The Rust emitter is change-gated — an untouched controller
+    // publishes only on a 1 s idle heartbeat. Without a bootstrap read
+    // the UI would show DEFAULT_INPUT_STATE ("No gamepad detected")
+    // until that heartbeat lands. Pull the current state once, and drop
+    // it if a live event beat us to it so we can't overwrite fresher
+    // data with the value we asked for before the listener attached.
+    const initial = await getInputState();
+    if (!sawFirstEvent) {
+        detectButtonChanges(initial.gamepad.buttons);
+        inputStateRef.value = initial;
+    }
 }
 
 function detectButtonChanges(currentButtons: { [key: string]: boolean }): void {
     // Pressed-edge (false → true) and released-edge (true → false) on
     // any button that appeared in either state.
-    for (const [button, pressed] of Object.entries(currentButtons)) {
+    //
+    // `for...in` rather than Object.entries: entries() allocates an array
+    // plus a two-element array per key, and this runs over ~24 buttons on
+    // every input event. for...in walks the same keys and allocates
+    // nothing.
+    for (const button in currentButtons) {
+        const pressed = currentButtons[button];
         const wasPressed = previousButtons[button] || false;
         if (pressed !== wasPressed) {
             emitButtonEvent({ button, pressed });
@@ -109,12 +144,18 @@ function detectButtonChanges(currentButtons: { [key: string]: boolean }): void {
     // loop above. The firmware emits the full button map every frame, so
     // `!currentButtons[button]` here would re-fire every release a second
     // time.
-    for (const [button, wasPressed] of Object.entries(previousButtons)) {
-        if (wasPressed && !(button in currentButtons)) {
+    for (const button in previousButtons) {
+        if (previousButtons[button] && !(button in currentButtons)) {
             emitButtonEvent({ button, pressed: false });
         }
     }
-    previousButtons = { ...currentButtons };
+    // Keep the reference, don't copy it. `currentButtons` came out of a
+    // freshly deserialized event payload and nothing mutates it, so a
+    // spread would allocate a duplicate of a map that is already
+    // immutable in practice. If a caller ever starts writing into the
+    // input state in place, this has to go back to a copy — which is the
+    // same assumption shallowRef above relies on.
+    previousButtons = currentButtons;
 }
 
 function emitButtonEvent(event: ButtonEvent): void {

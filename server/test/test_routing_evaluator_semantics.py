@@ -66,7 +66,8 @@ def _make_evaluator(routing, bridge=None, ptype="roboclaw"):
     sends: List[tuple] = []
     last_by_sink: Dict[str, float] = {}
 
-    def send_channel(node_id, peripheral_id, channel_id, value, ptype_):
+    def send_channel(node_id, peripheral_id, channel_id, value, ptype_,
+                     owner="stream"):
         sends.append((node_id, peripheral_id, channel_id, value, ptype_))
         last_by_sink[f"{node_id}/{peripheral_id}/{channel_id}"] = value
 

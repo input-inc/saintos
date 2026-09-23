@@ -88,6 +88,17 @@ extern "C" void watchdog_init(void)
     uint32_t srsr = SRC_SRSR;
     const char* cause = srsr_cause_str(srsr);
 
+    /* Teensy's CrashReport survives a fault across the reset and names
+     * the fault type, faulting PC and return address. Printing it beside
+     * the SRSR decode turns "software reset or CPU lockup" — all the
+     * SRSR bit can tell you — into an address you can look up. Falsy and
+     * free when the last reset was clean. */
+    if (CrashReport) {
+        Serial.println();
+        Serial.print(CrashReport);
+        Serial.println();
+    }
+
     Serial.printf("Reset cause: %s (SRSR=0x%08lX)\n",
                   cause, (unsigned long)srsr);
 

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "hardware/timer.h"   /* busy_wait_ms */
 #include "pico/unique_id.h"
 #include "wizchip_conf.h"
 #include "socket.h"

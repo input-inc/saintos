@@ -731,6 +731,17 @@ bool pin_control_apply_json(const char* json, size_t json_len)
     return pin_control_set_value(gpio, value);
 }
 
+/* Counts records dropped because the state buffer ran out. Surfaced
+ * via pin_control_state_truncations() so main.cpp can log it — the
+ * previous behavior (silent -1, no telemetry, no counter) cost a long
+ * debugging session to spot from the outside. */
+static uint32_t g_state_truncations = 0;
+
+uint32_t pin_control_state_truncations(void)
+{
+    return g_state_truncations;
+}
+
 int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node_id)
 {
     if (!buffer || buffer_size < 128) return -1;
@@ -755,6 +766,26 @@ int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node
         const pin_config_t* cfg = &configs[i];
         if (cfg->mode == PIN_MODE_UNCONFIGURED) continue;
 
+        /* Maestro reports through the channel-addressed path
+         * (maestro_driver.c:maestro_state_emit_channels), so its legacy
+         * per-channel GPIO rows are pure overhead here: ONE Maestro
+         * creates 24 pin_config entries (pin_config.cpp: channel_count
+         * = MAESTRO_MAX_CHANNELS) at ~68 bytes each, ~1.6 KB of a
+         * ~2 KB wire budget. The server drops them on the floor anyway
+         * — state_manager._FIRMWARE_CHANNEL_MAP has no maestro_servo
+         * entry, so they never become channel values, and the
+         * dashboard's MaestroCard reads channels, not pins.
+         *
+         * Concretely: the Head Node (24-channel Maestro + 2 NeoPixel
+         * strips) overran the 2048-byte state_buffer, pin_control_
+         * state_to_json returned -1, and publish_state bailed before
+         * rcl_publish — so that node published NO telemetry at all,
+         * silently, for as long as that config was loaded. Skipping
+         * these rows is what brings the message back under budget.
+         * Retiring the virtual-GPIO slabs entirely is the endgame; see
+         * docs/PERIPHERAL_FIRST_MIGRATION.md. */
+        if (cfg->mode == PIN_MODE_MAESTRO_SERVO) continue;
+
         pin_runtime_value_t* rv = find_runtime(cfg->gpio);
         float value = rv ? rv->value : 0.0f;
 
@@ -773,25 +804,46 @@ int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node
         }
         escaped_name[j] = '\0';
 
-        ret = snprintf(buffer + written, buffer_size - written,
+        /* Compose the whole record first, then commit it only if it
+         * fits. The old code wrote the record in three snprintf steps
+         * and returned -1 from whichever one overflowed — one row too
+         * many and the ENTIRE state message was discarded, node-wide
+         * and silently. Partial telemetry is strictly better: the
+         * server merges pin rows by gpio, so a short list updates what
+         * it covers instead of blacking everything out. */
+        char record[192];
+        int rn = snprintf(record, sizeof(record),
             "%s{\"gpio\":%d,\"mode\":\"%s\",\"value\":%.2f,\"name\":\"%s\"",
             first ? "" : ",",
             cfg->gpio, mode_str, value, escaped_name);
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-        written += ret;
+        if (rn < 0 || (size_t)rn >= sizeof(record)) { g_state_truncations++; break; }
 
-        // Add voltage for ADC pins
         if (cfg->mode == PIN_MODE_ADC) {
             float voltage = value;  // Already stored as voltage
-            ret = snprintf(buffer + written, buffer_size - written,
+            int vn = snprintf(record + rn, sizeof(record) - (size_t)rn,
                 ",\"voltage\":%.3f", voltage);
-            if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-            written += ret;
+            if (vn < 0 || (size_t)vn >= sizeof(record) - (size_t)rn) {
+                g_state_truncations++;
+                break;
+            }
+            rn += vn;
         }
 
-        ret = snprintf(buffer + written, buffer_size - written, "}");
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
-        written += ret;
+        int cn = snprintf(record + rn, sizeof(record) - (size_t)rn, "}");
+        if (cn < 0 || (size_t)cn >= sizeof(record) - (size_t)rn) {
+            g_state_truncations++;
+            break;
+        }
+        rn += cn;
+
+        /* +2 reserves the "]}" tail plus the channels[] opener the
+         * caller appends, so a record can never consume the room the
+         * closing syntax needs. */
+        if ((size_t)rn + 2 >= buffer_size - written) { g_state_truncations++; break; }
+
+        memcpy(buffer + written, record, (size_t)rn);
+        written += rn;
+        buffer[written] = '\0';
 
         first = false;
     }

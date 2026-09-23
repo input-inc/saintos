@@ -77,6 +77,17 @@ bool flash_storage_load(flash_storage_data_t* data)
 
     // Handle version migration
     if (data->version < FLASH_STORAGE_VERSION) {
+        /* v<=14 predates the pins[] 16 -> 48 growth; every config after
+         * pin_config moved. Reject rather than wipe, so the node boots
+         * UNADOPTED and the server re-pushes — see the long note in the
+         * hardware flash_storage_load below. Wiping in place leaves the
+         * node adopted-but-empty, which the server never re-syncs. */
+        if (data->version <= 14) {
+            printf("Flash storage: discarding pre-v15 config "
+                   "(layout changed); node will re-sync from server\n");
+            return false;
+        }
+
         flash_storage_data_t* mutable_data = (flash_storage_data_t*)data;
         printf("Flash storage: migrating from version %d to %d\n",
                mutable_data->version, FLASH_STORAGE_VERSION);
@@ -258,6 +269,33 @@ bool flash_storage_load(flash_storage_data_t* data)
     if (data->version < FLASH_STORAGE_VERSION) {
         printf("Flash storage: migrating from version %d to %d\n",
                data->version, FLASH_STORAGE_VERSION);
+
+        /* Pre-v15 blobs predate the pins[] 16 -> 48 growth, which moved
+         * every peripheral config after pin_config (offset 127) to a new
+         * offset. Reinterpreting one at the new layout reads each config
+         * out of bytes that belong to something else — past the end of
+         * the old record it is erased flash, so every field decodes as
+         * 0xFF. That is not theoretical: both Track Drive nodes came up
+         * from a v13 blob with roboclaw_config reading unit_count=8,
+         * address=0xFF, serial_port=255, baud=65535, bound the PIO UART
+         * at 65535 baud, and the RoboClaws never heard a valid byte.
+         *
+         * A partial wipe is not enough either — it would leave the node
+         * "adopted with no peripherals", and the server only re-pushes
+         * config to a node announcing UNADOPTED, so it would sit there
+         * configured-less forever. Reject the whole blob: node_state
+         * treats that as "no saved configuration", the node announces
+         * UNADOPTED, and the server re-syncs it automatically.
+         *
+         * This is the same guard flash_storage.cpp applies on the
+         * Teensy. Both platforms compile TWO flash_storage_load bodies
+         * (SIMULATION and hardware) — a guard added to one is not in
+         * the other. That asymmetry is what shipped this bug. */
+        if (data->version <= 14) {
+            printf("Flash storage: discarding pre-v15 config "
+                   "(layout changed); node will re-sync from server\n");
+            return false;
+        }
 
         // Version 1 -> 2: Added pin_config
         if (data->version == 1) {

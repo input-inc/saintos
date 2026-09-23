@@ -24,6 +24,10 @@ import { computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useConnection } from './useConnection';
+import {
+    createTelemetrySubscription,
+    holdWhileInScope,
+} from './useTelemetrySubscription';
 
 export interface WifiConfig {
     ssid: string | null;
@@ -88,6 +92,12 @@ const surveyRef = ref<SurveyState>({
 });
 const switchingRef = ref<SwitchingState>({ active: false, detail: null });
 
+// The WiFi panel watches one pseudo-node's pin_state frames. Ref-counted
+// so the stream stops when nothing is rendering them — see
+// useTelemetrySubscription for why that wasn't the case before.
+const HOST_TOPIC = 'pin_state/host_controller';
+const subscription = createTelemetrySubscription('useWifi', add => add([HOST_TOPIC]));
+
 let initialized = false;
 let surveyTimeout: ReturnType<typeof setTimeout> | null = null;
 let switchTimers: Array<ReturnType<typeof setTimeout>> = [];
@@ -144,7 +154,7 @@ async function ensureInit(): Promise<void> {
         await listen<{ node: string; data: { channels?: Array<{ peripheral_id: string; channel_id: string; value: number | null }> } | null }>(
             'pin-state', event => {
                 const { node, data } = event.payload;
-                if (node !== 'pin_state/host_controller') return;
+                if (node !== HOST_TOPIC) return;
                 const channels = data?.channels;
                 if (!Array.isArray(channels)) return;
                 const pick = (id: string): number | null => {
@@ -212,8 +222,10 @@ async function ensureInit(): Promise<void> {
             switchingRef.value = { active: false, detail: null };
             void invoke('get_wifi_config').catch(err =>
                 console.error('[useWifi] get_wifi_config failed:', err));
-            void invoke('subscribe_topics', { topics: ['pin_state/host_controller'] })
-                .catch(err => console.error('[useWifi] subscribe_topics failed:', err));
+            // Server-side subscriptions die with the connection, so a
+            // reconnect has to re-subscribe. No-op unless a component is
+            // actually holding the stream.
+            subscription.refresh();
         } else {
             // Link down: live numbers are stale by definition. Keep the
             // last config (SSID/channel don't change on their own) and
@@ -222,6 +234,9 @@ async function ensureInit(): Promise<void> {
                 signalDbm: null, retryPct: null, noiseDbm: null,
                 bitrateMbps: null, lastUpdate: null,
             };
+            // Already unsubscribed by virtue of the link dropping; clear
+            // the tracked set so reconnect re-subscribes cleanly.
+            subscription.forget();
         }
     }, { immediate: true });
 }
@@ -275,6 +290,9 @@ const bestPick = computed<SurveyChannel | null>(() => {
 
 export function useWifi() {
     void ensureInit();
+    // Hold the host_controller pin_state stream only while the calling
+    // component lives.
+    holdWhileInScope('useWifi', subscription);
     return {
         config: computed(() => configRef.value),
         live: computed(() => liveRef.value),

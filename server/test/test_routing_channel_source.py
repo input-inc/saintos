@@ -43,7 +43,7 @@ def _sheet_with_channel_input(routing, sheet_id="node-a",
 def _evaluator(sent, ptype="kangaroo"):
     return RoutingEvaluator(
         ros_bridge=None,
-        send_channel=lambda *a: sent.append(a),
+        send_channel=lambda *a, **kw: sent.append(a),
         peripheral_type_lookup=lambda *_: ptype,
     )
 

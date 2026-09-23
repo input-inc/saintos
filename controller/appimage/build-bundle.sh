@@ -59,6 +59,42 @@ export NG_CLI_ANALYTICS=false
 # without FUSE (GitHub Actions runners do the same).
 export APPIMAGE_EXTRACT_AND_RUN=1
 
+# --- preflight: can the bundle dir hold a mode-0200 file? -----------
+#
+# linuxdeploy populates the AppDir with C++ std::filesystem::copy_file(),
+# which creates each destination as open(dst, O_WRONLY|O_CREAT|O_TRUNC,
+# S_IWUSR) — mode 0200, no owner-read — and fchmod()s the real bits on
+# afterwards. Docker Desktop for Mac's virtiofs share rejects that
+# create with EACCES, so on a mis-mounted container EVERY library copy
+# fails ("filesystem error: cannot copy file: Permission denied") and
+# leaves a 0-byte stub behind. That failure only shows up after the full
+# cargo build, as a hundred-line wall of near-identical errors, so probe
+# for it here instead — one second, before anything expensive runs.
+#
+# The fix is a non-virtiofs filesystem under the bundle dir;
+# build-docker.sh mounts an anonymous Docker volume there. Native Linux
+# (CI, or a Linux dev box) is unaffected either way.
+BUNDLE_DIR="$CARGO_TARGET_DIR/release/bundle"
+mkdir -p "$BUNDLE_DIR"
+if command -v node >/dev/null 2>&1; then
+    _probe="$BUNDLE_DIR/.saint-mode-probe"
+    rm -f "$_probe" 2>/dev/null || true
+    if ! node -e 'const fs=require("fs");fs.closeSync(fs.openSync(process.argv[1],"w",0o200));' \
+            "$_probe" 2>/dev/null; then
+        echo "ERROR: $BUNDLE_DIR cannot hold a mode-0200 file (EACCES)." >&2
+        echo "       linuxdeploy's std::filesystem::copy_file() creates every" >&2
+        echo "       bundled .so that way, so the AppDir build would fail on" >&2
+        echo "       all ~100 libraries with 'cannot copy file: Permission denied'." >&2
+        echo "       This is the Docker Desktop virtiofs bind-mount limitation:" >&2
+        echo "       mount a non-virtiofs filesystem at that path. The supported" >&2
+        echo "       driver does it for you:" >&2
+        echo "           controller/appimage/build-docker.sh" >&2
+        echo "       (it adds '--volume /build/target/release/bundle' to docker run)." >&2
+        exit 1
+    fi
+    rm -f "$_probe" 2>/dev/null || true
+fi
+
 cd "$CONTROLLER_DIR"
 
 # node_modules in the persistent cache, symlinked from the source dir

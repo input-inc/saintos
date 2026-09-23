@@ -26,8 +26,6 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 parking_lot = "0.12"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 # Pure-Rust mDNS / DNS-SD client. Used in src/discovery.rs to resolve
 # .local hostnames and browse for SAINT.OS server instances on the LAN

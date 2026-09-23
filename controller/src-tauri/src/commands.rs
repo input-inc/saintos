@@ -4,6 +4,7 @@ use crate::input::InputManager;
 use crate::protocol::{ConnectionState, WebSocketClient};
 use parking_lot::RwLock;
 use serde_json::Value;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Runtime, State, WebviewWindow};
@@ -12,30 +13,36 @@ pub struct AppState {
     pub input_manager: InputManager,
     pub ws_client: WebSocketClient,
     pub mapper: RwLock<InputMapper>,
-    /// mDNS discovery / resolution helper. Optional because the daemon
-    /// can fail to bind its UDP socket on locked-down hosts (the
-    /// Steam Deck Game Mode sandbox notably) — in that case we still
-    /// want the rest of the app to work, just without auto-discovery.
-    pub discovery: Option<DiscoveryService>,
+    /// mDNS discovery / resolution helper.
+    ///
+    /// Not Optional any more: the daemon is created on demand, so there
+    /// is nothing to fail at construction time. A host that won't let us
+    /// open a multicast socket (the Steam Deck Game Mode sandbox
+    /// notably) now fails the individual resolve or browse and logs
+    /// there — which also means a host that blocks it at boot but not
+    /// later gets working discovery instead of a permanently dead
+    /// service.
+    pub discovery: DiscoveryService,
+    /// Whether the app window currently has focus.
+    ///
+    /// Drives whether the input pipeline runs at all: a backgrounded
+    /// controller is not being looked at, so sampling input, processing
+    /// bindings and publishing state to a hidden webview are all work
+    /// nobody can see. Starts true — the window is focused when it
+    /// opens, and no Focused event fires for that initial state.
+    pub focused: Arc<AtomicBool>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        // Best-effort start. If mDNS doesn't come up we log it and
-        // keep going; the operator can still connect by typing an IP
-        // address manually.
-        let discovery = match DiscoveryService::start() {
-            Ok(d) => Some(d),
-            Err(e) => {
-                log::warn!("mDNS discovery disabled: {}", e);
-                None
-            }
-        };
         Self {
             input_manager: InputManager::new(),
             ws_client: WebSocketClient::new(),
             mapper: RwLock::new(InputMapper::new()),
-            discovery,
+            // Opens no socket and starts no thread until something
+            // actually discovers — see discovery.rs's Lifetime section.
+            discovery: DiscoveryService::new(),
+            focused: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -79,11 +86,7 @@ fn maybe_resolve_local(state: &State<'_, Arc<AppState>>, host: &str) -> String {
     if !host.ends_with(".local") && !host.ends_with(".local.") {
         return host.to_string();
     }
-    let Some(d) = state.discovery.as_ref() else {
-        log::warn!("Host '{}' looks like mDNS but discovery is disabled", host);
-        return host.to_string();
-    };
-    match d.resolve(host, Duration::from_secs(2)) {
+    match state.discovery.resolve(host, Duration::from_secs(2)) {
         Some(ip) => {
             log::info!("Resolved '{}' → {} via embedded mDNS", host, ip);
             ip.to_string()
@@ -130,12 +133,32 @@ pub fn get_binding_profiles(state: State<'_, Arc<AppState>>) -> Vec<BindingProfi
 #[tauri::command]
 pub fn set_binding_profiles(state: State<'_, Arc<AppState>>, profiles: Vec<BindingProfile>) {
     state.mapper.write().set_profiles(profiles);
+    refresh_gyro_binding_demand(&state);
 }
 
 /// Set active binding profile
 #[tauri::command]
 pub fn set_active_profile(state: State<'_, Arc<AppState>>, profile_id: String) {
     state.mapper.write().set_active_profile(&profile_id);
+    refresh_gyro_binding_demand(&state);
+}
+
+/// Re-evaluate whether the IMU needs to be powered for the bindings
+/// currently in effect. Must run after ANY change to the profile set or
+/// the active profile — binding a gyro axis has to switch the sensor on,
+/// and unbinding the last one has to switch it back off.
+pub fn refresh_gyro_binding_demand(state: &Arc<AppState>) {
+    let uses_gyro = state.mapper.read().uses_gyro();
+    state.input_manager.set_gyro_binding_demand(uses_gyro);
+}
+
+/// Tell the backend whether the Controller diagnostics view is on
+/// screen. That view shows live gyro rates, so it needs the sensor even
+/// when nothing is bound to it; the frontend calls this with `true` on
+/// mount and `false` on unmount.
+#[tauri::command]
+pub fn set_gyro_diagnostics(state: State<'_, Arc<AppState>>, active: bool) {
+    state.input_manager.set_gyro_diagnostic_demand(active);
 }
 
 /// Send a command to the server (legacy - uses node_id + pin_id)
@@ -190,7 +213,10 @@ pub fn send_topic_channel_value(
     channel: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    state.ws_client.send_topic_channel_value(&topic, &channel, value)
+    // A throttled write is a deferral the input loop retries; to a
+    // one-shot caller from the UI it is simply "sent" — surfacing it as
+    // an error would make manual pushes look broken.
+    swallow_throttled(state.ws_client.send_topic_channel_value(&topic, &channel, value))
 }
 
 /// Request enumeration of WS-input slots across all routing sheets.
@@ -210,7 +236,24 @@ pub fn send_ws_input_value(
     input_id: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    state.ws_client.send_ws_input_value(&sheet_id, &input_id, value)
+    swallow_throttled(state.ws_client.send_ws_input_value(&sheet_id, &input_id, value))
+}
+
+/// Stop receiving a set of state topics. Called when the last consumer
+/// of a telemetry stream goes away (e.g. the dashboard unmounts), so the
+/// server stops pushing frames nobody is going to render.
+///
+/// A failure here is not worth surfacing: if the link is down the
+/// subscription is already gone with it.
+#[tauri::command]
+pub fn unsubscribe_topics(
+    state: State<'_, Arc<AppState>>,
+    topics: Vec<String>,
+) -> Result<(), String> {
+    match state.ws_client.unsubscribe_topics(topics) {
+        Err(e) if e.contains(crate::protocol::client::NOT_CONNECTED) => Ok(()),
+        other => other,
+    }
 }
 
 /// Ask the server for the adopted-node list. The response is delivered
@@ -450,6 +493,16 @@ pub fn quit_app<R: Runtime>(app_handle: AppHandle<R>) {
     app_handle.exit(0);
 }
 
+/// Map a throttled send onto Ok. Only the input loop cares about the
+/// distinction (it retries on the next tick); a UI caller pushing a
+/// single value should not see a transient rate limit as a failure.
+fn swallow_throttled(result: Result<(), String>) -> Result<(), String> {
+    match result {
+        Err(e) if crate::protocol::client::is_throttled(&e) => Ok(()),
+        other => other,
+    }
+}
+
 /// Log a message from the frontend
 #[tauri::command]
 pub fn log_frontend(level: String, message: String, context: Option<String>) {
@@ -627,10 +680,7 @@ pub fn hide_keyboard() -> Result<(), String> {
 /// the same as "found nothing" and falls back to the typed-host form.
 #[tauri::command]
 pub fn discover_servers(state: State<'_, Arc<AppState>>) -> Vec<DiscoveredServer> {
-    match state.discovery.as_ref() {
-        Some(d) => d.snapshot(),
-        None => Vec::new(),
-    }
+    state.discovery.snapshot()
 }
 
 /// Resolve a `.local` hostname through the embedded mDNS client and
@@ -643,10 +693,7 @@ pub fn resolve_host(
     state: State<'_, Arc<AppState>>,
     host: String,
 ) -> Result<String, String> {
-    let Some(d) = state.discovery.as_ref() else {
-        return Err("mDNS discovery is disabled on this host".into());
-    };
-    match d.resolve(&host, Duration::from_secs(2)) {
+    match state.discovery.resolve(&host, Duration::from_secs(2)) {
         Some(ip) => Ok(ip.to_string()),
         None => Err(format!("No mDNS answer for '{}' within 2 s", host)),
     }

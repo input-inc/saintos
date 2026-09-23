@@ -43,6 +43,11 @@ bool pin_control_read_digital(uint8_t gpio);
 bool pin_control_get_value(uint8_t gpio, float* value);
 bool pin_control_apply_json(const char* json, size_t json_len);
 int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node_id);
+/* Count of state records dropped because the serialization buffer ran
+ * out. A non-zero, climbing value means this node is publishing
+ * incomplete telemetry (or, before the graceful-truncation fix, none
+ * at all). Per-platform counter; main loop logs it. */
+uint32_t pin_control_state_truncations(void);
 void pin_control_update_state(void);
 void pin_control_estop(void);
 void pin_control_clear_estop(void);

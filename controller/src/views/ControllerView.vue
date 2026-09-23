@@ -5,16 +5,37 @@
     Log section so the operator can confirm the bridge is up.
 -->
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { useInput } from '../composables/useInput';
 import { useConnection } from '../composables/useConnection';
 
 const input = useInput();
 const conn = useConnection();
 
+// The IMU is powered on demand — it streams (and costs battery) the
+// whole time it's on, so the backend keeps it off unless a binding
+// uses it. This view renders live rates, so it has to ask for the
+// sensor while it's on screen and release it on the way out.
+onMounted(() => {
+    void invoke('set_gyro_diagnostics', { active: true })
+        .catch(err => console.error('[ControllerView] gyro request failed:', err));
+});
+
+onBeforeUnmount(() => {
+    void invoke('set_gyro_diagnostics', { active: false })
+        .catch(err => console.error('[ControllerView] gyro release failed:', err));
+});
+
 const buttonList = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'Select', 'Start', 'L3', 'R3', 'L4', 'R4', 'L5', 'R5', 'Steam', 'QAM'];
 
 function formatAxis(value: number): string { return value.toFixed(2); }
-function formatAngle(degrees: number): string { return `${degrees.toFixed(1)}°`; }
+// Rates, not angles — the IMU reports angular velocity and nothing
+// integrates it. Labelled °/s so a still-but-tilted controller reading
+// 0.0 doesn't look like a broken sensor.
+function formatRate(degreesPerSecond: number): string {
+    return `${degreesPerSecond.toFixed(1)}°/s`;
+}
 
 function getButtonClass(button: string): string {
     const pressed = input.gamepad.value.buttons[button];
@@ -175,15 +196,15 @@ function getButtonClass(button: string): string {
             <div class="grid grid-cols-3 gap-4">
                 <div class="flex flex-col items-center">
                     <span class="text-sm text-saint-text-muted mb-2">Pitch</span>
-                    <div class="text-2xl font-mono">{{ formatAngle(input.gyro.value.pitch) }}</div>
+                    <div class="text-2xl font-mono">{{ formatRate(input.gyro.value.pitch) }}</div>
                 </div>
                 <div class="flex flex-col items-center">
                     <span class="text-sm text-saint-text-muted mb-2">Roll</span>
-                    <div class="text-2xl font-mono">{{ formatAngle(input.gyro.value.roll) }}</div>
+                    <div class="text-2xl font-mono">{{ formatRate(input.gyro.value.roll) }}</div>
                 </div>
                 <div class="flex flex-col items-center">
                     <span class="text-sm text-saint-text-muted mb-2">Yaw</span>
-                    <div class="text-2xl font-mono">{{ formatAngle(input.gyro.value.yaw) }}</div>
+                    <div class="text-2xl font-mono">{{ formatRate(input.gyro.value.yaw) }}</div>
                 </div>
             </div>
         </div>

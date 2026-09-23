@@ -33,6 +33,18 @@ extern "C" {
 
 // Current pin configurations (runtime state)
 static pin_config_t pin_configs[PIN_CONFIG_MAX_PINS];
+
+/* The RAM array must never be able to outgrow the flash array, or
+ * saving a full config writes past the end of flash_pin_config_t::pins
+ * and corrupts everything after it in the storage struct. This is the
+ * check that would have caught the 48-vs-16 mismatch at build time
+ * instead of as a bricked node on the bench. */
+static_assert(PIN_CONFIG_MAX_PINS <= FLASH_PIN_CONFIG_MAX_PINS,
+              "PIN_CONFIG_MAX_PINS exceeds FLASH_PIN_CONFIG_MAX_PINS — "
+              "pin_config_save would overrun the flash struct");
+/* Teensy 4.1 emulated EEPROM is 4284 bytes. */
+static_assert(sizeof(flash_storage_data_t) <= 4284,
+              "flash_storage_data_t no longer fits Teensy EEPROM");
 static uint8_t pin_config_count = 0;
 
 static bool initialized = false;
@@ -476,7 +488,12 @@ bool pin_config_apply_json(const char* json, size_t json_len)
 
 bool pin_config_save(void)
 {
-    flash_storage_data_t storage;
+    /* static, not stack: this struct is ~3 KB since pins[] grew to 48
+     * slots, and a multi-kilobyte frame in a function reachable from a
+     * micro-ROS callback is a stack-overflow waiting to happen. Both
+     * call sites are already serialized (boot, or a config push), so a
+     * shared instance is safe. */
+    static flash_storage_data_t storage;
 
     // Load existing storage data
     if (!flash_storage_load(&storage)) {
@@ -491,9 +508,28 @@ bool pin_config_save(void)
 
     // Copy pin configurations to storage
     storage.pin_config.version = PIN_CONFIG_VERSION;
-    storage.pin_config.pin_count = pin_config_count;
+    /* Never record a count the array cannot hold: the loader trusts
+     * this field, and a count past the end is how garbage entries get
+     * resurrected as real pin configs. */
+    if (pin_config_count > FLASH_PIN_CONFIG_MAX_PINS) {
+        Serial.printf("Pin config: WARNING %u pins exceeds flash capacity %u — "
+                      "saving first %u, the rest will NOT persist\n",
+                      (unsigned)pin_config_count,
+                      (unsigned)FLASH_PIN_CONFIG_MAX_PINS,
+                      (unsigned)FLASH_PIN_CONFIG_MAX_PINS);
+        storage.pin_config.pin_count = FLASH_PIN_CONFIG_MAX_PINS;
+    } else {
+        storage.pin_config.pin_count = pin_config_count;
+    }
 
-    for (uint8_t i = 0; i < pin_config_count && i < PIN_CONFIG_MAX_PINS; i++) {
+    /* Bound by the FLASH array, not the RAM one. These differ on
+     * Teensy (48 in RAM, 48 in flash only since the 2026-09 fix) and
+     * bounding by the RAM constant is what let a 21-pin config write
+     * five entries past the end of pins[] into the Maestro config that
+     * follows it — corrupting the blob, which then hung the next boot.
+     * The static_assert below makes the two capacities impossible to
+     * drift apart again; this clamp is the belt to that suspenders. */
+    for (uint8_t i = 0; i < pin_config_count && i < FLASH_PIN_CONFIG_MAX_PINS; i++) {
         storage.pin_config.pins[i].gpio = pin_configs[i].gpio;
         storage.pin_config.pins[i].mode = (uint8_t)pin_configs[i].mode;
         strncpy(storage.pin_config.pins[i].logical_name,
@@ -540,7 +576,12 @@ bool pin_config_save(void)
 
 bool pin_config_load(void)
 {
-    flash_storage_data_t storage;
+    /* static, not stack: this struct is ~3 KB since pins[] grew to 48
+     * slots, and a multi-kilobyte frame in a function reachable from a
+     * micro-ROS callback is a stack-overflow waiting to happen. Both
+     * call sites are already serialized (boot, or a config push), so a
+     * shared instance is safe. */
+    static flash_storage_data_t storage;
 
     if (!flash_storage_load(&storage)) {
         Serial.printf("Pin config: no stored configuration\n");
@@ -558,7 +599,19 @@ bool pin_config_load(void)
     pin_config_reset();
 
     // Load configurations
-    for (uint8_t i = 0; i < storage.pin_config.pin_count && i < PIN_CONFIG_MAX_PINS; i++) {
+    /* Clamp to the FLASH array: a blob written by an older firmware can
+     * carry a pin_count larger than the array it came from, and reading
+     * past it decodes neighbouring config bytes as pin entries. That is
+     * exactly how the Head Node acquired a phantom I2C peripheral and
+     * hung at boot probing it. */
+    uint8_t stored_pins = storage.pin_config.pin_count;
+    if (stored_pins > FLASH_PIN_CONFIG_MAX_PINS) {
+        Serial.printf("Pin config: stored count %u exceeds flash capacity %u — "
+                      "clamping (blob predates the capacity fix)\n",
+                      (unsigned)stored_pins, (unsigned)FLASH_PIN_CONFIG_MAX_PINS);
+        stored_pins = FLASH_PIN_CONFIG_MAX_PINS;
+    }
+    for (uint8_t i = 0; i < stored_pins && i < PIN_CONFIG_MAX_PINS; i++) {
         uint8_t gpio = storage.pin_config.pins[i].gpio;
         pin_mode_t mode = (pin_mode_t)storage.pin_config.pins[i].mode;
         const char* name = storage.pin_config.pins[i].logical_name;

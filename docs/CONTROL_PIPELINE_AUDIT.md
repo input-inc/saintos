@@ -135,6 +135,14 @@ Recorded so they don't resurface as folklore:
   different (topic, channel) throttle key; they all pass immediately.
   The *real* preset issue is below.
 
+## Related: write arbitration (2026-09)
+
+This document is about latency. The companion failure mode — a write
+that never reaches the hardware at all, because a stale per-writer cache
+judged it redundant — is covered in `CHANNEL_ARBITRATION.md`. The 50 ms
+`CONTROL_THROTTLE_MS` gate discussed below was NOT implicated there:
+measured on the robot, `THROTTLED` was 0 across 951 sends.
+
 ## Open items, in recommended order
 
 1. ~~**Controller throttle 50 → 20 ms**~~ — **APPLIED 2026-07-05**

@@ -190,6 +190,23 @@ impl OutgoingMessage {
         }
     }
 
+    /// Stop receiving broadcasts for a set of topics. Same wire shape as
+    /// `subscribe`; the server does `client.subscriptions.difference_update`.
+    ///
+    /// Needed because subscriptions used to be one-way: the dashboard
+    /// subscribed to `pin_state/<node>` for every adopted node and the
+    /// stream then ran for the rest of the session, on every view, whether
+    /// or not anything was displaying it.
+    pub fn unsubscribe_owned(topics: &[String]) -> Self {
+        Self {
+            id: next_id(),
+            msg_type: "subscribe".to_string(),
+            action: "unsubscribe".to_string(),
+            params: Some(serde_json::json!({ "topics": topics })),
+            password: None,
+        }
+    }
+
     /// List adopted nodes. Server replies with `{ nodes: [{node_id, …}] }`.
     /// The battery panel uses this to learn which `pin_state/<node>`
     /// topics to subscribe to.

@@ -125,3 +125,29 @@ container):
 cd controller && npm install
 git add package-lock.json && git commit
 ```
+
+### `Failed to copy file /lib/x86_64-linux-gnu/lib*.so: Permission denied`
+
+A wall of these from linuxdeploy — one per bundled library, every copy failing,
+each leaving a 0-byte file behind in `AppDir/usr/lib/`:
+
+```
+ERROR: Failed to copy file /lib/x86_64-linux-gnu/libXau.so.6 to
+       .../SAINT Controller.AppDir/usr/lib/libXau.so.6:
+       filesystem error: cannot copy file: Permission denied
+```
+
+Nothing is wrong with the source libraries or with root's permissions. The
+destination filesystem is the problem: linuxdeploy copies with C++
+`std::filesystem::copy_file()`, which creates each destination file as
+`open(dst, O_WRONLY|O_CREAT|O_TRUNC, S_IWUSR)` — mode `0200`, owner-write-only —
+and `fchmod()`s the real permissions on afterwards. Docker Desktop for Mac's
+virtiofs bind mounts reject that create with `EACCES`. (Plain `cp` over the same
+mount works, which is why cargo, npm and Tauri's own bundler never trip on it.)
+
+`build-docker.sh` avoids it by mounting an anonymous Docker volume — real ext4
+inside the Linux VM — at `/build/target/release/bundle`, so the AppDir is built
+off virtiofs while `target/` keeps its bind-mounted cargo cache. If you see the
+error, you're running the container by hand without that mount, or from an older
+copy of the driver script. `build-bundle.sh` now probes for the condition up
+front and fails in a second with a pointer, rather than after the full build.

@@ -106,6 +106,27 @@ typedef struct maestro_transport_ops {
                      uint8_t* buf,
                      uint16_t wLength,
                      uint32_t timeout_ms);
+    /* Can this transport survive a periodic status round-trip?
+     *
+     * The driver polls GET_ERRORS / GET_MOVING_STATE every
+     * MAESTRO_STATUS_POLL_MS for the dashboard's Live Readings card.
+     * On the Teensy usb_vendor transport that poll is what kills the
+     * node: the 7th GET_VARIABLES (0x83) control transfer after connect
+     * faults inside USBHost::queue_Transfer on a null pointer, resetting
+     * the chip ~10 s into every boot (verified with CrashReport
+     * breadcrumbs: request 0x83, seq 7, still inside the queue call).
+     *
+     * That transport also stubs the interesting half of the poll —
+     * GET_MOVING_STATE and GET_POSITION need a model-specific
+     * GET_VARIABLES walk that isn't implemented — so the poll costs a
+     * crash and buys a connected flag we already have from the USB
+     * layer. Transports that can't take it set this false; the driver
+     * then reports connectivity from is_connected() and leaves the
+     * fault/moving fields at their defaults.
+     *
+     * NOTE: this disables only the PERIODIC poll. SET_TARGET and the
+     * one-shot connect probe still go out — servo control is unaffected. */
+    bool supports_status_poll;
 } maestro_transport_ops_t;
 
 /* Platform-provided transport lookups. A platform that cannot provide

@@ -22,6 +22,10 @@ import { computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useConnection } from './useConnection';
+import {
+    createTelemetrySubscription,
+    holdWhileInScope,
+} from './useTelemetrySubscription';
 
 // Channel ids emitted by the pathfinder_bms / jbd_bms firmware drivers.
 // Presence of any STRONG id marks a peripheral as a battery pack.
@@ -75,6 +79,15 @@ const framesRef = ref<Record<string, Channel[]>>({});
 let initialized = false;
 const unlistenFns: UnlistenFn[] = [];
 
+// Ref-counted so the pin_state stream stops when no component is
+// rendering batteries. Topics are whatever the adopted-node list turns
+// out to be, so the subscription tracks them for us — see
+// useTelemetrySubscription.
+const subscription = createTelemetrySubscription('useBatteries', () => {
+    void invoke('get_adopted_nodes').catch(err =>
+        console.error('[useBatteries] get_adopted_nodes failed:', err));
+});
+
 function decodeProtection(bits: number): string[] {
     const b = bits | 0;
     const out: string[] = [];
@@ -105,10 +118,10 @@ async function ensureInit(): Promise<void> {
                 .map(n => n.node_id)
                 .filter(Boolean)
                 .map(id => `pin_state/${id}`);
-            if (topics.length) {
-                void invoke('subscribe_topics', { topics }).catch(err =>
-                    console.error('[useBatteries] subscribe_topics failed:', err));
-            }
+            // add() is a no-op while nothing holds the subscription, so a
+            // response that lands after the dashboard unmounted can't
+            // re-open the stream behind our back.
+            subscription.add(topics);
         }),
     );
 
@@ -124,14 +137,19 @@ async function ensureInit(): Promise<void> {
         }),
     );
 
-    // Discover battery sources whenever the link comes up (and on every
-    // reconnect, since subscriptions don't survive a server restart).
+    // Re-discover battery sources whenever the link comes up: server-side
+    // subscriptions live on the per-connection client object, so a
+    // reconnect starts from nothing. Both sides are no-ops unless a
+    // consumer is actually holding the subscription.
     const conn = useConnection();
     watch(conn.isConnected, (connected) => {
         if (connected) {
-            void invoke('get_adopted_nodes').catch(err =>
-                console.error('[useBatteries] get_adopted_nodes failed:', err));
+            subscription.refresh();
         } else {
+            // The server already dropped our subscriptions with the
+            // connection; forget the tracked set so the reconnect
+            // re-subscribes cleanly rather than treating them as live.
+            subscription.forget();
             framesRef.value = {};
         }
     }, { immediate: true });
@@ -173,5 +191,7 @@ const batteries = computed<BmsPack[]>(() => {
 
 export function useBatteries() {
     void ensureInit();
+    // Hold the pin_state stream only while the calling component lives.
+    holdWhileInScope('useBatteries', subscription);
     return { batteries };
 }

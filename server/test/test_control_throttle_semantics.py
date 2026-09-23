@@ -37,6 +37,7 @@ from saint_server.webserver.websocket_handler import (
     CONTROL_CHANGE_EPSILON,
     is_neutral_value,
 )
+from saint_server.channel_arbiter import BOARD, SLIDER, STREAM, ChannelArbiter
 
 
 def run(coro):
@@ -65,18 +66,32 @@ def event_loop():
 def handler(event_loop, tmp_path):
     sm = StateManager(server_name="test-server", config_dir=str(tmp_path))
     h = WebSocketHandler(sm)
-    # The throttle/dedup logic under test lives entirely in the WS
-    # handler; channel-catalog resolution has its own tests. Stub the
-    # lookup so set_channel_value reaches the throttle gate.
+    # Channel-catalog resolution has its own tests. Stub the lookup so
+    # set_channel_value reaches the gates under test.
     sm.lookup_channel = lambda node, per, ch: {
         "direction": "out",
         "capability": "pwm",
         "peripheral_type": "maestro",
     }
+    # The change-gate moved out of the handler into channel_arbiter,
+    # which server_node.send_channel_command consults. Mirror that call
+    # here so these tests still cover the pipeline an operator write
+    # actually travels, rather than a handler in isolation.
+    arbiter = ChannelArbiter(
+        idle_disengage_lookup=sm.channel_idle_disengage_ms)
+    sm.set_channel_arbiter(arbiter)
+    h._arbiter = arbiter
     h._sent = []
-    h.set_send_channel_callback(
-        lambda node, per, ch, value, ptype, raw_us=None:
-            h._sent.append((per, ch, value, raw_us)))
+
+    def send_channel(node, per, ch, value, ptype, raw_us=None, owner=STREAM):
+        if not arbiter.should_send(node, per, ch, value, owner=owner,
+                                   peripheral_type=ptype, raw_us=raw_us):
+            return False
+        h._sent.append((per, ch, value, raw_us))
+        arbiter.record(node, per, ch, value, owner=owner, raw_us=raw_us)
+        return True
+
+    h.set_send_channel_callback(send_channel)
     return h
 
 

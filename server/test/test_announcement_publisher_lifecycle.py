@@ -61,6 +61,7 @@ def _make_stub(sm: StateManager) -> types.SimpleNamespace:
         # swallows, silently skipping the publisher + reconcile calls
         # these tests assert on. Keep this stub in lockstep with the
         # collaborators _on_node_announcement actually invokes.
+        _ensure_node_soundboard_subscribers=MagicMock(),
         _ensure_node_ble_scan_subscriber=MagicMock(),
         _ensure_node_update_progress_subscriber=MagicMock(),
         _maybe_handle_announce_sync_ack=MagicMock(),

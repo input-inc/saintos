@@ -105,7 +105,60 @@ pub struct InputMapper {
 /// says nothing new — protects against dropped dead-stick (return-to-zero)
 /// packets, post-reconnect drift, and the firmware coming back from a
 /// brown-out reset while the operator's hands are off the stick.
-const HEARTBEAT_MS: u64 = 500;
+/// Re-assert cadence for an unchanged bound value.
+///
+/// This is not just a controller-local backstop — it sets the cadence of
+/// the whole downstream liveness chain, because the server's motor
+/// re-assert is REACTIVE, not timer-driven. routing_evaluator's
+/// `_dispatch_sink` only re-asserts an unchanged non-neutral motor value
+/// when an evaluation happens, and an evaluation happens when WE push.
+/// So the period the firmware actually sees is:
+///
+/// ```text
+/// ceil(_MOTOR_REASSERT_MS / HEARTBEAT_MS) * HEARTBEAT_MS
+/// ```
+///
+/// against `ROBOCLAW_DEADMAN_MS` = 1250 ms, which zeroes a running motor
+/// when setpoints stop arriving. /control is BEST_EFFORT DDS, so packets
+/// genuinely drop there (unlike our own WS leg, which is TCP — that
+/// either delivers or drops the connection).
+///
+/// ```text
+/// push    firmware sees   consecutive /control losses survived
+/// 500 ms  500 ms          1
+/// 250 ms  500 ms          1     <- ceil() makes 250 no better than 500
+/// 150 ms  300 ms          3
+/// ```
+///
+/// 500 ms is what the firmware comment calls "tolerate one lost
+/// re-assert" — the designed minimum. But before the value_active
+/// re-emit was removed, a held stick pushed at the 20 ms throttle rate,
+/// so the firmware really saw 300 ms and survived three losses. Dropping
+/// to 500 ms would have quietly traded that margin away: two dropped
+/// /control frames while holding throttle and the dead-man fires,
+/// cutting the motor until the next re-assert. Fail-safe, but a visible
+/// stutter on a lossy link.
+///
+/// 150 ms restores the 300 ms the firmware used to see while still
+/// costing ~7 messages/sec for a static axis instead of 50.
+const HEARTBEAT_MS: u64 = 150;
+
+/// Gyro full-scale, deg/s. Mirrors GYRO_SCALE in input/steamdeck_hid.rs
+/// (raw counts * 2000/32768), so an axis saturates at +/-2000. Used to
+/// bring IMU rates into the -1..1 range every other analog input uses.
+const GYRO_FULL_SCALE_DPS: f32 = 2000.0;
+
+/// Angular rate (deg/s) -> -1..1, saturating at full scale.
+fn normalize_gyro(dps: f32) -> f32 {
+    (dps / GYRO_FULL_SCALE_DPS).clamp(-1.0, 1.0)
+}
+
+/// A trackpad axis is only input while the pad is touched. Releasing a
+/// pad is a return to neutral, exactly like releasing a stick — see the
+/// note in get_analog_value.
+fn touch_axis(touched: bool, position: f32) -> f32 {
+    if touched { position } else { 0.0 }
+}
 
 impl InputMapper {
     pub fn new() -> Self {
@@ -233,6 +286,164 @@ impl InputMapper {
         events
     }
 
+    /// Whether the ACTIVE profile has an enabled binding driven by the
+    /// IMU. This is the demand signal that decides whether the sensor
+    /// gets powered at all (see InputManager::set_gyro_binding_demand) —
+    /// the Steam Deck's IMU costs battery whenever it's streaming, and
+    /// before this it ran unconditionally for the app's whole lifetime.
+    ///
+    /// Deliberately ignores which ACTION the binding carries. A gyro
+    /// axis wired to DifferentialDrive is a no-op in
+    /// process_analog_bindings, but treating that as "no demand" would
+    /// mean an operator staring at a gyro binding they configured while
+    /// the sensor silently stays off. Over-reporting costs idle power;
+    /// under-reporting costs a control that doesn't work.
+    pub fn uses_gyro(&self) -> bool {
+        self.profiles
+            .iter()
+            .find(|p| p.id == self.active_profile_id)
+            .is_some_and(|p| {
+                p.analog_bindings.iter().any(|b| {
+                    b.enabled
+                        && matches!(
+                            b.input,
+                            AnalogInput::GyroPitch
+                                | AnalogInput::GyroRoll
+                                | AnalogInput::GyroYaw
+                        )
+                })
+            })
+    }
+
+    /// Command neutral on every analog target the active profile drives,
+    /// and forget the send records so the next `process()` tick
+    /// re-asserts from live input.
+    ///
+    /// Called when the app stops being the focused window. Simply
+    /// pausing the input loop there is not safe: a deflected stick has
+    /// already been commanded, the server change-gates unchanged values,
+    /// and the only thing that would eventually stop the motor is the
+    /// firmware dead-man at ROBOCLAW_DEADMAN_MS (1250 ms). At full
+    /// throttle that is metres of travel after the operator's attention
+    /// left the screen. So we say zero explicitly, and rely on the
+    /// dead-man only as the backstop it was meant to be.
+    ///
+    /// Deliberately analog-only. Running the whole `process()` path
+    /// against a synthetic neutral InputState would produce these same
+    /// zeros, but it would also present every button as released and
+    /// fire any `ButtonTrigger::Release` binding — a spurious action
+    /// triggered by the operator opening the Steam overlay.
+    ///
+    /// The emitted zeros are stop values, so they bypass the client's
+    /// per-target throttle and are exempt from its e-stop gate: they go
+    /// out now, not on the next window.
+    pub fn release_all_analog(&mut self) -> Vec<ActionEvent> {
+        let mut events = Vec::new();
+        let zero = Value::from(0.0);
+
+        if let Some(profile) = self.profiles.iter().find(|p| p.id == self.active_profile_id) {
+            for binding in &profile.analog_bindings {
+                if !binding.enabled {
+                    continue;
+                }
+                match &binding.action {
+                    AnalogAction::DirectControl { target, .. } => {
+                        events.push(ActionEvent::Command(MappedCommand::from_target(
+                            target,
+                            zero.clone(),
+                        )));
+                    }
+                    AnalogAction::DifferentialDrive {
+                        topic,
+                        left_channel,
+                        right_channel,
+                        ..
+                    } => {
+                        // Both tracks, or the un-zeroed one keeps running.
+                        for channel in [left_channel, right_channel] {
+                            events.push(ActionEvent::Command(MappedCommand::Topic {
+                                topic: topic.clone(),
+                                channel: channel.clone(),
+                                value: zero.clone(),
+                            }));
+                        }
+                    }
+                    // Modifiers scale other bindings; they command nothing
+                    // of their own, so there is nothing to neutralize.
+                    AnalogAction::Modifier { .. } => {}
+                }
+            }
+        }
+
+        // Whatever we thought was on the wire is now superseded by these
+        // zeros, and on refocus every axis must re-assert from live input.
+        self.forget_all_sends();
+        events
+    }
+
+    /// Forget every send record, so the next `process()` tick re-asserts
+    /// the current value of every bound axis — deflections and zeros
+    /// alike.
+    ///
+    /// Called when a link comes up. Nothing the mapper "sent" while
+    /// disconnected actually reached a server, so its bookkeeping is a
+    /// record of a conversation that never happened; left in place, a
+    /// freshly connected server would be told nothing about an axis
+    /// until it next moved or the 500 ms heartbeat came round.
+    pub fn forget_all_sends(&mut self) {
+        self.last_analog_values.clear();
+        self.last_send_times.clear();
+    }
+
+    /// Forget that `cmd` was ever sent, so the next `process()` tick
+    /// re-detects it as unsent and re-emits it.
+    ///
+    /// The analog paths below commit `last_analog_values` /
+    /// `last_send_times` at the moment they QUEUE a command — before
+    /// the WS client has had a chance to accept it. That's an
+    /// optimistic write: if the client then refuses the value (link
+    /// down, stream token queue saturated), the mapper still believes
+    /// it was delivered and the change-detection logic goes quiet. For
+    /// a deflection that's harmless — the next stick movement re-sends.
+    /// For a RETURN TO ZERO it is not: the stop is the last thing the
+    /// mapper will ever say about that channel, so a refused stop left
+    /// the motor running at the previously-commanded velocity until the
+    /// 500 ms heartbeat came around.
+    ///
+    /// Calling this on a failed send drops the bookkeeping so the retry
+    /// happens on the next tick (INPUT_LOOP_MS, ~4 ms) instead.
+    pub fn note_send_failed(&mut self, cmd: &MappedCommand) {
+        // Key shapes this has to match, all built in the analog paths:
+        //   DirectControl      "<Input>::topic::<topic>::<channel>"
+        //                      "<Input>::ws::<sheet>::<input>"
+        //   DifferentialDrive  "<topic>::<channel>"   (bare, no prefix)
+        // A target can be driven by more than one input, so clear every
+        // entry that resolves to it — over-clearing only costs one
+        // redundant re-send, under-clearing strands a motor.
+        let (suffix, topic_prefix) = match cmd {
+            MappedCommand::Topic { topic, channel, .. } => (
+                format!("topic::{}::{}", topic, channel),
+                // Differential drive keys the pair on bare topic::channel
+                // and heartbeats the pair off the LEFT slot alone, so
+                // clearing just the failed channel can leave the pair's
+                // timer intact. Clear every slot on this topic instead.
+                Some(format!("{}::", topic)),
+            ),
+            MappedCommand::WsInput { sheet_id, input_id, .. } => (
+                format!("ws::{}::{}", sheet_id, input_id),
+                None,
+            ),
+        };
+
+        let stale = |k: &str| {
+            k.ends_with(&suffix)
+                || topic_prefix.as_deref().is_some_and(|p| k.starts_with(p))
+        };
+
+        self.last_analog_values.retain(|k, _| !stale(k));
+        self.last_send_times.retain(|k, _| !stale(k));
+    }
+
     fn process_analog_bindings(
         &mut self,
         profile: &BindingProfile,
@@ -273,22 +484,41 @@ impl InputMapper {
 
                     // Send command if:
                     // 1. Value changed significantly (delta > 0.001), OR
-                    // 2. Value is non-zero (keep sending for continuous control), OR
-                    // 3. Value just returned to zero (send final stop command), OR
-                    // 4. Heartbeat — re-assert current value periodically so a
+                    // 2. Value just returned to zero (send final stop command), OR
+                    // 3. Heartbeat — re-assert current value periodically so a
                     //    dropped packet (Wi-Fi blip, firmware brown-out reboot,
                     //    server reconnect, etc.) can't permanently strand the
                     //    motor at a non-zero value.
-                    // The WebSocket client's per-target throttle
-                    // (THROTTLE_MS in protocol/client.rs) paces the wire.
+                    //
+                    // There used to be a fourth: re-emit whenever the value
+                    // is non-zero, on every 4 ms tick. That existed to
+                    // outlast the client's per-target throttle, which
+                    // silently dropped a write inside its window while the
+                    // mapper recorded it as sent. The throttle now reports
+                    // that deferral (client.rs THROTTLED) and the input loop
+                    // answers it via note_send_failed, so only the writes
+                    // actually dropped get retried — instead of ~230 of
+                    // every 250 emissions existing to brute-force past it.
+                    //
+                    // Liveness downstream does not depend on that re-emit.
+                    // The chain is documented at both ends and sized around
+                    // this heartbeat: the server change-gates unchanged
+                    // values and re-asserts motor channels itself
+                    // (routing_evaluator _MOTOR_REASSERT_MS = 300 ms,
+                    // effective period max(that, heartbeat) ~= 500 ms), the
+                    // firmware dead-man is ROBOCLAW_DEADMAN_MS = 1250 ms
+                    // "to tolerate one lost re-assert", and the RoboClaw's
+                    // own serial watchdog is fed by the firmware every
+                    // ROBOCLAW_DUTY_KEEPALIVE_MS = 400 ms from its stored
+                    // duty — not by us. 500 ms against 1250 ms is the margin
+                    // the design already assumes.
                     let value_changed = delta > 0.001;
-                    let value_active = modified.abs() > 0.001;
                     let returned_to_zero = last.abs() > 0.001 && modified.abs() <= 0.001;
                     let heartbeat_due = match self.last_send_times.get(&key) {
                         Some(t) => t.elapsed() >= std::time::Duration::from_millis(HEARTBEAT_MS),
                         None => true,
                     };
-                    let should_send = value_changed || value_active || returned_to_zero || heartbeat_due;
+                    let should_send = value_changed || returned_to_zero || heartbeat_due;
 
                     if should_send {
                         self.last_analog_values.insert(key.clone(), modified);
@@ -372,7 +602,8 @@ impl InputMapper {
                     let delta_left = (left - last_left).abs();
                     let delta_right = (right - last_right).abs();
                     let any_changed = delta_left > 0.001 || delta_right > 0.001;
-                    let any_active = left.abs() > 0.001 || right.abs() > 0.001;
+                    // No any_active re-emit — same reasoning as
+                    // DirectControl above.
                     let returned_to_zero = (last_left.abs() > 0.001 || last_right.abs() > 0.001)
                         && left.abs() <= 0.001 && right.abs() <= 0.001;
                     // Heartbeat is keyed on the LEFT slot but covers both —
@@ -382,7 +613,7 @@ impl InputMapper {
                         Some(t) => t.elapsed() >= std::time::Duration::from_millis(HEARTBEAT_MS),
                         None => true,
                     };
-                    let should_send = any_changed || any_active || returned_to_zero || heartbeat_due;
+                    let should_send = any_changed || returned_to_zero || heartbeat_due;
 
                     if should_send {
                         self.last_analog_values.insert(key_left.clone(), left);
@@ -608,10 +839,32 @@ impl InputMapper {
             AnalogInput::RightStickY => input.gamepad.right_stick.y,
             AnalogInput::LeftTrigger => input.gamepad.left_trigger,
             AnalogInput::RightTrigger => input.gamepad.right_trigger,
-            AnalogInput::LeftPadX => input.left_touchpad.x,
-            AnalogInput::LeftPadY => input.left_touchpad.y,
-            AnalogInput::RightPadX => input.right_touchpad.x,
-            AnalogInput::RightPadY => input.right_touchpad.y,
+            // Trackpads report a POSITION that persists after the
+            // finger leaves — neither the HID parser nor the evdev
+            // reader zeroes it on lift, so `left_pad_x` still holds
+            // wherever the thumb last was. Reading that as live input
+            // meant lifting off a pad-bound axis left the value pegged
+            // at the last deflection: the motor kept running with no
+            // hand on the controller, and the mapper's deadstick
+            // protections can't help because to them nothing changed —
+            // it's a steady non-zero value, re-asserted every tick and
+            // every heartbeat.
+            //
+            // `touched` is the only thing that distinguishes "held at
+            // the edge" from "let go at the edge", so a pad axis is
+            // input only while it is being touched.
+            AnalogInput::LeftPadX => touch_axis(input.left_touchpad.touched, input.left_touchpad.x),
+            AnalogInput::LeftPadY => touch_axis(input.left_touchpad.touched, input.left_touchpad.y),
+            AnalogInput::RightPadX => touch_axis(input.right_touchpad.touched, input.right_touchpad.x),
+            AnalogInput::RightPadY => touch_axis(input.right_touchpad.touched, input.right_touchpad.y),
+            // Normalize rate -> -1..1 so the IMU shares the stick's
+            // units and InputTransform (deadzone 0.1, clamp -1..1)
+            // behaves the same on both. Without this, raw deg/s
+            // saturates the clamp on the slightest wrist movement and
+            // every gyro binding is effectively a digital switch.
+            AnalogInput::GyroPitch => normalize_gyro(input.gyro.pitch),
+            AnalogInput::GyroRoll => normalize_gyro(input.gyro.roll),
+            AnalogInput::GyroYaw => normalize_gyro(input.gyro.yaw),
         }
     }
 
@@ -808,6 +1061,23 @@ mod tests {
         }
     }
 
+    /// Values of the Command events in emission order, non-Command
+    /// events dropped. Lets a test read as "this tick sent [0.0, 0.0]".
+    ///
+    /// Rounded to 1e-4: the pipeline is f32 and widening to f64 leaves
+    /// artifacts (0.8f32 -> 0.800000011920929) that would make every
+    /// literal comparison unreadable. Well below the mapper's own
+    /// 0.001 change threshold, so it can't mask a real difference.
+    fn cmd_values(events: &[ActionEvent]) -> Vec<f64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ActionEvent::Command(cmd) => Some((cmd_value(cmd) * 10_000.0).round() / 10_000.0),
+                _ => None,
+            })
+            .collect()
+    }
+
     // ── behavior (the "don't break anything" net) ───────────────────
 
     #[test]
@@ -872,19 +1142,27 @@ mod tests {
     // ── emission cadence (2026-07 latency audit lock-down) ──────────────
 
     #[test]
-    fn held_deflection_reemits_every_tick() {
-        // The value_active branch makes a held stick emit on EVERY
-        // process() tick (~250 Hz at the 4 ms input loop); the client's
-        // per-target throttle (THROTTLE_MS) caps the wire rate. The two
-        // are load-bearing partners: this steady re-emit is what plugs
-        // the throttle's trailing-edge drop for non-zero values. If this
-        // test fails because held values stopped re-emitting, deadstick
-        // recovery for mid-range setpoints rests solely on the 500 ms
-        // heartbeat — revisit the throttle before shipping that.
-        // Compare non-zero emissions only: the very first process() also
-        // emits a one-time zero baseline for every idle binding
-        // (heartbeat_due is true when a key has never sent), which then
-        // goes quiet.
+    fn held_deflection_emits_once_then_goes_quiet() {
+        // REPLACES held_deflection_reemits_every_tick.
+        //
+        // That test pinned the old value_active branch, which re-emitted
+        // every non-zero value on every 4 ms tick. Its stated reason was
+        // to plug the client throttle's trailing-edge drop — a write
+        // inside the THROTTLE_MS window was discarded while the mapper
+        // recorded it as sent, so without a blanket re-emit a mid-stroke
+        // setpoint waited for the 500 ms heartbeat. It told the next
+        // reader to "revisit the throttle before shipping that", which is
+        // what happened: the throttle now returns THROTTLED and the input
+        // loop retries via note_send_failed, so the drop is covered
+        // precisely instead of by brute force.
+        //
+        // What that re-emit was NOT doing is keeping anything downstream
+        // alive — see the should_send comment for the server/firmware
+        // cadence contract, which is built on the heartbeat.
+        //
+        // Count non-zero emissions only: the first process() also emits a
+        // one-time zero baseline for every idle binding (heartbeat_due is
+        // true for a key that has never sent), which then goes quiet.
         fn nonzero_cmds(events: &[ActionEvent]) -> usize {
             events.iter()
                 .filter(|e| match e {
@@ -895,10 +1173,51 @@ mod tests {
         }
         let mut m = fresh_mapper();
         let inp = input_left_stick(0.0, 0.9);
-        let first = nonzero_cmds(&m.process(&inp));
-        let second = nonzero_cmds(&m.process(&inp));
-        assert!(first > 0, "deflection must emit");
-        assert_eq!(first, second, "held deflection must re-emit each tick");
+        assert!(nonzero_cmds(&m.process(&inp)) > 0, "deflection must emit");
+        assert_eq!(
+            nonzero_cmds(&m.process(&inp)),
+            0,
+            "an unchanged held deflection must not re-emit; the wire value \
+             already stands and the heartbeat re-asserts it",
+        );
+    }
+
+    /// The trailing-edge case the old blanket re-emit existed for: a
+    /// mid-stroke value the client refused (inside its throttle window)
+    /// must come back on the next tick, not wait for the heartbeat.
+    #[test]
+    fn refused_midstroke_value_is_reemitted() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        let held = input_right_stick(0.0, 0.45);
+        assert_eq!(cmd_values(&m.process(&held)), vec![0.45]);
+        assert!(
+            m.process(&held).is_empty(),
+            "baseline: a delivered value stays quiet",
+        );
+
+        // The client throttled it — value never reached the server.
+        m.note_send_failed(&MappedCommand::Topic {
+            topic: "/tracks".into(),
+            channel: "left".into(),
+            value: Value::from(0.45),
+        });
+        assert_eq!(
+            cmd_values(&m.process(&held)),
+            vec![0.45],
+            "a throttled mid-stroke value must be retried next tick",
+        );
     }
 
     #[test]
@@ -912,6 +1231,531 @@ mod tests {
         let cmds = idle.iter()
             .filter(|e| matches!(e, ActionEvent::Command(_))).count();
         assert_eq!(cmds, 0, "resting stick must be quiet inside the heartbeat window");
+    }
+
+    // ── release on background (safety) ───────────────────────────────
+    //
+    // Pausing the input loop when the window loses focus is only safe if
+    // something stops the motors first. Without these, a deflected stick
+    // at blur leaves the last command standing and the firmware dead-man
+    // (1250 ms) is the only thing that eventually stops it.
+
+    #[test]
+    fn release_all_analog_zeroes_a_deflected_axis() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        assert_eq!(cmd_values(&m.process(&input_right_stick(0.0, 0.9))), vec![0.9]);
+        assert_eq!(
+            cmd_values(&m.release_all_analog()),
+            vec![0.0],
+            "backgrounding must command zero, not just stop talking",
+        );
+    }
+
+    /// Both tracks, or the un-zeroed one keeps driving and the robot
+    /// pirouettes off while the operator is in the Steam overlay.
+    #[test]
+    fn release_all_analog_zeroes_both_differential_channels() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DifferentialDrive {
+                topic: "/tracks".into(),
+                left_channel: "left".into(),
+                right_channel: "right".into(),
+                throttle_transform: tf0(),
+                turn_transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        m.process(&input_right_stick(0.0, 0.8));
+        assert_eq!(cmd_values(&m.release_all_analog()), vec![0.0, 0.0]);
+    }
+
+    /// Releasing must re-arm, so returning to a still-held stick resumes
+    /// motion rather than sitting dead until the next heartbeat.
+    #[test]
+    fn release_all_analog_rearms_for_refocus() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        let held = input_right_stick(0.0, 0.7);
+        m.process(&held);
+        m.release_all_analog();
+        assert_eq!(
+            cmd_values(&m.process(&held)),
+            vec![0.7],
+            "refocus must re-assert the live stick position",
+        );
+    }
+
+    /// Analog-only by design: running the full process() path against a
+    /// neutral InputState would also present every button as released and
+    /// fire Release-triggered bindings — a phantom action caused by the
+    /// operator opening an overlay.
+    #[test]
+    fn release_all_analog_does_not_fire_digital_bindings() {
+        let mut profile = BindingProfile::new("test", "Test");
+        profile.analog_bindings = vec![AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }];
+        profile.digital_bindings = vec![DigitalBinding {
+            input: DigitalInput::A,
+            trigger: ButtonTrigger::Release,
+            action: DigitalAction::ShowPanel { panel_id: "p".into() },
+            enabled: true,
+        }];
+        let mut m = mapper_with(profile);
+
+        m.process(&input_buttons(&[("A", true)]));
+        let events = m.release_all_analog();
+        assert!(
+            !events.iter().any(|e| matches!(e, ActionEvent::ShowPanel { .. })),
+            "a release must not trigger digital actions: {events:?}",
+        );
+    }
+
+    #[test]
+    fn release_all_analog_skips_disabled_bindings() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: false,
+        }));
+        assert!(m.release_all_analog().is_empty());
+    }
+
+    // ── link-up re-assertion ─────────────────────────────────────────
+    //
+    // While disconnected the input loop drops commands without sending
+    // (no link, and the send path would churn locks for nothing), but
+    // the mapper still records them as sent. forget_all_sends() is what
+    // makes that safe: on link-up every bound axis is re-asserted, so a
+    // fresh server is told the true current value instead of inheriting
+    // the mapper's memory of a conversation that never happened.
+
+    #[test]
+    fn forget_all_sends_reasserts_a_held_deflection() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        let held = input_right_stick(0.0, 0.6);
+        assert_eq!(cmd_values(&m.process(&held)), vec![0.6]);
+
+        m.forget_all_sends();
+        assert_eq!(
+            cmd_values(&m.process(&held)),
+            vec![0.6],
+            "link-up must re-assert a still-held deflection",
+        );
+    }
+
+    /// The zero case is the one that matters: a stick released while the
+    /// link was down must be re-asserted as zero on link-up, or the
+    /// server comes back up knowing nothing about that axis.
+    #[test]
+    fn forget_all_sends_reasserts_a_resting_axis() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        m.process(&input_right_stick(0.0, 0.6));
+        m.process(&input_right_stick(0.0, 0.0));
+        let resting = input_right_stick(0.0, 0.0);
+        assert!(
+            m.process(&resting).is_empty(),
+            "baseline: a resting axis is quiet inside the heartbeat window",
+        );
+
+        m.forget_all_sends();
+        assert_eq!(
+            cmd_values(&m.process(&resting)),
+            vec![0.0],
+            "link-up must re-assert zero, not stay quiet",
+        );
+    }
+
+    // ── trackpad release (a lifted finger is not input) ───────────────
+
+    fn input_left_pad(x: f32, y: f32, touched: bool) -> InputState {
+        InputState {
+            gamepad: GamepadState { connected: true, ..Default::default() },
+            gyro: GyroState::default(),
+            left_touchpad: TouchpadState { x, y, touched, clicked: false },
+            right_touchpad: TouchpadState::default(),
+        }
+    }
+
+    fn pad_profile(input: AnalogInput) -> BindingProfile {
+        analog_profile(AnalogBinding {
+            input,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        })
+    }
+
+    /// Trackpads report a position that PERSISTS after the finger
+    /// leaves — nothing zeroes it on lift. Reading it raw meant letting
+    /// go of a pad-bound axis left the motor at the last deflection, and
+    /// the deadstick machinery can't catch it: to the mapper the value
+    /// simply never changed.
+    #[test]
+    fn lifting_off_a_trackpad_commands_zero() {
+        let mut m = mapper_with(pad_profile(AnalogInput::LeftPadX));
+
+        assert_eq!(
+            cmd_values(&m.process(&input_left_pad(0.8, 0.0, true))),
+            vec![0.8],
+            "a touched pad drives the axis",
+        );
+
+        // Finger lifted at the edge: position still reads 0.8.
+        assert_eq!(
+            cmd_values(&m.process(&input_left_pad(0.8, 0.0, false))),
+            vec![0.0],
+            "releasing the pad must command zero, not hold the last position",
+        );
+    }
+
+    #[test]
+    fn untouched_trackpad_never_starts_motion() {
+        let mut m = mapper_with(pad_profile(AnalogInput::LeftPadY));
+        // A stale position from a previous session/subscriber must not
+        // read as input just because it is non-zero.
+        let events = m.process(&input_left_pad(0.0, -0.9, false));
+        assert_eq!(
+            cmd_values(&events),
+            vec![0.0],
+            "an untouched pad is neutral regardless of its position",
+        );
+    }
+
+    /// The release has to survive the same refusal path as a stick's —
+    /// this is the trackpad equivalent of refused_stop_is_reemitted.
+    #[test]
+    fn refused_trackpad_release_is_reemitted() {
+        let mut m = mapper_with(pad_profile(AnalogInput::LeftPadX));
+        m.process(&input_left_pad(0.8, 0.0, true));
+        assert_eq!(cmd_values(&m.process(&input_left_pad(0.8, 0.0, false))), vec![0.0]);
+        assert!(
+            m.process(&input_left_pad(0.8, 0.0, false)).is_empty(),
+            "baseline: a delivered release stays quiet",
+        );
+
+        m.note_send_failed(&MappedCommand::Topic {
+            topic: "/tracks".into(),
+            channel: "left".into(),
+            value: Value::from(0.0),
+        });
+        assert_eq!(
+            cmd_values(&m.process(&input_left_pad(0.8, 0.0, false))),
+            vec![0.0],
+            "a refused pad release must be retried on the next tick",
+        );
+    }
+
+    // ── IMU bindings + demand signal ─────────────────────────────────
+
+    fn input_gyro(pitch: f32, roll: f32, yaw: f32) -> InputState {
+        InputState {
+            gamepad: GamepadState { connected: true, ..Default::default() },
+            gyro: GyroState { pitch, roll, yaw },
+            left_touchpad: TouchpadState::default(),
+            right_touchpad: TouchpadState::default(),
+        }
+    }
+
+    fn gyro_binding(input: AnalogInput, enabled: bool) -> AnalogBinding {
+        AnalogBinding {
+            input,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/head".into(),
+                    channel: "pan".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled,
+        }
+    }
+
+    /// Raw gyro is deg/s at +/-2000 full scale; every other analog
+    /// input is -1..1. Without normalization the shared InputTransform
+    /// clamp turns any real wrist movement into a hard +/-1, making a
+    /// gyro binding behave like a switch instead of a proportional axis.
+    #[test]
+    fn gyro_rates_are_normalized_to_the_stick_range() {
+        let mut m = mapper_with(analog_profile(gyro_binding(AnalogInput::GyroPitch, true)));
+        // Half of full scale -> half deflection.
+        assert_eq!(cmd_values(&m.process(&input_gyro(1000.0, 0.0, 0.0))), vec![0.5]);
+        // Beyond full scale saturates rather than exceeding the range.
+        assert_eq!(cmd_values(&m.process(&input_gyro(5000.0, 0.0, 0.0))), vec![1.0]);
+        assert_eq!(cmd_values(&m.process(&input_gyro(-5000.0, 0.0, 0.0))), vec![-1.0]);
+    }
+
+    #[test]
+    fn each_gyro_axis_reads_its_own_channel() {
+        for (input, sample, expect) in [
+            (AnalogInput::GyroPitch, input_gyro(2000.0, 0.0, 0.0), 1.0),
+            (AnalogInput::GyroRoll, input_gyro(0.0, 2000.0, 0.0), 1.0),
+            (AnalogInput::GyroYaw, input_gyro(0.0, 0.0, 2000.0), 1.0),
+        ] {
+            let mut m = mapper_with(analog_profile(gyro_binding(input.clone(), true)));
+            assert_eq!(
+                cmd_values(&m.process(&sample)),
+                vec![expect],
+                "{input:?} must read its own axis",
+            );
+        }
+    }
+
+    // uses_gyro is the switch that decides whether the sensor is
+    // powered at all, so both directions matter: a false negative
+    // leaves a configured binding dead, a false positive burns battery
+    // for the whole session.
+
+    #[test]
+    fn uses_gyro_is_false_without_a_gyro_binding() {
+        let m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+        assert!(!m.uses_gyro(), "stick-only profile must leave the IMU off");
+    }
+
+    #[test]
+    fn uses_gyro_is_true_with_an_enabled_gyro_binding() {
+        let m = mapper_with(analog_profile(gyro_binding(AnalogInput::GyroYaw, true)));
+        assert!(m.uses_gyro());
+    }
+
+    #[test]
+    fn uses_gyro_ignores_disabled_bindings() {
+        let m = mapper_with(analog_profile(gyro_binding(AnalogInput::GyroYaw, false)));
+        assert!(
+            !m.uses_gyro(),
+            "a disabled binding must not keep the sensor powered",
+        );
+    }
+
+    /// Demand follows the ACTIVE profile. Switching to a profile that
+    /// doesn't use the IMU has to release it, or the sensor stays on
+    /// for the rest of the session after one gyro profile is touched.
+    #[test]
+    fn uses_gyro_tracks_the_active_profile() {
+        let mut gyro_p = BindingProfile::new("gyro", "Gyro");
+        gyro_p.analog_bindings = vec![gyro_binding(AnalogInput::GyroPitch, true)];
+        let plain = BindingProfile::new("plain", "Plain");
+
+        let mut m = InputMapper::new();
+        m.profiles = vec![gyro_p, plain];
+        m.active_profile_id = "gyro".to_string();
+        assert!(m.uses_gyro());
+
+        m.set_active_profile("plain");
+        assert!(!m.uses_gyro(), "switching away must release the IMU");
+
+        m.set_active_profile("gyro");
+        assert!(m.uses_gyro(), "switching back must re-acquire it");
+    }
+
+    // ── refused-send recovery (deadstick must never be lost) ──────────
+    //
+    // The analog paths commit last_analog_values/last_send_times when a
+    // command is QUEUED, not when it lands. If the WS client then
+    // refuses it, the mapper has already gone quiet about that channel.
+    // For a return-to-zero that means a motor keeps running. These pin
+    // note_send_failed as the undo.
+
+    /// Deflect, then release, then have the release refused. The mapper
+    /// must re-emit the zero on the very next tick — not sit on it for
+    /// HEARTBEAT_MS with the motor still turning.
+    #[test]
+    fn refused_stop_is_reemitted_on_the_next_tick() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        // Stick deflected.
+        let deflect = m.process(&input_right_stick(0.0, 0.8));
+        assert_eq!(cmd_values(&deflect), vec![0.8], "deflection must be sent");
+
+        // Stick released — the mapper emits the stop and records it sent.
+        let release = m.process(&input_right_stick(0.0, 0.0));
+        assert_eq!(cmd_values(&release), vec![0.0], "release must emit a stop");
+
+        // Without the undo the mapper now believes the zero landed, and
+        // an immediate re-tick produces nothing.
+        let quiet = m.process(&input_right_stick(0.0, 0.0));
+        assert!(cmd_values(&quiet).is_empty(), "baseline: a delivered stop stays quiet");
+
+        // Now say that stop was refused.
+        m.note_send_failed(&MappedCommand::Topic {
+            topic: "/tracks".into(),
+            channel: "left".into(),
+            value: Value::from(0.0),
+        });
+
+        let retry = m.process(&input_right_stick(0.0, 0.0));
+        assert_eq!(
+            cmd_values(&retry),
+            vec![0.0],
+            "a refused stop must be retried on the next tick, not the heartbeat",
+        );
+    }
+
+    /// Differential drive heartbeats the left/right pair off one timer,
+    /// so a refusal on either channel has to re-arm both — clearing only
+    /// the failed channel can leave the pair's timer intact and the
+    /// opposite track running.
+    #[test]
+    fn refused_stop_rearms_both_differential_drive_channels() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DifferentialDrive {
+                topic: "/tracks".into(),
+                left_channel: "left".into(),
+                right_channel: "right".into(),
+                throttle_transform: tf0(),
+                turn_transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        m.process(&input_right_stick(0.0, 0.8));
+        let release = m.process(&input_right_stick(0.0, 0.0));
+        assert_eq!(cmd_values(&release), vec![0.0, 0.0], "both tracks must stop");
+        assert!(m.process(&input_right_stick(0.0, 0.0)).is_empty(), "baseline quiet");
+
+        // Only the RIGHT channel's send failed...
+        m.note_send_failed(&MappedCommand::Topic {
+            topic: "/tracks".into(),
+            channel: "right".into(),
+            value: Value::from(0.0),
+        });
+
+        // ...but both must be re-asserted, because they share a timer.
+        assert_eq!(
+            cmd_values(&m.process(&input_right_stick(0.0, 0.0))),
+            vec![0.0, 0.0],
+            "a refusal on one track must re-arm the pair",
+        );
+    }
+
+    /// note_send_failed must not blow away unrelated channels' state —
+    /// over-clearing costs a redundant send, but clearing a different
+    /// robot's target on every transient would be a traffic amplifier.
+    #[test]
+    fn refused_send_does_not_rearm_unrelated_targets() {
+        let mut m = mapper_with(analog_profile(AnalogBinding {
+            input: AnalogInput::RightStickY,
+            action: AnalogAction::DirectControl {
+                target: ControlTarget::Topic {
+                    topic: "/tracks".into(),
+                    channel: "left".into(),
+                    name: None,
+                },
+                transform: tf0(),
+            },
+            enabled: true,
+        }));
+
+        m.process(&input_right_stick(0.0, 0.8));
+        m.process(&input_right_stick(0.0, 0.0));
+        assert!(m.process(&input_right_stick(0.0, 0.0)).is_empty(), "baseline quiet");
+
+        // A failure on a completely different topic must leave this
+        // channel's bookkeeping alone.
+        m.note_send_failed(&MappedCommand::Topic {
+            topic: "/arm".into(),
+            channel: "shoulder".into(),
+            value: Value::from(0.0),
+        });
+        assert!(
+            m.process(&input_right_stick(0.0, 0.0)).is_empty(),
+            "an unrelated failure must not re-arm this target",
+        );
     }
 
     #[test]

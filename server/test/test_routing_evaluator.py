@@ -55,7 +55,7 @@ def test_ws_input_through_operator_chain_reaches_peripheral():
     sent: list = []
     evaluator = RoutingEvaluator(
         ros_bridge=None,
-        send_channel=lambda *a: sent.append(a),
+        send_channel=lambda *a, **kw: sent.append(a),
         peripheral_type_lookup=lambda *_: "roboclaw",
     )
     evaluator.reconcile(routing)
@@ -76,7 +76,7 @@ def test_snapshot_includes_operator_and_peripheral_buckets():
     routing = _build_chained_routing()
     evaluator = RoutingEvaluator(
         ros_bridge=None,
-        send_channel=lambda *a: None,
+        send_channel=lambda *a, **kw: None,
         peripheral_type_lookup=lambda *_: "roboclaw",
     )
     evaluator.reconcile(routing)
@@ -105,7 +105,7 @@ def test_orphan_operator_evaluates_via_pass3():
 
     evaluator = RoutingEvaluator(
         ros_bridge=None,
-        send_channel=lambda *a: None,
+        send_channel=lambda *a, **kw: None,
         peripheral_type_lookup=lambda *_: "",
     )
     evaluator.reconcile(routing)
@@ -120,7 +120,7 @@ def test_clamp_constrains_input_to_range():
     routing = _build_chained_routing()
     evaluator = RoutingEvaluator(
         ros_bridge=None,
-        send_channel=lambda *a: None,
+        send_channel=lambda *a, **kw: None,
         peripheral_type_lookup=lambda *_: "",
     )
     evaluator.reconcile(routing)

@@ -4,6 +4,7 @@ SAINT.OS State Manager
 Manages system state and provides data for WebSocket clients.
 """
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -53,6 +54,8 @@ from saint_server.peripheral_model import (
     pimoroni_slim_channels_for_wire,
 )
 from saint_server.board_config import BoardConfigManager, derive_capabilities
+from saint_server.channel_arbiter import BOARD
+from saint_server.router.routing_evaluator import DispatchTally
 
 # Installed-version metadata — populated once by _read_installed_version_info()
 # on first call to get_system_status() so we don't stat files every second.
@@ -679,6 +682,23 @@ class SystemState:
     system_routing: SystemRouting = field(default_factory=SystemRouting)
 
 
+def _board_dispatch(ev, tally):
+    """Mark a fan-out as board-owned when the evaluator supports it.
+
+    Production has exactly one evaluator and it always does; the getattr
+    keeps partial test doubles (and any future evaluator built against
+    the older interface) from turning a pose application into an
+    exception. Losing the marker only costs the force-send, not
+    correctness, so degrading is safe — but it must never be silent in
+    production, which is why the real evaluator is the one that defines
+    dispatch_as.
+    """
+    dispatch_as = getattr(ev, "dispatch_as", None)
+    if dispatch_as is None:
+        return contextlib.nullcontext()
+    return dispatch_as(BOARD, tally)
+
+
 class StateManager:
     """Manages system state and provides data for clients."""
 
@@ -774,6 +794,7 @@ class StateManager:
         # ROS bridge is up. Whenever sheets change we call .reconcile()
         # on it so it can refresh its subscriptions.
         self._routing_evaluator = None
+        self._channel_arbiter = None
         # Out-of-band peripheral-command publisher (set by
         # server_node.py once ROS publishers are up). Used by the
         # animation player when a trigger track of kind
@@ -1084,6 +1105,16 @@ class StateManager:
                     self._log_activity(
                         f"Peripheral {pid}: {'connected' if connected else 'disconnected'}",
                         "info" if connected else "warn", node_id=node_id)
+                    # A peripheral that just re-enumerated does not hold
+                    # what we last sent it — a Maestro drives every
+                    # channel to its configured home on connect. Drop
+                    # the cached channel state for this node so the next
+                    # command is never suppressed as "already there".
+                    # Coarse (whole node) on purpose: the announcement
+                    # keys are driver types, not instance ids, and these
+                    # transitions are rare.
+                    self._invalidate_channel_cache(
+                        node_id, f"peripheral {pid} re-enumerated")
                 node.peripheral_connected[pid] = connected
 
         # Clear any pending offline state and mark online
@@ -1094,6 +1125,12 @@ class StateManager:
         if not prev_online:
             name = node.display_name or node.node_id
             self._log_activity(f"Node reconnected: {name}", "info", node_id=node_id)
+            # Everything commanded before the gap may have been lost:
+            # /control is best-effort, and a node that re-initialized
+            # micro-ROS came back with its outputs at whatever the
+            # firmware's boot/home state is. Forget what we think it
+            # holds so the next write always goes out.
+            self._invalidate_channel_cache(node_id, "node reconnected")
 
         return is_new
 
@@ -2517,8 +2554,18 @@ class StateManager:
         applied = 0
         batch = getattr(ev, "apply_animation_frame", None)
         if batch is not None and (joint_values or ws_values):
+            # A board activation is latched operator authority: it must
+            # override whatever else last touched these channels — a
+            # slider nudge, a stick, a write that was dropped in flight.
+            # dispatch_as(BOARD) makes every resulting peripheral write
+            # bypass the change gate, so re-activating a pose always
+            # re-asserts the hardware instead of silently no-opping on
+            # exactly the channels the operator had touched.
+            tally = DispatchTally()
             try:
-                if batch(joint_values, ws_values):
+                with _board_dispatch(ev, tally):
+                    ok = batch(joint_values, ws_values)
+                if ok:
                     applied = len(joint_values) + len(ws_values)
                 else:
                     skipped.extend(list(joint_values))
@@ -2528,9 +2575,25 @@ class StateManager:
                     self.logger.warn(f"{where} apply_animation_frame failed: {e}")
                 skipped.extend(list(joint_values))
                 skipped.extend(f"{a}/{b}" for a, b in ws_values)
-            return {"success": True, "applied": applied, "skipped": skipped}
+            # `applied` counts setpoints accepted into the evaluator;
+            # `dispatched` counts channels that actually reached
+            # firmware. They differ whenever a sheet maps several
+            # setpoints onto one channel, or a sink is wired to nothing
+            # — and the second number is the one an operator means when
+            # they ask "did the pose take?".
+            return {"success": True, "applied": applied, "skipped": skipped,
+                    "dispatched": tally.sent, "suppressed": tally.suppressed}
 
         # Per-setpoint fallback for evaluators without the batch call.
+        # Same latched authority as the batch path above — a board is a
+        # board regardless of which dispatch API the evaluator exposes.
+        with _board_dispatch(ev, None):
+            return self._fan_out_per_setpoint(
+                ev, joint_values, ws_values, skipped, where)
+
+    def _fan_out_per_setpoint(self, ev, joint_values, ws_values,
+                              skipped, where: str) -> Dict[str, Any]:
+        applied = 0
         for joint, value in joint_values.items():
             try:
                 ok = ev.set_urdf_joint_value(joint, value)
@@ -3313,6 +3376,26 @@ class StateManager:
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"Routing evaluator reconcile failed: {e}")
+
+    def set_channel_arbiter(self, arbiter) -> None:
+        """Share the channel arbiter (see channel_arbiter.py). Used to
+        invalidate cached channel state when something moves the
+        hardware outside the normal write path — a node reconnecting, a
+        config sync re-homing servos."""
+        self._channel_arbiter = arbiter
+
+    def _invalidate_channel_cache(self, node_id: str, reason: str) -> None:
+        """Forget cached channel state for a node after something moved
+        its hardware outside the write path. No-ops before the arbiter
+        is wired (early startup, and tests that construct a bare
+        StateManager)."""
+        if self._channel_arbiter is None:
+            return
+        dropped = self._channel_arbiter.invalidate_node(node_id, reason=reason)
+        if dropped and self.logger:
+            self.logger.info(
+                f"Channel cache: dropped {dropped} entries for {node_id} "
+                f"({reason})")
 
     def set_routing_evaluator(self, evaluator) -> None:
         """Wire the live routing evaluator (set by server_node once the

@@ -20,8 +20,12 @@ from __future__ import annotations
 
 import math
 import time
+import threading
+from contextlib import contextmanager
 from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+from saint_server.channel_arbiter import BOARD, STREAM
 
 from saint_server.peripheral_model import (
     OPERATOR_CATALOG,
@@ -52,8 +56,11 @@ _HOT_LOG_IDLE_MS = 500.0    # also log if this much wallclock has passed
 # controller's 500 ms heartbeat pushes, so the effective re-assert
 # period is max(_MOTOR_REASSERT_MS, heartbeat) ≈ 500 ms — the firmware
 # dead-man window is sized to tolerate one lost heartbeat on top.
-_MOTOR_REASSERT_TYPES = frozenset({"roboclaw", "syren"})
-_MOTOR_REASSERT_MS = 300.0
+# Motor re-assert and change-gating now live in channel_arbiter, which
+# every writer shares — keeping a private copy here is what let a pose
+# board and a State slider each believe they had already sent a value
+# the other had since overwritten. Only the neutral epsilon is still
+# used locally (for the e-stop/widget paths).
 _MOTOR_NEUTRAL_EPSILON = 0.02
 
 
@@ -63,6 +70,23 @@ SourceKey = Tuple[str, str]
 # (sheet_node_id, ws_input_id) → most recent scalar value pushed by a
 # controller. Per-sheet to keep input ids stable across renamed sheets.
 WSInputKey = Tuple[str, str]
+
+
+class DispatchTally:
+    """Counts what a dispatch block actually pushed to hardware.
+
+    Pose application used to report `applied: N` straight from the
+    number of setpoints it pushed into the evaluator's input caches —
+    which says nothing about whether any channel moved. A pose that was
+    entirely suppressed by the change gate still reported success. This
+    is what lets the API answer honestly.
+    """
+
+    __slots__ = ("sent", "suppressed")
+
+    def __init__(self) -> None:
+        self.sent = 0
+        self.suppressed = 0
 
 
 class RoutingEvaluator:
@@ -75,9 +99,20 @@ class RoutingEvaluator:
         peripheral_type_lookup: Callable[[str, str], str],
         logger: Optional[Any] = None,
         on_values_changed: Optional[Callable[[Dict[str, Any]], None]] = None,
+        channel_arbiter: Optional[Any] = None,
     ):
         self._bridge = ros_bridge
         self._send_channel = send_channel
+        # Shared with every other writer (see channel_arbiter.py). The
+        # evaluator no longer keeps its own "already sent" bookkeeping —
+        # send_channel consults the arbiter, and this reference exists
+        # only so structural events here can invalidate it.
+        self._arbiter = channel_arbiter
+        # Per-thread dispatch ownership. Sheets evaluate on ROS callback
+        # threads while a pose board applies from the websocket loop, so
+        # this must not be a plain attribute — BOARD authority leaking
+        # into a concurrent stick tick would defeat the rate gate.
+        self._owner_ctx = threading.local()
         self._peripheral_type_lookup = peripheral_type_lookup
         self._logger = logger
         # Optional sink for per-evaluation value snapshots. Called from
@@ -155,21 +190,36 @@ class RoutingEvaluator:
         # republishing stale operator input that would resume motion
         # the moment estop releases.
         self._estop_active: bool = False
-        # Last value actually pushed to each peripheral channel, keyed by
-        # (node_id, peripheral_id, channel_id). A sheet re-dispatches ALL
-        # its peripheral sinks on every evaluation, so without this a
-        # 60 fps animation republishes every static channel 60×/s and
-        # floods /control (depth-1, newest-wins) — clobbering the one
-        # channel that's actually moving. We gate on change so only moving
-        # channels hit the wire. Reset on reconcile (wiring changed) and
-        # on estop release (so held values re-arm the hardware).
-        self._last_channel_sent: Dict[Tuple[str, str, str], float] = {}
-        # Wallclock (ms) of the last actual send per channel — drives
-        # the motor re-assert window (_MOTOR_REASSERT_MS).
-        self._last_channel_sent_ms: Dict[Tuple[str, str, str], float] = {}
         # Hot-path log sampling state (see _hot_log).
         self._hot_log_count = 0
         self._hot_log_last_ms = 0.0
+
+    # ── dispatch ownership ──────────────────────────────────────────
+
+    def _current_owner(self) -> str:
+        return getattr(self._owner_ctx, "owner", STREAM)
+
+    @contextmanager
+    def dispatch_as(self, owner: str, tally: Optional["DispatchTally"] = None):
+        """Mark every peripheral write made on THIS thread inside the
+        block as coming from `owner`.
+
+        Pose boards use this with BOARD: activation is latched operator
+        authority, so its writes bypass the change gate and re-assert
+        the hardware even when the arbiter thinks the value is already
+        there. That is what makes re-clicking a pose always work after
+        someone has nudged a slider — or after a best-effort /control
+        frame was dropped on the way to the node.
+        """
+        prev_owner = getattr(self._owner_ctx, "owner", STREAM)
+        prev_tally = getattr(self._owner_ctx, "tally", None)
+        self._owner_ctx.owner = owner
+        self._owner_ctx.tally = tally
+        try:
+            yield tally
+        finally:
+            self._owner_ctx.owner = prev_owner
+            self._owner_ctx.tally = prev_tally
 
     # ── public API ──────────────────────────────────────────────────
 
@@ -183,12 +233,14 @@ class RoutingEvaluator:
         prev = self._estop_active
         self._estop_active = bool(active)
         if prev != self._estop_active:
-            # Drop the change-gate cache on any transition. On release the
-            # held values must re-send to re-arm the hardware (the gate
-            # would otherwise swallow them as "unchanged" vs the pre-estop
-            # send); on engage it just clears stale state.
-            self._last_channel_sent.clear()
-            self._last_channel_sent_ms.clear()
+            # Drop the shared change-gate cache on any transition. On
+            # release the held values must re-send to re-arm the
+            # hardware (the gate would otherwise swallow them as
+            # "unchanged" vs the pre-estop send); on engage it clears
+            # state the firmware no longer holds, since e-stop released
+            # the outputs underneath us.
+            if self._arbiter is not None:
+                self._arbiter.invalidate_all(reason="estop transition")
             self._log("warn",
                       f"Routing evaluator estop gate: "
                       f"{'ENGAGED — suppressing peripheral/output writes' if self._estop_active else 'RELEASED'}")
@@ -219,8 +271,8 @@ class RoutingEvaluator:
             self._leaf_persist = {}
             # Rewiring can move/rename channels; force a fresh send to
             # every peripheral sink on the next eval.
-            self._last_channel_sent = {}
-            self._last_channel_sent_ms = {}
+            if self._arbiter is not None:
+                self._arbiter.invalidate_all(reason="routing reconcile")
             to_add = needed - self._subscribed_topics
             to_drop = self._subscribed_topics - needed
             self._subscribed_topics = set(needed)
@@ -923,40 +975,37 @@ class RoutingEvaluator:
             if len(sink.parts) < 3:
                 return
             node_id, peripheral_id, channel_id = sink.parts[0], sink.parts[1], sink.parts[2]
-            # Change-gate (see _last_channel_sent). A sheet re-dispatches
-            # every peripheral sink on every evaluation; during a 60 fps
-            # animation that republishes each holding channel 60×/s and
-            # floods /control (depth-1 newest-wins), clobbering the one
-            # channel that's moving — the servo then only catches sparse
-            # updates ("moves only at the keyframe"). Send only when this
-            # channel's commanded value actually changed. Also lets the
-            # firmware's idle_disengage fire, since a held channel now
-            # stops getting SET_TARGET instead of being re-armed each tick.
+            # Rate-gating lives in channel_arbiter now, consulted inside
+            # send_channel_command. A sheet re-dispatches every
+            # peripheral sink on every evaluation — during a 60 fps
+            # animation that would republish each holding channel 60x/s
+            # and flood /control (depth-1 newest-wins), so unattended
+            # stream writes are still suppressed unless the value really
+            # changed (plus the motor dead-man re-assert and the servo
+            # idle-disengage re-engage, both of which the arbiter owns).
             #
-            # Motor exception: an unchanged NON-neutral motor value is
-            # re-asserted every _MOTOR_REASSERT_MS so the firmware
-            # dead-man can distinguish "held stick" (re-asserts keep
-            # arriving) from "dead link" (silence → firmware zeros the
-            # motor). Neutral values never re-assert — a stopped motor
-            # needs no liveness feed.
+            # What changed: the decision now reads ONE cache that every
+            # writer updates. A pose board re-activating after a slider
+            # nudge used to compare against this evaluator's private
+            # record, see "no change", and silently send nothing while
+            # the servo sat where the slider left it.
             fval = float(value)
-            gkey = (node_id, peripheral_id, channel_id)
-            now_ms = time.monotonic() * 1000.0
-            ptype: Optional[str] = None
-            if self._last_channel_sent.get(gkey) == fval:
-                if abs(fval) <= _MOTOR_NEUTRAL_EPSILON:
-                    return
-                if now_ms - self._last_channel_sent_ms.get(gkey, 0.0) < _MOTOR_REASSERT_MS:
-                    return
-                ptype = self._lookup_peripheral_type(node_id, peripheral_id)
-                if ptype not in _MOTOR_REASSERT_TYPES:
-                    return
-            if ptype is None:
-                ptype = self._lookup_peripheral_type(node_id, peripheral_id)
+            owner = self._current_owner()
+            ptype = self._lookup_peripheral_type(node_id, peripheral_id)
             try:
-                self._send_channel(node_id, peripheral_id, channel_id, fval, ptype)
-                self._last_channel_sent[gkey] = fval
-                self._last_channel_sent_ms[gkey] = now_ms
+                sent = self._send_channel(node_id, peripheral_id, channel_id,
+                                          fval, ptype, owner=owner)
+                tally = getattr(self._owner_ctx, "tally", None)
+                if tally is not None:
+                    # False means arbitration judged it redundant; None
+                    # means a caller wired an older send_channel that
+                    # returns nothing, which we count as sent.
+                    if sent is False:
+                        tally.suppressed += 1
+                    else:
+                        tally.sent += 1
+                if sent is False:
+                    return
                 # Include node_id in the log: peripheral_ids are scoped
                 # per-node so e.g. "roboclaw-1" on the Left vs Right Track
                 # Drive nodes both render as "roboclaw-1/motor" without

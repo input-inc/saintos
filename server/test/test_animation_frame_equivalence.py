@@ -109,8 +109,10 @@ def _make_evaluator(routing):
     last_by_sink: Dict[str, float] = {}
     snapshots: List[dict] = []
 
-    def send_channel(node_id, peripheral_id, channel_id, value, _ptype):
+    def send_channel(node_id, peripheral_id, channel_id, value, _ptype,
+                     owner="stream"):
         last_by_sink[f"{node_id}/{peripheral_id}/{channel_id}"] = value
+        return True
 
     def on_values_changed(snap):
         snapshots.append(snap)

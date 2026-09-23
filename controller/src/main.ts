@@ -13,7 +13,14 @@ import { invoke } from '@tauri-apps/api/core';
 import App from './App.vue';
 import { router } from './router';
 import { installDragScroll } from './composables/useDragScroll';
+import { installLogForwarding, logVueError } from './composables/useLogForwarding';
 import './styles.css';
+
+// FIRST, before anything else can throw. This mirrors console output
+// into the Rust log file so `saint-controller.log` holds every layer's
+// story in one place — without it the Vue half (uncaught renders
+// included) never leaves the devtools console. See useLogForwarding.ts.
+installLogForwarding();
 
 // Apply saved UI scale via Tauri's webview-level zoom as early as
 // possible (before App is mounted) so the first paint comes up at
@@ -40,5 +47,9 @@ if (savedScale) {
 installDragScroll();
 
 const app = createApp(App);
+// Vue swallows component errors into its own console handler; route them
+// to the log file too (logVueError still prints to the console, so
+// devtools is unchanged).
+app.config.errorHandler = (err, _instance, info) => logVueError(err, info);
 app.use(router);
 app.mount('#app');

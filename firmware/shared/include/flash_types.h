@@ -20,7 +20,19 @@ extern "C" {
 // =============================================================================
 
 #define FLASH_STORAGE_MAGIC     0x53414E54  // "SANT"
-#define FLASH_STORAGE_VERSION   13
+/* 13 -> 14: pins[] grew from 16 to 48 slots, which moves every field
+ * after it. A stale v13 blob MUST be rejected rather than reinterpreted
+ * against the new offsets — the server re-pushes config to any node
+ * announcing UNADOPTED, so the recovery is automatic. */
+/* 14 -> 15: v14 shipped with pins[] already grown to 48 slots but no
+ * migration case for the shift, so a v13 blob upgraded to v14 in place
+ * and every peripheral config after pin_config was reinterpreted at the
+ * wrong offset — the Maestro came back with garbage channel parameters
+ * ("applied home positions to 0 channels") and the provisioning sweep
+ * wedged the main loop until WDOG1 reset the node, every 30 s. 15
+ * discards any blob written before the layout settled; see the
+ * migration in flash_storage. */
+#define FLASH_STORAGE_VERSION   15
 // Bump history:
 //   v8: added uart_pins block.
 //   v9: added estop_pin + uart_swap to flash_roboclaw_config_t units.
@@ -67,14 +79,33 @@ extern "C" {
 //        + uart_pins; pre-existing peripheral configs survive untouched
 //        but operators must re-sync UART pin pairs.
 
-#define FLASH_PIN_CONFIG_MAX_PINS     16
+/* Must be >= every platform's PIN_CONFIG_MAX_PINS (Teensy 4.1: 48,
+ * RP2040: 16). It was 16 while the Teensy's RAM array held 48, and the
+ * save/load loops bounded themselves by the RAM constant — so a node
+ * with more than 16 configured pins wrote entries 16..N straight past
+ * the end of pins[] and into the Maestro config that follows it in
+ * this struct, then read the same garbage back at boot.
+ *
+ * One Maestro alone creates 24 pin_config entries (one per channel),
+ * so ANY Teensy with a Maestro was over the line. The Head Node's
+ * saved blob reported 21 pins; on reload, entries 16..20 decoded out
+ * of the neighbouring bytes as plausible-looking nonsense ("GPIO 128
+ * (unknown)", a phantom I2C pair) and the boot hung probing I2C
+ * hardware that does not exist. It only became fatal when the EEPROM
+ * was erased and the full config re-saved from scratch.
+ *
+ * 48 slots costs 32 * 42 = 1344 bytes, taking the whole storage struct
+ * to ~2985 — still inside the RP2040's 4096-byte flash sector and the
+ * Teensy's 4284-byte EEPROM. The static_asserts in each platform's
+ * pin_config guard both bounds at compile time now. */
+#define FLASH_PIN_CONFIG_MAX_PINS     48
 #define FLASH_PIN_CONFIG_MAX_NAME_LEN 32
 // v2 (2026-06): servo mode's param1/param2/reserved_pin slot now
 //     stores (start_us<<0, end_us<<16) in param1, center_us in
 //     param2, and home_us in reserved_pin[0..1]. Old v1 saves had
 //     (frequency, min_pulse_us, max_pulse_us) and are rejected on
 //     load — operator re-syncs from the Peripherals tab.
-#define FLASH_PIN_CONFIG_VERSION      2
+#define FLASH_PIN_CONFIG_VERSION      3   /* 2 -> 3: pins[] 16 -> 48 slots */
 
 // =============================================================================
 // Pin Configuration Storage Structure

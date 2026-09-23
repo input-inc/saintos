@@ -2,6 +2,11 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
+import {
+  buildSaveParams,
+  channelFallbacks,
+  channelsLostByCountChange,
+} from '@/utils/peripheralParams'
 import { useChannelHistory } from '@/composables/useChannelHistory'
 import { useWsTopic } from '@/composables/useWsTopic'
 import AppModal from '@/components/AppModal.vue'
@@ -130,6 +135,27 @@ const channelModalPeripheralId = ref(null)
 const channelModalIdx = ref(0)
 const channelModalDraft = ref({})  // { label, min_us, max_us, center_us, home_us, default_speed, default_accel }
 const channelModalError = ref('')
+
+// Identity of the channel under edit, for the modal title and the
+// subtitle under the Label field. `channelModalStoredName` reads the
+// SAVED label, not the draft — so it keeps telling you which channel
+// you opened even after you have typed a new name over it.
+const channelModalPeripheralLabel = computed(() => {
+  const p = peripherals.value.find(x => x.id === channelModalPeripheralId.value)
+  return p ? (p.label || p.id) : ''
+})
+const channelModalStoredName = computed(() => {
+  const p = peripherals.value.find(x => x.id === channelModalPeripheralId.value)
+  const label = String(p?.params?.channels?.[channelModalIdx.value]?.label ?? '').trim()
+  // "Ch <n>" is the default and duplicates the channel id already shown.
+  return label && label !== `Ch ${channelModalIdx.value}` ? label : ''
+})
+const channelModalTitle = computed(() => {
+  const name = channelModalStoredName.value
+  return name
+    ? `Edit channel ch${channelModalIdx.value} — ${name}`
+    : `Edit channel ch${channelModalIdx.value}`
+})
 
 // Live extent-dial preview: while the operator drags a handle in the
 // channel modal, jog the real servo to that absolute pulse so they can
@@ -427,6 +453,35 @@ const claimedPins = computed(() => {
   return out
 })
 
+// ─── Destructive-save guard ───────────────────────────────────────────
+//
+// Reducing channel_count is the one peripheral edit that genuinely
+// discards operator work: the server's maestro_normalize_channels keeps
+// channels[0..count-1] and TRUNCATES the tail, so dropping 24 -> 6 loses
+// 18 channels' labels, icons and extents with no undo. Everything else
+// is now non-destructive (see the params note in saveModal), so this is
+// the only case worth interrupting a save for.
+//
+// `channelLossWarning` holds what would be lost; a non-empty value makes
+// the modal show the confirmation panel instead of saving.
+const channelLossWarning = ref([])
+const channelLossAccepted = ref(false)
+
+// Channels this save would discard, as [{ idx, label }]. Reads the
+// STORED peripheral, not the draft, so it reports what is actually at
+// risk on the server. Logic lives in utils/peripheralParams.js with
+// tests — getting it wrong either nags the operator on every save or
+// wipes their channel config silently.
+function channelsAtRisk () {
+  if (modalMode.value !== 'edit') return []
+  const stored = peripherals.value.find(p => p.id === modalEditingId.value)
+  return channelsLostByCountChange(
+    stored?.params?.channels,
+    modalParams.value.channel_count,
+    channelFallbacks(modalParams.value),
+  )
+}
+
 function openAdd () {
   modalMode.value = 'add'
   modalEditingId.value = null
@@ -435,6 +490,8 @@ function openAdd () {
   modalPins.value = {}
   modalParams.value = {}
   modalError.value = ''
+  channelLossWarning.value = []
+  channelLossAccepted.value = false
   advancedOpen.value = false
   _lastServoUs = null
   applyDefaults()
@@ -447,7 +504,17 @@ function openEdit (p) {
   modalLabel.value = p.label
   modalPins.value = { ...p.pins }
   modalParams.value = { ...p.params }
+  // Deep-copy the per-channel array. A shallow spread shares it with the
+  // store, so editing the draft would mutate what the peripheral card
+  // renders before the server has confirmed anything — and would make
+  // the "what would this save discard?" check below compare the live
+  // array against itself.
+  if (Array.isArray(p.params?.channels)) {
+    modalParams.value.channels = p.params.channels.map(ch => ({ ...ch }))
+  }
   modalError.value = ''
+  channelLossWarning.value = []
+  channelLossAccepted.value = false
   advancedOpen.value = false
   _lastServoUs = null
   modalOpen.value = true
@@ -614,6 +681,17 @@ async function saveModal () {
   const type = typesById.value[modalTypeId.value]
   if (!type) { modalError.value = 'Pick a type'; return }
 
+  // Ask before discarding per-channel config. Returning here leaves the
+  // modal open with the warning panel shown, so Cancel is always
+  // available — the operator never finds out after the fact.
+  if (!channelLossAccepted.value) {
+    const atRisk = channelsAtRisk()
+    if (atRisk.length) {
+      channelLossWarning.value = atRisk
+      return
+    }
+  }
+
   // Every interlock target needs an explicit direction. Saving without
   // one would persist a target that blocks ALL motion — which strands
   // the axis on the switch — and it would look like a deliberate
@@ -624,14 +702,21 @@ async function saveModal () {
     return
   }
 
-  // Drop params hidden by `visible_when` from the saved payload so
-  // stale values (e.g. a MAC entered before switching transport
-  // back to UART) don't reach the firmware. Pins likewise get
-  // cleared when the picker is hidden.
-  const params = {}
-  for (const p of (type.params || [])) {
-    if (paramVisible(p)) params[p.id] = modalParams.value[p.id]
-  }
+  // Start from params the TYPE doesn't declare, then overlay the
+  // declared ones.
+  //
+  // Rebuilding purely from `type.params` silently destroyed per-channel
+  // config: `params.channels` (labels, icons, extents) is deliberately
+  // NOT a PeripheralTypeParam — see the schema note in
+  // peripheral_model.py — so it isn't in that list, so it was dropped
+  // from every save. The server's maestro_normalize_channels then saw
+  // no channels array and regenerated defaults, which is why opening a
+  // Maestro, changing nothing and hitting Save reset every channel name
+  // and extent.
+  //
+  // Anything the type doesn't describe is operator data we have no
+  // business discarding, so carry it through untouched.
+  const params = buildSaveParams(type.params, modalParams.value, paramVisible)
   const pins = pinsVisible.value ? { ...modalPins.value } : {}
 
   // Server contract (websocket_handler.py:1018): expects
@@ -650,6 +735,8 @@ async function saveModal () {
       peripheral,
     })
     if (r?.success === false) { modalError.value = r.message || 'Save failed'; return }
+    channelLossWarning.value = []
+    channelLossAccepted.value = false
     modalOpen.value = false
     loadAll()
   } catch (e) {
@@ -962,6 +1049,41 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
 
     <AppModal v-if="modalOpen" :title="modalMode === 'add' ? 'Add peripheral' : 'Edit peripheral'" @close="modalOpen = false">
       <div v-if="modalError" class="mb-3 p-2 rounded bg-red-500/20 border border-red-500/40 text-sm text-red-300">{{ modalError }}</div>
+
+      <!-- Destructive-save confirmation. Shown instead of saving when
+           reducing channel_count would discard configured channels. -->
+      <div v-if="channelLossWarning.length"
+           class="mb-3 p-3 rounded bg-amber-500/15 border border-amber-500/50 text-sm">
+        <div class="flex items-start gap-2">
+          <span class="material-icons icon-sm text-amber-300 mt-0.5">warning</span>
+          <div class="min-w-0">
+            <div class="font-medium text-amber-200">
+              This will permanently delete {{ channelLossWarning.length }}
+              configured channel{{ channelLossWarning.length === 1 ? '' : 's' }}
+            </div>
+            <div class="mt-1 text-fg-muted">
+              Reducing the channel count discards everything above the new
+              limit — name, icon and extents. This cannot be undone.
+            </div>
+            <ul class="mt-2 space-y-0.5 font-mono text-xs text-amber-100/90">
+              <li v-for="c in channelLossWarning" :key="c.idx">
+                ch{{ c.idx }} — {{ c.label }}
+              </li>
+            </ul>
+            <div class="mt-3 flex items-center gap-2">
+              <button class="btn-secondary" @click="channelLossWarning = []">
+                Cancel
+              </button>
+              <button
+                class="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-sm"
+                @click="channelLossAccepted = true; channelLossWarning = []; saveModal()"
+              >
+                Delete them and save
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div class="space-y-4">
         <div>
@@ -1277,7 +1399,10 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
 
       <template #actions>
         <button class="btn-secondary" @click="modalOpen = false">Cancel</button>
-        <button class="btn-primary" @click="saveModal">{{ modalMode === 'add' ? 'Add' : 'Save' }}</button>
+        <!-- Hidden while the destructive-save panel is up: that panel
+             owns the decision, and two live Save buttons would let the
+             operator re-trigger the same prompt instead of answering it. -->
+        <button v-if="!channelLossWarning.length" class="btn-primary" @click="saveModal">{{ modalMode === 'add' ? 'Add' : 'Save' }}</button>
       </template>
     </AppModal>
 
@@ -1288,13 +1413,22 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
          are number inputs; the runtime-apply hook (apply on Pose
          transitions, zero on animation input) is deferred to the Pose
          editor work — see TODO in maestro_driver. -->
-    <AppModal v-if="channelModalOpen" title="Edit channel" @close="channelModalOpen = false">
+    <AppModal v-if="channelModalOpen" :title="channelModalTitle" @close="channelModalOpen = false">
       <div v-if="channelModalError" class="mb-3 p-2 rounded bg-red-500/20 border border-red-500/40 text-sm text-red-300">{{ channelModalError }}</div>
 
       <div class="space-y-4">
         <div>
           <label class="block text-sm font-medium text-fg mb-1">Label</label>
           <input v-model="channelModalDraft.label" type="text" maxlength="32" class="input-field w-full" placeholder="e.g. Pan, Tilt, Left Arm" />
+          <!-- Which channel this is, kept visible while the label field is
+               being edited. Typing into Label replaces the only other
+               on-screen clue to what you are configuring, and the extents
+               below move a real servo — worth being certain first. -->
+          <div class="mt-1 text-xs text-fg-faint">
+            ch{{ channelModalIdx }}
+            <span v-if="channelModalStoredName"> · currently “{{ channelModalStoredName }}”</span>
+            <span v-if="channelModalPeripheralLabel"> on {{ channelModalPeripheralLabel }}</span>
+          </div>
         </div>
 
         <div>

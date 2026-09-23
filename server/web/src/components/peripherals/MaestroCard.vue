@@ -70,6 +70,20 @@ const statusStale = computed(() => connectedAge.value != null && connectedAge.va
 
 // Channel-count clip mirrors what Live.vue does for the generic table.
 const channelCount = computed(() => Number(props.peripheral?.params?.channel_count) || 6)
+
+// Per-channel display name, when the operator gave one. `label` defaults
+// to "Ch <n>", which carries no more information than the channel id
+// already on screen — so treat that as unnamed and show nothing rather
+// than padding the row with "ch3 · Ch 3".
+function chName (idx) {
+  const label = String(props.peripheral?.params?.channels?.[idx]?.label ?? '').trim()
+  if (!label || label === `Ch ${idx}`) return ''
+  return label
+}
+// Icon the operator picked for the channel, if any.
+function chIcon (idx) {
+  return String(props.peripheral?.params?.channels?.[idx]?.icon ?? '').trim()
+}
 const channelIds   = computed(() => {
   const ids = []
   for (let i = 0; i < channelCount.value; i++) ids.push(`ch${i}`)
@@ -157,9 +171,18 @@ const typeLabel = computed(() =>
          per channel to the firmware poll cache, this is where the
          "actual" column lands. -->
     <div class="space-y-1">
-      <div v-for="id in channelIds" :key="id"
+      <div v-for="(id, idx) in channelIds" :key="id"
            class="flex items-center justify-between text-sm font-mono py-1 border-b border-line/50 last:border-b-0">
-        <span class="text-fg-muted">{{ id }}</span>
+        <!-- Channel id always, plus the operator's name when there is
+             one. Without the name a 24-channel Maestro is 24 rows of
+             "ch0..ch23" and the only way to tell which servo is which is
+             to open each channel's edit modal. -->
+        <span class="flex items-center gap-1.5 min-w-0">
+          <span class="material-icons icon-sm text-fg-faint shrink-0"
+                v-if="chIcon(idx)">{{ chIcon(idx) }}</span>
+          <span class="text-fg-muted shrink-0">{{ id }}</span>
+          <span v-if="chName(idx)" class="font-sans text-fg-strong truncate">{{ chName(idx) }}</span>
+        </span>
         <div class="flex items-center gap-3">
           <span :class="chValue(id) != null ? 'text-amber-300' : 'text-fg-faint'">
             {{ fmtChannel(id) }}

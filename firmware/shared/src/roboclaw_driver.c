@@ -1798,13 +1798,47 @@ static bool roboclaw_drv_load(const void* storage_ptr)
         return true;
     }
 
+    /* Sanity-check the blob before any of it touches the wire. A flash
+     * layout change once shifted this struct's offset, so roboclaw_config
+     * decoded out of erased flash: unit_count=8, address=0xFF,
+     * serial_port=255, baud=65535. The driver adopted all of it, bound
+     * the PIO UART at 65535 baud, and the controller went silent.
+     *
+     * The damage outlived the bad boot, which is the part worth guarding:
+     * a dashboard re-sync pushes addresses and pins but NOT baud, so
+     * configured_baud stayed 65535 and re-syncing looked like it did
+     * nothing. Refusing a blob we can't believe keeps the driver dormant
+     * on defaults, where the next sync actually recovers the node. */
     uint8_t count = storage->roboclaw_config.unit_count;
     if (count > ROBOCLAW_MAX_UNITS) count = ROBOCLAW_MAX_UNITS;
-    unit_count = count;
 
-    if (storage->roboclaw_config.baud_rate > 0) {
-        configured_baud = storage->roboclaw_config.baud_rate;
+    /* baud 0 means "never set" — older saves left it zero and the
+     * driver has always fallen back to the default there, so keep that
+     * working. Only a nonzero value outside the RoboClaw's range is
+     * evidence of a corrupt record. */
+    uint16_t stored_baud = storage->roboclaw_config.baud_rate;
+    if (stored_baud == 0) stored_baud = ROBOCLAW_DEFAULT_BAUD;
+    bool blob_ok = (stored_baud >= 1200 && stored_baud <= 57600);
+    for (uint8_t i = 0; blob_ok && i < count; i++) {
+        uint8_t addr = storage->roboclaw_config.units[i].address;
+        /* Packet Serial addresses are 0x80..0x87 — nothing else can ever
+         * be answered by a RoboClaw. */
+        if (addr < 0x80 || addr > 0x87) blob_ok = false;
     }
+    if (!blob_ok) {
+        saint_log_publish("warn",
+            "RoboClaw: stored config failed validation (%u units, addr0=0x%02X, "
+            "%u baud) — ignoring it and staying dormant on defaults. "
+            "Re-sync from the dashboard.",
+            (unsigned)count,
+            (unsigned)storage->roboclaw_config.units[0].address,
+            (unsigned)stored_baud);
+        unit_count = 0;
+        return true;
+    }
+
+    unit_count = count;
+    configured_baud = stored_baud;
     configured_serial_port = storage->roboclaw_config.serial_port;
 
     for (uint8_t i = 0; i < count; i++) {

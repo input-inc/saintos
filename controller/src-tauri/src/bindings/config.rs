@@ -19,6 +19,18 @@ pub enum AnalogInput {
     LeftPadY,
     RightPadX,
     RightPadY,
+    // Steam Deck IMU. These are angular RATES (deg/s), not angles —
+    // the hardware reports rate and nothing here integrates it. Raw
+    // full scale is +/-2000 deg/s; mapper::get_analog_value normalizes
+    // to -1..1 before the transform runs, so a gyro binding's deadzone
+    // and scale mean the same thing they do on a stick.
+    //
+    // Powering the IMU is not free, so the reader only turns it on
+    // while one of these is bound (InputMapper::uses_gyro) or the
+    // Controller diagnostics view is open.
+    GyroPitch,
+    GyroRoll,
+    GyroYaw,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

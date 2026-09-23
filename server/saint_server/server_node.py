@@ -88,10 +88,14 @@ import asyncio
 import os
 import signal
 import threading
+import time
 from typing import Optional, Dict, Any, List
 
 from saint_server.webserver.state_manager import (
     StateManager, HOST_CONTROLLER_NODE_ID)
+from saint_server.channel_arbiter import (
+    ChannelArbiter, BOARD, SLIDER, STREAM,
+)
 from saint_server.host_peripherals import HostPeripheralManager
 from saint_server.peripheral_logger import PeripheralLogger
 from saint_server.livelink import LiveLinkReceiver, LiveLinkRouter
@@ -126,6 +130,38 @@ def _extract_peripheral_from_text(text: str) -> Optional[str]:
             if sep in (":", "_", "-"):
                 return prefix
     return None
+
+
+# ── node keepalive ───────────────────────────────────────────────────
+#
+# Teensy nodes judge agent liveness by RX-with-data only: NativeEthernet's
+# udp.endPacket() returns success even when the agent is gone, so TX
+# proves nothing. Their firmware declares the agent silent after
+# CONNECTION_TIMEOUT_MS (45 s) without an inbound frame and tears down a
+# perfectly good micro-ROS session.
+#
+# Nothing guarantees that inbound traffic: our publishers are best-effort
+# (no ACKs flow back) and an idle robot generates no /control or /config
+# writes. So a HEALTHY but unattended node drops off roughly every 60 s
+# and reconnects — visible in the node log as offline/reconnect pairs
+# with firmware uptime climbing straight through them. Each cycle costs a
+# 1-4 s window in which every best-effort /control write is silently
+# lost, which is a large part of why servo setpoints landed "sometimes".
+#
+# The firmware-side fix (rmw_uros_ping_agent from the main loop) faults
+# the chip, so the keepalive lives here: one tiny publish to the node's
+# /control topic, which lands as RX through the normal transport path and
+# needs no micro-ROS internals on the node.
+#
+# Idle-only by design. It never fires while a node is being written to,
+# so it cannot displace a real setpoint on a depth-1 best-effort topic.
+NODE_KEEPALIVE_IDLE_S = 15.0    # quiet this long → send one
+NODE_KEEPALIVE_CHECK_S = 5.0    # how often we look
+
+# Firmware treats an unrecognized action as a no-op and logs nothing
+# (pin_control_apply_json returns false on both RP2040 and Teensy), so
+# the payload only has to arrive, not mean anything.
+NODE_KEEPALIVE_PAYLOAD = '{"action":"keepalive"}'
 
 
 class SaintServerNode(Node):
@@ -174,6 +210,21 @@ class SaintServerNode(Node):
             server_name=self.server_name,
             logger=self.get_logger()
         )
+
+        # Single arbitration point for channel writes. Every writer —
+        # State-tab sliders, pose boards, routing sheets, the animation
+        # player — reaches the firmware through send_channel_command,
+        # which consults this. Replaces the two blind per-writer caches
+        # that used to suppress each other's re-sends; see
+        # channel_arbiter.py for the failure it exists to prevent.
+        # When we last put a frame on each node's wire (any topic).
+        # Feeds the idle keepalive — see NODE_KEEPALIVE_IDLE_S.
+        self._node_last_tx: Dict[str, float] = {}
+
+        self.channel_arbiter = ChannelArbiter(
+            idle_disengage_lookup=self.state_manager.channel_idle_disengage_ms,
+        )
+        self.state_manager.set_channel_arbiter(self.channel_arbiter)
 
         # File-backed logging tree under $SAINT_LOG_DIR (default
         # /var/log/saint-os):
@@ -366,6 +417,55 @@ class SaintServerNode(Node):
             self._cleanup_stale_nodes,
             callback_group=self.callback_group
         )
+
+        # Idle keepalive so RX-liveness nodes don't drop a healthy
+        # session — see NODE_KEEPALIVE_IDLE_S.
+        self.keepalive_timer = self.create_timer(
+            NODE_KEEPALIVE_CHECK_S,
+            self._send_node_keepalives,
+            callback_group=self.callback_group
+        )
+
+    def _mark_node_tx(self, node_id: str) -> None:
+        """Note that we just published to this node. Any frame counts —
+        the node's liveness check only cares that bytes arrived."""
+        self._node_last_tx[node_id] = time.monotonic()
+
+    def _send_node_keepalives(self) -> None:
+        """Publish a no-op to any adopted node we've been quiet toward.
+
+        Idle-only: a node under active control already has all the RX it
+        needs, and injecting a frame there could displace a real setpoint
+        on a depth-1 best-effort topic.
+        """
+        now = time.monotonic()
+        try:
+            nodes = list(self.state_manager.state.adopted_nodes.items())
+        except Exception as e:
+            self.get_logger().warn(f'Keepalive: cannot read adopted nodes: {e}')
+            return
+
+        for node_id, node in nodes:
+            if not getattr(node, 'online', False):
+                continue        # offline nodes get the reconnect path, not this
+            if node_id == HOST_CONTROLLER_NODE_ID:
+                continue        # in-process, no wire
+            last = self._node_last_tx.get(node_id)
+            if last is not None and (now - last) < NODE_KEEPALIVE_IDLE_S:
+                continue        # recently written to — nothing to do
+
+            try:
+                pub = self._ensure_node_control_publisher(node_id)
+                msg = String()
+                msg.data = NODE_KEEPALIVE_PAYLOAD
+                pub.publish(msg)
+                self._mark_node_tx(node_id)
+                self.get_logger().debug(f'Keepalive → {node_id}')
+            except Exception as e:
+                # A publish failure here is not fatal: the node either
+                # recovers on its own or trips its timeout, which is the
+                # behavior we had before this existed.
+                self.get_logger().warn(f'Keepalive to {node_id} failed: {e}')
 
     def _on_node_announcement(self, msg: String):
         """Handle node announcement from micro-ROS nodes."""
@@ -1360,12 +1460,14 @@ class SaintServerNode(Node):
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
+        self._mark_node_tx(node_id)
         self.get_logger().debug(f'Sent control to {node_id}: GPIO {gpio} = {value}')
 
     def send_channel_command(self, node_id: str, peripheral_id: str,
                              channel_id: str, value: float,
                              peripheral_type: str = "",
-                             raw_us: Optional[int] = None):
+                             raw_us: Optional[int] = None,
+                             owner: str = STREAM) -> bool:
         """Send channel-addressed control to a node via ROS2.
 
         Operator-visible names go on the wire — the firmware does its
@@ -1378,6 +1480,16 @@ class SaintServerNode(Node):
         built-in status NeoPixel is the canonical case — its instance
         id is "onboard_neopixel" but the firmware only knows it as
         type="neopixel").
+
+        `owner` says who is writing (channel_arbiter.BOARD / SLIDER /
+        STREAM). This is the ONE place that decides whether a write goes
+        out, so every writer gets the same view of what the firmware
+        holds — a board activation can no longer be swallowed because a
+        slider moved the channel, or vice versa.
+
+        Returns True if the write was published, False if arbitration
+        suppressed it as redundant. Callers that report success to an
+        operator should use this rather than assuming.
         """
         import json
 
@@ -1388,7 +1500,16 @@ class SaintServerNode(Node):
             if self._host_peripheral_manager is not None:
                 self._host_peripheral_manager.handle_channel(
                     peripheral_id, channel_id, float(value))
-            return
+            return True
+
+        # Arbitration gate. Human-owned writes (board activation, a
+        # slider under the operator's hand) always pass; unattended
+        # streams are rate-gated on real change so a 50 Hz sheet can't
+        # flood /control.
+        if not self.channel_arbiter.should_send(
+                node_id, peripheral_id, channel_id, value,
+                owner=owner, peripheral_type=peripheral_type, raw_us=raw_us):
+            return False
 
         pub = self._ensure_node_control_publisher(node_id)
         self._ensure_node_state_subscriber(node_id)
@@ -1414,9 +1535,17 @@ class SaintServerNode(Node):
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
+        self._mark_node_tx(node_id)
+        # Record only after the publish — a cache entry for a write that
+        # never left would re-create the stale-suppression bug this
+        # whole path exists to kill.
+        self.channel_arbiter.record(node_id, peripheral_id, channel_id,
+                                    value, owner=owner, raw_us=raw_us)
         self.get_logger().debug(
             f'Sent channel control to {node_id}: '
-            f'{peripheral_type}/{peripheral_id}/{channel_id} = {value}')
+            f'{peripheral_type}/{peripheral_id}/{channel_id} = {value} '
+            f'(owner={owner})')
+        return True
 
     def send_peripheral_command(self, node_id: str, peripheral_id: str,
                                 command: str, args: Dict[str, Any]):
@@ -1449,6 +1578,7 @@ class SaintServerNode(Node):
         msg.data = json.dumps(control_data)
 
         pub.publish(msg)
+        self._mark_node_tx(node_id)
         self.get_logger().debug(
             f'Sent peripheral command to {node_id}: '
             f'{peripheral_id}.{command}({args})')
@@ -2200,6 +2330,7 @@ class SaintServerNode(Node):
                             peripheral_type_lookup=self.state_manager.lookup_peripheral_type,
                             logger=self.get_logger(),
                             on_values_changed=self._broadcast_routing_values,
+                            channel_arbiter=self.channel_arbiter,
                         )
                         self.ros_bridge.add_routing_listener(
                             self.routing_evaluator.on_topic_message

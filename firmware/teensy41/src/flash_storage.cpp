@@ -8,6 +8,7 @@
 #include <Arduino.h>
 #include "platform.h"
 #include <string.h>
+#include <stddef.h>
 
 extern "C" {
 #include "flash_storage.h"
@@ -73,6 +74,19 @@ bool flash_storage_load(flash_storage_data_t* data)
         flash_storage_data_t* mutable_data = (flash_storage_data_t*)data;
         Serial.printf("Flash storage: migrating from version %d to %d\n",
                        mutable_data->version, FLASH_STORAGE_VERSION);
+        /* Pre-v15 blobs predate the pins[] 16 -> 48 growth, which moved
+         * every peripheral config after pin_config. Nothing below the
+         * header can be reinterpreted at the new offsets, and a partial
+         * wipe would leave the node "adopted with no peripherals" — the
+         * server only re-pushes config to a node announcing UNADOPTED,
+         * so it would sit there configured-less forever. Reject the
+         * whole blob: the node boots UNADOPTED and the server re-syncs
+         * it automatically. */
+        if (mutable_data->version <= 14) {
+            Serial.printf("Flash storage: discarding pre-v15 config "
+                          "(layout changed); node will re-sync from server\n");
+            return false;
+        }
         if (mutable_data->version == 1) {
             memset(&mutable_data->pin_config, 0, sizeof(mutable_data->pin_config));
             mutable_data->pin_config.version = FLASH_PIN_CONFIG_VERSION;
@@ -219,6 +233,11 @@ bool flash_storage_load(flash_storage_data_t* data)
     if (data->version < FLASH_STORAGE_VERSION) {
         Serial.printf("Flash storage: migrating from version %d to %d\n",
                        data->version, FLASH_STORAGE_VERSION);
+        if (data->version <= 14) {
+            Serial.printf("Flash storage: discarding pre-v15 config "
+                          "(layout changed); node will re-sync from server\n");
+            return false;
+        }
         if (data->version == 1) {
             memset(&data->pin_config, 0, sizeof(data->pin_config));
             data->pin_config.version = FLASH_PIN_CONFIG_VERSION;

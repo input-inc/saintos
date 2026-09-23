@@ -42,6 +42,9 @@ const ANALOG_INPUTS: { value: AnalogInput; label: string }[] = [
     { value: 'left_pad_y', label: 'Left Trackpad Y' },
     { value: 'right_pad_x', label: 'Right Trackpad X' },
     { value: 'right_pad_y', label: 'Right Trackpad Y' },
+    { value: 'gyro_pitch', label: 'Gyro Pitch' },
+    { value: 'gyro_roll', label: 'Gyro Roll' },
+    { value: 'gyro_yaw', label: 'Gyro Yaw' },
 ];
 
 const DIGITAL_INPUTS: { value: DigitalInput; label: string }[] = [

@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Native stand-in for PJRC's `teensy_size`.
+
+The Teensy platform reports post-link size by shelling out to
+`teensy_size` (resolved via PATH) and treats a non-zero exit as a build
+failure. PJRC ships that helper x86_64-only — every published
+tool-teensy version, 1.158 through 1.162, declares its macOS file as
+`darwin_x86_64,darwin_arm64`, i.e. one Intel binary claimed to serve
+both. It ran on Apple Silicon purely through Rosetta, so a macOS
+upgrade that drops Rosetta breaks the Teensy build at `Calculating
+size` with "Bad CPU type in executable" — after everything has already
+compiled and linked.
+
+We are put earlier on PATH than tool-teensy so this runs instead. It
+reports the same numbers using `arm-none-eabi-size`, which IS shipped
+as a native darwin_arm64 build, and keeps the flash-overflow check the
+platform intended (SAINT_TEENSY_MAX_FLASH, set by
+patch_teensy_size.py). Without that check a too-large image would flash
+and brick.
+"""
+import os
+import shutil
+import subprocess
+import sys
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("teensy_size: no ELF given", file=sys.stderr)
+        return 1
+    elf = sys.argv[1]
+
+    size_tool = shutil.which("arm-none-eabi-size")
+    if not size_tool:
+        # Don't fail the build over a missing reporter — the image is
+        # already linked. Say so loudly instead.
+        print("teensy_size(shim): arm-none-eabi-size not on PATH; "
+              "size report skipped")
+        return 0
+
+    try:
+        out = subprocess.check_output(
+            [size_tool, "-B", "-d", elf], text=True,
+            stderr=subprocess.STDOUT)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        print("teensy_size(shim): size failed: {}".format(exc))
+        return 0
+
+    text = data = bss = None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[0].isdigit():
+            text, data, bss = int(parts[0]), int(parts[1]), int(parts[2])
+            break
+    if text is None:
+        print("teensy_size(shim): unparsable size output:\n" + out)
+        return 0
+
+    flash = text + data
+    ram = data + bss
+
+    def pct(used, total):
+        return " ({:.1f}%)".format(100.0 * used / total) if total else ""
+
+    max_flash = int(os.environ.get("SAINT_TEENSY_MAX_FLASH", "0") or 0)
+    max_ram = int(os.environ.get("SAINT_TEENSY_MAX_RAM", "0") or 0)
+
+    print("Flash: {} bytes{}".format(flash, pct(flash, max_flash)))
+    # Advisory only: the Teensy 4 core places some sections at runtime, so
+    # a Berkeley-format sum is an estimate, not the real ceiling.
+    print("RAM:   {} bytes{} (estimate)".format(ram, pct(ram, max_ram)))
+
+    if max_flash and flash > max_flash:
+        print("teensy_size(shim): ERROR image is {} bytes over the {} byte "
+              "flash limit".format(flash - max_flash, max_flash),
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

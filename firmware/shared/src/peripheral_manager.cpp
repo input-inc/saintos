@@ -283,7 +283,15 @@ int peripheral_state_emit_all_channels(char* buf, size_t cap)
     for (uint8_t i = 0; i < driver_count; i++) {
         if (!drivers[i] || !drivers[i]->state_emit_channels) continue;
         int n = drivers[i]->state_emit_channels(buf + total, cap - (size_t)total, &first);
-        if (n < 0) return -1;
+        /* Out of room: stop and keep what fit. Returning -1 here made
+         * ONE driver overrunning the budget discard the entire node's
+         * state message — every other driver's telemetry with it, and
+         * silently, since the caller just skips the publish. That is
+         * how the Head Node ended up publishing nothing at all while
+         * reporting ACTIVE once a second. The server merges channel
+         * values per (peripheral, channel), so a short message is a
+         * partial update, not a corrupt one. */
+        if (n < 0) break;
         total += n;
     }
     return total;

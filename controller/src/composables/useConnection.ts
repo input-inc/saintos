@@ -100,6 +100,35 @@ async function ensureInit(): Promise<void> {
         }),
     );
 
+    // Swift reconnect on refocus.
+    //
+    // The app is allowed to go quiet while backgrounded, but coming back
+    // must not require the operator to press anything. The Rust
+    // reconnect loop already retries on its own, with a backoff that
+    // grows to 30 s — and after a device suspend the socket is dead, so
+    // a return from sleep could sit there for most of that half-minute
+    // looking broken. Focus regain resets that: try immediately.
+    //
+    // Only when actually disconnected. Reconnecting a healthy link would
+    // tear down a working connection for no reason, which is the exact
+    // opposite of the requirement.
+    unlistenFns.push(
+        await listen<boolean>('app-focus', event => {
+            if (!event.payload) return;
+            if (statusRef.value === ConnectionStatus.Connected) return;
+            if (statusRef.value === ConnectionStatus.Connecting
+                || statusRef.value === ConnectionStatus.Authenticating) {
+                // An attempt is already in flight; let it finish rather
+                // than restarting it and losing the progress.
+                return;
+            }
+            if (!getSavedConfig()?.password) return;
+            console.log('[useConnection] refocused while disconnected; reconnecting');
+            void reconnect().catch(err =>
+                console.error('[useConnection] refocus reconnect failed:', err));
+        }),
+    );
+
     // Auto-connect on app boot if credentials are saved. The short
     // delay lets the Tauri JS bridge finish wiring up before we
     // try to invoke; without it, the first invoke can race the

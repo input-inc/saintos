@@ -124,6 +124,11 @@ static bool g_initialized = false;
  * Declared before the class so the inline claim() can see it. */
 static bool g_vendor_mode = false;
 
+/* Count of USB-level disconnects seen by the vendor driver. Reported on
+ * serial by the transport's update hook so an unplug/brown-out shows up
+ * as a number instead of an inference. */
+static volatile uint32_t g_vendor_disconnects = 0;
+
 class MaestroVendorDriver : public USBDriver {
 public:
     explicit MaestroVendorDriver(USBHost& host) { (void)host; init(); }
@@ -140,6 +145,17 @@ public:
              uint8_t* buf, uint16_t wLength, uint32_t timeout_ms) {
         Device_t* dev = *(Device_t* volatile*)&device;
         if (!dev) return -1;
+        /* The control pipe — not just the device — must still be live.
+         * USBHost::queue_Control_Transfer dereferences dev->control_pipe
+         * immediately, and the USB ISR can tear a device down between
+         * our null check above and that call (or hand us a Device_t
+         * whose pipe was never allocated). That fault is not theoretical:
+         * it reset the Head Node roughly ten seconds into every boot
+         * while a Maestro was attached — CrashReport pointed at
+         * USBHost::queue_Transfer with "Data Access Violation, accessed
+         * address 0x8". A failed transfer is a recoverable error; a
+         * null-pointer fault costs the whole node. */
+        if (*(Pipe_t* volatile*)&dev->control_pipe == nullptr) return -1;
         if (wLength > sizeof(m_buf)) return -1;
 
         const bool in = (bmRequestType & 0x80u) != 0;
@@ -155,11 +171,31 @@ public:
         m_done   = false;
         m_result = -1;
         m_expect = wLength;
+        /* Breadcrumbs via Teensyduino's CrashReport API — they survive
+         * the fault and print with the report. (Do NOT hand-roll this
+         * with a custom .noinit section: those land in the MPU-guarded
+         * region past .bss and every write faults, which manufactures a
+         * second crash on top of the one you are chasing.) */
+        {
+            static uint32_t s_seq = 0;
+            CrashReport.breadcrumb(1, 0x4D410000u | bRequest);
+            CrashReport.breadcrumb(2, ++s_seq);
+            CrashReport.breadcrumb(3, 1);   /* about to queue */
+        }
+
+        /* Re-check immediately before queueing: this is the narrowest
+         * the race can be made without a lock the USB stack doesn't
+         * offer. */
+        if (*(Device_t* volatile*)&device != dev
+            || *(Pipe_t* volatile*)&dev->control_pipe == nullptr) {
+            return -1;
+        }
         if (!queue_Control_Transfer(dev, &m_setup,
                                     wLength ? m_buf : nullptr, this)) {
             return -1;
         }
 
+        CrashReport.breadcrumb(3, 2);   /* queued OK; waiting on ISR */
         uint32_t start = millis();
         while (!m_done && (millis() - start) < timeout_ms) {
             /* completion arrives via control() from the USB ISR */
@@ -199,7 +235,14 @@ protected:
         m_done   = true;
     }
 
-    void disconnect() override { device = nullptr; }
+    void disconnect() override {
+        device = nullptr;
+        /* Visibility for the wedge investigation: if the Maestro is
+         * dropping off the bus on its own, this fires — which is a very
+         * different problem from our transfers racing a teardown, and
+         * the two were indistinguishable from the outside. */
+        g_vendor_disconnects++;
+    }
 
 private:
     void init() {
@@ -364,6 +407,7 @@ static const maestro_transport_ops_t usb_cdc_ops = {
     .read             = usb_read,
     .supports_hotplug = usb_supports_hotplug,
     .ctrl_xfer        = NULL,   /* CDC transport can't issue EP0 control transfers */
+    .supports_status_poll = true,
 };
 
 extern "C" const maestro_transport_ops_t* maestro_get_transport_usb_cdc(void)
@@ -491,6 +535,7 @@ static const maestro_transport_ops_t uart_ops = {
     .read             = uart_read,
     .supports_hotplug = uart_supports_hotplug,
     .ctrl_xfer        = NULL,   /* UART has no EP0 — never */
+    .supports_status_poll = true,
 };
 
 /* ── USB vendor (EP0 control transfer) transport ─────────────────────
@@ -663,6 +708,13 @@ static const maestro_transport_ops_t usb_vendor_ops = {
     .read             = vendor_read,
     .supports_hotplug = vendor_supports_hotplug,
     .ctrl_xfer        = vendor_ctrl_xfer,
+    /* See supports_status_poll in maestro_transport.h. The periodic
+     * GET_VARIABLES (0x83) round-trip faults USBHost::queue_Transfer on
+     * this transport — CrashReport breadcrumbs put it at the 7th such
+     * request, still inside the queue call — resetting the node ~10 s
+     * into every boot with a Maestro attached. SET_TARGET and the
+     * one-shot connect probe are unaffected. */
+    .supports_status_poll = false,
 };
 
 extern "C" const maestro_transport_ops_t* maestro_get_transport_usb_vendor(void)

@@ -800,6 +800,18 @@ bool pin_control_apply_json(const char* json, size_t json_len)
     return pin_control_set_value(gpio, value);
 }
 
+/* See pin_control_types.h. RP2040 configs are small enough that this
+ * has never tripped in the field — unlike Teensy, where a 24-channel
+ * Maestro overran the buffer and silenced the node's telemetry
+ * entirely. Counting it here keeps the same failure visible if a
+ * future peripheral pushes this platform over too. */
+static uint32_t g_state_truncations = 0;
+
+uint32_t pin_control_state_truncations(void)
+{
+    return g_state_truncations;
+}
+
 int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node_id)
 {
     if (!buffer || buffer_size < 128) return -1;
@@ -859,19 +871,19 @@ int pin_control_state_to_json(char* buffer, size_t buffer_size, const char* node
                 first ? "" : ",",
                 cfg->gpio, mode_str, escaped_name);
         }
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+        if (ret < 0 || (size_t)ret >= buffer_size - written) { g_state_truncations++; return -1; }
         written += ret;
 
         // Add voltage for ADC pins (only when we actually have a reading).
         if (cfg->mode == PIN_MODE_ADC && rv) {
             ret = snprintf(buffer + written, buffer_size - written,
                 ",\"voltage\":%.3f", rv->value);
-            if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+            if (ret < 0 || (size_t)ret >= buffer_size - written) { g_state_truncations++; return -1; }
             written += ret;
         }
 
         ret = snprintf(buffer + written, buffer_size - written, "}");
-        if (ret < 0 || (size_t)ret >= buffer_size - written) return -1;
+        if (ret < 0 || (size_t)ret >= buffer_size - written) { g_state_truncations++; return -1; }
         written += ret;
 
         first = false;

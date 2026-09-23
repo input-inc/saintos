@@ -10,7 +10,15 @@ systemd unit), not embedded in the Python server.
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    ExecuteProcess,
+    LogInfo,
+    RegisterEventHandler,
+)
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -102,7 +110,33 @@ def generate_launch_description():
              LaunchConfiguration('agent_port')],
     )
 
+    # Without this, the death of saint_server is INVISIBLE.
+    #
+    # A launch Node that exits does not end the launch. micro_ros_agent
+    # keeps running, so `ros2 launch` stays alive, so systemd still sees
+    # its main process and reports "active (running)" — while the web UI
+    # and the whole control path are gone. `Restart=on-failure` never
+    # fires because the unit never fails.
+    #
+    # That is exactly how a server that crashed on startup (an
+    # AttributeError from a half-updated payload) presented as a healthy
+    # service nobody could connect to. Tie the agent's fate to the
+    # server's: if saint_server exits, bring the launch down so systemd
+    # sees a failure, restarts per its policy, and — when the failure is
+    # permanent — reports `failed` instead of lying.
+    server_exit_is_fatal = RegisterEventHandler(
+        OnProcessExit(
+            target_action=server_node,
+            on_exit=[
+                LogInfo(msg='saint_server exited — shutting down launch '
+                            'so systemd sees the failure'),
+                EmitEvent(event=Shutdown(reason='saint_server exited')),
+            ],
+        )
+    )
+
     return LaunchDescription([
+        server_exit_is_fatal,
         config_arg,
         server_name_arg,
         web_port_arg,

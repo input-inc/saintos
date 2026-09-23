@@ -17,6 +17,16 @@
 # everything needed to OTA-update every connected target. Override with
 # the firmware / controller skip flags below.
 #
+# A firmware build that was ASKED FOR and fails is fatal. It used to warn
+# and continue, leaving whatever was already staged in place — so a
+# broken toolchain produced a tarball that exited 0 and looked complete
+# while carrying firmware weeks older than the source it was built from.
+# (That is exactly what happened when a macOS upgrade removed Rosetta and
+# took the x86_64 arm-none-eabi toolchain with it: three green builds,
+# six-week-old firmware.) Shipping stale firmware is now something you
+# have to ask for explicitly, via --skip-firmware-build (use what's
+# staged), --fetch-firmware (take CI's), or --skip-firmware (ship none).
+#
 # Options:
 #   --version VER            Override version string (default: <VERSION>-local.<sha7>)
 #   --rebundle-debs          Re-download the bundled .deb cache (slow; usually unneeded)
@@ -233,8 +243,7 @@ fi
 
 build_firmware_rp2040() {
     if [[ ! -x "firmware/rp2040/build.sh" ]]; then
-        warn "RP2040 build script missing — skipping"
-        return
+        die "RP2040 build script missing (firmware/rp2040/build.sh). Pass --skip-firmware-build to ship the already-staged firmware on purpose."
     fi
     log "Building RP2040 hardware firmware (OTA bootloader ON, incremental)"
     # Build with the OTA bootloader enabled so the dist tarball contains
@@ -252,14 +261,13 @@ build_firmware_rp2040() {
         && cmake -DSIMULATION=OFF -DSAINT_OS_OTA_BOOTLOADER=ON .. > /dev/null \
         && make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
                saint_node saint_ota_bootloader saint_node_combined ) \
-        || { warn "RP2040 firmware build failed — leaving existing staged files"; return; }
+        || die "RP2040 firmware build FAILED. The tarball would have shipped whatever is already staged, which is silently older than this source tree. Fix the build, or pass --skip-firmware-build / --fetch-firmware to choose stale-or-CI firmware deliberately."
 
     local fw_out=firmware/rp2040/build
     local fw_bl=firmware/rp2040/build/bootloader
 
     if [[ ! -f "${fw_out}/saint_node.uf2" ]]; then
-        warn "RP2040 build produced no saint_node.uf2 — staged files unchanged"
-        return
+        die "RP2040 build reported success but produced no saint_node.uf2 — refusing to stage a tarball whose RP2040 firmware is older than its source."
     fi
     mkdir -p server/resources/firmware/rp2040
     # App artifacts: .uf2 (legacy first-flash), .elf (debug), .bin (OTA fetch).
@@ -288,13 +296,11 @@ build_firmware_rp2040() {
 
 build_firmware_teensy41() {
     if [[ ! -x "firmware/teensy41/build.sh" ]]; then
-        warn "Teensy build script missing — skipping"
-        return
+        die "Teensy build script missing (firmware/teensy41/build.sh). Pass --skip-firmware-build to ship the already-staged firmware on purpose."
     fi
     log "Building Teensy 4.1 hardware firmware (best-effort; needs PlatformIO + binutils)"
     if ! ( cd firmware/teensy41 && ./build.sh hw 2>&1 ); then
-        warn "Teensy firmware build failed — leaving existing staged files (run 'brew install binutils' if missing)"
-        return
+        die "Teensy firmware build FAILED. The tarball would have shipped stale firmware. Common causes: PlatformIO toolchain missing or built for the wrong architecture (Error 126 = binary present but not executable), or binutils absent (brew install binutils). Pass --skip-firmware-build / --fetch-firmware to choose stale-or-CI firmware deliberately."
     fi
     # stage_firmware.py (a SCons post-action in platformio.ini) already copies
     # firmware.hex + saint_node.bin into server/resources/firmware/teensy41/.
@@ -303,8 +309,7 @@ build_firmware_teensy41() {
 build_firmware_raspberrypi() {
     local pkg=firmware/raspberrypi/scripts/package.sh
     if [[ ! -x "$pkg" ]]; then
-        warn "Pi package script missing — skipping"
-        return
+        die "Pi package script missing (firmware/raspberrypi/scripts/package.sh). Pass --skip-firmware-build to ship the already-staged firmware on purpose."
     fi
 
     # Refresh the per-release Pi .deb caches before packaging. bundle-debs.sh
@@ -320,7 +325,7 @@ build_firmware_raspberrypi() {
         || [[ -d "_ros2_${rel}/opt/ros/${ROS_DISTRO}/install" ]]; then
             log "Refreshing Pi .deb cache (${rel})"
             DEBIAN_RELEASE="$rel" "$debs" \
-                || warn "bundle-debs.sh ${rel} failed — package may use stale cache"
+                || die "bundle-debs.sh ${rel} FAILED. Its own comment above says why this must not be ignored: a stale _rpi_debs_${rel}/ silently ships into the bundle and the Pi service then fails at startup with a missing .so."
         fi
     done
 
@@ -344,18 +349,17 @@ build_firmware_raspberrypi() {
     if (( have_bookworm && have_trixie )); then
         log "Packaging Pi firmware (multi-target: bookworm + trixie)"
         ( cd firmware/raspberrypi/scripts && ./package.sh --multi-target ) \
-            || warn "Pi firmware multi-target package failed — leaving existing staged files"
+            || die "Pi firmware multi-target package FAILED — refusing to ship stale Pi firmware."
     elif (( have_bookworm )); then
         log "Packaging Pi firmware (bookworm only)"
         ( cd firmware/raspberrypi/scripts && ./package.sh ) \
-            || warn "Pi firmware bookworm package failed — leaving existing staged files"
+            || die "Pi firmware bookworm package FAILED — refusing to ship stale Pi firmware."
     elif (( have_trixie )); then
         log "Packaging Pi firmware (trixie only)"
         ( cd firmware/raspberrypi/scripts && ./package.sh --target-release trixie ) \
-            || warn "Pi firmware trixie package failed — leaving existing staged files"
+            || die "Pi firmware trixie package FAILED — refusing to ship stale Pi firmware."
     else
-        warn "No ROS2 install tree found for Pi (need _ros2/ or _ros2_trixie/) — skipping Pi bundle"
-        return
+        die "No ROS2 install tree found for Pi (need _ros2/ or _ros2_trixie/) — cannot build Pi firmware, and shipping the staged copy would hide that."
     fi
 
     if [[ -d firmware/raspberrypi/dist ]]; then

@@ -315,7 +315,11 @@ void maestro_update(void)
      * the emit path renders as connected=0. */
     if (g_transport->is_connected && g_transport->is_connected()) {
         uint32_t now = PLATFORM_MILLIS();
-        if (now - g_last_poll_ms >= MAESTRO_STATUS_POLL_MS) {
+        /* Skip the round-trip entirely on transports that can't take it
+         * (see supports_status_poll). Connectivity still comes from the
+         * USB layer below; only the error/moving registers go unread. */
+        if (g_transport->supports_status_poll
+            && now - g_last_poll_ms >= MAESTRO_STATUS_POLL_MS) {
             g_last_poll_ms = now;
             g_last_errors = maestro_get_errors();
             g_last_moving = maestro_get_moving_state();
@@ -1308,7 +1312,11 @@ static bool drv_load(const void* storage)
 static int maestro_state_emit_channels(char* buf, size_t cap, bool* first)
 {
     if (!g_initialized) return 0;
-    bool connected = (g_last_errors != 0xFFFFu);
+    /* With the status poll skipped, g_last_errors never leaves its
+     * sentinel, so derive connectivity from the transport instead. */
+    bool connected = (g_transport && g_transport->supports_status_poll)
+                   ? (g_last_errors != 0xFFFFu)
+                   : maestro_is_connected();
     uint16_t errs   = connected ? g_last_errors : 0u;
     uint8_t  moving = (g_last_moving == 0xFFu) ? 0u : g_last_moving;
 
