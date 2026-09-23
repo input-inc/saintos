@@ -82,6 +82,12 @@ class _Entry:
     value: Optional[float]   # last value actually sent; None = unknown
     sent_ms: float
     owner: str
+    # Last value a STREAM actually put on the wire for this channel.
+    # Deliberately separate from `value`: `value` is what the hardware
+    # holds (every writer updates it), while this is the stream's own
+    # bookkeeping. A stream must re-send when ITS value changes, not
+    # when someone else moves the channel — see should_send.
+    stream_value: Optional[float] = None
 
 
 class ChannelArbiter:
@@ -139,6 +145,7 @@ class ChannelArbiter:
             if raw_us is not None:
                 if entry is not None:
                     entry.value = None
+                    entry.stream_value = None
                 return True
 
             if value is None:
@@ -163,10 +170,30 @@ class ChannelArbiter:
             if owner == BOARD:
                 return True
 
-            if entry is None or entry.value is None:
+            if entry is None:
                 return True
 
-            if abs(value - entry.value) >= CHANGE_EPSILON:
+            # Which value does this writer measure "change" against?
+            #
+            # A SLIDER is the operator's hand, so it asks the useful
+            # question: does the hardware already hold this? That is
+            # `entry.value`, which every writer updates — it is what
+            # lets a slider command a value a board overwrote.
+            #
+            # A STREAM is unattended and re-dispatches continuously, so
+            # it must ask a different question: has MY value changed
+            # since I last sent it? Comparing a stream against
+            # `entry.value` makes it re-assert every time another owner
+            # writes the channel — and a pose board's setpoints stay in
+            # the evaluator's caches long after the activation, so every
+            # sheet evaluation re-offers them. Gated the wrong way, that
+            # stale pose value snaps the servo back on the very next
+            # tick and the State sliders become unusable.
+            reference = entry.stream_value if owner == STREAM else entry.value
+            if reference is None:
+                return True
+
+            if abs(value - reference) >= CHANGE_EPSILON:
                 return True
 
             # Unchanged stream value from here down.
@@ -198,9 +225,23 @@ class ChannelArbiter:
         now = self._clock()
         with self._lock:
             # A raw-us jog leaves the normalized value unknown (see
-            # should_send) but still marks ownership and liveness.
+            # should_send) but still marks ownership and liveness. It
+            # also moves the servo off the normalized map, so the
+            # stream's bookkeeping is void too.
             cached = None if raw_us is not None else value
-            self._entries[key] = _Entry(value=cached, sent_ms=now, owner=owner)
+            prev = self._entries.get(key)
+            if raw_us is not None:
+                stream_value = None
+            elif owner == STREAM:
+                stream_value = value
+            else:
+                # A board or slider write does not change what the
+                # stream last emitted, so its gate must survive: this is
+                # what keeps a held pose value quiet after the operator
+                # has moved the channel by hand.
+                stream_value = prev.stream_value if prev else None
+            self._entries[key] = _Entry(value=cached, sent_ms=now,
+                                        owner=owner, stream_value=stream_value)
 
     # ── invalidation ────────────────────────────────────────────────
     #

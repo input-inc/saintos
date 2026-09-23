@@ -2269,10 +2269,12 @@ class WebSocketHandler:
             # recorded was answered with {"unchanged": true} and nothing
             # was sent — a dead slider with a success response.
             #
-            # A slider is also operator authority (channel_arbiter.SLIDER):
-            # a hand on a control is never a flood risk, so it is not
-            # change-gated at all. Only the throttle below still applies,
-            # to bound drag streams.
+            # A slider writes as channel_arbiter.SLIDER, which gates on
+            # hardware truth rather than on any private bookkeeping: it
+            # sends unless the firmware verifiably already holds this
+            # value. That is what lets the operator drag back to a value
+            # a pose overwrote. The throttle below still applies, to
+            # bound drag streams.
 
             if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
                 self.log('debug', f'[Control] THROTTLED {node_id} '

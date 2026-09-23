@@ -13,7 +13,7 @@ equal:
 |---|---|---|
 | **Board** | pose board activation (`apply_pose`, `preview_setpoints`) | **Latched.** Overrides everything; force-sends every channel in the pose. |
 | **Slider** | State tab control under the operator's hand | Owns its channel while it moves. Its value stands until the next board activation. |
-| **Stream** | routing sheets — controller sticks, RC, animation player | Unattended and continuous, so rate-gated: sends only on real change. |
+| **Stream** | routing sheets — controller sticks, RC, animation player | Unattended and continuous, so rate-gated: sends only when **its own** value changes. Never re-asserts because someone else moved the channel. |
 
 A parked slider is **not** a writer. It must never block a board, and
 nothing re-asserts a board underneath a slider the operator just moved.
@@ -66,6 +66,9 @@ setpoints pushed into the evaluator, not channels that reached firmware.
 - **Honest reporting.** `set_channel_value` answers `{"unchanged":
   true}` only when the write really was redundant, and `apply_pose`
   carries `dispatched` / `suppressed` alongside `applied`.
+- **A pose sets a channel once.** After the activation the operator's
+  slider holds it, because the pose value the evaluator keeps
+  re-offering is gated as an unchanged stream write.
 
 ## Rules that did NOT change
 
@@ -79,8 +82,47 @@ setpoints pushed into the evaluator, not channels that reached firmware.
 - A suppressed write is never recorded — caching a value the firmware
   never received is how the old caches went stale.
 
-## If you are tempted to add a per-writer cache
+## Two questions, not one
 
-Don't. That is the bug. Add an owner to `channel_arbiter` instead, and
-a test in `server/test/test_channel_arbitration.py` next to the ones
-pinning the board-beats-slider cases.
+The subtlety that cost a second round of dead sliders: "has this
+changed?" is not one question, and the writers do not ask the same one.
+
+- **Board / slider — "does the hardware already hold this?"** They
+  compare against `_Entry.value`, the shared record every writer
+  updates. That is what lets a slider command a value a pose
+  overwrote, and it is the whole point of having one cache.
+- **Stream — "has *my* value changed since *I* last sent it?"** It
+  compares against `_Entry.stream_value`, which only a stream write
+  updates. A board or slider write deliberately leaves it alone.
+
+Gate a stream against the shared value and it re-asserts every time
+anyone else writes the channel. That is not hypothetical: a pose
+activation does **not** end when the fan-out returns.
+`apply_animation_frame` writes the setpoints into the evaluator's
+`_urdf_joint_values` / `_ws_input_values`, which persist, and every
+later sheet evaluation re-dispatches them down the same sinks — only
+the activation itself runs inside `dispatch_as(BOARD)`, so all the
+re-dispatches arrive as ordinary `STREAM` writes. With the wrong
+reference, each one saw "hardware holds -0.35, I want 0.40, that's a
+change" and snapped the servo back to the pose on the next tick. Every
+slider nudge was undone within milliseconds of the operator releasing
+it.
+
+The *timing* exceptions stay on the shared record on purpose:
+`idle_disengage` and the motor dead-man both count writes from anyone,
+so they measure from `_Entry.sent_ms`, not from the stream's own last
+send.
+
+## If you are tempted to add a cache
+
+One shared record of what the firmware holds — that part is not
+negotiable, and re-introducing a private "already sent that" cache per
+writer is the original bug (see the two caches above). `stream_value`
+is not that: it is not a second opinion about hardware state, it is a
+stream's record of its own output, which no one else can know.
+
+Anything new goes in `channel_arbiter` as an owner, with a test in
+`server/test/test_channel_arbitration.py` beside the board-beats-slider
+cases, and — if it touches the dispatch loop — one in
+`test_router_drive_path_semantics.py::TestPoseDoesNotStompTheOperator`,
+which drives the real evaluator.

@@ -128,6 +128,72 @@ class TestSliderAuthority:
 
 # ── invalidation: the hardware moved behind our back ────────────────
 
+class TestStreamMustNotFightTheOperator:
+    """A pose board's setpoints do not evaporate after the activation —
+    apply_animation_frame writes them into the evaluator's persistent
+    _urdf_joint_values / _ws_input_values caches, and EVERY later sheet
+    evaluation re-dispatches the same values down the same peripheral
+    sinks. Only the first pass runs under dispatch_as(BOARD); every
+    re-dispatch afterwards arrives as an ordinary STREAM write.
+
+    So a stream's change gate cannot be "does the firmware already hold
+    my value" — that answer flips the moment anyone else writes the
+    channel, and the stream then re-asserts a stale pose value on the
+    next tick. Operator-visible symptom: the State sliders go dead.
+    Nudge one and the next evaluation tick (any ROS topic message will
+    do) snaps the servo straight back to the pose.
+
+    The right question for an unattended writer is "did *my* value
+    change since *I* last sent it".
+    """
+
+    def test_held_pose_value_does_not_stomp_a_slider(self, arbiter):
+        # Pose board activates the channel.
+        assert write(arbiter, 0.40, owner=BOARD) is True
+        # The evaluator re-dispatches the same held value once the
+        # BOARD context is gone. Harmless: hardware is already there.
+        write(arbiter, 0.40, owner=STREAM)
+
+        # Operator drags the slider.
+        assert write(arbiter, -0.35, owner=SLIDER) is True
+
+        # Next sheet evaluation. The pose value is still sitting in the
+        # evaluator's cache, so the same STREAM write comes round again
+        # — and it must NOT go out, or the servo snaps back and the
+        # slider is unusable.
+        assert write(arbiter, 0.40, owner=STREAM) is False, \
+            "a stream re-asserting its unchanged value stomped the operator"
+        assert arbiter.last_value(NODE, PER, CH) == pytest.approx(-0.35)
+
+    def test_repeated_evaluation_ticks_stay_quiet(self, arbiter):
+        write(arbiter, 0.40, owner=BOARD)
+        write(arbiter, 0.40, owner=STREAM)
+        write(arbiter, -0.35, owner=SLIDER)
+        for _ in range(50):
+            assert write(arbiter, 0.40, owner=STREAM) is False
+        assert arbiter.owner_of(NODE, PER, CH) == SLIDER
+
+    def test_a_stream_that_really_changes_still_takes_over(self, arbiter):
+        """The gate is about *unchanged* values. An operator moving a
+        stick must still beat a parked slider — that is live input, not
+        a stale echo."""
+        write(arbiter, -0.35, owner=SLIDER)
+        assert write(arbiter, 0.60, owner=STREAM) is True
+
+    def test_board_reactivation_still_wins_over_a_held_stream(self, arbiter):
+        write(arbiter, 0.40, owner=STREAM)
+        write(arbiter, -0.35, owner=SLIDER)
+        assert write(arbiter, 0.40, owner=BOARD) is True
+
+    def test_slider_can_still_return_to_a_value_the_stream_holds(self, arbiter):
+        """The slider gates on shared hardware truth, not on the
+        stream's bookkeeping — dragging back to the stream's value when
+        a board has since moved the channel must go out."""
+        write(arbiter, 0.40, owner=STREAM)
+        write(arbiter, 0.80, owner=BOARD)
+        assert write(arbiter, 0.40, owner=SLIDER) is True
+
+
 class TestInvalidation:
     def test_node_reconnect_forgets_cached_state(self, arbiter):
         """A node that re-initialized micro-ROS came back at its boot/home
