@@ -69,6 +69,7 @@ def _make_stub(sm: StateManager) -> types.SimpleNamespace:
         _ensure_node_control_publisher=MagicMock(),
         _ensure_node_command_publisher=MagicMock(),
         _maybe_reconcile_adopted_unadopted=MagicMock(),
+        _observe_node_config_tag=MagicMock(),
         _ANNOUNCE_ERROR_COOLDOWN_S=SaintServerNode._ANNOUNCE_ERROR_COOLDOWN_S,
         _announce_error_last_reported={},
     )

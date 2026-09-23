@@ -347,8 +347,83 @@ static void config_subscription_callback(const void* msgin)
     saint_log_publish("info", "Config received (%zu bytes), applying…",
                       msg->data.size);
 
+
+    /* Per-channel config delta. The operator nudging one extent should
+     * not cost a full config push against a ~2048-byte wire ceiling.
+     *
+     * Guarded by the config sync tag: apply ONLY if our current tag
+     * equals the patch's "from". If it doesn't, we are not in the state
+     * the server thought we were (missed patch, reboot onto an older
+     * blob, reflash), so we ignore this and keep announcing our real
+     * tag — the server sees the mismatch and sends a full config. That
+     * makes lost, duplicated and reordered patches all self-healing
+     * with no handshake. See docs/CONFIG_SYNC.md. */
+    if (strstr(msg->data.data, "\"action\":\"patch_config\"") ||
+        strstr(msg->data.data, "\"action\": \"patch_config\"")) {
+        const char* end = msg->data.data + msg->data.size;
+        uint32_t from_tag = FLASH_CFG_TAG_UNKNOWN;
+        uint32_t to_tag   = FLASH_CFG_TAG_UNKNOWN;
+        const char* k = strstr(msg->data.data, "\"from\"");
+        if (k) { k = strchr(k, ':'); if (k) { k++; while (*k==' ') k++;
+                 from_tag = (uint32_t)strtoul(k, NULL, 10); } }
+        k = strstr(msg->data.data, "\"to\"");
+        if (k) { k = strchr(k, ':'); if (k) { k++; while (*k==' ') k++;
+                 to_tag = (uint32_t)strtoul(k, NULL, 10); } }
+
+        if (pin_config_cfg_tag() != from_tag) {
+            saint_log_publish("warn",
+                "Config patch ignored: expects tag %lu, we hold %lu — "
+                "awaiting full config",
+                (unsigned long)from_tag,
+                (unsigned long)pin_config_cfg_tag());
+            g_loop_stage = 39;
+            return;
+        }
+
+        int n = maestro_apply_config_patch(msg->data.data, end);
+        if (n < 0) {
+            saint_log_publish("warn",
+                "Config patch not addressed to any peripheral here");
+            g_loop_stage = 39;
+            return;
+        }
+        /* Only now does our state match what "to" describes. */
+        pin_config_set_cfg_tag(to_tag);
+        if (pin_config_save()) {
+            saint_log_publish("info",
+                "Config patch applied (%d channel%s), tag %lu",
+                n, n == 1 ? "" : "s", (unsigned long)to_tag);
+            g_last_config_save_ok_ms = saint_log_uptime_ms();
+        } else {
+            saint_log_publish("error", "Config patch save to flash failed");
+        }
+        g_loop_stage = 39;
+            return;
+    }
+
     if (strstr(msg->data.data, "\"action\":\"configure\"") ||
         strstr(msg->data.data, "\"action\": \"configure\"")) {
+        /* Config sync tag: the server stamps every push with one and we
+         * echo it in /announce, so it can tell whether we are holding
+         * the config it currently intends without sending the whole
+         * thing every time. Parsed BEFORE apply so it is already set
+         * when pin_config_save() writes it to flash alongside the
+         * config it describes. A push without a tag (older server)
+         * leaves us at UNKNOWN, which simply means "no opinion" and
+         * keeps the old always-push behaviour. */
+        {
+            uint32_t tag = FLASH_CFG_TAG_UNKNOWN;
+            const char* t = strstr(msg->data.data, "\"tag\"");
+            if (t) {
+                t = strchr(t, ':');
+                if (t) {
+                    t++;
+                    while (*t == ' ') t++;
+                    tag = (uint32_t)strtoul(t, NULL, 10);
+                }
+            }
+            pin_config_set_cfg_tag(tag);
+        }
         bool applied = pin_config_apply_json(msg->data.data, msg->data.size);
         if (applied) {
             Serial.printf("Pin configuration applied successfully\n");
@@ -819,6 +894,13 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"state\":\"%s\","
         "\"uptime\":%lu,"
         "\"last_config_save_ok_ms\":%lu,"
+        /* Config sync tag — what config we are actually holding. The
+         * server compares it against the tag its current config would
+         * carry and pushes only on a mismatch, instead of shipping the
+         * whole config on every sync. ~20 bytes; /announce has room
+         * (258 of a ~480-byte practical budget) but that budget is real
+         * — see the note on the peripherals map below. */
+        "\"cfg_tag\":%lu,"
         "\"peripherals\":{",
         g_node.node_id,
         chip_family,
@@ -831,7 +913,8 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         FIRMWARE_VERSION_FULL,
         node_state_to_string(g_node.state),
         g_node.uptime_ms / 1000,
-        (unsigned long)g_last_config_save_ok_ms
+        (unsigned long)g_last_config_save_ok_ms,
+        (unsigned long)pin_config_cfg_tag()
     );
 
     /* Peripheral connection status — ONLY for drivers this node

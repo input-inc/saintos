@@ -22,6 +22,22 @@ class WebSocketConfig:
     # panel. None means "no kiosk token configured" — kiosks then
     # only work when websocket.password is also None.
     kiosk_token: Optional[str] = None
+    # Minimum ms between `pin_state/<node>` broadcasts per node.
+    #
+    # This is a bandwidth knob with a latency consequence, which is why
+    # it is tunable at runtime. Each frame is a node's COMPLETE runtime
+    # state (~1.9 KB), and nodes publish `/state` at 10 Hz, so four
+    # RP2040s un-throttled push ~76 KB/s at every subscriber. When a
+    # subscriber is the Steam Deck on the Pi's own single-radio 2.4 GHz
+    # AP, that downstream traffic is airtime the controller cannot use to
+    # send setpoints — measured 2026-09-22 as control arriving in clumps
+    # with 300-460 ms gaps, i.e. visible lag and deadstick run-on. See
+    # docs/LATENCY_REDUCTION.md "Round 3".
+    #
+    # Raise it if control still feels laggy on a congested link; lower it
+    # if dashboard gauges feel steppy. Display data only — no server
+    # logic and nothing in the control path reads these broadcasts.
+    pin_state_interval_ms: int = 200
 
 
 @dataclass
@@ -132,6 +148,9 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
             config.websocket.password = ws_data.get('password')
             config.websocket.auth_timeout = ws_data.get('auth_timeout', config.websocket.auth_timeout)
             config.websocket.kiosk_token = ws_data.get('kiosk_token') or None
+            config.websocket.pin_state_interval_ms = ws_data.get(
+                'pin_state_interval_ms',
+                config.websocket.pin_state_interval_ms)
 
         # Network settings
         net_data = data.get('network', {})
@@ -252,6 +271,7 @@ def save_config(config: Optional[ServerConfig] = None) -> bool:
             'password': config.websocket.password,
             'auth_timeout': config.websocket.auth_timeout,
             'kiosk_token': config.websocket.kiosk_token,
+            'pin_state_interval_ms': config.websocket.pin_state_interval_ms,
         },
         'network': {
             'web_port': config.network.web_port,

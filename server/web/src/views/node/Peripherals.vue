@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWsStore } from '@/stores/ws'
 import { usePeripheralCatalog } from '@/stores/peripheralCatalog'
 import {
@@ -299,10 +299,15 @@ onMounted(async () => {
   await loadAll()
   ws.on('state', onStateFrame)
   await attachSyncFeed(props.nodeId)
+  await refreshRevertAvailability()
 })
 
 watch(() => props.nodeId, async (id) => {
+  clearSyncTimer()
+  syncing.value = false
+  syncError.value = ''
   await loadAll()
+  await refreshRevertAvailability()
   await attachSyncFeed(id)
 })
 
@@ -924,15 +929,80 @@ async function toggleLog (p) {
   }
 }
 
-async function sync () {
+// How long to wait for the node to confirm a sync before declaring it
+// failed. The node acknowledges by announcing the config tag it now
+// holds; the server flips sync_status to 'synced' only when that tag
+// matches. Announcements run at ~1 Hz and apply+flash-save takes a few
+// hundred ms, so 12 s is many chances to land while still being short
+// enough that an operator isn't left guessing.
+const SYNC_CONFIRM_TIMEOUT_MS = 12000
+
+const syncing    = ref(false)
+const syncError  = ref('')
+const canRevert  = ref(false)
+let syncTimer    = null
+
+async function refreshRevertAvailability () {
   try {
-    await ws.management('sync_node_peripherals', { node_id: props.nodeId })
-    syncStatus.value = 'pending'
-    loadAll()
-  } catch (e) {
-    console.warn('sync_node_peripherals failed:', e)
+    const r = await ws.management('has_synced_snapshot', { node_id: props.nodeId })
+    canRevert.value = !!r?.available
+  } catch (_) {
+    canRevert.value = false
   }
 }
+
+function clearSyncTimer () {
+  if (syncTimer) { clearTimeout(syncTimer); syncTimer = null }
+}
+
+// A sync is only complete when the NODE says so. Watching sync_status
+// rather than the request's own response is the whole point: the
+// request succeeding means a message left the server, which is exactly
+// the assumption that used to hide lost pushes.
+watch(syncStatus, (v) => {
+  if (v === 'synced' && syncing.value) {
+    syncing.value = false
+    clearSyncTimer()
+    refreshRevertAvailability()
+  }
+})
+
+async function sync () {
+  syncError.value = ''
+  syncing.value = true
+  clearSyncTimer()
+  try {
+    await ws.management('sync_node_peripherals', { node_id: props.nodeId })
+    syncTimer = setTimeout(() => {
+      if (syncing.value) {
+        syncing.value = false
+        syncError.value =
+          'The node did not confirm the configuration within ' +
+          `${SYNC_CONFIRM_TIMEOUT_MS / 1000} seconds. It is still running its ` +
+          'previous configuration — nothing was lost. This usually means the ' +
+          'node was offline or the message did not arrive.'
+      }
+    }, SYNC_CONFIRM_TIMEOUT_MS)
+    loadAll()
+  } catch (e) {
+    syncing.value = false
+    clearSyncTimer()
+    syncError.value = e?.message || String(e)
+  }
+}
+
+async function revert () {
+  try {
+    await ws.management('revert_node_peripherals', { node_id: props.nodeId })
+    syncError.value = ''
+    await loadAll()
+    await refreshRevertAvailability()
+  } catch (e) {
+    syncError.value = e?.message || String(e)
+  }
+}
+
+onBeforeUnmount(clearSyncTimer)
 
 const syncBadge = computed(() => ({
   synced:       { label: 'Synced',       cls: 'bg-emerald-500/20 text-emerald-400' },
@@ -951,8 +1021,34 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
       <h3 class="text-lg font-semibold text-fg-strong">Peripherals</h3>
       <div class="flex items-center gap-2 flex-wrap">
         <span :class="['px-2 py-1 text-xs font-medium rounded-full', syncBadge.cls]">{{ syncBadge.label }}</span>
-        <button class="btn-secondary text-sm" @click="sync"><span class="material-icons icon-sm">sync</span>Sync</button>
+        <button
+          v-if="syncStatus === 'pending' && canRevert"
+          class="btn-secondary text-sm"
+          title="Discard changes that were never synced and go back to what the node is running"
+          @click="revert"
+        ><span class="material-icons icon-sm">undo</span>Revert</button>
+        <button class="btn-secondary text-sm" :disabled="syncing" @click="sync">
+          <span class="material-icons icon-sm">sync</span>{{ syncing ? 'Syncing…' : 'Sync' }}
+        </button>
         <button class="btn-primary" @click="openAdd"><span class="material-icons icon-sm">add</span>Add peripheral</button>
+      </div>
+    </div>
+
+    <!-- Unsynced edits live only on the server: the node keeps running
+         its previous configuration until Sync is pressed. Say so, so
+         the operator isn't left guessing whether their change is live. -->
+    <div
+      v-if="syncStatus === 'pending'"
+      class="card flex items-start gap-3 border-amber-500/40 bg-amber-500/5"
+    >
+      <span class="material-icons icon-sm text-amber-300 mt-0.5">edit_note</span>
+      <div class="flex-1 min-w-0">
+        <p class="text-sm text-fg-strong font-medium">Unsynced changes</p>
+        <p class="text-xs text-fg-muted mt-0.5">
+          This node is still running its previous configuration. Press
+          <span class="font-medium">Sync</span> to apply your changes<span v-if="canRevert">, or
+          <span class="font-medium">Revert</span> to discard them</span>.
+        </p>
       </div>
     </div>
 
@@ -1544,5 +1640,34 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
       :channels="tuneChannels"
       @close="tuneModalPeripheralId = null"
     />
+
+    <!-- Sync did not complete. Deliberately NOT auto-retried: config
+         reaches a node only when the operator asks for it, so a failed
+         sync stays failed until they decide. The reassuring half of the
+         message matters — the node is still running its previous
+         config, so nothing is in a half-applied state. -->
+    <AppModal v-if="syncError" title="Sync did not complete" @close="syncError = ''">
+      <div class="space-y-4">
+        <div class="flex items-start gap-3">
+          <span class="material-icons text-amber-300 mt-0.5">sync_problem</span>
+          <p class="text-sm text-fg">{{ syncError }}</p>
+        </div>
+        <p class="text-xs text-fg-faint">
+          Your changes are still saved on the server. You can retry, or
+          revert them and go back to what the node is running.
+        </p>
+        <div class="flex justify-end gap-2">
+          <button
+            v-if="canRevert"
+            class="btn-secondary text-sm"
+            @click="syncError = ''; revert()"
+          ><span class="material-icons icon-sm">undo</span>Revert changes</button>
+          <button class="btn-secondary text-sm" @click="syncError = ''">Dismiss</button>
+          <button class="btn-primary text-sm" @click="syncError = ''; sync()">
+            <span class="material-icons icon-sm">refresh</span>Retry sync
+          </button>
+        </div>
+      </div>
+    </AppModal>
   </div>
 </template>

@@ -5,6 +5,7 @@ import { useNodesStore } from '@/stores/nodes'
 import { useWsStore } from '@/stores/ws'
 import FirmwareUpdateModal from '@/components/FirmwareUpdateModal.vue'
 import FirmwareUpdateProgress from '@/components/FirmwareUpdateProgress.vue'
+import { useFirmwareUpdatesStore } from '@/stores/firmwareUpdates'
 import NodeEditModal from '@/components/NodeEditModal.vue'
 
 const props = defineProps({
@@ -14,6 +15,7 @@ const props = defineProps({
 
 const nodes = useNodesStore()
 const ws = useWsStore()
+const firmwareUpdates = useFirmwareUpdatesStore()
 const router = useRouter()
 
 // Node actions used to live on their own Control tab. They're here now:
@@ -26,6 +28,12 @@ const message = ref('')
 const fwUpdateAvailable = computed(() =>
   !!(props.node?.firmware_update_available && props.node?.server_firmware_version)
 )
+// Same store the progress strip reads, so the version block and the
+// progress it shows can never disagree about whether this node is
+// updating.
+const updateInFlight = computed(
+  () => firmwareUpdates.isUpdating(props.nodeId))
+
 const fwTooltip = computed(() =>
   `Installed: ${props.node?.firmware_version || '—'} → Available: ${props.node?.server_firmware_version || '—'}`
 )
@@ -64,17 +72,6 @@ async function estopNode () {
     await ws.command(props.nodeId, 'estop', {})
     message.value = 'E-Stop sent'
   } catch (e) { message.value = e.message || String(e) }
-}
-
-async function updateFirmware () {
-  try {
-    await ws.management('update_firmware', { node_id: props.nodeId })
-    message.value = 'Firmware update started'
-  } catch (e) {
-    // Fall back to the force-firmware modal if the server doesn't
-    // support a one-shot "update to latest available" action.
-    firmwareModalOpen.value = true
-  }
 }
 
 async function factoryResetNode () {
@@ -120,8 +117,12 @@ async function factoryResetNode () {
           <span class="stat-label">Firmware</span>
           <div class="flex items-center gap-2">
             <span class="stat-value text-sm">{{ node?.firmware_version || '--' }}</span>
+            <!-- Hidden while an update is in flight: the progress
+                 strip directly below is the live state, and offering
+                 "Update Available" beside it invites starting a second
+                 update on a node already mid-flight. -->
             <button
-              v-if="fwUpdateAvailable"
+              v-if="fwUpdateAvailable && !updateInFlight"
               type="button"
               class="px-2 py-0.5 text-xs font-medium rounded-full bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 cursor-pointer hover:bg-cyan-500/30"
               :title="fwTooltip"
@@ -131,10 +132,19 @@ async function factoryResetNode () {
             </button>
           </div>
           <span class="text-xs text-fg-faint block">{{ node?.firmware_build ? `Built: ${node.firmware_build}` : '' }}</span>
-          <!-- OTA progress strip — renders only while an update is
-               in flight for this node. Driven by the firmwareUpdates
-               store (subscribes to update_progress/<node_id> on the
-               WS broadcast that bridges the node's ROS publication). -->
+          <!-- Firmware lives HERE and only here. The Actions card used
+               to carry a second "Update Firmware" button, so the same
+               operation appeared twice on one screen with two different
+               behaviours. Keep the version, the update affordance and
+               the progress for that update in one block — "Force
+               Firmware Update" stays in the danger zone because it is a
+               different, deliberate action (pick a build, override the
+               version check), not a duplicate of this one.
+
+               OTA progress strip — renders only while an update is in
+               flight for this node. Driven by the firmwareUpdates store
+               (subscribes to update_progress/<node_id> on the WS
+               broadcast that bridges the node's ROS publication). -->
           <FirmwareUpdateProgress :node-id="nodeId" variant="panel" />
         </div>
         <div class="stat-item">
@@ -157,15 +167,6 @@ async function factoryResetNode () {
     <div class="card">
       <h3 class="text-lg font-semibold text-fg-strong mb-4">Actions</h3>
       <div class="space-y-3">
-        <button
-          v-if="fwUpdateAvailable"
-          class="btn-primary w-full justify-center"
-          @click="updateFirmware"
-        >
-          <span class="material-icons icon-sm">system_update</span>
-          <span class="update-text">Update Firmware</span>
-          <span v-if="fwAvailableVersion" class="text-xs opacity-75 ml-1">{{ fwAvailableVersion }}</span>
-        </button>
         <button class="btn-secondary w-full justify-center" @click="restartNode">
           <span class="material-icons icon-sm">restart_alt</span>
           Restart Node

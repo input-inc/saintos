@@ -254,10 +254,35 @@ reassembly cap.
    `server/test/test_maestro_wire_size_budget.py` asserts realistic
    configurations stay under the XRCE cap. If a future field addition
    blows the budget, the test fails before the change can ship.
-3. **Runtime guard** — `get_firmware_config_json` logs a warning if
-   any push exceeds the cap, so an operator-set unusual configuration
-   surfaces immediately in the activity log instead of as an
-   unexplained firmware crash.
+3. **Shared-value hoisting** — a per-channel field that many channels
+   set to the same value is sent once at peripheral level, and only
+   channels that differ carry their own. `idle_disengage_ms` (the
+   power timeout) works this way: 24 channels repeating it cost 624
+   bytes, versus ~25 hoisted. Channels that differ emit an explicit
+   value **including `0`**, so nothing silently inherits a timeout it
+   was not given — the firmware's "each channel opts in" rule is
+   upheld by the encoder rather than by refusing to have a fallback.
+   See `peripheral_model._maestro_hoist_idle`.
+4. **Runtime guard** — `get_firmware_config_json` **refuses** to build
+   a push that exceeds the cap: it returns `None`, records why, and
+   the Sync action reports it to the operator. It previously logged a
+   warning and published anyway, which is exactly how the 2026-09-23
+   incident happened — a 2150-byte push WDOG-reset the Head Node
+   mid-apply, and because the node then announced UNADOPTED the
+   reconcile path re-pushed the same payload and reset it again.
+
+   Note the second half of that guard: a refusal must never be
+   confused with "this node has no peripherals". The reconcile path's
+   empty-configure fallback would otherwise adopt the node with
+   nothing on it and erase the operator's config from the one place it
+   was still intact. See `test_auto_reconcile.py::
+   TestOversizedConfigIsNotPushed`.
+
+Hoisting bought real headroom (the Head Node's fully-mapped 24-channel
+config went 2150 → 1584 bytes), but it only helps fields that channels
+*share*. An operator who genuinely gives all 24 channels distinct
+envelopes AND distinct timeouts will still exceed the cap, and will now
+get a refusal with an explanation instead of a crash.
 
 If a real workflow ever legitimately needs payloads above 2 KB
 (e.g., per-channel EEPROM readback echo, task #10), the right answer

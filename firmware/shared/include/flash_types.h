@@ -387,9 +387,59 @@ typedef struct __attribute__((packed)) {
 
     flash_uart_pins_t uart_pins;
 
+    /* reserved[0..3] now carry the config sync tag — see
+     * flash_cfg_tag_get/set below. Deliberately carved out of the
+     * existing reserved block rather than added as a new field: that
+     * keeps sizeof(flash_storage_data_t) and every field offset
+     * byte-identical, so no FLASH_STORAGE_VERSION bump is needed.
+     * Growing this struct is what shifted every peripheral config and
+     * bricked both Track Drive nodes on 2026-09-23. */
     uint8_t reserved[16];
 
 } flash_storage_data_t;
+
+// =============================================================================
+// Config sync tag
+// =============================================================================
+//
+// The server stamps every config push with a tag (a CRC32 over the
+// payload it built). The node stores whatever tag it was given
+// alongside the config and reports it in /announce; the server compares
+// that against the tag its CURRENT config would carry and pushes only
+// when they differ.
+//
+// Why a server-assigned tag rather than a hash the node computes: the
+// node would need a canonical serializer in C matching the server's
+// Python byte-for-byte, and a canonicalization mismatch would cause a
+// permanent resync loop. The tag proves the node received and applied
+// the config the server currently intends, which covers every
+// divergence we have actually hit — reboot onto a stale flash blob, a
+// wipe, a reflash, a dropped message.
+//
+// A blob written before this shipped has reserved[] zeroed, so it reads
+// tag 0 = "unknown", and the server pushes once to establish the tag.
+
+#define FLASH_CFG_TAG_UNKNOWN 0u
+
+static inline uint32_t flash_cfg_tag_get(const flash_storage_data_t* d)
+{
+    if (!d) return FLASH_CFG_TAG_UNKNOWN;
+    /* Byte-wise so the value survives regardless of the struct's
+     * packing and the platform's alignment rules. */
+    return (uint32_t)d->reserved[0]
+         | ((uint32_t)d->reserved[1] << 8)
+         | ((uint32_t)d->reserved[2] << 16)
+         | ((uint32_t)d->reserved[3] << 24);
+}
+
+static inline void flash_cfg_tag_set(flash_storage_data_t* d, uint32_t tag)
+{
+    if (!d) return;
+    d->reserved[0] = (uint8_t)(tag & 0xFF);
+    d->reserved[1] = (uint8_t)((tag >> 8) & 0xFF);
+    d->reserved[2] = (uint8_t)((tag >> 16) & 0xFF);
+    d->reserved[3] = (uint8_t)((tag >> 24) & 0xFF);
+}
 
 // =============================================================================
 // Function Declarations

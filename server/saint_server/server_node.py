@@ -170,6 +170,25 @@ class SaintServerNode(Node):
     def __init__(self):
         super().__init__('saint_server')
 
+        # Per-node pin_state broadcast throttle buckets, and the window
+        # they use. Tunable at runtime because it trades dashboard
+        # smoothness against the downstream airtime the controller needs
+        # for its setpoints — see _broadcast_pin_state.
+        self._pin_state_last_emit: Dict[str, float] = {}
+        self._pin_state_pending: Dict[str, bool] = {}
+        self._pin_state_interval_s = self._PIN_STATE_INTERVAL_S
+        try:
+            from saint_server.config import get_config
+            ms = int(get_config().websocket.pin_state_interval_ms)
+            # 0 disables the throttle (the pre-2026-09 behaviour); clamp
+            # the upper end so a typo can't freeze the dashboard.
+            if 0 <= ms <= 5000:
+                self._pin_state_interval_s = ms / 1000.0
+        except Exception:
+            # Config not readable yet — the default stands. Logging isn't
+            # configured at this point in __init__, so stay quiet.
+            pass
+
         # Declare parameters
         self.declare_parameter('server_name', 'SAINT-01')
         self.declare_parameter('web_port', 80)
@@ -572,6 +591,26 @@ class SaintServerNode(Node):
                 self._maybe_reconcile_adopted_unadopted(
                     announced_node_id, announced_state)
 
+                # Config sync tag reconcile. The node reports which
+                # config it is actually holding; if that disagrees with
+                # what we intend, re-push. This is the general case of
+                # the UNADOPTED check above — it also catches a node
+                # that is happily ACTIVE while holding a stale config,
+                # which nothing previously detected.
+                # Stash what the node says it holds. Any push path can
+                # then ask "where is this node?" without re-parsing an
+                # announcement it didn't see.
+                if isinstance(parsed, dict) and "cfg_tag" in parsed:
+                    _n = self.state_manager.state.adopted_nodes.get(
+                        announced_node_id)
+                    if _n is not None:
+                        try:
+                            _n.reported_cfg_tag = int(parsed.get("cfg_tag") or 0)
+                        except (TypeError, ValueError):
+                            pass
+
+                self._observe_node_config_tag(announced_node_id, parsed)
+
                 # /announce-borne sync ACK. The firmware bumps
                 # last_config_save_{ok,fail}_ms inside its config
                 # callback after pin_config_save() returns. Edge-trigger
@@ -707,14 +746,58 @@ class SaintServerNode(Node):
         if now - node.last_reconcile_push_at < self._RECONCILE_COOLDOWN_S:
             return
 
+        # Prefer what this node was LAST RUNNING over what the
+        # dashboard currently holds. This path exists to restore a node
+        # that lost its config, not to promote unsynced edits to live
+        # hardware — config goes live on an explicit Sync and nowhere
+        # else. Falls back to the current config when we have no record
+        # (server restarted since the last push), because leaving a
+        # blank node dead is worse.
+        config_json = self.state_manager.last_pushed_config(node_id)
+        if config_json:
+            node.last_reconcile_push_at = now
+            self.send_config_to_node(node_id, config_json)
+            self.state_manager.log_node_event(
+                node_id,
+                "Adopted node announced UNADOPTED — restoring the config "
+                "it was last running (unsynced edits are not included)",
+                "warn",
+            )
+            return
+
         config_json = self.state_manager.get_firmware_config_json(node_id)
         if not config_json:
-            # Adopted but no non-builtin peripherals yet. Send an empty
-            # peripherals array — RP2040's pin_config_apply_json accepts
-            # `{"peripherals":[]}` (apply_peripherals_json walks an empty
-            # array without error and returns true → ACTIVE transition).
-            # Teensy main.cpp:176-186 treats any configure as adoption,
-            # so the same payload works there too.
+            # None has two meanings, and they need opposite responses.
+            #
+            # "Nothing configured yet" → send an empty peripherals array
+            # so the node transitions out of UNADOPTED (RP2040's
+            # apply_peripherals_json walks an empty array and returns
+            # true; Teensy main.cpp:176-186 treats any configure as
+            # adoption).
+            #
+            # "We refused to build it" (over the XRCE reassembly cap) →
+            # send NOTHING. A node with real peripherals that just
+            # announced UNADOPTED is very likely the node this oversized
+            # config already crashed; answering it with an empty
+            # configure would adopt it with no peripherals at all,
+            # silently erasing the operator's config from the one place
+            # it still works. Leave it UNADOPTED and visible.
+            has_peripherals = any(
+                not p.builtin
+                for p in ((node.peripheral_config.peripherals
+                           if node.peripheral_config else []) or [])
+            )
+            if has_peripherals:
+                self.state_manager.log_node_event(
+                    node_id,
+                    "Node announced UNADOPTED but its config cannot be "
+                    "sent (over the size limit) — not pushing an empty "
+                    "config over it. Reduce per-channel overrides and "
+                    "sync again.",
+                    "error",
+                )
+                node.last_reconcile_push_at = now
+                return
             config_json = '{"action":"configure","version":0,"peripherals":[]}'
 
         node.last_reconcile_push_at = now
@@ -724,6 +807,35 @@ class SaintServerNode(Node):
             "Adopted node announced UNADOPTED — re-pushing peripheral config",
             "warn",
         )
+
+    def _observe_node_config_tag(self, node_id: str,
+                                 parsed: Dict[str, Any]) -> None:
+        """Note which config a node reports holding. Never pushes.
+
+        Config reaches a node during an explicit Sync and at no other
+        time. An operator has to be able to change their mind: edit a
+        channel, look at it, decide against it and revert, without the
+        server having quietly shipped the intermediate state to the
+        hardware on the next announcement.
+
+        This earlier version DID push on a mismatch, which made every
+        dashboard edit go live within a second and removed any way to
+        stage or discard a change. What the tag is for is making
+        `sync_status` truthful — the dashboard can now say "this node is
+        not running what you are looking at" instead of the server
+        assuming a push it published actually landed.
+
+        Absent tag (firmware predating the field) means "no opinion":
+        leave the status alone rather than claiming it is out of sync.
+        """
+        if not isinstance(parsed, dict) or "cfg_tag" not in parsed:
+            return
+        try:
+            node_tag = int(parsed.get("cfg_tag") or 0)
+        except (TypeError, ValueError):
+            return
+        if self.state_manager.observe_node_config_tag(node_id, node_tag):
+            self._broadcast_sync_status(node_id)
 
     def _periodic_update(self):
         """Periodic update - check timeouts, publish status."""
@@ -865,8 +977,30 @@ class SaintServerNode(Node):
 
         pub.publish(msg)
         self.get_logger().info(f'Sent config to node {node_id}')
+        is_patch = '"action":"patch_config"' in config_json
         self.state_manager.log_node_event(
-            node_id, "Pushed peripheral config (Sync to Node)", "info")
+            node_id,
+            "Pushed config patch" if is_patch
+            else "Pushed peripheral config (Sync to Node)",
+            "info")
+        if not is_patch:
+            # Only a FULL push establishes a known base to diff against.
+            # A patch is expressed relative to that base and doesn't
+            # replace it — recording one here would make the next delta
+            # diff against a fragment.
+            self.state_manager.record_config_push(node_id, config_json)
+
+        # Any push — operator Sync included — arms the reconcile cooldown.
+        # Without this, an explicit Sync and the announce-driven
+        # reconcile both fire inside the same second: the node applies
+        # the first, then refuses the second because it was built
+        # against the tag the node reported a moment earlier. Harmless
+        # (that refusal is the guard working) but it logs a warning for
+        # something the operator did correctly, and it wastes a frame.
+        _node = self.state_manager.state.adopted_nodes.get(node_id)
+        if _node is not None:
+            import time as _t
+            _node.last_reconcile_push_at = _t.time()
 
         # Mark as syncing (not yet confirmed)
         # The node will publish capabilities after applying config
@@ -1429,19 +1563,94 @@ class SaintServerNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error processing state from {node_id}: {e}')
 
+    # Default pin_state throttle window, overridden per instance from
+    # websocket.pin_state_interval_ms. See _broadcast_pin_state for why
+    # this exists. The per-node buckets live in __init__ — a class-level
+    # dict would be MUTATED in place and so shared by every instance (the
+    # _routing_* fields below get away with class-level defaults only
+    # because they are rebound, never mutated).
+    _PIN_STATE_INTERVAL_S = 0.2
+
     def _broadcast_pin_state(self, node_id: str):
-        """Broadcast pin state update to WebSocket clients."""
-        if self.web_server and self.web_server.ws_handler:
-            if self._async_loop:
-                state = self.state_manager.get_runtime_state(node_id)
-                if state:
-                    topic = f'pin_state/{node_id}'
-                    state_copy = state
-                    self._async_loop.call_soon_threadsafe(
-                        lambda s=state_copy, t=topic: asyncio.create_task(
-                            self.web_server.ws_handler.broadcast_state(t, s)
-                        )
-                    )
+        """Broadcast a node's runtime state to subscribed WS clients.
+
+        Coalesced per node, leading edge + trailing edge, at
+        _PIN_STATE_INTERVAL_S. This used to fire on every `/state`
+        message a node published, unthrottled.
+
+        Why that mattered (measured 2026-09-22, opensaint.local):
+        RP2040 nodes publish `/state` at 10 Hz, and every publish sent
+        the node's COMPLETE runtime state — every pin and every channel,
+        ~1.9 KB of JSON — to each subscriber. Four RP2040 nodes = ~40
+        full-state frames/s = a steady **76 KB/s pushed at the Steam
+        Deck**, against ~6 KB/s of control coming back the other way.
+
+        The Deck is a station on the Pi's own 2.4 GHz AP (wlan0, ch 9,
+        20 MHz, single radio). That radio is strictly half-duplex: every
+        frame the Pi transmits downstream is airtime the Deck cannot use
+        to send the next joystick setpoint. The result was a control
+        stream arriving in clumps — set_input inter-arrival p50 3 ms but
+        p99 324 ms, max 463 ms, with the server provably idle inside
+        those gaps (so the delay was in the air, not in our loop). That
+        is the "messages are queued up" the operator feels: during a
+        stick circle the tracks execute a stale rotation, and on
+        deadstick the release-zero is stuck in the same clump.
+
+        Nothing about server state or the control path depends on this
+        cadence — `update_pin_actual` has already run and the routing
+        evaluator reads the state manager directly. This throttles only
+        what goes on the wire to display clients.
+
+        The trailing edge is load-bearing: the last frame of any burst
+        must land, or a gauge sticks on an intermediate value forever.
+        """
+        if not (self.web_server and self.web_server.ws_handler
+                and self._async_loop):
+            return
+
+        import time as _time
+        now = _time.monotonic()
+        elapsed = now - self._pin_state_last_emit.get(node_id, 0.0)
+        if elapsed >= self._pin_state_interval_s:
+            # Leading edge: send now, and drop any scheduled trail so
+            # the same state isn't sent twice.
+            self._pin_state_last_emit[node_id] = now
+            self._pin_state_pending[node_id] = False
+            self._emit_pin_state(node_id)
+            return
+
+        # Inside the window. The freshest state is always read at flush
+        # time from the state manager, so there is no snapshot to stash
+        # — just make sure exactly one trailing fire is scheduled.
+        if self._pin_state_pending.get(node_id):
+            return
+        self._pin_state_pending[node_id] = True
+        delay = max(0.0, self._pin_state_interval_s - elapsed)
+        self._async_loop.call_soon_threadsafe(
+            lambda n=node_id, d=delay: self._async_loop.call_later(
+                d, self._flush_pin_state, n)
+        )
+
+    def _flush_pin_state(self, node_id: str):
+        """Trailing-edge fire for a node's coalesced pin_state."""
+        self._pin_state_pending[node_id] = False
+        if not self._async_loop:
+            return
+        import time as _time
+        self._pin_state_last_emit[node_id] = _time.monotonic()
+        self._emit_pin_state(node_id)
+
+    def _emit_pin_state(self, node_id: str):
+        """Read the node's current runtime state and broadcast it."""
+        state = self.state_manager.get_runtime_state(node_id)
+        if not state:
+            return
+        topic = f'pin_state/{node_id}'
+        self._async_loop.call_soon_threadsafe(
+            lambda s=state, t=topic: asyncio.create_task(
+                self.web_server.ws_handler.broadcast_state(t, s)
+            )
+        )
 
     def send_control_command(self, node_id: str, gpio: int, value: float):
         """Send pin control command to a node via ROS2."""
@@ -1500,6 +1709,9 @@ class SaintServerNode(Node):
             if self._host_peripheral_manager is not None:
                 self._host_peripheral_manager.handle_channel(
                     peripheral_id, channel_id, float(value))
+            if raw_us is None:
+                self.state_manager.record_commanded_channel(
+                    node_id, peripheral_id, channel_id, value)
             return True
 
         # Arbitration gate. Human-owned writes (board activation, a
@@ -1541,6 +1753,16 @@ class SaintServerNode(Node):
         # whole path exists to kill.
         self.channel_arbiter.record(node_id, peripheral_id, channel_id,
                                     value, owner=owner, raw_us=raw_us)
+        # Feed the State tab. Its sliders render from pin_state/<node_id>,
+        # which is built from runtime state — and actuator channels like a
+        # Maestro's 24 servos never report a position back, so without this
+        # the slider has no value to sit at. A raw-us jog is deliberately
+        # excluded: `value` is ignored firmware-side when `us` is present,
+        # so recording it would put a number on the slider that does not
+        # describe where the servo is.
+        if raw_us is None:
+            self.state_manager.record_commanded_channel(
+                node_id, peripheral_id, channel_id, value)
         self.get_logger().debug(
             f'Sent channel control to {node_id}: '
             f'{peripheral_type}/{peripheral_id}/{channel_id} = {value} '
@@ -2259,13 +2481,18 @@ class SaintServerNode(Node):
                 self.web_server.ws_handler.set_send_control_callback(
                     lambda node_id, gpio, value: self.send_control_command(node_id, gpio, value)
                 )
+                # Bound method, NOT a lambda that restates the
+                # signature. The lambda here used to list its own
+                # parameters, so when send_channel_command gained
+                # `owner` (channel arbitration) the wrapper silently
+                # stopped matching: every State-tab slider write raised
+                # "unexpected keyword argument 'owner'" inside the
+                # handler's try/except and the sliders did nothing at
+                # all, while the routing path — which calls the method
+                # directly — kept working. Passing the method through
+                # means a signature change can never desync again.
                 self.web_server.ws_handler.set_send_channel_callback(
-                    lambda node_id, peripheral_id, channel_id, value, peripheral_type, raw_us=None:
-                        self.send_channel_command(node_id, peripheral_id,
-                                                  channel_id, value,
-                                                  peripheral_type,
-                                                  raw_us=raw_us)
-                )
+                    self.send_channel_command)
                 self.web_server.ws_handler.set_send_peripheral_command_callback(
                     lambda node_id, peripheral_id, command, args:
                         self.send_peripheral_command(node_id, peripheral_id,

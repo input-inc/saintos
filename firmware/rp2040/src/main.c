@@ -327,7 +327,101 @@ static unsigned g_announce_count = 0;
  * /announce tells us whether the executor is delivering messages,
  * which is independent of the /log writer's health. */
 static volatile uint32_t g_config_recv_count = 0;
+/* Times the control drain hit a bound with work still queued. Non-zero
+ * means the node is still not keeping up and the loop period needs
+ * attention. Declared here so the loop profiler below can report it. */
+static volatile uint32_t g_control_drain_truncated = 0;
 static volatile uint32_t g_control_recv_count = 0;
+
+/* ── Main-loop profiler ───────────────────────────────────────────────
+ * The loop is designed to run at roughly 2-12 ms. Measured 2026-09-23 it
+ * was taking ~157 ms, which capped /control consumption at ~6.4/s and
+ * let the agent's XRCE queue build a multi-second backlog during a stick
+ * rotation. Draining the executor (below) bounds the CONSEQUENCE; this
+ * measures the CAUSE so the 157 ms can be attributed rather than guessed
+ * at.
+ *
+ * Costs nothing when idle: four uint32 adds and a compare per phase, and
+ * one log line every LOOP_PROFILE_INTERVAL_MS. Left in permanently —
+ * this is exactly the signal that was missing when the backlog was being
+ * chased from the server side. */
+#define LOOP_PROFILE_INTERVAL_MS 5000
+
+typedef enum {
+    LOOP_PHASE_PERIPHERALS = 0,  /* peripheral_update_all: blocking UART */
+    LOOP_PHASE_TRANSPORT,        /* W5500 / DHCP tick                    */
+    LOOP_PHASE_EXECUTOR,         /* spin_some drain: inbound + callbacks */
+    LOOP_PHASE_LOGDRAIN,         /* saint_log_drain_pending: XRCE out    */
+    LOOP_PHASE_COUNT
+} loop_phase_t;
+
+static const char* const LOOP_PHASE_NAMES[LOOP_PHASE_COUNT] = {
+    "periph", "net", "exec", "log"
+};
+
+static uint32_t loop_phase_total_ms[LOOP_PHASE_COUNT];
+static uint32_t loop_phase_max_ms[LOOP_PHASE_COUNT];
+static uint32_t loop_iterations;
+static uint32_t loop_total_ms;
+static uint32_t loop_max_ms;
+static uint32_t loop_profile_last_ms;
+
+static inline void loop_phase_account(loop_phase_t phase, uint32_t started)
+{
+    uint32_t dt = to_ms_since_boot(get_absolute_time()) - started;
+    loop_phase_total_ms[phase] += dt;
+    if (dt > loop_phase_max_ms[phase]) loop_phase_max_ms[phase] = dt;
+}
+
+/* Emit one line per interval: mean and worst-case for the loop and for
+ * each phase, so a single blocking call is attributable at a glance. */
+static void loop_profile_maybe_dump(uint32_t now)
+{
+    if (loop_profile_last_ms == 0) { loop_profile_last_ms = now; return; }
+    if (now - loop_profile_last_ms < LOOP_PROFILE_INTERVAL_MS) return;
+
+    uint32_t window = now - loop_profile_last_ms;
+    loop_profile_last_ms = now;
+
+    if (loop_iterations == 0) return;
+
+    char buf[176];
+    int n = snprintf(buf, sizeof(buf),
+        "loop %lu Hz (%lu it/%lu ms) avg %lu.%lu ms max %lu ms |",
+        (unsigned long)(loop_iterations * 1000UL / (window ? window : 1)),
+        (unsigned long)loop_iterations, (unsigned long)window,
+        (unsigned long)(loop_total_ms / loop_iterations),
+        (unsigned long)((loop_total_ms * 10UL / loop_iterations) % 10),
+        (unsigned long)loop_max_ms);
+    for (int i = 0; i < LOOP_PHASE_COUNT && n < (int)sizeof(buf) - 24; i++) {
+        n += snprintf(buf + n, sizeof(buf) - n, " %s %lu/%lu",
+                      LOOP_PHASE_NAMES[i],
+                      (unsigned long)(loop_phase_total_ms[i] / loop_iterations),
+                      (unsigned long)loop_phase_max_ms[i]);
+    }
+    saint_log_publish("info",
+        "%s | ctrl rx=%lu drain_trunc=%lu  (avg/max ms per phase)",
+        buf, (unsigned long)g_control_recv_count,
+        (unsigned long)g_control_drain_truncated);
+
+    loop_iterations = 0;
+    loop_total_ms = 0;
+    loop_max_ms = 0;
+    for (int i = 0; i < LOOP_PHASE_COUNT; i++) {
+        loop_phase_total_ms[i] = 0;
+        loop_phase_max_ms[i] = 0;
+    }
+}
+
+/* Executor drain bounds — see the drain block in the main loop.
+ * MAX_PASSES caps how many messages one iteration may consume; BUDGET_MS
+ * caps the wall time it may spend doing so. Whichever trips first, the
+ * remainder waits for the next iteration. 16 passes covers a full
+ * ~300 ms backlog at the 50/s streaming rate without letting a hostile
+ * or runaway publisher hold the loop. */
+#define CONTROL_DRAIN_MAX_PASSES  16
+#define CONTROL_DRAIN_BUDGET_MS   20
+
 static volatile uint32_t g_command_recv_count = 0;
 
 /* Sync-ACK signal published via /announce — uptime_ms of the last
@@ -449,10 +543,79 @@ static void config_subscription_callback(const void* msgin)
            msg->data.data);
 
     // Check for configure action
+
+    /* Per-channel config delta. The operator nudging one extent should
+     * not cost a full config push against a ~2048-byte wire ceiling.
+     *
+     * Guarded by the config sync tag: apply ONLY if our current tag
+     * equals the patch's "from". If it doesn't, we are not in the state
+     * the server thought we were (missed patch, reboot onto an older
+     * blob, reflash), so we ignore this and keep announcing our real
+     * tag — the server sees the mismatch and sends a full config. That
+     * makes lost, duplicated and reordered patches all self-healing
+     * with no handshake. See docs/CONFIG_SYNC.md. */
+    if (strstr(msg->data.data, "\"action\":\"patch_config\"") ||
+        strstr(msg->data.data, "\"action\": \"patch_config\"")) {
+        const char* end = msg->data.data + msg->data.size;
+        uint32_t from_tag = FLASH_CFG_TAG_UNKNOWN;
+        uint32_t to_tag   = FLASH_CFG_TAG_UNKNOWN;
+        const char* k = strstr(msg->data.data, "\"from\"");
+        if (k) { k = strchr(k, ':'); if (k) { k++; while (*k==' ') k++;
+                 from_tag = (uint32_t)strtoul(k, NULL, 10); } }
+        k = strstr(msg->data.data, "\"to\"");
+        if (k) { k = strchr(k, ':'); if (k) { k++; while (*k==' ') k++;
+                 to_tag = (uint32_t)strtoul(k, NULL, 10); } }
+
+        if (pin_config_cfg_tag() != from_tag) {
+            saint_log_publish("warn",
+                "Config patch ignored: expects tag %lu, we hold %lu — "
+                "awaiting full config",
+                (unsigned long)from_tag,
+                (unsigned long)pin_config_cfg_tag());
+            return;
+        }
+
+        int n = maestro_apply_config_patch(msg->data.data, end);
+        if (n < 0) {
+            saint_log_publish("warn",
+                "Config patch not addressed to any peripheral here");
+            return;
+        }
+        /* Only now does our state match what "to" describes. */
+        pin_config_set_cfg_tag(to_tag);
+        if (pin_config_save()) {
+            saint_log_publish("info",
+                "Config patch applied (%d channel%s), tag %lu",
+                n, n == 1 ? "" : "s", (unsigned long)to_tag);
+            g_last_config_save_ok_ms = saint_log_uptime_ms();
+        } else {
+            saint_log_publish("error", "Config patch save to flash failed");
+        }
+        return;
+    }
+
     if (strstr(msg->data.data, "\"action\":\"configure\"") ||
         strstr(msg->data.data, "\"action\": \"configure\"")) {
         saint_log_publish("info", "Config received (%zu bytes), applying…",
                           msg->data.size);
+
+        /* Config sync tag — see pin_types.h. Parsed before apply so it
+         * is already set when pin_config_save() writes it to flash
+         * beside the config it describes. Absent (older server) leaves
+         * it UNKNOWN, which keeps the previous always-push behaviour. */
+        {
+            uint32_t tag = FLASH_CFG_TAG_UNKNOWN;
+            const char* t = strstr(msg->data.data, "\"tag\"");
+            if (t) {
+                t = strchr(t, ':');
+                if (t) {
+                    t++;
+                    while (*t == ' ') t++;
+                    tag = (uint32_t)strtoul(t, NULL, 10);
+                }
+            }
+            pin_config_set_cfg_tag(tag);
+        }
 
         if (pin_config_apply_json(msg->data.data, msg->data.size)) {
             saint_log_publish("info", "Config applied OK");
@@ -973,6 +1136,10 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         "\"uptime\":%lu,"
         "\"cpu_temp\":%.1f,"
         "\"last_config_save_ok_ms\":%lu,"
+        /* What config this node is actually holding — the
+         * server pushes only when it differs from the tag its
+         * current config would carry. */
+        "\"cfg_tag\":%lu,"
         "\"last_config_save_fail_ms\":%lu,"
         "\"peripherals\":{",
         g_node.node_id,
@@ -991,6 +1158,7 @@ static void announce_timer_callback(rcl_timer_t* timer, int64_t last_call_time)
         g_node.uptime_ms / 1000,
         cpu_temp,
         (unsigned long)g_last_config_save_ok_ms,
+        (unsigned long)pin_config_cfg_tag(),
         (unsigned long)g_last_config_save_fail_ms
     );
 
@@ -1875,14 +2043,18 @@ int main(void)
         led_update();
 
         // Poll peripheral drivers
+        uint32_t phase_start = to_ms_since_boot(get_absolute_time());
         peripheral_update_all();
+        loop_phase_account(LOOP_PHASE_PERIPHERALS, phase_start);
 
         // Pump DHCP — lease half-time renewal lives here. Without this
         // the W5500 ioLibrary never advances dhcp_tick_1s and never
         // notices when the lease is half over. SIMULATION builds use
         // the UDP bridge transport instead, which doesn't need ticking.
 #ifndef SIMULATION
+        phase_start = to_ms_since_boot(get_absolute_time());
         transport_w5500_tick();
+        loop_phase_account(LOOP_PHASE_TRANSPORT, phase_start);
 #endif
 
         // Check agent connection (and ERROR-state recovery).
@@ -1893,8 +2065,69 @@ int main(void)
             continue;
         }
 
-        // Spin micro-ROS executor (process timers and callbacks)
-        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+        // Spin micro-ROS executor (process timers and callbacks).
+        //
+        // Drained to empty, not spun once. rclc takes ONE message per
+        // subscription per spin_some(), so a single spin per loop
+        // iteration caps /control consumption at the loop rate. When the
+        // server streams faster than that (a rotating stick produces a
+        // fresh value on BOTH axes every tick, ~50/s, and nothing in the
+        // change-gate suppresses it), the shortfall accumulates in the
+        // agent's XRCE stream queue — which depth-1 QoS does NOT protect,
+        // because that QoS governs the agent's DDS subscriber and the
+        // agent keeps up with DDS just fine. The backlog is one hop
+        // further downstream, between agent and node.
+        //
+        // Measured on 2026-09-23 before this change: control takes were
+        // 157 ms apart while a backlog existed (= the loop period), so
+        // the node consumed ~6.4 setpoints/s against ~50/s produced. The
+        // publish→apply delay grew monotonically through the gesture —
+        // 20 ms at the start, 3555 ms by the end — and after the operator
+        // released the stick the robot re-executed the whole stale
+        // rotation for 3.5 s. See docs/LATENCY_REDUCTION.md "Round 4".
+        //
+        // Draining makes the queue self-limiting: whatever arrived is
+        // consumed in the iteration it arrived in, so run-on is bounded
+        // by one loop period instead of by however long the operator
+        // kept moving. Per-channel latest-wins still falls out naturally
+        // — same-channel writes are applied in order and the last one
+        // issued in this drain is the one the actuator holds — while
+        // OTHER channels on the same topic (a Maestro node carries
+        // ch0..ch10 on /control) are still each applied, which a
+        // "keep only the newest message" shortcut would have dropped.
+        //
+        // Bounded on both count and time so a fast publisher can never
+        // starve the watchdog pet, the dead-man check, or peripheral
+        // updates. Hitting either bound just defers the remainder to the
+        // next iteration — the old behaviour, no worse.
+        {
+            phase_start = to_ms_since_boot(get_absolute_time());
+            uint32_t drain_start = phase_start;
+            for (uint8_t pass = 0; pass < CONTROL_DRAIN_MAX_PASSES; pass++) {
+                uint32_t before = g_control_recv_count + g_command_recv_count;
+                /* Only the FIRST pass may wait. spin_some() blocks in
+                 * rcl_wait for its full timeout when there is no work, so
+                 * re-probing with 10 ms would add a 10 ms stall to every
+                 * iteration that received anything — making the loop
+                 * slower and the backlog worse, the exact opposite of
+                 * this fix. Follow-up passes poll with a zero timeout:
+                 * they either find queued work immediately or fall
+                 * through to the break below. */
+                rclc_executor_spin_some(
+                    &executor, pass == 0 ? RCL_MS_TO_NS(10) : 0);
+                /* Nothing taken — the queue is empty, stop early. This is
+                 * the common case: one spin, no extra cost. */
+                if ((g_control_recv_count + g_command_recv_count) == before) {
+                    break;
+                }
+                if (to_ms_since_boot(get_absolute_time()) - drain_start
+                        >= CONTROL_DRAIN_BUDGET_MS) {
+                    g_control_drain_truncated++;
+                    break;
+                }
+            }
+            loop_phase_account(LOOP_PHASE_EXECUTOR, phase_start);
+        }
 
         // Drain queued /log lines one per iteration. saint_log_publish
         // enqueues from any context (subscription/timer callbacks
@@ -1904,9 +2137,11 @@ int main(void)
         // Gated on ≥2 announces because the server creates per-node
         // /log subscribers lazily on first /announce — draining
         // sooner just leaks bytes into the void.
+        phase_start = to_ms_since_boot(get_absolute_time());
         if (g_announce_count >= 2) {
             saint_log_drain_pending();
         }
+        loop_phase_account(LOOP_PHASE_LOGDRAIN, phase_start);
 
         // Periodic status print (every 10 seconds)
         if (now - last_status_print >= 10000) {
@@ -1914,6 +2149,17 @@ int main(void)
                    now / 1000, node_state_to_string(g_node.state),
                    agent_connected ? "connected" : "disconnected");
             last_status_print = now;
+        }
+
+        // Whole-iteration accounting. Measured BEFORE the sleep so the
+        // number reflects work done, not the deliberate pacing delay;
+        // the sleep is a known constant and would only mask regressions.
+        {
+            uint32_t iter_ms = to_ms_since_boot(get_absolute_time()) - now;
+            loop_iterations++;
+            loop_total_ms += iter_ms;
+            if (iter_ms > loop_max_ms) loop_max_ms = iter_ms;
+            loop_profile_maybe_dump(now);
         }
 
         // Small delay between spins. This is the loop's blind window —

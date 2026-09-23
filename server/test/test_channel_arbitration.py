@@ -264,13 +264,32 @@ class TestIdleDisengageExpiry:
     after that window. A repeat of the value it already holds must then
     be allowed through to re-engage it, or the servo stays released."""
 
-    def test_repeat_passes_once_the_channel_has_disengaged(self, clock):
+    def test_an_operator_repeat_passes_once_the_channel_has_disengaged(
+            self, clock):
+        """The exemption is for a deliberate act — a slider re-touched, a
+        pose re-applied — where the person expects the servo to take hold
+        again."""
+        arb = ChannelArbiter(idle_disengage_lookup=lambda n, p, c: 1000,
+                             clock=clock)
+        assert write(arb, 0.5, owner=SLIDER) is True
+        assert write(arb, 0.5, owner=SLIDER) is False
+        clock.advance(1001)
+        assert write(arb, 0.5, owner=SLIDER) is True
+
+    def test_a_stream_does_not_get_the_idle_disengage_exemption(self, clock):
+        """An unattended stream must NOT re-engage on the idle window.
+
+        A routing sheet parked on a stale value would otherwise re-assert
+        once per idle window and undo every slider move on a channel with
+        idle_disengage set, within a second. See the `owner != STREAM`
+        condition in should_send.
+        """
         arb = ChannelArbiter(idle_disengage_lookup=lambda n, p, c: 1000,
                              clock=clock)
         assert write(arb, 0.5, owner=STREAM) is True
         assert write(arb, 0.5, owner=STREAM) is False
         clock.advance(1001)
-        assert write(arb, 0.5, owner=STREAM) is True
+        assert write(arb, 0.5, owner=STREAM) is False
 
     def test_always_on_channel_stays_gated(self, clock):
         arb = ChannelArbiter(idle_disengage_lookup=lambda n, p, c: 0,

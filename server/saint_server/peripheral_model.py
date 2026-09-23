@@ -20,7 +20,7 @@ get merged into this catalog at runtime.)
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Peripheral catalog
@@ -439,6 +439,80 @@ def kangaroo_slim_params_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+# Params the dashboard stores and the firmware never reads. They ride
+# the config push at full price, and the push has a hard ~2048-byte
+# ceiling (the micro-ROS input reassembly buffer, MTU 512 ×
+# STREAM_HISTORY_INPUT 4) past which the node overruns and watchdogs.
+# Spending any of that budget on values no driver looks at is pure loss.
+#
+# This is a DENY list, not an allow list, on purpose: a field added to
+# firmware later keeps flowing by default. Getting an allow list wrong
+# silently strips real config, which is a far worse failure than a few
+# wasted bytes. Everything here was verified absent from the firmware
+# tree (grep for the quoted JSON key across firmware/, excluding the
+# vendored libs) before being listed.
+#
+#   channel_count  — the driver declares its own slab size in
+#                    peripheral_driver_t.channel_count; the JSON key is
+#                    never parsed.
+#   device_number  — Pololu-protocol device id; we drive the Maestro
+#                    with Compact Protocol, which has no device byte.
+#   idle_value     — UI-side resting position for the State slider.
+#   speed_limit /
+#   accel_limit    — peripheral-level UI defaults. The firmware reads
+#                    the per-channel "speed"/"acceleration" instead.
+#   poll_positions — server-side telemetry toggle; the firmware's own
+#                    status poll is gated by transport capability
+#                    (supports_status_poll), not by this.
+_SERVER_ONLY_PARAMS: Dict[str, FrozenSet[str]] = {
+    "maestro": frozenset({
+        "channel_count", "device_number", "idle_value",
+        "speed_limit", "accel_limit", "poll_positions",
+    }),
+}
+
+
+def strip_server_only_params(type_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop params the firmware provably never reads, for the wire only.
+
+    The stored YAML keeps everything — the dashboard still needs these
+    to render the peripheral's edit modal. This affects the config push
+    and nothing else.
+    """
+    drop = _SERVER_ONLY_PARAMS.get(type_id)
+    if not drop:
+        return params
+    return {k: v for k, v in params.items() if k not in drop}
+
+
+def _maestro_hoist_idle(channels: Any) -> int:
+    """Pick the idle_disengage_ms worth sending once at peripheral level.
+
+    The most common non-zero value, and only when at least two channels
+    share it — hoisting a value only one channel uses would cost a
+    peripheral-level key AND an explicit 0 on every other channel, which
+    is strictly worse than leaving it per-channel. Returns 0 for "do not
+    hoist", which is also the firmware's always-engaged default.
+    """
+    counts: Dict[int, int] = {}
+    for ch in channels:
+        if not isinstance(ch, dict):
+            continue
+        v = ch.get("idle_disengage_ms")
+        if v is None:
+            continue
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            continue
+        if iv > 0:
+            counts[iv] = counts.get(iv, 0) + 1
+    if not counts:
+        return 0
+    best = max(counts, key=lambda k: (counts[k], k))
+    return best if counts[best] >= 2 else 0
+
+
 def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of `params` where every channel that exactly
     matches its default gets replaced with an empty `{}`. The full
@@ -469,7 +543,33 @@ def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     if "channels" not in params or not isinstance(params["channels"], list):
         return dict(params)
-    out = dict(params)
+
+    # Hoist a shared idle_disengage_ms to peripheral level.
+    #
+    # Every channel repeating the same timeout costs 26 bytes; with all
+    # 24 set that is 624 bytes of pure repetition, and it is what took
+    # the Head Node's config push to 2150 bytes — past the ~2048-byte
+    # XRCE-DDS reassembly cap, watchdog-resetting the node on every
+    # sync. Sending the shared value once costs ~25.
+    #
+    # Semantics are preserved exactly, which is what makes it safe: any
+    # channel whose value differs from the hoisted one emits its own
+    # explicit value below, INCLUDING an explicit 0. No channel can
+    # silently inherit a timeout it was never given — the firmware's
+    # "each channel opts in" rule is now upheld by this encoder rather
+    # than by the absence of a fallback.
+    hoisted_idle = _maestro_hoist_idle(params["channels"])
+
+    # Key order matters on the wire: the firmware bounds its
+    # peripheral-level lookup to the text before "channels", so the
+    # hoisted value must precede the array. Rebuild rather than mutate —
+    # dict() would leave a pre-existing "channels" in place and append
+    # the hoisted key after it.
+    out = {k: v for k, v in params.items() if k != "channels"}
+    if hoisted_idle:
+        out["idle_disengage_ms"] = hoisted_idle
+    else:
+        out.pop("idle_disengage_ms", None)
     slim: List[Dict[str, Any]] = []
     for i, ch in enumerate(params["channels"]):
         if not isinstance(ch, dict):
@@ -494,6 +594,14 @@ def maestro_slim_channels_for_wire(params: Dict[str, Any]) -> Dict[str, Any]:
             # 624 bytes, enough to bust the XRCE-DDS reassembly cap on
             # its own). Treat missing == default.
             v = ch.get(k)
+            if k == "idle_disengage_ms":
+                # Compared against the hoisted value, not the 0 default,
+                # and a mismatch is always emitted — a channel with no
+                # timeout sitting under a hoisted one MUST say 0 out
+                # loud, or the firmware would hand it the shared value.
+                if (0 if v is None else v) != hoisted_idle:
+                    diff[k] = 0 if v is None else v
+                continue
             if v is None:
                 continue
             if v != default[k]:

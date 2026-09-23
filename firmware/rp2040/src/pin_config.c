@@ -620,6 +620,21 @@ bool pin_config_apply_json(const char* json, size_t json_len)
     return true;
 }
 
+/* Config sync tag — mirror of the Teensy implementation. Held in RAM,
+ * persisted in the flash reserved block, reloaded at boot so a node
+ * that reboots onto its saved config still reports the tag it holds. */
+static uint32_t g_cfg_tag = FLASH_CFG_TAG_UNKNOWN;
+
+uint32_t pin_config_cfg_tag(void)
+{
+    return g_cfg_tag;
+}
+
+void pin_config_set_cfg_tag(uint32_t tag)
+{
+    g_cfg_tag = tag;
+}
+
 bool pin_config_save(void)
 {
     flash_storage_data_t storage;
@@ -636,6 +651,9 @@ bool pin_config_save(void)
     }
 
     // Copy pin configurations to storage
+    /* Stamp the tag alongside the config it describes. */
+    flash_cfg_tag_set(&storage, g_cfg_tag);
+
     storage.pin_config.version = PIN_CONFIG_VERSION;
     storage.pin_config.pin_count =
         (pin_config_count > FLASH_PIN_CONFIG_MAX_PINS)
@@ -695,13 +713,22 @@ bool pin_config_load(void)
 
     if (!flash_storage_load(&storage)) {
         printf("Pin config: no stored configuration\n");
+        /* No stored config means no tag either. */
+        g_cfg_tag = FLASH_CFG_TAG_UNKNOWN;
         return false;
     }
+
+    /* Restore the tag belonging to the config we are about to load. */
+    g_cfg_tag = flash_cfg_tag_get(&storage);
 
     // Check pin config version
     if (storage.pin_config.version != PIN_CONFIG_VERSION) {
         printf("Pin config: version mismatch (%d vs %d)\n",
                storage.pin_config.version, PIN_CONFIG_VERSION);
+        /* Rejected: we are not holding this config, so don't claim
+         * its tag — that would tell the server we are in sync while
+         * running with nothing applied. */
+        g_cfg_tag = FLASH_CFG_TAG_UNKNOWN;
         return false;
     }
 

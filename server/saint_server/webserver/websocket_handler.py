@@ -37,6 +37,17 @@ NEUTRAL_EPSILON = 0.02    # Values within this range of 0 are considered neutral
 # deadband, so sub-threshold changes are imperceptible anyway.
 CONTROL_CHANGE_EPSILON = 0.005
 
+# Per-client deadline for one broadcast frame. Display state is
+# latest-wins, so dropping a frame for a client that cannot take it
+# within this window costs nothing; blocking on it costs everyone.
+#
+# A timed-out send is not retried — the client is closed instead, because
+# wait_for cancels the write and may already have put a partial frame on
+# the wire, leaving the stream untrustworthy. 2 s is ~1000x what a healthy
+# client needs for a 2 KB frame, so this only fires on a socket that is
+# genuinely wedged. See WebSocketHandler._fan_out.
+BROADCAST_SEND_TIMEOUT_S = 2.0
+
 
 def is_neutral_value(value: float) -> bool:
     """
@@ -134,6 +145,10 @@ class WebSocketClient:
     user_agent: str = ""  # Client's User-Agent header
     client_name: str = ""  # Optional client-provided name
     terminal_session: Optional[Any] = None  # TerminalSession when one is open
+    # Consecutive broadcast sends that timed out. A client whose socket
+    # has wedged (peer gone without a FIN) accepts writes into the kernel
+    # buffer until it fills, then blocks forever. See _fan_out.
+    send_timeouts: int = 0
 
 
 class WebSocketHandler:
@@ -1264,13 +1279,50 @@ class WebSocketHandler:
             self.state_manager.clear_node_logs(node_id)
             return {"status": "ok", "data": {"success": True}}
 
+        elif action == 'revert_node_peripherals':
+            # Throw away edits that were never synced. Safe by
+            # construction: config only reaches a node on an explicit
+            # Sync, so unsynced edits exist solely on the server and
+            # nothing is published here.
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            result = self.state_manager.revert_node_peripherals(node_id)
+            if result.get("success"):
+                await self.broadcast_activity(
+                    f'Reverted unsynced changes on {node_id}', 'info')
+                await self.broadcast_state(f'sync_status/{node_id}',
+                                           {"sync_status": "synced"})
+            return {"status": "ok" if result.get("success") else "error",
+                    "data": result, "message": result.get("message")}
+
+        elif action == 'has_synced_snapshot':
+            node_id = params.get('node_id')
+            if not node_id:
+                return {"status": "error", "message": "Missing node_id"}
+            return {"status": "ok", "data": {
+                "available": self.state_manager.has_synced_snapshot(node_id)}}
+
         elif action == 'sync_node_peripherals':
             node_id = params.get('node_id')
             if not node_id:
                 return {"status": "error", "message": "Missing node_id"}
-            config_json = self.state_manager.get_firmware_config_json(node_id)
+            # Same decision the announce-driven reconcile makes: a patch
+            # when the node is provably holding the config we last sent,
+            # a full push otherwise. Pressing Sync after nudging one
+            # channel should cost one small frame, not 1.5 KB against a
+            # ~2048-byte ceiling.
+            _node = self.state_manager.state.adopted_nodes.get(node_id)
+            config_json = self.state_manager.plan_config_push(
+                node_id, getattr(_node, "reported_cfg_tag", None))
             if not config_json:
-                return {"status": "error", "message": "No peripheral configuration to sync"}
+                # Distinguish "nothing configured" from "we refused to
+                # send it": an oversized config is a specific, fixable
+                # problem, and reporting it as "nothing to sync" sends
+                # the operator looking in the wrong place.
+                refused = self.state_manager.last_config_push_error(node_id)
+                return {"status": "error",
+                        "message": refused or "No peripheral configuration to sync"}
             if self._sync_config_callback:
                 self._sync_config_callback(node_id, config_json)
                 # A sync re-applies extents on the node and re-homes its
@@ -2160,7 +2212,16 @@ class WebSocketHandler:
 
             if not is_neutral and now - last_send < CONTROL_THROTTLE_MS:
                 self.state_manager.update_pin_desired(node_id, gpio, native_value)
-                await self._broadcast_pin_state(node_id)
+                # No pin_state broadcast here. This is the throttled
+                # branch — we deliberately did NOT send the value to the
+                # node, so pushing a full-node-state frame to every
+                # subscriber would spend downstream airtime advertising
+                # a desired value that never went anywhere. The node's
+                # own 10 Hz /state feedback (coalesced in
+                # server_node._broadcast_pin_state) is what the UI
+                # should follow. On the Steam Deck this downstream
+                # traffic competes for the same half-duplex radio the
+                # control stream needs; see that method's note.
                 self.log('debug', f'[Control] THROTTLED {node_id} GPIO {gpio}: {native_value:.1f}')
                 return {"status": "ok", "message": "Throttled", "data": {"throttled": True}}
 
@@ -2704,6 +2765,76 @@ class WebSocketHandler:
         except OSError as e:
             return {"status": "error", "message": f"Failed to delete file: {e}"}
 
+    async def _fan_out(self, message: dict, predicate=None):
+        """Send one frame to every matching client, concurrently.
+
+        Replaces the pattern this class used to use everywhere:
+
+            async with self._lock:
+                for client in self.clients.values():
+                    if <match>:
+                        await self._send_to_client(client, message)
+
+        which had three compounding faults, all of them observed live on
+        opensaint.local (2026-09-22):
+
+        1. `self._lock` was held across the network sends. That lock also
+           guards client registration and teardown, so a slow send
+           blocked connects and disconnects too.
+        2. The sends were sequential, so the slowest subscriber set the
+           latency for every subscriber behind it in dict order.
+        3. `_send_to_client` had no timeout. A peer that vanishes without
+           a FIN leaves a socket that accepts writes until the kernel
+           buffer fills and then blocks forever — measured on a stale
+           controller connection sitting at 413,689 bytes in Send-Q,
+           not draining, with a keepalive timer 116 minutes out. Because
+           every broadcast is launched with `create_task`, tasks then
+           accumulated behind the permanently-held lock without bound.
+
+        So: resolve the recipient list under the lock, release it, then
+        send to everyone at once with a per-client deadline. Display
+        state is latest-wins, so a dropped frame self-heals on the next
+        one; a client that blocks past the deadline is wedged and gets
+        closed so it reconnects and resynchronises.
+        """
+        async with self._lock:
+            targets = [c for c in self.clients.values()
+                       if predicate is None or predicate(c)]
+        if not targets:
+            return
+        await asyncio.gather(
+            *(self._send_with_deadline(c, message) for c in targets),
+            return_exceptions=True,
+        )
+
+    async def _send_with_deadline(self, client: WebSocketClient, message: dict):
+        """One broadcast send, bounded by BROADCAST_SEND_TIMEOUT_S.
+
+        On timeout the client is closed rather than kept and retried:
+        `wait_for` cancels the write, which may already have emitted a
+        partial WebSocket frame, so the stream cannot be trusted for the
+        next send. Closing forces a reconnect, and the client resyncs
+        from the periodic broadcasts.
+        """
+        try:
+            await asyncio.wait_for(client.ws.send_json(message),
+                                   timeout=BROADCAST_SEND_TIMEOUT_S)
+            client.send_timeouts = 0
+        except asyncio.TimeoutError:
+            client.send_timeouts += 1
+            self.log('warn',
+                     f'Closing wedged client {client.id} ({client.ip_address}): '
+                     f'broadcast send blocked for '
+                     f'{BROADCAST_SEND_TIMEOUT_S:g}s')
+            try:
+                await client.ws.close()
+            except Exception:
+                pass
+        except Exception as e:
+            # Normal for a client that disconnected mid-broadcast; the
+            # connection handler removes it from self.clients.
+            self.log('debug', f'Broadcast to client {client.id} failed: {e}')
+
     async def broadcast_ros_state(self, topic: str, data: dict):
         """Broadcast ROS state update to subscribed WebSocket clients."""
         message = {
@@ -2714,11 +2845,8 @@ class WebSocketHandler:
         }
 
         subscription_key = f'ros:{topic}'
-
-        async with self._lock:
-            for client in self.clients.values():
-                if subscription_key in client.subscriptions:
-                    await self._send_to_client(client, message)
+        await self._fan_out(
+            message, lambda c: subscription_key in c.subscriptions)
 
     async def _broadcast_pin_state(self, node_id: str):
         """Broadcast pin runtime state to subscribers."""
@@ -2829,10 +2957,9 @@ class WebSocketHandler:
             "data": data,
         }
 
-        async with self._lock:
-            for client in self.clients.values():
-                if topic in client.subscriptions or 'all' in client.subscriptions:
-                    await self._send_to_client(client, message)
+        await self._fan_out(
+            message,
+            lambda c: topic in c.subscriptions or 'all' in c.subscriptions)
 
     async def broadcast_activity(self, text: str, level: str = 'info'):
         """Broadcast activity log entry to all clients."""
@@ -2843,9 +2970,7 @@ class WebSocketHandler:
             "timestamp": time.time(),
         }
 
-        async with self._lock:
-            for client in self.clients.values():
-                await self._send_to_client(client, message)
+        await self._fan_out(message)
 
     async def broadcast_node_log(self, node_id: str, entry: Dict[str, Any]):
         """Push a single per-node log entry to subscribers of node_log/<id>.

@@ -330,6 +330,16 @@ const pin_config_t* pin_config_get(uint8_t gpio);
 const pin_config_t* pin_config_get_all(uint8_t* count);
 bool pin_config_apply_json(const char* json, size_t json_len);
 bool pin_config_save(void);
+
+/* Config sync tag — the server stamps each config push with one and the
+ * node echoes it in /announce, so the server can tell whether this node
+ * is holding the config it currently intends without shipping the whole
+ * thing every time. Persisted in flash (flash_cfg_tag_get/set) and
+ * restored at boot, so a node that reboots onto its saved config still
+ * reports the right tag. Returns FLASH_CFG_TAG_UNKNOWN (0) when the node
+ * has never been given one. */
+uint32_t pin_config_cfg_tag(void);
+void pin_config_set_cfg_tag(uint32_t tag);
 bool pin_config_load(void);
 void pin_config_reset(void);
 bool pin_config_has_configured_pins(void);

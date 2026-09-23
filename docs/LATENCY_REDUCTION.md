@@ -299,3 +299,149 @@ unbounded.
 - On hardware, repeat tests 2-3 above; additionally: drive, then kill
   the server process mid-deflection — motors must stop within ~1.3 s
   (dead-man) instead of running until reconnect.
+
+---
+
+# Round 3 — 2026-09-22: the delay was downstream traffic, not the control path
+
+Same operator report as Round 2 — the track drives lag behind a stick
+rotated in circles, and keep rotating after deadstick, "as if messages
+are queued up". This time the whole chain was already current, so the
+cause had to be somewhere Rounds 1-2 never looked.
+
+## What was ruled out first
+
+Before changing anything, every layer's *deployed* version was checked
+against source on the live rig:
+
+- Server: `md5sum` of the installed `routing_evaluator.py` and
+  `websocket_handler.py` matched source exactly. Round 2's router
+  re-assert and no-ack were live.
+- Nodes: all four RP2040s reported `fw=1.2.0-1790137825`,
+  `built=2026-09-22 21:30:25` on `/saint/nodes/announce` — the current
+  build, dead-man and fire-and-forget ACK included.
+- Firmware serial: `RoboClaw wire` stats showed ~77 pkts/s of telemetry
+  with `resp=382 ok / 0 short / 0 crc_bad` and zero ACK timeouts. The
+  wire was healthy and duty writes were not blocking.
+- Zero `DEAD-MAN` events in the journal, so no lost-zero run-on either.
+
+So the control path itself was behaving. The measurement that broke the
+case open was timing the *arrival* of control messages rather than their
+processing.
+
+## The measurement
+
+From the server journal's microsecond ROS timestamps, over 90 s of
+driving:
+
+| quantity | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| `set_input` inter-arrival | 3.1 ms | 54.6 ms | **324 ms** | **463 ms** |
+| `set_input` → `Sent channel control` (in-server) | 5.0 ms | 29 ms | 53 ms | 160 ms |
+
+The arrival gaps were the problem — but dumping every log line *inside*
+the six largest gaps showed only routine announcements, keepalives and
+temp probes. **The server was idle during those stalls.** The delay was
+therefore upstream of the server: in the air.
+
+Then, on the socket itself:
+
+```
+server -> Steam Deck:  ~76,000 B/s   (sustained, steady)
+Steam Deck -> server:   ~6,330 B/s   (the control stream)
+```
+
+The server was pushing **12x more data at the controller than the
+controller sent it**, continuously.
+
+## Root cause
+
+`SaintServerNode._broadcast_pin_state` fired on every `/state` message a
+node published, and each broadcast carried that node's *complete* runtime
+state — every pin, every channel, ~1.9 KB of JSON. RP2040 nodes publish
+at 10 Hz (`ros2 topic hz` confirmed 9.98 Hz) and there are four of them:
+
+    4 nodes x 10 Hz x ~1.9 KB = ~76 KB/s
+
+which is exactly what the socket showed.
+
+Why that wrecks control latency: the Deck is a station on the Pi's own
+2.4 GHz AP (`wlan0`, channel 9, 20 MHz, single radio). That radio is
+strictly half-duplex — every frame the Pi transmits downstream is airtime
+the Deck cannot use to transmit the next joystick setpoint. A steady
+600 kbit/s downstream is trivial as *bandwidth* and ruinous as *latency*:
+the control stream gets squeezed into clumps separated by the observed
+300-460 ms gaps. During a circle the tracks execute a stale rotation; on
+deadstick the release-zero is stuck in the same clump.
+
+Nothing in the control path reads that broadcast — `update_pin_actual`
+has already run and the routing evaluator consults the state manager
+directly. It is display data, and it was being delivered at the
+publisher's rate rather than at any rate a UI needs.
+
+## Fixes
+
+- **`_broadcast_pin_state` is coalesced per node**, leading edge plus
+  trailing edge, at `_PIN_STATE_INTERVAL_S = 0.2` — the same pattern
+  `_broadcast_routing_values` already used. Ceiling drops from 40
+  frames/s to at most 2 per node per window. The trailing edge is
+  load-bearing: without it the last frame of a burst never lands and a
+  gauge sticks on an intermediate value, which on a motor channel means
+  the dashboard shows the robot driving after it has stopped.
+  The window is `websocket.pin_state_interval_ms` in
+  `server_config.yaml` (default 200; 0 restores the old behaviour),
+  because the right value depends on the link and is not knowable from
+  source — raise it if control still feels laggy, lower it if gauges feel
+  steppy. Measured effect at the default, with 4 nodes at 10 Hz: 40
+  frames/s down to 24, so ~76 KB/s down to ~46 KB/s. That is a real cut
+  but only 1.7x; the remaining cost is that every frame is still the
+  WHOLE node state, so sending per-channel deltas is the next big lever
+  (it needs a merge on the consuming side, so it is a cross-layer change).
+  `server/test/test_pin_state_broadcast_throttle.py` (18 tests).
+- **The throttled-control branch no longer broadcasts.** It had sent a
+  full-node-state frame to advertise a desired value it had deliberately
+  *not* forwarded to the node.
+- **Broadcast fan-out no longer serialises behind one slow client, and no
+  longer holds `self._lock` across network I/O.** A stale controller
+  connection was found wedged at 413,689 bytes in `Send-Q`, not draining,
+  keepalive timer 116 minutes out — a peer gone without a FIN. Writes to
+  it blocked forever, so it held the lock that also guards client
+  registration, while every broadcast task (`create_task`, ~50/s under
+  stick motion) piled up behind it unbounded. Now: resolve recipients
+  under the lock, release, `asyncio.gather` with a per-client
+  `BROADCAST_SEND_TIMEOUT_S = 2.0`. A send that blocks past the deadline
+  closes that client rather than being retried — `wait_for` cancels the
+  write and may already have emitted a partial frame, so the stream
+  cannot be trusted afterwards; closing forces a clean reconnect.
+  `server/test/test_broadcast_fanout.py` (11 tests).
+
+## Measured but NOT fixed — next levers
+
+- **The server runs at `logging.level: DEBUG`** (deliberately — logs must
+  stay available for field diagnosis). At idle that is ~80 lines/s, and
+  **2,709 of 4,573 DEBUG lines per 60 s are the per-axis-tick
+  `[WS] router: set_input params={...}` line** — the one whose own
+  comment says an INFO line there "runs synchronous file I/O inside the
+  sequential receive loop and directly slows the drain that keeps
+  deadstick fast". At DEBUG it runs anyway, plus two `eval ...` lines per
+  evaluated op. This is the likely bulk of the 29 ms p90 / 160 ms max
+  in-server latency above. Fixing it without losing information means
+  moving the log I/O off the event loop (queue + writer thread), not
+  logging less.
+- **2.4 GHz channel 9, 20 MHz** for the control link. Moving the Deck to
+  5 GHz, or to a dedicated AP, addresses the airtime contention directly
+  rather than just reducing what we put in it.
+- **The Pi's clock is ~4 months off** (reported 2026-05-25 while files
+  installed that day were stamped 2026-09-22). NTP is not syncing, which
+  makes cross-layer log correlation unreliable — every timing figure
+  above had to be derived from monotonic ROS stamps and relative deltas.
+- A node rebooted mid-session (`[+5.8s] RoboClaw: probe complete`),
+  unexplained.
+
+## Round 3 verification
+
+- `python3 -m pytest server/test` — 679 passed, 28 skipped.
+- Not yet verified on hardware: the traffic reduction should be
+  re-measured with the same `ss -tni` sampling (expect ~76 KB/s to fall
+  to roughly a quarter), and the arrival-gap percentiles re-derived from
+  the journal, before calling this fixed.

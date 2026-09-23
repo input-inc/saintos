@@ -522,6 +522,122 @@ bool maestro_stop_script(void)
     return tx_bytes(&cmd, 1);
 }
 
+/* ── Config patch (per-channel delta sync) ───────────────────────── */
+
+/* Apply a `patch_config` payload's channel deltas to this Maestro.
+ *
+ * Shape (see docs/CONFIG_SYNC.md):
+ *   {"action":"patch_config","from":T0,"to":T1,
+ *    "peripheral":"maestro-1",
+ *    "channels":{"12":{"home_us":1300},"13":{"min_pulse_us":900}}}
+ *
+ * Only the fields present are changed; everything else on that channel
+ * keeps its current value. That is the entire point — an operator
+ * nudging one extent should not cost a full 1.5 KB config push against
+ * a ~2048-byte wire ceiling.
+ *
+ * Returns the number of channels actually touched, or -1 if this patch
+ * is not addressed to us. The caller decides what to do with 0 (a patch
+ * naming channels we don't have is a no-op, not a failure).
+ *
+ * The tag check belongs to the CALLER, not here: it is a property of
+ * the whole message, not of one peripheral.
+ */
+int maestro_apply_config_patch(const char* json, const char* json_end)
+{
+    if (!json || !json_end || json_end <= json) return -1;
+
+    /* Addressed to this peripheral instance? g_peripheral_id is set
+     * from the last configure; if we have never been configured we
+     * cannot own a patch. */
+    const char* pid = strstr(json, "\"peripheral\"");
+    if (!pid || pid >= json_end) return -1;
+    pid = strchr(pid, ':');
+    if (!pid || pid >= json_end) return -1;
+    pid++;
+    while (*pid == ' ' || *pid == '"') pid++;
+    size_t idlen = strlen(g_peripheral_id);
+    if (idlen == 0 || strncmp(pid, g_peripheral_id, idlen) != 0
+        || pid[idlen] != '"') {
+        return -1;
+    }
+
+    const char* ch_key = strstr(json, "\"channels\"");
+    if (!ch_key || ch_key >= json_end) return 0;
+    const char* p = strchr(ch_key, '{');
+    if (!p || p >= json_end) return 0;
+
+    int touched = 0;
+    /* Walk "<index>":{...} pairs at depth 1 of the channels object. */
+    for (const char* q = p + 1; q < json_end && *q != '}'; q++) {
+        if (*q != '"') continue;
+        const char* num = q + 1;
+        const char* num_end = strchr(num, '"');
+        if (!num_end || num_end >= json_end) break;
+        long idx = strtol(num, NULL, 10);
+        const char* colon = strchr(num_end, ':');
+        if (!colon || colon >= json_end) break;
+        const char* obj_s = strchr(colon, '{');
+        if (!obj_s || obj_s >= json_end) break;
+
+        /* Find this entry's closing brace by depth. */
+        int depth = 0;
+        const char* obj_e = NULL;
+        for (const char* r = obj_s; r < json_end; r++) {
+            if (*r == '{') depth++;
+            else if (*r == '}') {
+                depth--;
+                if (depth == 0) { obj_e = r + 1; break; }
+            }
+        }
+        if (!obj_e) break;
+
+        if (idx >= 0 && idx < MAESTRO_MAX_CHANNELS) {
+            /* Read-modify-write: start from what the channel holds now
+             * so omitted fields keep their value, then hand it back
+             * through the normal live-apply path so the idle timer
+             * reset and EEPROM re-provision happen exactly as they do
+             * for a full configure. */
+            maestro_channel_config_t cfg = g_channel_configs[idx];
+
+            #define MAESTRO_PATCH_U16(key, into)                          \
+                do {                                                      \
+                    const char* k = strstr(obj_s, "\"" key "\"");           \
+                    if (k && k < obj_e) {                                 \
+                        k = strchr(k, ':');                               \
+                        if (k && k < obj_e) {                             \
+                            k++; while (*k == ' ') k++;                   \
+                            into = (uint16_t)atoi(k);                     \
+                        }                                                 \
+                    }                                                     \
+                } while (0)
+            MAESTRO_PATCH_U16("min_pulse_us", cfg.min_pulse_us);
+            MAESTRO_PATCH_U16("max_pulse_us", cfg.max_pulse_us);
+            MAESTRO_PATCH_U16("neutral_us",   cfg.neutral_us);
+            MAESTRO_PATCH_U16("speed",        cfg.speed);
+            MAESTRO_PATCH_U16("acceleration", cfg.acceleration);
+            MAESTRO_PATCH_U16("home_us",      cfg.home_us);
+            #undef MAESTRO_PATCH_U16
+            {
+                const char* k = strstr(obj_s, "\"idle_disengage_ms\"");
+                if (k && k < obj_e) {
+                    k = strchr(k, ':');
+                    if (k && k < obj_e) {
+                        k++; while (*k == ' ') k++;
+                        long v = atol(k);
+                        if (v < 0) v = 0;
+                        cfg.idle_disengage_ms = (uint32_t)v;
+                    }
+                }
+            }
+            maestro_set_channel_config((uint8_t)idx, &cfg);
+            touched++;
+        }
+        q = obj_e - 1;
+    }
+    return touched;
+}
+
 /* ── Channel config ──────────────────────────────────────────────── */
 
 void maestro_set_channel_config(uint8_t channel,
@@ -1074,6 +1190,47 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
     MAESTRO_PARSE_U16("home_us",      home);
     #undef MAESTRO_PARSE_U16
 
+    /* Peripheral-level idle_disengage_ms — the value a channel inherits
+     * when it carries none of its own. uint32, so it can't ride the u16
+     * macro above.
+     *
+     * This exists purely as a WIRE ENCODING. An operator who sets the
+     * same power timeout on every channel used to spend 24 x 26 = 624
+     * bytes repeating it, which is what pushed the Head Node's config to
+     * 2150 bytes and past the ~2048-byte XRCE-DDS reassembly cap: the
+     * node took a WDOG reset mid-apply every time it synced.
+     *
+     * The safety rule that made this per-channel-only has NOT changed —
+     * "release every channel after N ms" is still the wrong thing to
+     * infer. It is preserved by the sender, not by the absence of this
+     * fallback: maestro_slim_channels_for_wire hoists a value here only
+     * when channels actually share it, and emits an explicit
+     * "idle_disengage_ms":0 on every channel that does not. So no
+     * channel silently acquires a timeout it was not given.
+     *
+     * Compatibility runs both ways: an older server omits this key and
+     * every channel keeps defaulting to 0, and older firmware ignores it
+     * and channels fall back to 0 — always-engaged, the fail-safe
+     * direction, never a crash.
+     *
+     * Bounded to the text BEFORE "channels" so a per-channel entry can
+     * never be misread as the peripheral-level default, whatever order
+     * the sender serializes its keys in. */
+    {
+        const char* ch_key = strstr(json_start, "\"channels\"");
+        const char* limit = (ch_key && ch_key < json_end) ? ch_key : json_end;
+        const char* k = strstr(json_start, "\"idle_disengage_ms\"");
+        if (k && k < limit) {
+            k = strchr(k, ':');
+            if (k && k < limit) {
+                k++; while (*k == ' ') k++;
+                long v = atol(k);
+                if (v < 0) v = 0;
+                idle = (uint32_t)v;
+            }
+        }
+    }
+
     /* Per-channel override: walk the "channels" array (if present)
      * and find the entry matching THIS channel's index. Each channel
      * has its own min/max/neutral/home/speed/acceleration that
@@ -1141,12 +1298,13 @@ static bool drv_parse_json(const char* json_start, const char* json_end,
                     MAESTRO_PARSE_CH_U16("home_us",      home);
                     #undef MAESTRO_PARSE_CH_U16
                     /* idle_disengage_ms is uint32 — server caps at 600_000.
-                     * Per-channel only; no peripheral-level fallback because
-                     * "release every channel after N ms idle" is exactly the
-                     * wrong default for load-bearing servos. Each channel
-                     * opts in. strtoul is overkill for a JSON integer this
-                     * size; atol is fine and matches the surrounding atoi
-                     * style. */
+                     * Overrides the peripheral-level default parsed above;
+                     * absent means inherit it. The sender guarantees an
+                     * explicit value here for any channel that differs, so
+                     * "each channel opts in" still holds — see the note on
+                     * that peripheral-level parse. strtoul is overkill for a
+                     * JSON integer this size; atol is fine and matches the
+                     * surrounding atoi style. */
                     {
                         const char* k = strstr(obj_s, "\"idle_disengage_ms\"");
                         if (k && k < obj_e) {

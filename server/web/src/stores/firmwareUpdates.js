@@ -228,5 +228,15 @@ export const useFirmwareUpdatesStore = defineStore('firmwareUpdates', () => {
     return !!e && !TERMINAL_STATUSES.has(e.status)
   })
 
-  return { entries, start, cancel, byId, isActive }
+  // Plain predicate, not a computed factory. `isActive` returns a new
+  // computed per call, which is fine in a script block but churns one
+  // per node per render when called from a template (`v-if` in a
+  // v-for). Reading the reactive `entries` here is just as reactive and
+  // allocates nothing.
+  const isUpdating = (nodeId) => {
+    const e = entries[nodeId]
+    return !!e && !TERMINAL_STATUSES.has(e.status)
+  }
+
+  return { entries, start, cancel, byId, isActive, isUpdating }
 })

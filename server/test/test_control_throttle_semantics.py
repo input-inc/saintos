@@ -6,11 +6,16 @@ pipeline audit (docs/LATENCY_REDUCTION.md is the running design doc):
 - Neutral (near-zero) values BYPASS the 50 ms per-channel throttle so a
   deadstick is never buffered behind the rate limit.
 - Non-neutral values inside the throttle window are DROPPED, not
-  buffered. That trailing-edge hole is plugged upstream: the controller
-  re-emits a held deflection every input tick (mapper.rs value_active)
-  and heartbeats every 500 ms, so the next allowed window always gets
-  the freshest value. If either side of that contract changes, these
-  tests are the tripwire.
+  buffered. That trailing-edge hole is plugged upstream, and how it is
+  plugged CHANGED in 2026-09: the controller used to brute-force past it
+  by re-emitting a held deflection on every 4 ms input tick
+  (mapper.rs value_active) with a 500 ms heartbeat behind that. It no
+  longer re-emits per tick — the client now reports the deferral
+  (protocol/client.rs THROTTLED) and the input loop retries only the
+  writes actually dropped (mapper.rs note_send_failed), with
+  HEARTBEAT_MS = 150 as the floor. So the guarantee still holds but now
+  rests on the THROTTLED round-trip rather than on spam. If either side
+  of that contract changes, these tests are the tripwire.
 - The change-dedup cache records only values actually SENT. A value
   that was throttle-dropped must not poison the cache, or the
   controller's heartbeat replay of it would be swallowed as

@@ -144,8 +144,19 @@ class ChannelArbiter:
             # was a reproducible dead slider.
             if raw_us is not None:
                 if entry is not None:
+                    # Drop the normalized cache: the servo has moved off
+                    # the normalized map, so "the firmware already holds
+                    # 0.4" is no longer true and a slider dragged back
+                    # there must go out.
                     entry.value = None
-                    entry.stream_value = None
+                    # But NOT the stream's own bookkeeping. Clearing it
+                    # made the next unattended dispatch look like a
+                    # change and fire immediately — so a routing sheet
+                    # parked on a value re-asserted it after EVERY jog,
+                    # yanking the servo back between dialer steps. The
+                    # operator saw an extent dialer that did nothing.
+                    # The stream's value has not changed just because
+                    # someone jogged the channel in microseconds.
                 return True
 
             if value is None:
@@ -196,17 +207,43 @@ class ChannelArbiter:
             if abs(value - reference) >= CHANGE_EPSILON:
                 return True
 
-            # Unchanged stream value from here down.
+            # Unchanged value from here down: the two liveness
+            # exceptions, both measured from the SHARED last-send, since
+            # the firmware's timers count writes from every writer.
+            since = now - entry.sent_ms
+
+            # Idle-disengage re-engage. A Maestro channel with
+            # idle_disengage_ms drops PWM and goes limp that long after
+            # its last write, so a repeat of the value it already holds
+            # has to be allowed through to re-engage it.
+            #
+            # Operator writes only. This is for a deliberate act — a
+            # slider re-touch, a pose re-applied — where the person
+            # expects the servo to take hold again. An unattended stream
+            # must NOT use it: a routing sheet parked on a stale value
+            # would re-assert once per idle window, undoing every slider
+            # move on a channel with idle_disengage set within a second.
+            #
+            # Note what this deliberately does NOT do: grant the slider
+            # lasting precedence. A slider takes precedence while the
+            # operator is moving it and not after — afterwards its value
+            # simply stands as the last thing written, and any writer
+            # with something NEW to say takes the channel immediately.
+            # An earlier version gated this on "does the current owner
+            # match", which let a released slider keep blocking a sheet
+            # indefinitely. Precedence belongs to whoever is actually
+            # doing something, not to whoever touched it last.
+            idle_ms = self._idle_disengage_ms(node_id, peripheral_id, channel_id)
+            if idle_ms > 0 and since >= idle_ms and owner != STREAM:
+                return True
+
+            # A stopped motor needs no liveness feed, and re-sending
+            # zeros forever would defeat the firmware going quiet.
             if abs(value) <= NEUTRAL_EPSILON:
                 return False
 
-            since = now - entry.sent_ms
             if (peripheral_type in MOTOR_REASSERT_TYPES
                     and since >= MOTOR_REASSERT_MS):
-                return True
-
-            idle_ms = self._idle_disengage_ms(node_id, peripheral_id, channel_id)
-            if idle_ms > 0 and since >= idle_ms:
                 return True
 
             return False
@@ -225,13 +262,15 @@ class ChannelArbiter:
         now = self._clock()
         with self._lock:
             # A raw-us jog leaves the normalized value unknown (see
-            # should_send) but still marks ownership and liveness. It
-            # also moves the servo off the normalized map, so the
-            # stream's bookkeeping is void too.
+            # should_send) but still marks ownership and liveness. The
+            # stream's own record survives it: what a sheet last emitted
+            # is unchanged by an operator jogging in microseconds, and
+            # forgetting it would license an immediate re-assert that
+            # fights the dialer.
             cached = None if raw_us is not None else value
             prev = self._entries.get(key)
             if raw_us is not None:
-                stream_value = None
+                stream_value = prev.stream_value if prev else None
             elif owner == STREAM:
                 stream_value = value
             else:

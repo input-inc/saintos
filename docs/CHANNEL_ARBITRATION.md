@@ -78,7 +78,37 @@ setpoints pushed into the evaluator, not channels that reached firmware.
   every `MOTOR_REASSERT_MS` so the firmware dead-man has a liveness
   feed. Servos are excluded on purpose: `idle_disengage` depends on a
   held channel going quiet.
-- Neutral values never re-assert.
+- Neutral values never re-assert *for the dead-man* — but they can
+  still re-engage a disengaged channel (see below).
+
+### The liveness exceptions are not authority
+
+Both exceptions (`idle_disengage` re-engage, motor dead-man) measure
+from the **shared** last-send, because the firmware's own timers count
+writes from every writer. But the idle re-engage fires **only for
+operator writes** (slider, board), never for a stream.
+
+"This channel may have gone limp" licenses a deliberate act — a slider
+re-touch, a pose re-applied — to take hold again. It does not license
+an unattended sheet to re-assert a parked value: that sheet did so once
+per idle window (`owner=stream`, a burst every ~1.3 s on the Head Node),
+so every State slider move on a channel with `idle_disengage_ms` set was
+undone within a second.
+
+**Precedence belongs to whoever is acting, not to whoever touched the
+channel last.** A slider takes precedence while the operator is moving
+it and not after; once released its value simply stands as the last
+thing written, and any writer with something *new* to say takes the
+channel immediately. An earlier version gated this rule on "does the
+current owner match", which let a released slider block a sheet
+indefinitely — precedence that outlived the interaction that earned it.
+
+Note what this means in normal use: on a channel with
+`idle_disengage_ms` set, the firmware releases PWM that long after the
+*last write from anyone*, so a slider position is held electrically for
+one window and then the servo goes limp. That is the configured
+behaviour, not a fault. Channels whose position must hold want
+`idle_disengage_ms: 0`.
 - A suppressed write is never recorded — caching a value the firmware
   never received is how the old caches went stale.
 
@@ -112,6 +142,47 @@ The *timing* exceptions stay on the shared record on purpose:
 `idle_disengage` and the motor dead-man both count writes from anyone,
 so they measure from `_Entry.sent_ms`, not from the stream's own last
 send.
+
+## What the State slider displays
+
+Arbitration decides what reaches the firmware. A separate question is
+what the operator *sees*, and they are answered by different code.
+
+`State.vue` renders each writable channel's slider from
+`pin_state/<node_id>`, which the server builds from `NodeRuntimeState`.
+That state is filled from firmware `/state` messages — and most
+actuator channels never report anything. A Maestro's `/state` carries
+exactly three entries (`connected`, `error_flags`, `moving`); its 24
+servo channels are write-only on the wire, because reading a position
+means polling the Maestro over USB, the transfer that used to wedge the
+Teensy.
+
+So every servo slider bound to `channelValues[ch.id]` was reading
+`undefined`. A pose would drive a servo correctly and its slider would
+sit at zero, and the operator's next drag started from the wrong place
+instead of continuing from where the hardware actually was. The writes
+were fine the whole time; only the feedback was missing.
+
+`send_channel_command` therefore calls
+`state_manager.record_commanded_channel` after a publish: for a
+write-only channel the last commanded value is the best truth
+available. Firmware readings still win — a real reading for the same
+channel overwrites it through the normal `set_channel` path.
+
+Two consequences worth knowing:
+
+- **A suppressed write records nothing**, so the displayed value never
+  claims a write that arbitration stopped.
+- **Commanded values are in-memory only.** After a server restart the
+  sliders have no value again until something commands each channel —
+  there is genuinely nothing to restore from, since the hardware cannot
+  be asked.
+
+The slider updates when the node's next `/state` arrives (Teensy: 1 Hz),
+coalesced by the `_broadcast_pin_state` throttle. Commanding a
+broadcast directly would tighten that to ~200 ms, at the cost of more
+frames on an AP that has already been measured saturating — so it
+deliberately rides the existing cadence.
 
 ## If you are tempted to add a cache
 

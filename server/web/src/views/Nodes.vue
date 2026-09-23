@@ -4,9 +4,11 @@ import { useNodesStore } from '@/stores/nodes'
 import { useWsStore } from '@/stores/ws'
 import AdoptModal from '@/components/AdoptModal.vue'
 import FirmwareUpdateProgress from '@/components/FirmwareUpdateProgress.vue'
+import { useFirmwareUpdatesStore } from '@/stores/firmwareUpdates'
 
 const ws = useWsStore()
 const nodes = useNodesStore()
+const firmwareUpdates = useFirmwareUpdatesStore()
 const adopting = ref(null)            // node object being adopted
 
 onMounted(() => nodes.fetchAll().catch(() => {}))
@@ -35,14 +37,37 @@ async function updateAll () {
     `Update firmware on ${targets.length} node${targets.length === 1 ? '' : 's'}?\n\n` +
     `${lines}\n\nEach node will restart during the update.`
   )) return
+  // Seed every target's progress entry BEFORE issuing any request, so
+  // all the cards flip to "Starting update" at once instead of waking
+  // up one at a time as their first ROS frame arrives. Bootloader-driven
+  // targets (RP2040 / Teensy) may never publish a progress frame at all,
+  // so without this seed their cards showed nothing for the entire
+  // update and the bulk action looked like it had done nothing.
+  //
+  // The per-node modal already did this; the bulk path did not, which is
+  // the whole difference the operator was seeing.
+  for (const n of targets) firmwareUpdates.start(n.node_id)
+
   for (const n of targets) {
-    try { await ws.management('update_firmware', { node_id: n.node_id }) }
-    catch (e) { console.warn(`update_firmware ${n.node_id} failed:`, e) }
+    try {
+      await ws.management('update_firmware', { node_id: n.node_id })
+    } catch (e) {
+      console.warn(`update_firmware ${n.node_id} failed:`, e)
+      // Drop the seed again — leaving it would show a node updating
+      // forever when the request never reached the server.
+      firmwareUpdates.cancel(n.node_id)
+    }
   }
   await nodes.fetchAll()
 }
 
 const updatable = computed(() => nodes.all.filter(isUpdatable).length)
+
+// How many nodes are mid-update right now. Drives the bulk button so it
+// reports the fleet's real state rather than re-offering work already
+// under way.
+const updating = computed(
+  () => nodes.all.filter(n => firmwareUpdates.isUpdating(n.node_id)).length)
 </script>
 
 <template>
@@ -51,9 +76,15 @@ const updatable = computed(() => nodes.all.filter(isUpdatable).length)
       <h2 class="text-2xl font-bold text-fg-strong">Nodes</h2>
       <div class="flex items-center gap-2">
         <span class="text-xs text-fg-muted">{{ nodes.all.length }} adopted · {{ nodes.unadopted.length }} unadopted</span>
-        <button v-if="updatable" class="btn-primary text-sm" title="Update firmware on all eligible nodes" @click="updateAll">
+        <button
+          v-if="updatable || updating"
+          class="btn-primary text-sm"
+          :disabled="updating > 0"
+          :title="updating ? `${updating} node${updating === 1 ? '' : 's'} updating` : 'Update firmware on all eligible nodes'"
+          @click="updateAll"
+        >
           <span class="material-icons icon-sm">system_update</span>
-          Update all ({{ updatable }})
+          {{ updating ? `Updating ${updating}…` : `Update all (${updatable})` }}
         </button>
         <button class="btn-secondary" @click="nodes.scan()">
           <span class="material-icons icon-sm">search</span>
@@ -124,8 +155,13 @@ const updatable = computed(() => nodes.all.filter(isUpdatable).length)
           <div>{{ n.ip_address || '—' }}</div>
           <div class="flex items-center gap-1.5">
             <span>FW {{ n.firmware_version || '—' }}</span>
+            <!-- Hidden while this node is actually updating: the
+                 progress strip below is the live state, and an
+                 "update available" badge sitting next to it invites an
+                 operator to start a second update on a node that is
+                 already mid-flight. -->
             <span
-              v-if="isUpdatable(n)"
+              v-if="isUpdatable(n) && !firmwareUpdates.isUpdating(n.node_id)"
               class="px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
               :title="`Update available: ${n.server_firmware_version}`"
             >↑ {{ n.server_firmware_version }}</span>

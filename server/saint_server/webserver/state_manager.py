@@ -7,9 +7,11 @@ Manages system state and provides data for WebSocket clients.
 import contextlib
 import hashlib
 import json
+import zlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import time
 import yaml
@@ -52,6 +54,7 @@ from saint_server.peripheral_model import (
     maestro_slim_channels_for_wire,
     pimoroni_normalize_channels,
     pimoroni_slim_channels_for_wire,
+    strip_server_only_params,
 )
 from saint_server.board_config import BoardConfigManager, derive_capabilities
 from saint_server.channel_arbiter import BOARD
@@ -662,6 +665,10 @@ class NodeInfo:
     # don't hammer a node every 1 s announcement when apply keeps
     # failing.
     last_reconcile_push_at: float = 0.0
+    # Config sync tag this node last reported in /announce — what it
+    # says it is actually holding. None = never reported one (firmware
+    # predating the field). See docs/CONFIG_SYNC.md.
+    reported_cfg_tag: Optional[int] = None
 
 
 @dataclass
@@ -789,6 +796,17 @@ class StateManager:
         # rehydrate the enabled set without a separate pass — see the
         # set_peripheral_logger() seeding logic.
         self.peripheral_logger = None
+
+        # Why the last config build for a node was refused, keyed by
+        # node_id. Populated by get_firmware_config_json's budget guard
+        # and cleared on the next successful build, so the Sync action
+        # can report the real reason rather than "nothing to sync".
+        self._config_push_errors: Dict[str, str] = {}
+
+        # Last config payload actually pushed to each node, so the next
+        # change can go out as a delta instead of a full re-push. An
+        # optimization only — see record_config_push.
+        self._last_pushed_json: Dict[str, str] = {}
 
         # Optional routing graph evaluator. Set by server_node once the
         # ROS bridge is up. Whenever sheets change we call .reconcile()
@@ -2124,6 +2142,11 @@ class StateManager:
             # comma-separated string; the firmware parses a JSON array.
             if p.type == "switch_input":
                 params = switch_input_params_for_wire(params)
+            # Last step before the wire: drop params no firmware reads.
+            # The config push has a hard ~2048-byte ceiling and every
+            # byte spent on a value no driver looks at is a byte closer
+            # to the overrun that watchdogs the node.
+            params = strip_server_only_params(p.type, params)
             peripherals_out.append({
                 "id": p.id,
                 "type": p.type,
@@ -2145,6 +2168,30 @@ class StateManager:
         # which looked exactly like "Teensy in a reboot loop" because
         # the server kept seeing UNADOPTED and re-pushing. The firmware
         # JSON parser handles either spacing.
+        # Config sync tag: a CRC32 over the payload the node is about
+        # to receive. The node stores it, echoes it in /announce, and
+        # the server pushes only when it differs from the tag its
+        # CURRENT config would carry.
+        #
+        # Deriving it from the content rather than issuing a random
+        # token keeps the server stateless — it can recompute what it
+        # expects at any time, so a server restart doesn't trigger a
+        # resync storm, and two servers built from the same config agree.
+        # Computed over the payload WITHOUT the tag (it cannot contain
+        # its own checksum) and inserted afterwards; expected_config_tag
+        # reads it back out of the same builder, so the two can't drift.
+        # Computed over the CONFIGURATION, deliberately excluding
+        # `version` — that counter increments on every edit, so
+        # including it meant editing a channel and then reverting it
+        # produced byte-identical config with a different tag, and the
+        # node stayed "pending" forever despite running exactly what the
+        # dashboard held. Reverting a change has to actually come back
+        # to the same state, or the sync indicator lies and the only way
+        # to clear it is a full push the operator does not need.
+        _for_tag = {k: v for k, v in payload.items() if k != "version"}
+        payload["tag"] = zlib.crc32(
+            json.dumps(_for_tag, separators=(",", ":")).encode()) & 0xFFFFFFFF
+
         out = json.dumps(payload, separators=(",", ":"))
         # Budget guard: alert at the source if a config push approaches
         # the firmware's reassembly cap. UXR_CONFIG_UDP_TRANSPORT_MTU is
@@ -2157,14 +2204,299 @@ class StateManager:
         # operator-set values that pushed past the test's coverage.
         XRCE_REASSEMBLY_CAP = 2048
         if len(out) > XRCE_REASSEMBLY_CAP:
-            self._log_activity(
-                f"Config push for {node_id} is {len(out)} bytes "
-                f"(over the ~{XRCE_REASSEMBLY_CAP}-byte XRCE-DDS reassembly cap; "
-                f"firmware may crash on receive). See docs/MAESTRO_BRINGUP.md "
-                f"wire-size section.",
-                "warning", node_id=node_id,
+            # REFUSE, don't warn-and-send. This guard used to log and
+            # publish anyway, which is how a 2150-byte push reached the
+            # Head Node on 2026-09-23: the node WDOG-reset mid-apply,
+            # came back with "applied home positions to 0 channels", and
+            # the server — seeing UNADOPTED — re-pushed the same
+            # oversized payload, resetting it again.
+            #
+            # A config we know the node cannot survive is not worth
+            # attempting. Returning None leaves the node on its last
+            # good config with a message the operator can act on,
+            # instead of a reboot loop they have to diagnose.
+            self._config_push_errors[node_id] = (
+                f"Config is {len(out)} bytes, over the ~{XRCE_REASSEMBLY_CAP}-byte "
+                f"limit the node can receive ({len(out) - XRCE_REASSEMBLY_CAP} "
+                f"bytes too large). Sending it would crash the node, so it was "
+                f"not sent. Reduce per-channel overrides — channels that share a "
+                f"power timeout or pulse range cost nothing extra."
             )
+            self._log_activity(
+                f"Refused config push for {node_id}: {len(out)} bytes "
+                f"exceeds the ~{XRCE_REASSEMBLY_CAP}-byte XRCE-DDS "
+                f"reassembly cap, which crashes the node on receive. The "
+                f"node keeps its previous config. Reduce per-channel "
+                f"overrides (channels sharing one power timeout or one "
+                f"pulse range cost nothing extra) — see "
+                f"docs/MAESTRO_BRINGUP.md wire-size section.",
+                "error", node_id=node_id,
+            )
+            return None
+        self._config_push_errors.pop(node_id, None)
         return out
+
+    # Largest patch we will send. A patch exists to stay inside ONE
+    # XRCE frame (MTU 512) so it is never fragmented and never touches
+    # the reassembly buffer that the full push has to fight. A patch
+    # approaching that size has lost its reason to exist — send the
+    # full config instead, which at least gets the node to a known
+    # state in one shot.
+    _MAX_PATCH_BYTES = 400
+
+    def record_config_push(self, node_id: str, config_json: str) -> None:
+        """Remember what we last sent a node, so the next change can be
+        expressed as a delta against it.
+
+        Purely an optimization cache: if it is missing, stale, or wrong,
+        :meth:`plan_config_push` falls back to a full push. Correctness
+        rests on the tag comparison, never on this.
+        """
+        if config_json:
+            self._last_pushed_json[node_id] = config_json
+
+    def last_pushed_config(self, node_id: str) -> Optional[str]:
+        """The last full config this server actually sent to a node.
+
+        Distinct from `get_firmware_config_json`, which reflects what
+        the dashboard currently holds — including edits the operator has
+        not synced. Recovery paths want this one: restoring a node that
+        lost its config should put back what it was running, not
+        silently promote work in progress to live hardware.
+        """
+        return self._last_pushed_json.get(node_id)
+
+    def plan_config_push(self, node_id: str,
+                         reported_tag: Optional[int]) -> Optional[str]:
+        """What to send to bring this node up to date — a patch if one
+        is provably safe, otherwise the full config, otherwise None.
+
+        Both the operator's Sync and the announce-driven reconcile go
+        through here, so there is one place that decides and one set of
+        rules to reason about.
+        """
+        full = self.get_firmware_config_json(node_id)
+        if not full:
+            return None
+        patch = self._build_config_patch(node_id, reported_tag, full)
+        return patch or full
+
+    def _build_config_patch(self, node_id: str, reported_tag: Optional[int],
+                            full_json: str) -> Optional[str]:
+        """A patch_config payload, or None when a full push is required.
+
+        A patch is only safe when we can prove what the node currently
+        holds AND that the difference is confined to Maestro channel
+        fields. Every other case falls back, deliberately — a delta
+        applied to a base we only *assume* is the divergence this whole
+        mechanism exists to prevent.
+        """
+        prev_json = self._last_pushed_json.get(node_id)
+        if not prev_json or reported_tag is None:
+            return None
+        try:
+            prev = json.loads(prev_json)
+            cur = json.loads(full_json)
+        except ValueError:
+            return None
+
+        # The node must be holding exactly the config we last sent —
+        # that is the base the patch is expressed against.
+        if prev.get("tag") != reported_tag:
+            return None
+        if prev.get("tag") == cur.get("tag"):
+            return None            # nothing changed; caller sends full only if asked
+
+        prev_by_id = {p.get("id"): p for p in prev.get("peripherals", [])}
+        cur_by_id = {p.get("id"): p for p in cur.get("peripherals", [])}
+        if set(prev_by_id) != set(cur_by_id):
+            return None            # peripheral added or removed
+
+        changed: Dict[str, Dict[str, Any]] = {}
+        target_id: Optional[str] = None
+        for pid, cur_p in cur_by_id.items():
+            prev_p = prev_by_id[pid]
+            if cur_p == prev_p:
+                continue
+            # Only Maestro channel arrays are patchable today; anything
+            # else differing means a full push.
+            if cur_p.get("type") != "maestro":
+                return None
+            if target_id is not None:
+                return None        # two peripherals changed; not worth a patch
+            cur_params = dict(cur_p.get("params") or {})
+            prev_params = dict(prev_p.get("params") or {})
+            cur_ch = cur_params.pop("channels", None)
+            prev_ch = prev_params.pop("channels", None)
+            if cur_params != prev_params:
+                return None        # a peripheral-level param moved too
+            if not isinstance(cur_ch, list) or not isinstance(prev_ch, list):
+                return None
+            if len(cur_ch) != len(prev_ch):
+                return None
+            for i, (a, b) in enumerate(zip(prev_ch, cur_ch)):
+                if a == b:
+                    continue
+                # Send the channel's full new field set, not a
+                # field-level diff: a field the operator RESET to its
+                # default disappears from the slimmed wire form, and a
+                # field-level diff would silently leave the node on the
+                # old value. Whole-channel is both smaller to reason
+                # about and correct by construction.
+                changed[str(i)] = b
+            target_id = pid
+
+        if not changed or target_id is None:
+            return None
+
+        payload = json.dumps({
+            "action": "patch_config",
+            "from": reported_tag,
+            "to": cur.get("tag"),
+            "peripheral": target_id,
+            "channels": changed,
+        }, separators=(",", ":"))
+        if len(payload) > self._MAX_PATCH_BYTES:
+            return None
+        return payload
+
+    def _synced_snapshot_path(self, node_id: str) -> str:
+        """Sidecar holding the last config a node CONFIRMED running.
+
+        A separate file rather than a second copy inside the node's YAML
+        so the live config stays the readable one an operator can open
+        and reason about.
+        """
+        return os.path.join(self.nodes_config_dir, f"{node_id}.yaml.synced")
+
+    def has_synced_snapshot(self, node_id: str) -> bool:
+        """Whether there is a confirmed state to revert to."""
+        return os.path.exists(self._synced_snapshot_path(node_id))
+
+    def _snapshot_synced_config(self, node_id: str) -> None:
+        """Record the current config as the node's confirmed state.
+
+        Called only when the node's reported tag matches ours, which is
+        exactly when the stored config IS what the hardware runs. Doing
+        it at push time instead would record an optimistic state — a
+        push that never lands would leave a 'confirmed' snapshot the
+        node never received, and Revert would restore fiction.
+        """
+        src = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
+        if not os.path.exists(src):
+            return
+        try:
+            shutil.copyfile(src, self._synced_snapshot_path(node_id))
+        except OSError as e:
+            if self.logger:
+                self.logger.warn(f"Could not snapshot synced config: {e}")
+
+    def revert_node_peripherals(self, node_id: str) -> Dict[str, Any]:
+        """Discard unsynced edits, restoring what the node is running.
+
+        The operator's escape hatch: config only reaches hardware on an
+        explicit Sync, so anything edited but not synced exists solely
+        on the server and can be thrown away without touching the node.
+        Nothing is published here.
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node:
+            return {"success": False, "message": f"Node {node_id} not found"}
+        snap = self._synced_snapshot_path(node_id)
+        if not os.path.exists(snap):
+            return {"success": False,
+                    "message": "No synced configuration to revert to — this "
+                               "node has not confirmed a config yet."}
+        dest = os.path.join(self.nodes_config_dir, f"{node_id}.yaml")
+        try:
+            shutil.copyfile(snap, dest)
+        except OSError as e:
+            return {"success": False, "message": f"Revert failed: {e}"}
+        if not self._load_node_config(node_id):
+            return {"success": False,
+                    "message": "Restored file but could not load it"}
+        if node.peripheral_config:
+            # It matches the hardware again by construction.
+            node.peripheral_config.sync_status = "synced"
+        self._save_node_config(node_id)
+        self._log_activity("Reverted unsynced peripheral changes", "info",
+                           node_id=node_id)
+        self._maybe_notify_host_peripheral_change(node_id)
+        return {"success": True}
+
+    def observe_node_config_tag(self, node_id: str,
+                                node_tag: Optional[int]) -> bool:
+        """Record whether a node is actually holding our config.
+
+        Observation only — this NEVER pushes. Config reaches a node
+        during an explicit Sync and at no other time, so an operator can
+        edit, look at it, and revert without the server having quietly
+        shipped the half-finished version to the hardware.
+
+        What the tag buys us here is that `sync_status` stops being a
+        belief and becomes a fact. It used to be set to "synced" at the
+        moment we published, which said only that a message left the
+        server; a push that never landed, or a node that later rebooted
+        onto an older blob, still read as "synced". Now "synced" means
+        the node told us which config it is holding and it is ours.
+
+        Returns True if the status changed, so the caller can broadcast
+        it. Writes the node's YAML only on a real transition — this runs
+        on every announcement, at roughly 1 Hz per node.
+        """
+        node = self.state.adopted_nodes.get(node_id)
+        if not node or not node.peripheral_config or node_tag is None:
+            return False
+        expected = self.expected_config_tag(node_id)
+        if expected is None:
+            return False
+        want = "synced" if node_tag == expected else "pending"
+
+        # Snapshot on any confirmation, not only on a transition. A node
+        # already sitting at "synced" when this shipped would otherwise
+        # never produce one — no transition ever comes — and Revert
+        # would stay unavailable indefinitely. The existence check keeps
+        # this to one stat() on the ~1 Hz announcement path.
+        if want == "synced" and not self.has_synced_snapshot(node_id):
+            self._snapshot_synced_config(node_id)
+
+        if node.peripheral_config.sync_status == want:
+            return False
+        node.peripheral_config.sync_status = want
+        self._save_node_config(node_id)
+        if want == "synced":
+            # Freshly confirmed: this is the state Revert returns to.
+            self._snapshot_synced_config(node_id)
+        return True
+
+    def expected_config_tag(self, node_id: str) -> Optional[int]:
+        """The tag this node's CURRENT server-side config would carry.
+
+        Compared against the `cfg_tag` the node reports in /announce to
+        decide whether it is holding what we intend. None means there is
+        nothing to compare — no config, or a config we refused to build
+        — and the caller must not treat that as a mismatch.
+
+        Deliberately derived from the same builder as the push rather
+        than tracked separately: a second source of truth for "what
+        should the node have" is precisely the drift this exists to
+        detect.
+        """
+        js = self.get_firmware_config_json(node_id)
+        if not js:
+            return None
+        try:
+            tag = json.loads(js).get("tag")
+            return int(tag) if tag is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    def last_config_push_error(self, node_id: str) -> Optional[str]:
+        """Why the most recent config build for this node was refused,
+        or None if the last one was fine. Lets the Sync action tell the
+        operator what actually happened instead of the generic "nothing
+        to sync"."""
+        return self._config_push_errors.get(node_id)
 
     def _generate_peripheral_id(self, node: NodeInfo, type_id: str) -> str:
         config = node.peripheral_config or NodePeripheralConfig()
@@ -4010,6 +4342,35 @@ class StateManager:
                             f"{node_id}/{peripheral_id}/{channel_id}: "
                             f"{type(e).__name__}: {e}", exc_info=True)
         return True
+
+    def record_commanded_channel(self, node_id: str, peripheral_id: str,
+                                 channel_id: str, value: float) -> None:
+        """Note the value the server last COMMANDED for a channel.
+
+        The State tab's sliders bind to `pin_state/<node_id>`, which is
+        built from this runtime state — so a channel with no entry here
+        renders a slider with no position, and the operator drags from
+        wherever the control happened to be rather than from where the
+        hardware actually is.
+
+        Most actuator channels never report back. A Maestro's /state
+        carries only `connected`, `error_flags` and `moving`; the 24
+        servo channels are write-only on the wire (reading positions
+        means polling the Maestro over USB, which is the transfer that
+        used to wedge the Teensy). So for those channels the last
+        commanded value IS the best available truth, and without it a
+        pose can move a servo while its slider sits at zero.
+
+        Firmware readings still win: a real reading for the same channel
+        arriving on /state overwrites this via the same set_channel path.
+        """
+        runtime_state = self.get_or_create_runtime_state(node_id)
+        if runtime_state is None:
+            return
+        try:
+            runtime_state.set_channel(peripheral_id, channel_id, float(value))
+        except (TypeError, ValueError):
+            return
 
     def get_runtime_state(self, node_id: str) -> Optional[Dict[str, Any]]:
         """Get runtime state for a node as a dictionary."""

@@ -205,3 +205,159 @@ def test_pathological_full_customization_documented_overage():
     # docs/MAESTRO_BRINGUP.md.
     print(f"\n  pathological case: {n} bytes "
           f"({'within' if n <= XRCE_REASSEMBLY_CAP_BYTES else 'OVER'} XRCE cap)")
+
+
+# ── shared power timeout (idle_disengage_ms) ─────────────────────────
+#
+# The 2026-09-23 incident: the operator set the per-channel power
+# timeout on a fully-mapped 24-channel Head Node. Each channel repeating
+# `"idle_disengage_ms":1000` costs 26 bytes — 624 bytes of pure
+# repetition — which took the push to 2150 bytes, past the reassembly
+# cap. The node WDOG-reset on every sync ("Boot — reset cause:
+# WDOG1/WDOG2 timeout") and came back with `applied home positions to 0
+# channels`.
+#
+# The value is now hoisted to peripheral level when channels share it,
+# with channels that differ emitting an explicit value (including 0).
+
+def _all_channels_idle(p, ms=1000):
+    for ch in p["channels"]:
+        ch["idle_disengage_ms"] = ms
+    return p
+
+
+def test_power_timeout_on_every_channel_fits():
+    """THE regression. Every channel sharing one timeout must not cost
+    24 copies of it."""
+    p = _all_channels_idle(_baseline_params())
+    n = _wire_size(_maestro_peripheral(p))
+    assert n <= XRCE_REASSEMBLY_CAP_BYTES, (
+        f"24 channels sharing one power timeout must fit the XRCE "
+        f"reassembly cap ({XRCE_REASSEMBLY_CAP_BYTES}); got {n}. The "
+        f"hoist in maestro_slim_channels_for_wire has regressed."
+    )
+
+
+def test_power_timeout_on_top_of_full_customization_fits():
+    """The real Head Node shape: tuned envelopes AND a shared timeout."""
+    p = _baseline_params()
+    for i in range(18):
+        ch = p["channels"][i]
+        ch["min_pulse_us"] = 950 + i * 3
+        ch["max_pulse_us"] = 2050 + i * 3
+        ch["neutral_us"] = 1500 + i
+        ch["home_us"] = 1400 + i * 10
+    _all_channels_idle(p)
+    n = _wire_size(_maestro_peripheral(p))
+    assert n <= XRCE_REASSEMBLY_CAP_BYTES, (
+        f"18 tuned channels + a shared power timeout must fit the cap "
+        f"({XRCE_REASSEMBLY_CAP_BYTES}); got {n}."
+    )
+
+
+def test_shared_timeout_is_hoisted_once():
+    p = _all_channels_idle(_baseline_params())
+    wire = maestro_slim_channels_for_wire(p)
+    assert wire["idle_disengage_ms"] == 1000
+    assert all("idle_disengage_ms" not in ch for ch in wire["channels"])
+
+
+def test_hoisted_key_precedes_the_channels_array():
+    """The firmware bounds its peripheral-level lookup to the text
+    before "channels", so a hoisted value serialized after the array
+    would simply never be seen."""
+    p = _all_channels_idle(_baseline_params())
+    blob = json.dumps(maestro_slim_channels_for_wire(p), separators=(",", ":"))
+    assert blob.index('"idle_disengage_ms"') < blob.index('"channels"')
+
+
+def test_a_channel_opting_out_says_zero_explicitly():
+    """The safety property. A channel with no timeout, sitting under a
+    hoisted one, must emit an explicit 0 — otherwise the firmware hands
+    it the shared value and a load-bearing servo silently goes limp."""
+    p = _all_channels_idle(_baseline_params())
+    p["channels"][3]["idle_disengage_ms"] = 0
+    wire = maestro_slim_channels_for_wire(p)
+    assert wire["idle_disengage_ms"] == 1000
+    assert wire["channels"][3]["idle_disengage_ms"] == 0
+
+
+def test_a_channel_with_a_different_timeout_keeps_its_own(): 
+    p = _all_channels_idle(_baseline_params())
+    p["channels"][7]["idle_disengage_ms"] = 250
+    wire = maestro_slim_channels_for_wire(p)
+    assert wire["idle_disengage_ms"] == 1000
+    assert wire["channels"][7]["idle_disengage_ms"] == 250
+
+
+def test_a_lone_timeout_is_not_hoisted():
+    """Hoisting a value only one channel uses costs a peripheral-level
+    key plus an explicit 0 on all 23 others — strictly worse."""
+    p = _baseline_params()
+    p["channels"][2]["idle_disengage_ms"] = 1000
+    wire = maestro_slim_channels_for_wire(p)
+    assert "idle_disengage_ms" not in wire
+    assert wire["channels"][2]["idle_disengage_ms"] == 1000
+    assert all("idle_disengage_ms" not in ch
+               for i, ch in enumerate(wire["channels"]) if i != 2)
+
+
+def test_no_timeouts_anywhere_emits_no_peripheral_key():
+    p = _baseline_params()
+    wire = maestro_slim_channels_for_wire(p)
+    assert "idle_disengage_ms" not in wire
+
+
+def test_every_channel_resolves_to_its_original_value():
+    """End-to-end equivalence: decode the wire the way the firmware
+    does (channel value, else peripheral value, else 0) and confirm
+    every channel still gets exactly what the operator configured."""
+    p = _all_channels_idle(_baseline_params())
+    p["channels"][3]["idle_disengage_ms"] = 0
+    p["channels"][7]["idle_disengage_ms"] = 250
+    p["channels"][11]["idle_disengage_ms"] = 0
+    wire = maestro_slim_channels_for_wire(p)
+    fallback = wire.get("idle_disengage_ms", 0)
+    for i, ch in enumerate(p["channels"]):
+        decoded = wire["channels"][i].get("idle_disengage_ms", fallback)
+        assert decoded == ch["idle_disengage_ms"], (
+            f"ch{i} decoded {decoded}, operator set {ch['idle_disengage_ms']}")
+
+
+# ── server-only params never reach the node ──────────────────────────
+
+def test_server_only_params_are_stripped_from_the_wire():
+    """channel_count / device_number / idle_value / speed_limit /
+    accel_limit / poll_positions are dashboard state. Grepping the
+    firmware tree for each quoted JSON key returns nothing — no driver
+    parses them — yet they rode every config push at full price against
+    a hard 2048-byte ceiling."""
+    from saint_server.peripheral_model import strip_server_only_params
+    p = _baseline_params()
+    wire = strip_server_only_params("maestro", maestro_slim_channels_for_wire(p))
+    for k in ("channel_count", "device_number", "idle_value",
+              "speed_limit", "accel_limit", "poll_positions"):
+        assert k not in wire, f"{k} must not reach the node"
+
+
+def test_stripping_keeps_everything_the_firmware_reads():
+    """The deny list must never widen into fields drv_parse_json_params
+    actually looks for."""
+    from saint_server.peripheral_model import strip_server_only_params
+    p = _baseline_params()
+    p["neutral_us"] = 1500
+    p["speed"] = 3
+    p["acceleration"] = 4
+    p["home_us"] = 1500
+    wire = strip_server_only_params("maestro", maestro_slim_channels_for_wire(p))
+    for k in ("transport", "min_pulse_us", "max_pulse_us", "neutral_us",
+              "speed", "acceleration", "home_us", "channels"):
+        assert k in wire, f"{k} is read by the firmware and must survive"
+
+
+def test_unknown_peripheral_types_are_untouched():
+    """Deny list, not allow list: a type with no entry passes through
+    whole, so a new peripheral can't be silently gutted."""
+    from saint_server.peripheral_model import strip_server_only_params
+    params = {"pixel_count": 16, "default_color": "#1e293b", "anything": 1}
+    assert strip_server_only_params("neopixel", params) == params

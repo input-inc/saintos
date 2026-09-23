@@ -105,6 +105,11 @@ bool     maestro_stop_script(void);
 
 /* ── Channel config ──────────────────────────────────────────────── */
 
+/* Apply a patch_config payload's channel deltas. Returns channels
+ * touched, or -1 if the patch is not addressed to this peripheral.
+ * Only fields present in the patch change. See docs/CONFIG_SYNC.md. */
+int maestro_apply_config_patch(const char* json, const char* json_end);
+
 void maestro_set_channel_config(uint8_t channel,
                                  const maestro_channel_config_t* config);
 const maestro_channel_config_t* maestro_get_channel_config(uint8_t channel);

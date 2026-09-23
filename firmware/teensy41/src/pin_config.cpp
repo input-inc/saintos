@@ -486,6 +486,21 @@ bool pin_config_apply_json(const char* json, size_t json_len)
     return true;
 }
 
+/* Config sync tag. Held in RAM, persisted in flash's reserved block,
+ * and reloaded at boot by pin_config_load so a node that reboots onto
+ * its saved config still reports the tag it was given. */
+static uint32_t g_cfg_tag = FLASH_CFG_TAG_UNKNOWN;
+
+uint32_t pin_config_cfg_tag(void)
+{
+    return g_cfg_tag;
+}
+
+void pin_config_set_cfg_tag(uint32_t tag)
+{
+    g_cfg_tag = tag;
+}
+
 bool pin_config_save(void)
 {
     /* static, not stack: this struct is ~3 KB since pins[] grew to 48
@@ -505,6 +520,10 @@ bool pin_config_save(void)
         // Copy current node config
         flash_storage_from_node(&storage, &g_node);
     }
+
+    /* Stamp the tag the server gave us alongside the config it
+     * describes, so the two can never drift apart across a reboot. */
+    flash_cfg_tag_set(&storage, g_cfg_tag);
 
     // Copy pin configurations to storage
     storage.pin_config.version = PIN_CONFIG_VERSION;
@@ -585,13 +604,26 @@ bool pin_config_load(void)
 
     if (!flash_storage_load(&storage)) {
         Serial.printf("Pin config: no stored configuration\n");
+        /* No stored config means no tag either — say so rather than
+         * keeping a stale one, or the server would believe this node
+         * still holds a config it just lost. */
+        g_cfg_tag = FLASH_CFG_TAG_UNKNOWN;
         return false;
     }
+
+    /* Restore the tag that belongs to the config we are about to load,
+     * so the first /announce after a reboot already reports it and the
+     * server does not push a config the node already has. */
+    g_cfg_tag = flash_cfg_tag_get(&storage);
 
     // Check pin config version
     if (storage.pin_config.version != PIN_CONFIG_VERSION) {
         Serial.printf("Pin config: version mismatch (%d vs %d)\n",
                storage.pin_config.version, PIN_CONFIG_VERSION);
+        /* Rejected: we are NOT holding this config, so we must not
+         * claim its tag. Reporting it would tell the server we are in
+         * sync while running with nothing applied. */
+        g_cfg_tag = FLASH_CFG_TAG_UNKNOWN;
         return false;
     }
 

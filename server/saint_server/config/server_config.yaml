@@ -9,6 +9,10 @@ websocket:
   password: '12345'
   auth_timeout: 10.0
   kiosk_token: lHfQTmr4TQMnsTOjBjyGkpyn-aESvqE4k3_wrj18veQ
+  # Minimum ms between pin_state broadcasts per node. Raise if control
+  # feels laggy on a congested link, lower for smoother gauges; 0
+  # disables. See docs/LATENCY_REDUCTION.md "Round 3".
+  pin_state_interval_ms: 200
 network:
   web_port: 80
 ros_bridge:
