@@ -363,6 +363,29 @@ bool pin_config_set_fas100_params(uint8_t gpio, uint8_t poll_interval_ms);
 bool pin_config_set_roboclaw_params(uint8_t gpio, uint8_t address, uint8_t deadband,
                                      uint16_t max_current_ma);
 void pin_config_apply_hardware(void);
+
+/* Boot-reload variant: same physical-pin setup, but WITHOUT the
+ * peripheral-driver `apply_config` delegation.
+ *
+ * Use this one — and only this one — from pin_config_load(). By the
+ * time it runs, every peripheral driver has already restored its own
+ * state straight from the flash blob via drv->load_config(). Calling
+ * drv->apply_config() on top of that pushes the pin_config_t's params
+ * over the restored values, and those params are NOT recovered from
+ * flash for peripheral modes (the loader only unpacks PWM and SERVO
+ * params) — they are whatever the pin table happened to be left
+ * holding.
+ *
+ * That is how a Maestro came back from every reboot running all 24
+ * channels on the default 992-2000 us / 1500 us envelope instead of
+ * its calibrated one: poses resolved to the wrong pulse widths until
+ * the operator hit Sync, which re-pushed the real per-channel values.
+ * home_us was zeroed along with it, so the connect hook homed 0
+ * channels and the EEPROM provisioning sweep skipped every one.
+ *
+ * Skipping the delegation costs nothing: peripheral channels are
+ * virtual GPIOs with no hardware to configure. */
+void pin_config_apply_hardware_from_flash(void);
 const char* pin_mode_to_string(pin_mode_t mode);
 pin_mode_t pin_mode_from_string(const char* str);
 

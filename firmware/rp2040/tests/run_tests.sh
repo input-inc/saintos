@@ -22,13 +22,17 @@ CC="${CC:-cc}"
 # helpers aren't all exercised by each test runner — that's fine, the
 # test code just calls the entry points it cares about directly.
 # -DSIMULATION drops the hardware UART/GPIO code so we don't need Pico
-# SDK headers.
+# SDK headers. stubs/ covers what survives that guard: pin_config.c
+# includes pico/stdlib.h + hardware/{gpio,pwm,adc}.h unconditionally,
+# so the test build supplies its own no-op versions of the ~20 entry
+# points it actually calls.
 CFLAGS=(
     -std=c11 -O0 -g
     -Wall -Wextra
     -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter
     -Wno-unused-but-set-variable
     -DSIMULATION=1
+    -I"${SCRIPT_DIR}/stubs"
     -I"${DRIVER_INC}"
     -I"${SHARED_INC}"
 )
@@ -41,6 +45,7 @@ TEST_BINARIES=(
     "test_tmc2208_driver"
     "test_kangaroo_driver"
     "test_switch_input_driver"
+    "test_pin_config_boot_reload"
 )
 
 overall_rc=0

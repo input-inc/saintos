@@ -689,8 +689,11 @@ bool pin_config_load(void)
         drv->load_config(&storage);
     }
 
-    // Apply hardware configuration
-    pin_config_apply_hardware();
+    // Apply hardware configuration. The from_flash variant: the
+    // drv->load_config() loop above already restored each peripheral
+    // driver's state, so the peripheral apply_config delegation must
+    // NOT run here and overwrite it.
+    pin_config_apply_hardware_from_flash();
 
     Serial.printf("Pin config: loaded %d pins from flash\n", pin_config_count);
     return true;
@@ -850,7 +853,13 @@ bool pin_config_set_maestro_params(uint8_t gpio, uint16_t min_pulse_us, uint16_t
     return true;
 }
 
-void pin_config_apply_hardware(void)
+/* Shared body for both entry points. `from_flash` is true only on the
+ * boot-reload path (pin_config_load), where each peripheral driver has
+ * already restored its own state from the flash blob via
+ * drv->load_config(). See pin_config_apply_hardware_from_flash() in
+ * shared/include/pin_types.h for why re-applying over that corrupted
+ * every Maestro channel's pulse envelope on reboot. */
+static void apply_hardware_impl(bool from_flash)
 {
     for (uint8_t i = 0; i < pin_config_count; i++) {
         pin_config_t* cfg = &pin_configs[i];
@@ -914,6 +923,12 @@ void pin_config_apply_hardware(void)
 
             default:
             {
+                /* Boot reload: drv->load_config() already restored this
+                 * driver's state from flash. Pushing the pin table's
+                 * params over it would clobber the real config with
+                 * whatever set_defaults left behind. */
+                if (from_flash) break;
+
                 // Delegate to peripheral driver for hardware apply
                 const peripheral_driver_t* drv = peripheral_find_by_mode(cfg->mode);
                 if (drv && drv->apply_config) {
@@ -927,6 +942,16 @@ void pin_config_apply_hardware(void)
         Serial.printf("Pin config: applied hardware config for GPIO %d (%s)\n",
                gpio, pin_mode_to_string(cfg->mode));
     }
+}
+
+void pin_config_apply_hardware(void)
+{
+    apply_hardware_impl(false);
+}
+
+void pin_config_apply_hardware_from_flash(void)
+{
+    apply_hardware_impl(true);
 }
 
 const char* pin_mode_to_string(pin_mode_t mode)

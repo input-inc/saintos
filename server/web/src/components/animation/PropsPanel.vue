@@ -6,6 +6,7 @@ import {
 import { EASING_CATEGORIES } from '@/composables/easings'
 import { useAnimationsStore } from '@/stores/animations'
 import IconPicker from './IconPicker.vue'
+import NumberField from '@/components/NumberField.vue'
 
 const animations = useAnimationsStore()
 
@@ -30,12 +31,11 @@ const emit = defineEmits([
   'select',
 ])
 
-// Time / Value inputs show at most 2 decimal places. The underlying
-// curve still stores full precision (the gizmo + slider can land on
-// arbitrary fractions), but the displayed text is rounded so the
-// fields stay readable. Edits go back through `setRounded` which
-// writes the rounded value into the model so the curve matches what
-// the operator sees.
+// Read-only 2-decimal formatting for inline text (e.g. the clip range
+// label). The editable Time / Value fields use <NumberField>, which
+// owns its own display formatting — it has to, because reformatting
+// while the operator is mid-keystroke is exactly the bug it exists to
+// prevent. See components/NumberField.vue.
 function fmt2 (n) {
   const v = Number(n)
   return Number.isFinite(v) ? v.toFixed(2) : '0.00'
@@ -286,10 +286,10 @@ function onIconChange (value) {
 
       <label class="block">
         <span class="block text-fg-muted text-xs mb-1">Time (s)</span>
-        <input type="number" step="0.01" min="0" :max="animation.duration"
-               class="input-field w-full"
-               :value="fmt2(selectedKeyframe.time)"
-               @input="e => { selectedKeyframe.time = Number(Number(e.target.value).toFixed(2)); onChange() }" />
+        <NumberField class="input-field w-full"
+                     step="0.01" :decimals="2" :min="0" :max="animation.duration"
+                     :model-value="selectedKeyframe.time"
+                     @update:model-value="v => { selectedKeyframe.time = v; onChange() }" />
       </label>
 
       <label class="block">
@@ -300,9 +300,10 @@ function onIconChange (value) {
                  v-model.number="selectedKeyframe.value"
                  @input="onChange"
                  class="w-full accent-cyan-400" />
-          <input type="number" step="0.01" class="input-field w-full"
-                 :value="fmt2(selectedKeyframe.value)"
-                 @input="e => { selectedKeyframe.value = Number(Number(e.target.value).toFixed(2)); onChange() }" />
+          <NumberField class="input-field w-full"
+                       step="0.01" :decimals="2"
+                       :model-value="selectedKeyframe.value"
+                       @update:model-value="v => { selectedKeyframe.value = v; onChange() }" />
         </div>
       </label>
 
@@ -353,12 +354,12 @@ function onIconChange (value) {
           Time (s)<span v-if="overrideClip" class="text-fg-faint">
             — clip {{ fmt2(overrideClip[0]) }}–{{ fmt2(overrideClip[1]) }}</span>
         </span>
-        <input type="number" step="0.01"
-               :min="overrideClip ? overrideClip[0] : 0"
-               :max="overrideClip ? overrideClip[1] : animation.duration"
-               class="input-field w-full"
-               :value="fmt2(selectedOverrideKey.time)"
-               @input="e => setOverrideTime(e.target.value)" />
+        <NumberField class="input-field w-full"
+                     step="0.01" :decimals="3"
+                     :min="overrideClip ? overrideClip[0] : 0"
+                     :max="overrideClip ? overrideClip[1] : animation.duration"
+                     :model-value="selectedOverrideKey.time"
+                     @update:model-value="setOverrideTime" />
       </label>
 
       <label class="block">
@@ -368,9 +369,10 @@ function onIconChange (value) {
                  v-model.number="selectedOverrideKey.value"
                  @input="onChange"
                  class="w-full accent-amber-400" />
-          <input type="number" step="0.01" class="input-field w-full"
-                 :value="fmt2(selectedOverrideKey.value)"
-                 @input="e => { selectedOverrideKey.value = Number(Number(e.target.value).toFixed(2)); onChange() }" />
+          <NumberField class="input-field w-full"
+                       step="0.01" :decimals="2"
+                       :model-value="selectedOverrideKey.value"
+                       @update:model-value="v => { selectedOverrideKey.value = v; onChange() }" />
         </div>
       </label>
 
@@ -401,10 +403,10 @@ function onIconChange (value) {
 
       <label class="block">
         <span class="block text-fg-muted text-xs mb-1">Time (s)</span>
-        <input type="number" step="0.01" min="0" :max="animation.duration"
-               class="input-field w-full"
-               :value="fmt2(selectedTriggerKey.time)"
-               @input="e => { selectedTriggerKey.time = Number(Number(e.target.value).toFixed(2)); onChange() }" />
+        <NumberField class="input-field w-full"
+                     step="0.01" :decimals="2" :min="0" :max="animation.duration"
+                     :model-value="selectedTriggerKey.time"
+                     @update:model-value="v => { selectedTriggerKey.time = v; onChange() }" />
       </label>
 
       <label class="block">
@@ -535,8 +537,10 @@ function onIconChange (value) {
                v-model.number="jointAngles[name]"
                @input="onJointSlider(name)"
                class="w-full accent-cyan-400" />
-        <input type="number" step="0.01" class="input-field w-full"
-               v-model.number="jointAngles[name]" @input="onJointSlider(name)" />
+        <NumberField class="input-field w-full"
+                     step="0.01" :decimals="3"
+                     :model-value="jointAngles[name]"
+                     @update:model-value="v => { jointAngles[name] = v; onJointSlider(name) }" />
         <button class="btn-sm w-full bg-cyan-600 hover:bg-cyan-500 text-fg-strong justify-center"
                 @click="setJointKeyframe(name)">
           <span class="material-icons icon-sm">fiber_manual_record</span>
@@ -584,13 +588,17 @@ function onIconChange (value) {
       <div class="grid grid-cols-2 gap-2">
         <label class="block">
           <span class="block text-fg-muted text-xs mb-1">Duration (s)</span>
-          <input type="number" step="0.1" min="0" class="input-field w-full"
-                 v-model.number="animation.duration" @input="onChange" />
+          <NumberField class="input-field w-full"
+                       step="0.1" :min="0"
+                       :model-value="animation.duration"
+                       @update:model-value="v => { animation.duration = v; onChange() }" />
         </label>
         <label class="block">
           <span class="block text-fg-muted text-xs mb-1">FPS</span>
-          <input type="number" step="1" min="1" max="240" class="input-field w-full"
-                 v-model.number="animation.fps" @input="onChange" />
+          <NumberField class="input-field w-full"
+                       step="1" :decimals="0" :min="1" :max="240"
+                       :model-value="animation.fps"
+                       @update:model-value="v => { animation.fps = v; onChange() }" />
         </label>
       </div>
 

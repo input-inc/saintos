@@ -796,8 +796,11 @@ bool pin_config_load(void)
         drv->load_config(&storage);
     }
 
-    // Apply hardware configuration
-    pin_config_apply_hardware();
+    // Apply hardware configuration. The from_flash variant: the
+    // drv->load_config() loop above already restored each peripheral
+    // driver's state, so the peripheral apply_config delegation must
+    // NOT run here and overwrite it.
+    pin_config_apply_hardware_from_flash();
 
     printf("Pin config: loaded %d pins from flash\n", pin_config_count);
     return true;
@@ -945,7 +948,19 @@ bool pin_config_set_digital_in_params(uint8_t gpio, bool pull_up, bool pull_down
     return true;
 }
 
-void pin_config_apply_hardware(void)
+/* Shared body for both entry points. `from_flash` is true only on the
+ * boot-reload path (pin_config_load), where each peripheral driver has
+ * already restored its own state from the flash blob via
+ * drv->load_config(). See pin_config_apply_hardware_from_flash() in
+ * shared/include/pin_types.h.
+ *
+ * Dropping the set_defaults call from pin_config_set() (see the note
+ * there) was only half of this fix: it stopped apply_config from
+ * pushing fake "default" params over the restored config, but left the
+ * params zeroed — which apply_config then pushed just as happily. On a
+ * Maestro that lands as min = max = neutral = 0, clamping every target
+ * to a 0 us pulse. Skipping the delegation outright is the whole fix. */
+static void apply_hardware_impl(bool from_flash)
 {
     for (uint8_t i = 0; i < pin_config_count; i++) {
         pin_config_t* cfg = &pin_configs[i];
@@ -1044,6 +1059,11 @@ void pin_config_apply_hardware(void)
 
             default:
             {
+                /* Boot reload: drv->load_config() already restored this
+                 * driver's state from flash — don't overwrite it with
+                 * the pin table's params. */
+                if (from_flash) break;
+
                 const peripheral_driver_t* drv = peripheral_find_by_mode(cfg->mode);
                 if (drv && drv->apply_config) {
                     uint8_t ch = peripheral_gpio_to_channel(drv, gpio);
@@ -1056,6 +1076,16 @@ void pin_config_apply_hardware(void)
         printf("Pin config: applied hardware config for GPIO %d (%s)\n",
                gpio, pin_mode_to_string(cfg->mode));
     }
+}
+
+void pin_config_apply_hardware(void)
+{
+    apply_hardware_impl(false);
+}
+
+void pin_config_apply_hardware_from_flash(void)
+{
+    apply_hardware_impl(true);
 }
 
 const char* pin_mode_to_string(pin_mode_t mode)

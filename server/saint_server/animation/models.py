@@ -474,3 +474,136 @@ class Sound:
         if not self.created:
             self.created = now
         self.modified = now
+
+
+# ── playlists ───────────────────────────────────────────────────────
+
+
+#: The three board kinds a playlist can hold. A playlist is single-kind:
+#: an animation playlist holds animation ids and nothing else. Keeps the
+#: sidebar's Animations / Poses / Sounds sections intact and lets each
+#: kind's row renderer stay as it is.
+PLAYLIST_KINDS = ("animations", "poses", "sounds")
+
+
+@dataclass
+class Playlist:
+    """An ordered, named set of board items of one kind.
+
+    Replaces the single ``group`` string that used to live on Animation,
+    Pose and Sound. Membership is many-to-many — the same animation can
+    sit in "Greetings" and in "Show opener" — so it cannot live on the
+    item as one value any more.
+
+    Membership AND order both live here, on the playlist, rather than
+    being split between an ``item.playlists`` list and an ``item.position``
+    int. That is what makes an item's slot per-playlist: "Bow" can be
+    third in Greetings and first in Idle loops at the same time, which a
+    single position field on the item cannot express. It also means
+    reordering is one write to one file instead of N writes across the
+    members, and an item's membership is removed by deleting it from this
+    list — there is no second place for it to linger.
+
+    ``items`` is the ordered list of member ids. It is allowed to name an
+    id that no longer exists (an item deleted out from under the
+    playlist); readers filter those out rather than the store rewriting
+    every playlist on every delete. :meth:`prune` exists for callers that
+    do want to compact it.
+    """
+    id: str
+    name: str
+    kind: str                                          # PLAYLIST_KINDS
+    icon: str = ""
+    items: List[str] = field(default_factory=list)     # ordered member ids
+    position: int = 0                                  # order in the sidebar
+    created: str = ""
+    modified: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind,
+            "icon": self.icon,
+            "items": list(self.items),
+            "position": self.position,
+            "created": self.created,
+            "modified": self.modified,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Playlist":
+        kind = str(d.get("kind", ""))
+        if kind not in PLAYLIST_KINDS:
+            raise ValueError(f"Unknown playlist kind: {kind!r}")
+        # De-dupe on read as well as on write: a playlist that acquired a
+        # duplicate id through some other path must not render the same
+        # row twice, and "already a member" checks elsewhere assume this.
+        seen = set()
+        items: List[str] = []
+        for raw in d.get("items", []) or []:
+            iid = str(raw)
+            if iid and iid not in seen:
+                seen.add(iid)
+                items.append(iid)
+        return cls(
+            id=str(d["id"]),
+            name=str(d.get("name", "")),
+            kind=kind,
+            icon=str(d.get("icon", "")),
+            items=items,
+            position=int(d.get("position", 0)),
+            created=str(d.get("created", "")),
+            modified=str(d.get("modified", "")),
+        )
+
+    def add(self, item_id: str, index: Optional[int] = None) -> bool:
+        """Insert ``item_id`` at ``index`` (default: append).
+
+        Returns True if the playlist changed. An item already present is
+        MOVED to the new slot rather than duplicated — dragging a row
+        that is already in this list is a reorder, which is what the
+        operator means by it.
+        """
+        if not item_id:
+            return False
+        before = list(self.items)
+        if item_id in self.items:
+            self.items.remove(item_id)
+        if index is None or index < 0 or index >= len(self.items):
+            self.items.append(item_id)
+        else:
+            self.items.insert(index, item_id)
+        return self.items != before
+
+    def remove(self, item_id: str) -> bool:
+        """Drop ``item_id``. Returns True if it was there."""
+        if item_id in self.items:
+            self.items.remove(item_id)
+            return True
+        return False
+
+    def reorder(self, ordered_ids: List[str]) -> None:
+        """Set the order from ``ordered_ids``.
+
+        Ids not currently in the playlist are ignored, and members the
+        caller left out keep their relative order at the end — so a
+        partial list (the visible rows, say, with a filter applied)
+        reorders what it names without silently dropping the rest.
+        """
+        wanted = [i for i in dict.fromkeys(ordered_ids) if i in self.items]
+        rest = [i for i in self.items if i not in wanted]
+        self.items = wanted + rest
+
+    def prune(self, known_ids) -> bool:
+        """Drop members that no longer exist. True if anything went."""
+        known = set(known_ids)
+        before = list(self.items)
+        self.items = [i for i in self.items if i in known]
+        return self.items != before
+
+    def stamp(self) -> None:
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if not self.created:
+            self.created = now
+        self.modified = now
