@@ -11,6 +11,7 @@ import { useChannelHistory } from '@/composables/useChannelHistory'
 import { useWsTopic } from '@/composables/useWsTopic'
 import AppModal from '@/components/AppModal.vue'
 import ServoExtentsControl from '@/components/peripherals/ServoExtentsControl.vue'
+import { useCurrentSource, sourceKey } from '@/composables/useCurrentSource'
 import KangarooTuneModal from '@/components/peripherals/KangarooTuneModal.vue'
 
 // Param IDs the servo type stores as a 4-tuple of pulse widths. The
@@ -64,47 +65,30 @@ const liveChannels = computed(() => {
   }
   return out
 })
-const peripheralLabels = computed(() => {
-  const out = {}
-  for (const p of peripherals.value) out[p.id] = p.label || p.id
-  return out
-})
+// Live current reading for calibrating a servo — see
+// composables/useCurrentSource.js. The operator picks the sensor,
+// because it is usually on a DIFFERENT node than the servo (FAS100 on
+// the Cradle Base, Maestro on the Head), which the previous same-node
+// auto-pick could never find.
+const {
+  sources:     currentSources,
+  selectedKey: currentSourceKey,
+  selected:    currentSourceSelected,
+  value:       currentSourceAmps,
+  stale:       currentSourceStale,
+  label:       currentSourceLabel,
+  refresh:     refreshCurrentSources,
+} = useCurrentSource()
 
-// Channel ids that carry an electrical-current reading, across the
-// current-monitoring peripheral types (FAS100 uses `amps`; RoboClaw /
-// BMS use `current`). A servo driver that senses its own current would
-// expose one of these too.
-const CURRENT_CHANNEL_IDS = ['current', 'amps']
-
-// Resolve a live current reading (amps) for the servo/channel being
-// dialed in. Prefer the servo peripheral's OWN current channel if its
-// driver reports one; otherwise fall back to the first separate
-// current-monitor peripheral on the node that's reporting. Returns
-// { current: Number|null, source: String } for the extent dial.
-function currentForServo (peripheralId) {
-  const live = liveChannels.value
-  const pick = (pid) => {
-    const chans = live[pid]
-    if (!chans) return null
-    for (const cid of CURRENT_CHANNEL_IDS) {
-      if (typeof chans[cid] === 'number') return { pid, cid, value: chans[cid] }
-    }
-    return null
-  }
-  let hit = peripheralId ? pick(peripheralId) : null
-  if (!hit) {
-    for (const pid of Object.keys(live)) {
-      if (pid === peripheralId) continue
-      hit = pick(pid)
-      if (hit) break
-    }
-  }
-  if (!hit) return { current: null, source: '' }
-  const label = peripheralLabels.value[hit.pid] || hit.pid
-  return { current: hit.value, source: `${label} · ${hit.cid}` }
-}
-const channelCurrent = computed(() => currentForServo(channelModalPeripheralId.value))
-const servoCurrent   = computed(() => currentForServo(modalEditingId.value))
+// Shape the extents control already expects. A stale source is passed
+// through as a null reading rather than a number: no frame since we
+// subscribed is not the same as zero amps, and showing 0.00 A would
+// read as "no load" while dialing a servo toward a hard stop.
+const channelCurrent = computed(() => ({
+  current: currentSourceStale.value ? null : currentSourceAmps.value,
+  source:  currentSourceLabel.value,
+}))
+const servoCurrent = channelCurrent
 const syncStatus  = ref('unknown')
 const capabilities = ref(null)        // { pins, uart_pairs, reserved_pins }
 const logErrors = ref({})              // peripheral_id -> inline error message
@@ -841,6 +825,9 @@ function openChannelEdit (peripheral, channelIdx) {
   channelModalError.value = ''
   _lastChannelUs = null      // fresh channel — no held pulse to re-assert yet
   channelModalOpen.value = true
+  // Re-read the sensor list each time: peripherals get added and nodes
+  // come and go between calibration sessions.
+  refreshCurrentSources()
 }
 
 async function saveChannelEdit () {
@@ -1561,6 +1548,42 @@ const modalType = computed(() => typesById.value[modalTypeId.value])
               class="input-field inline-block w-32 ml-1 py-0 text-xs"
               placeholder="e.g. memory"
             />
+          </p>
+        </div>
+
+        <!-- Current monitor. Dialing extents is a mechanical judgement:
+             you watch the draw climb as the servo approaches the end of
+             its travel and stop before it stalls against a hard limit.
+             The sensor is usually on another node, so the list is
+             fleet-wide and the choice is remembered. -->
+        <div class="space-y-1">
+          <div class="flex items-center justify-between gap-2">
+            <label class="block text-xs text-fg-muted">Current monitor</label>
+            <span
+              v-if="currentSourceSelected"
+              class="text-xs font-mono"
+              :class="currentSourceStale ? 'text-fg-faint' : 'text-cyan-400'"
+            >{{ currentSourceStale
+                 ? 'no reading'
+                 : `${Number(currentSourceAmps).toFixed(2)} A` }}</span>
+          </div>
+          <select v-model="currentSourceKey" class="input-field w-full text-sm">
+            <option value="">None</option>
+            <option
+              v-for="src in currentSources"
+              :key="sourceKey(src)"
+              :value="sourceKey(src)"
+            >
+              {{ src.node_name }} · {{ src.peripheral_label }} · {{ src.channel_label }}{{ src.online ? '' : ' (offline)' }}
+            </option>
+          </select>
+          <p v-if="!currentSources.length" class="text-xs text-fg-faint">
+            No current-sensing peripherals configured on any node. Add one
+            (e.g. FAS100) to watch draw while calibrating.
+          </p>
+          <p v-else-if="currentSourceStale" class="text-xs text-amber-300/80">
+            Selected sensor has not reported since this panel opened — the
+            node may be offline or its driver not polling.
           </p>
         </div>
 

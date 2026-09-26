@@ -193,6 +193,11 @@ class RoutingEvaluator:
         # Hot-path log sampling state (see _hot_log).
         self._hot_log_count = 0
         self._hot_log_last_ms = 0.0
+        # Sheets with controller input absorbed but not yet evaluated.
+        # See stage_ws_input / flush_staged: evaluating per received
+        # message capped this path at ~53 msg/s and let the websockets
+        # receive buffer grow without bound.
+        self._staged_sheets: Set[str] = set()
 
     # ── dispatch ownership ──────────────────────────────────────────
 
@@ -362,6 +367,108 @@ class RoutingEvaluator:
             except Exception as e:
                 self._log("error", f"routing_values broadcast failed: {e}")
         return True
+
+    def stage_ws_input(self, sheet_id: str, input_id: str,
+                       value: float) -> bool:
+        """Absorb a controller axis value WITHOUT evaluating the sheet.
+
+        Same validation and same cache as :meth:`set_ws_input` — only the
+        evaluation is deferred, to whoever calls :meth:`flush_staged`.
+
+        Why this exists (measured 2026-09-23, see
+        docs/LATENCY_REDUCTION.md "Round 5"): `set_ws_input` evaluates the
+        owning sheet synchronously on the websocket receive loop, which
+        costs ~19 ms per message and caps this path at **~53 messages/s**.
+        The controller re-emits all of its bindings every 150 ms — 7
+        bindings is already 46.7/s, 88% of that ceiling — and each *moving*
+        axis may emit up to 50/s of its own. Anything above the ceiling
+        queued in the websockets receive buffer, unbounded, and the motors
+        then executed the whole stale backlog: a 3 s rotation took 9 s to
+        drain, with the operator's release-zero at the back of the queue.
+
+        Staging makes the receive loop O(1) per message and the evaluation
+        rate independent of the arrival rate. Latest-wins per input is the
+        correct collapse here and matches the rest of the stack — the
+        `/control` QoS is depth-1 newest-wins for the same reason, and an
+        intermediate joystick sample has no meaning once a fresher one has
+        arrived.
+
+        Returns False (like set_ws_input) when the sheet or input does not
+        exist, so a mis-bound axis stays diagnosable.
+        """
+        routing = self._routing
+        if routing is None:
+            self._log("warn",
+                      f"stage_ws_input {sheet_id}/{input_id}: evaluator has "
+                      "no routing snapshot yet (reconcile not run?)")
+            return False
+        sheet = routing.sheets.get(sheet_id)
+        if sheet is None:
+            self._log("warn",
+                      f"stage_ws_input: sheet '{sheet_id}' not found "
+                      f"(have: {list(routing.sheets.keys())})")
+            return False
+        if sheet.find_ws_input(input_id) is None:
+            ws_ids = [w.id for w in sheet.ws_inputs]
+            self._log("warn",
+                      f"stage_ws_input: ws_input '{input_id}' not on sheet "
+                      f"'{sheet_id}' (have: {ws_ids})")
+            return False
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError):
+            self._log("warn", f"stage_ws_input: non-numeric value {value!r}")
+            return False
+
+        with self._lock:
+            self._ws_input_values[(sheet_id, input_id)] = scalar
+            self._staged_sheets.add(sheet_id)
+
+        self._hot_log(f"stage_ws_input {sheet_id}/{input_id} = {scalar}")
+        return True
+
+    def flush_staged(self) -> int:
+        """Evaluate every sheet with staged input, once each.
+
+        Returns the number of sheets evaluated. Safe to call when nothing
+        is staged (returns 0 without touching the lock's contents), so a
+        caller can drive it from a fixed-rate tick.
+        """
+        with self._lock:
+            if not self._staged_sheets:
+                return 0
+            pending = list(self._staged_sheets)
+            self._staged_sheets.clear()
+
+        routing = self._routing
+        if routing is None:
+            return 0
+
+        evaluated = 0
+        for sheet_id in pending:
+            sheet = routing.sheets.get(sheet_id)
+            if sheet is None:
+                # Rewired out from under us between stage and flush.
+                continue
+            try:
+                self._evaluate_sheet(sheet)
+                evaluated += 1
+            except Exception as e:
+                self._log("error",
+                          f"Sheet '{sheet.node_id}' evaluation failed: {e}")
+
+        if evaluated and self._on_values_changed is not None:
+            # One broadcast for the whole flush, not one per sheet: this
+            # is display data and it competes with control for airtime.
+            try:
+                self._on_values_changed(self.get_value_snapshot())
+            except Exception as e:
+                self._log("error", f"routing_values broadcast failed: {e}")
+        return evaluated
+
+    def has_staged_input(self) -> bool:
+        with self._lock:
+            return bool(self._staged_sheets)
 
     def set_urdf_joint_value(self, joint: str, value: float) -> bool:
         """Push a URDF-joint setpoint (typically from an animation

@@ -60,6 +60,13 @@
 #define KANGAROO_RESPONSE_TIMEOUT_MS 50
 #define KANGAROO_BYTE_TIMEOUT_MS     10
 
+/* Round-robin telemetry cadence. See the gate in kangaroo_update() for
+ * why this exists: the poll blocks the main loop on a 9600-baud Get, and
+ * it used to run on every iteration. Position and speed feed a UI gauge
+ * on a slow linear actuator, so 100 ms is already far finer than the
+ * display needs — the node's own /state only publishes at 10 Hz. */
+#define KANGAROO_POLL_INTERVAL_MS    100
+
 /* ── Teach-tune timings ─────────────────────────────────────────── */
 
 /* Tuning has an automatic serial timeout and aborts if packets stop
@@ -215,6 +222,8 @@ static uint8_t  configured_serial_port = KANGAROO_DEFAULT_SERIAL_PORT;
 
 static uint8_t poll_unit = 0;
 static uint8_t poll_param = 0;  /* 0 = position, 1 = speed */
+/* Last round-robin poll (KANGAROO_POLL_INTERVAL_MS). */
+static uint32_t poll_last_ms = 0;
 
 static const kangaroo_transport_ops_t* transport(void)
 {
@@ -711,6 +720,19 @@ void kangaroo_init(void)
     port_initialized = true;
 }
 
+/* Cadence decision for the round-robin telemetry poll below. Split out
+ * of kangaroo_update() so the host tests can pin it: that function's
+ * body is compiled out under SIMULATION, which is how the test runner
+ * builds this file. Stamps poll_last_ms when it lets a poll through. */
+static bool poll_due(uint32_t now)
+{
+    if ((uint32_t)(now - poll_last_ms) < KANGAROO_POLL_INTERVAL_MS) {
+        return false;
+    }
+    poll_last_ms = now;
+    return true;
+}
+
 void kangaroo_update(void)
 {
     if (!port_initialized || unit_count == 0) return;
@@ -730,6 +752,40 @@ void kangaroo_update(void)
         tune_tick(t);
         return;
     }
+
+    /* Telemetry cadence gate.
+     *
+     * Everything below blocks the main loop on a 9600-baud Get:
+     * read_byte() busy-waits without yielding, and read_packet_reply()
+     * allows KANGAROO_RESPONSE_TIMEOUT_MS for the first byte plus a
+     * further sync deadline at KANGAROO_BYTE_TIMEOUT_MS per byte. A
+     * healthy reply is 10-15 ms of wire time; a marginal unit costs the
+     * full timeout. This used to run on EVERY main-loop iteration.
+     *
+     * On a node that also drives the track RoboClaws that stretched the
+     * loop from its designed 2-12 ms to a measured ~157 ms, and the loop
+     * period is the hard cap on /control intake — rclc takes one message
+     * per subscription per spin_some(). The node consumed ~6.4
+     * setpoints/s against ~50/s produced and the shortfall backed up in
+     * the agent's XRCE stream queue (depth-1 QoS does not protect that
+     * hop), so after the operator released the stick the tracks replayed
+     * the stale rotation for seconds. See docs/LATENCY_REDUCTION.md
+     * "Round 4".
+     *
+     * Contrast roboclaw_update, which returns early while duty ACKs are
+     * outstanding and so yields its UART during active driving. This
+     * driver had no equivalent, and an interval is the right shape for
+     * it: the poll is pure telemetry, unlike the RoboClaw's, which
+     * shares a bus with the writes that keep motors alive.
+     *
+     * Deliberately NOT gated: the tune branch above (it carries its own
+     * KANGAROO_TUNE_KEEPALIVE_MS, and its jog dead-man must be evaluated
+     * every iteration or a dropped link pins an open-loop axis against a
+     * hard stop), and the per-unit reprobe below, which already has
+     * KANGAROO_REPROBE_INTERVAL_MS — that one is also what bounds the
+     * cost of an absent-but-not-yet-dropped unit, since
+     * KANGAROO_DROP_AFTER_MISSES demotes it to the 2 s reprobe path. */
+    if (!poll_due(PLATFORM_MILLIS())) return;
 
     uint8_t i = poll_unit;
     kangaroo_unit_t* u = &units[i];

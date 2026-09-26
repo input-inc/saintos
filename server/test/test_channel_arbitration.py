@@ -309,3 +309,101 @@ class TestRecordDiscipline:
         clock.advance(10)
         write(arbiter, 0.5 + CHANGE_EPSILON / 4, owner=STREAM)   # suppressed
         assert arbiter.last_value(NODE, PER, CH) == before
+
+
+class TestExtentDialerIsNotFought:
+    """Dialing extents jogs a channel in absolute microseconds, many
+    times a second, while the operator watches the servo.
+
+    Observed on the robot: the dialer looked dead. The µs writes reached
+    the node, but each one also cleared the STREAM's bookkeeping, so the
+    next sheet dispatch looked like a change and re-asserted its parked
+    value between jogs — yanking the servo back before the operator
+    could see it move:
+
+        [Control] SENT maestro-1/ch0: 1055us
+        Sent channel control maestro-1/ch0 = 0.0 (owner=stream)
+
+    A jog in microseconds says nothing about what a sheet last emitted,
+    so `record` now preserves stream_value across one.
+    """
+
+    def test_a_parked_stream_does_not_reassert_after_a_jog(self, arbiter):
+        assert write(arbiter, 0.0, owner=STREAM) is True
+        assert write(arbiter, None, owner=SLIDER, raw_us=1055) is True
+        assert write(arbiter, 0.0, owner=STREAM) is False, \
+            "stream re-asserted between dialer steps and fought the operator"
+
+    def test_it_stays_quiet_across_a_whole_drag(self, arbiter):
+        write(arbiter, 0.0, owner=STREAM)
+        for us in range(1030, 1070):
+            assert write(arbiter, None, owner=SLIDER, raw_us=us) is True
+            assert write(arbiter, 0.0, owner=STREAM) is False
+
+    def test_the_jog_still_takes_ownership(self, arbiter):
+        write(arbiter, 0.0, owner=STREAM)
+        write(arbiter, None, owner=SLIDER, raw_us=1055)
+        assert arbiter.owner_of(NODE, PER, CH) == SLIDER
+
+    def test_a_slider_can_still_return_to_the_value_it_jogged_past(self, arbiter):
+        """Why the NORMALIZED cache is still dropped on a jog: the servo
+        is off the normalized map afterwards, so commanding 0.40 again
+        must go out even though 0.40 was the last normalized value."""
+        write(arbiter, 0.40, owner=SLIDER)
+        write(arbiter, None, owner=SLIDER, raw_us=2200)
+        assert write(arbiter, 0.40, owner=SLIDER) is True
+
+    def test_a_stream_that_really_changes_still_gets_through(self, arbiter):
+        write(arbiter, 0.0, owner=STREAM)
+        write(arbiter, None, owner=SLIDER, raw_us=1055)
+        assert write(arbiter, 0.75, owner=STREAM) is True
+
+
+class TestPrecedenceFollowsActivity:
+    """A slider takes precedence while the operator is moving it, and
+    not after. Once released its value simply stands as the last thing
+    written — it holds no lasting claim, and any writer with something
+    NEW to say takes the channel at once.
+
+    An earlier version gated the idle-disengage exemption on "does the
+    current owner match", which let a released slider block a sheet
+    indefinitely: precedence outliving the interaction that earned it.
+    """
+
+    def test_a_released_slider_does_not_block_a_changed_stream(self, clock):
+        arb = ChannelArbiter(idle_disengage_lookup=lambda n, p, c: 1000,
+                             clock=clock)
+        write(arb, 0.20, owner=SLIDER)
+        clock.advance(10_000)
+        assert write(arb, 0.85, owner=STREAM) is True
+        assert arb.owner_of(NODE, PER, CH) == STREAM
+
+    def test_a_parked_stream_still_cannot_undo_the_slider(self, clock):
+        """The other half: not blocking a CHANGED stream must not mean
+        letting an unchanged one re-assert."""
+        arb = ChannelArbiter(idle_disengage_lookup=lambda n, p, c: 1000,
+                             clock=clock)
+        write(arb, 1.0, owner=STREAM)
+        write(arb, 0.20, owner=SLIDER)
+        for _ in range(5):
+            clock.advance(1001)
+            assert write(arb, 1.0, owner=STREAM) is False
+
+    def test_an_operator_can_reengage_a_channel_a_stream_owns(self, clock):
+        """Re-engage is about who is ACTING, not who owns: a slider
+        re-touch on a channel a sheet last wrote must take hold."""
+        arb = ChannelArbiter(idle_disengage_lookup=lambda n, p, c: 1000,
+                             clock=clock)
+        write(arb, 0.5, owner=STREAM)
+        clock.advance(1001)
+        assert write(arb, 0.5, owner=SLIDER) is True
+
+    def test_a_neutral_value_can_re_engage(self, clock):
+        """A servo commanded to ~0 disengages like any other. The neutral
+        shortcut is about motors not needing a dead-man feed; it used to
+        sit ahead of the idle check and strand a released servo there."""
+        arb = ChannelArbiter(idle_disengage_lookup=lambda n, p, c: 1000,
+                             clock=clock)
+        write(arb, 0.0, owner=SLIDER)
+        clock.advance(1001)
+        assert write(arb, 0.0, owner=SLIDER) is True

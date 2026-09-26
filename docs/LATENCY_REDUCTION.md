@@ -445,3 +445,290 @@ publisher's rate rather than at any rate a UI needs.
   re-measured with the same `ss -tni` sampling (expect ~76 KB/s to fall
   to roughly a quarter), and the arrival-gap percentiles re-derived from
   the journal, before calling this fixed.
+
+# Round 4 — 2026-09-23: the node could not consume setpoints fast enough
+
+Same operator report again — circle the stick, release, the tracks replay
+the stale rotation. Rounds 2 and 3 were both still intact in source
+(verified by diffing the whole control path against `065af91`, the last
+commit before the window the operator reported as good), and neither was
+at fault. This time the bottleneck was on the node.
+
+## Where the queue actually was
+
+`rclc` takes **one message per subscription per `spin_some()`**. The
+RP2040 main loop called `spin_some` once per iteration, so the loop period
+was a hard cap on `/control` intake. Measured before the fix:
+
+| quantity | value |
+|---|---|
+| main loop period | **~157 ms** (design: 2-12 ms) |
+| `/control` consumed | ~6.4 setpoints/s |
+| `/control` produced | ~50/s |
+| publish→apply delay, start of gesture | 20 ms |
+| publish→apply delay, end of gesture | **3555 ms** |
+| run-on after release | **~3.5 s** |
+
+Two things that look like they should have prevented this, and did not:
+
+- **depth-1 QoS does not cover this hop.** It governs the *agent's* DDS
+  subscriber, and the agent keeps up with DDS fine. The backlog was one
+  hop further downstream, in the agent→node XRCE stream queue.
+- **The RoboClaw dead-man (1250 ms) cannot fire.** Every queued stale
+  non-zero re-stamps `last_setpoint_ms` as it is finally consumed, so the
+  window never elapses until the queue has drained. The dead-man protects
+  against a *lost* zero, not a *late* one.
+
+## Fixes
+
+- **The executor is drained, not spun once** (`firmware/rp2040/src/main.c`).
+  Bounded on both count and time — `CONTROL_DRAIN_MAX_PASSES` 16 and
+  `CONTROL_DRAIN_BUDGET_MS` 20 — so a fast publisher can never starve the
+  watchdog pet, the dead-man check, or peripheral updates. Only the first
+  pass may wait (10 ms); later passes poll with a zero timeout, because
+  `spin_some` blocks for its full timeout when there is no work and
+  re-probing with 10 ms would add a stall to every iteration that received
+  anything. This makes the queue self-limiting: whatever arrived is
+  consumed in the iteration it arrived in, so run-on is bounded by one
+  loop period instead of by how long the operator kept moving.
+  Per-channel latest-wins still falls out naturally, while other channels
+  on the same topic are each still applied — which a "keep only the newest
+  message" shortcut would have dropped.
+- **A permanent main-loop profiler**, dumping avg+max per phase
+  (`periph` / `net` / `exec` / `log`) plus `ctrl rx` and `drain_trunc`
+  every `LOOP_PROFILE_INTERVAL_MS` (5 s). The drain bounds the
+  *consequence*; this measures the *cause*, which was the signal missing
+  while this was being chased from the server side.
+
+## Why the operator was still seeing it
+
+**The Round 4 firmware had never reached the robot.** On 2026-09-23 the
+server's staged artifact was still built from `443d81e`, and both
+RoboClaw nodes (`rp2040_48405f4f3d28`, `rp2040_5857c7555f34`) reported
+running exactly that. The fix existed only in the repository.
+
+Deploying it is two steps, and the first is easy to forget: stage the
+build into `/opt/saint-os/firmware/rp2040/` (`saint_node.bin` is what the
+OTA bootloader fetches; `generated/version.h` is where the server reads
+the version it offers), then trigger the per-node OTA. Verify with
+`management/check_firmware_update` — it compares the node's reported
+`version_full` against the server's, and the build-timestamp suffix is
+what actually distinguishes two builds of the same commit.
+
+## Measured after deploying
+
+All four RP2040 nodes, at rest:
+
+```
+loop 74-88 Hz  avg 9.3-11.4 ms  max 18 ms
+periph 0-2/5   net 0/1   exec 8-10/18   log 0/1   drain_trunc=0
+```
+
+So the loop is healthy at rest and the drain is never truncating. The
+~9 ms in `exec` is the design idle cost: `spin_some`'s 10 ms wait with
+nothing to do, plus the 2 ms pacing sleep.
+
+**The 157 ms is still unattributed, and the profiler has already narrowed
+it to the wrong phase from what was guessed.** While two nodes were
+pulling OTA images over HTTP through the Pi, the other two logged
+`exec 9/284` and `exec 10/282` — a single `spin_some` taking **282-284 ms**
+with `periph` still at 0-1 ms. That points at the executor phase, not at
+blocking peripheral UART: a callback or an XRCE publish stalling while
+the network is congested. The `/state` publish (~1.9 KB of JSON per node)
+is the obvious candidate to look at first.
+
+Next measurement, and the one that actually closes this out: drive the
+robot in circles and watch `exec` max and `drain_trunc` during the
+gesture. At rest proves nothing about the loaded case, which is the only
+case the operator ever complained about.
+
+## Not the cause: the Kangaroo telemetry poll
+
+`kangaroo_update()` ran a blocking 9600-baud Get on **every** main-loop
+iteration — no cadence gate on the connected path, `read_byte()` a
+busy-wait with no yield, and `read_packet_reply()` allowing 50 ms for the
+first byte plus a further sync deadline at 10 ms/byte. It is the right
+shape for this defect and it was investigated as the cause, but **no
+Kangaroo is configured on any node** (checked against
+`/etc/saint-os/nodes/*.yaml`), so `unit_count == 0` and the function
+returns on its first line. It cost nothing.
+
+Gated anyway, at `KANGAROO_POLL_INTERVAL_MS` (100 ms), because it is a
+live trap for whoever configures the first one: position and speed feed a
+UI gauge on a slow actuator and the node's own `/state` only publishes at
+10 Hz, so a per-iteration poll buys nothing. Contrast `roboclaw_update`,
+which returns early while duty ACKs are outstanding and so yields its
+UART during active driving — this driver had no equivalent. Deliberately
+still un-gated: the tune branch (it carries its own keep-alive interval,
+and its jog dead-man must be evaluated every iteration or a dropped link
+pins an open-loop axis against a hard stop) and the per-unit reprobe,
+which already has `KANGAROO_REPROBE_INTERVAL_MS` and is what bounds an
+absent-but-not-yet-dropped unit.
+
+The decision is split into `poll_due()` so it can be tested at all:
+`kangaroo_update`'s body is inside `#ifndef SIMULATION` and the host test
+runner builds with `-DSIMULATION=1`, so the function itself is compiled
+out there. Three tests in `firmware/rp2040/tests/test_kangaroo_driver.c`
+pin the interval boundary, that telemetry resumes (a cadence limit, not a
+mute), and that the unsigned subtraction survives the ~49.7-day
+`PLATFORM_MILLIS()` wrap.
+
+## Still open
+
+- **Attribute the loop period under load** — the `exec` spike above.
+- **The server runs at `logging.level: DEBUG`** and the per-axis-tick
+  `[WS] router: set_input params={...}` line still does synchronous file
+  I/O inside the sequential receive loop, which its own comment says it
+  must not. Carried over from Round 3; fixing it means moving log I/O off
+  the event loop, not logging less.
+- **The router drive path has no server-side rate limit at all.**
+  `_handle_control` throttles at `CONTROL_THROTTLE_MS` (50 ms); the
+  gamepad `router/set_input` path only change-gates, so a node can be
+  asked to swallow whatever the controller emits. A per-(node, channel)
+  cap there would bound this independently of how fast any firmware runs.
+- **2.4 GHz channel 9, 20 MHz** for the control link (Round 3).
+- **The Pi's clock is still wrong** — it reported May 25 while installing
+  files on 2026-09-23. All timing here came from monotonic ROS stamps and
+  node uptimes.
+
+## Round 4 verification
+
+- `python3 -m pytest server/test` — 741 passed, 28 skipped.
+- `firmware/rp2040/tests/run_tests.sh` — 7 suites green, including
+  `test_kangaroo_driver` at 60 tests (57 + the 3 new cadence tests).
+- `firmware/rp2040/build.sh hw` and `sim`, and `firmware/teensy41/build.sh hw`
+  all build clean. (`kangaroo_driver.c` is not compiled into the Teensy
+  image, so the gate is RP2040-only in practice.)
+- Deployed and confirmed on hardware: both RoboClaw nodes report
+  `1.2.0-1790204269`, and the staged `saint_node.bin` md5 matches the
+  local build byte for byte.
+- **Not yet verified: the run-on itself.** The drain is deployed and
+  `drain_trunc=0` at rest, but nobody has driven the robot since.
+
+# Round 5 — 2026-09-23: the server's set_input path was the queue
+
+Round 4 deployed a firmware executor drain and a loop profiler, and the
+operator reported **no change**. The profiler is what made the next step
+cheap: it showed the nodes were fine (74-88 Hz, `drain_trunc=0`), so the
+backlog had to be upstream of them. It was in the server.
+
+## The measurement
+
+Driven from a script **on the Pi itself, with the Steam Deck controller
+disconnected** — so the radio, the Deck, and Wi-Fi airtime are all out of
+the picture. Rotation injected through the same `router/set_input` path
+the controller uses: 4 inputs at 40 Hz = 160 msg/s for 3.0 s, then
+release-zeros, then silence. Observable is the RoboClaw's own `current`
+and the commanded `motor` value out of each node's `/state`.
+
+```
+sent:       480 set_input over 3.0 s   (160/s)
+processed:  480 set_input over 8.99 s  (53/s)   <-- the ceiling
+publishes:  430 to the two track nodes over 8.77 s
+```
+
+The motors executed the **entire** stale trajectory: at **+6.6 s** after
+the stick stopped, `motor` was still swinging through the injected
+sinusoid (0.48 → -0.52 → 0.35 → -0.38), only reaching 0.000 at **+6.77 s**
+— even though release-zeros were sent during +0 to +1.0 s. They were at
+the back of the queue. This is the operator's report, exactly: "the motors
+continue to move until it finishes all the commands it was sent."
+
+## Root cause
+
+`_handle_router`'s `set_input` called `state_manager.push_ws_input`, which
+called `RoutingEvaluator.set_ws_input`, which **evaluated the owning sheet
+synchronously on the websocket receive loop** — sheet evaluation, the
+arbitration gate, the ROS publish, `record_commanded_channel`, and a log
+line, per message. That is ~19 ms, so the path tops out at **~53 msg/s**.
+
+What makes it pathological rather than merely slow is the arrival rate.
+The controller's mapper re-emits **every** binding on a 150 ms heartbeat;
+with 7 bindings that is a **46.7/s floor — 88% of the ceiling before the
+operator touches anything**. Each *moving* axis may then emit up to 50/s
+of its own (the client's 20 ms per-target throttle). So any real stick
+input pushes arrival past service rate, and the excess queues in the
+websockets receive buffer, unbounded. There was no rate limit anywhere on
+this path: `_handle_control` throttles at `CONTROL_THROTTLE_MS`, the
+gamepad path only change-gated, which cannot help when every value
+differs.
+
+Note which earlier conclusions this corrects:
+
+- It is **not** the agent→node XRCE queue (Round 4). That queue was real
+  but secondary; the node was never the constraint here.
+- It is **not** downstream telemetry airtime (Round 3). This reproduces
+  with the controller disconnected and the loopback interface only.
+- The firmware dead-man still cannot save it, for the Round 4 reason: the
+  backlog keeps *delivering* setpoints, each re-stamping
+  `last_setpoint_ms`, so the 1250 ms window never elapses.
+
+## Fix
+
+Split absorbing a value from acting on it.
+
+- `RoutingEvaluator.stage_ws_input()` validates and caches the value and
+  marks the sheet staged. No evaluation. Same validation as before, so a
+  mis-bound axis still returns an error and stays diagnosable.
+- `RoutingEvaluator.flush_staged()` evaluates each staged sheet **once**
+  and emits one `routing_values` broadcast for the whole flush.
+- `_handle_router` stages, then arms a single `WS_INPUT_FLUSH_MS` (20 ms)
+  timer. Every message landing inside the window collapses into that one
+  evaluation, latest-value-wins per input. One timer at a time; anything
+  staged *during* a flush gets its own following window rather than
+  extending the current one, so a saturated stream still yields to the
+  receive loop.
+
+Latest-wins is the correct collapse and matches the rest of the stack —
+`/control` is depth-1 newest-wins for the same reason, and an intermediate
+joystick sample is meaningless once a fresher one exists. 20 ms sits under
+the nodes' own ~13 ms loop period, so the added latency is not observable.
+
+## Measured after the fix
+
+Same script, same amplitude, same duration, hot-patched server:
+
+| | before | after |
+|---|---|---|
+| set_input processed | 480 over **8.99 s** (53/s) | 511 over **3.76 s** (**136/s**) |
+| last publish vs. stick stop | **+6.77 s** | **~+0.0 s** |
+| `motor` reaches 0.000 | **+6.77 s** | **+0.29 s** |
+| RoboClaw current quiet | +7.7 s | **~+1.2 s** |
+
+The residual +0.29 s is mostly instrumentation: the 25 ms send interval,
+the 20 ms window, and `pin_state` telemetry itself being coalesced at
+200 ms. The remaining current decay to ~+1.2 s is motor coast and the
+RoboClaw's own ramp, not commanded motion.
+
+## Found on the way, not fixed
+
+- **A server restart trips node watchdog resets.** Four
+  `Recovered from watchdog reset — main loop hung` across the nodes,
+  17 s after the drive and interleaved with
+  `Config saved to flash (sync ACK ...)` — i.e. the config-sync push on
+  reconnect blocks the firmware main loop long enough to trip WDOG. One
+  of those nodes carries a Maestro, which is the known shape of this (the
+  provisioning sweep must yield, one channel per `maestro_update()`).
+  Worth its own round; it will look like a random node reboot in the field.
+- **The controller's 46.7/s heartbeat floor.** Harmless against a 136/s
+  ceiling, but it is pure airtime on the Deck's half-duplex link (Round 3)
+  and the obvious next reduction.
+- **The RoboClaw encoder reads 0** — nothing is wired to it, so `encoder`
+  is not a usable observable. `current` is.
+- The DEBUG `set_input` log line is still on the receive loop (Round 3).
+
+## Round 5 verification
+
+- `python3 -m pytest server/test` — **747 passed**, 28 skipped. Six new
+  tests in `server/test/test_router_drive_path_semantics.py` pin the
+  property that matters: 100 received messages cost ONE evaluation, the
+  flush uses the freshest value, per-sheet coalescing still drives both
+  track sheets, only one timer is armed at a time, input staged during a
+  flush is not stranded, and a failed stage arms nothing.
+- Verified on hardware by the table above.
+- **Deployed as a HOT-PATCH ONLY** (operator's call, for the test):
+  `routing_evaluator.py`, `state_manager.py`, `websocket_handler.py` under
+  `/opt/saint-os/install/lib/python3.11/site-packages/saint_server/`,
+  originals saved in `/opt/saint-os/hotpatch-bak/`. **A formal
+  dist build + install is still owed**, or the next install silently
+  reverts the fix.

@@ -913,9 +913,30 @@ int maestro_provision_channel(uint8_t channel)
         }
     }
 
-    /* 2. MIN / MAX — 1 byte each, stored as qus÷64 (= µs/16). */
-    uint16_t min_byte = (uint16_t)(cfg->min_pulse_us / 16);
-    uint16_t max_byte = (uint16_t)(cfg->max_pulse_us / 16);
+    /* 2. MIN / MAX — 1 byte each, stored as qus÷64 (= µs/16).
+     *
+     * These are the SERVO'S ABSOLUTE RAILS, deliberately NOT the
+     * channel's configured extents.
+     *
+     * The Maestro clamps every SET_TARGET to these in hardware, and it
+     * has no notion of "except while the operator is dialing". Writing
+     * the saved extents here meant the extent dialer could never dial
+     * OUTWARD: on the Head Node, ch0 ("Right Iris") was saved at
+     * 1010–1840 µs, so jogs from 1791 up to 1940 stopped moving the
+     * servo at 1840 and the dialer looked dead. Dialing inward worked,
+     * which is why it survived. Widening an envelope is most of what
+     * the tool is for.
+     *
+     * The configured extents are still enforced — host-side, where they
+     * can be bypassed deliberately. drv_set_value maps a normalized
+     * command as `min + value * (max - min)`, so ordinary control is
+     * inside the envelope by construction; only the explicit µs preview
+     * path (maestro_set_target_preview) reaches past it, which is
+     * exactly the operator dialing. What we give up is the Maestro
+     * independently refusing an out-of-range pulse — the rails below
+     * still stop anything the servo could not physically take. */
+    uint16_t min_byte = (uint16_t)(MAESTRO_PREVIEW_MIN_US / 16);
+    uint16_t max_byte = (uint16_t)(MAESTRO_PREVIEW_MAX_US / 16);
     if (min_byte > 255) min_byte = 255;
     if (max_byte > 255) max_byte = 255;
     maestro_provision_param(base + MAESTRO_PARAM_OFF_MIN, min_byte, 1, &writes);

@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 
 # Throttle settings
 CONTROL_THROTTLE_MS = 50  # Minimum ms between control commands per node
+# Coalescing window for controller axis pushes (router/set_input). Sheet
+# evaluation is deferred this long so every message that arrives inside
+# the window collapses into one evaluation, latest-value-wins per input.
+# Sized under the nodes' own ~13 ms main-loop period so the added latency
+# is not observable, while decoupling evaluation rate from arrival rate —
+# see _schedule_ws_input_flush and docs/LATENCY_REDUCTION.md "Round 5".
+WS_INPUT_FLUSH_MS = 20
 NEUTRAL_EPSILON = 0.02    # Values within this range of 0 are considered neutral/stop
 # Don't resend a channel value the firmware already has. Continuous
 # sources (joystick hold, animation tail, a parked slider) otherwise
@@ -252,6 +259,8 @@ class WebSocketHandler:
         # Throttle tracking: (node_id, gpio) -> last_send_time
         # Per-gpio throttling allows controlling multiple pins simultaneously
         self._control_throttle: Dict[tuple, float] = {}
+        # Pending coalescing timer for router/set_input (None = none armed).
+        self._ws_flush_handle: Optional[asyncio.TimerHandle] = None
         # Redundant-resend suppression moved to channel_arbiter, which
         # every writer shares. This path's private copy is what let a
         # pose board and a State slider silently cancel each other's
@@ -1279,6 +1288,12 @@ class WebSocketHandler:
             self.state_manager.clear_node_logs(node_id)
             return {"status": "ok", "data": {"success": True}}
 
+        elif action == 'list_current_sources':
+            # Fleet-wide, because the current sensor is usually not on
+            # the same node as the servo being calibrated.
+            return {"status": "ok", "data": {
+                "sources": self.state_manager.list_current_sources()}}
+
         elif action == 'revert_node_peripherals':
             # Throw away edits that were never synced. Safe by
             # construction: config only reaches a node on an explicit
@@ -2171,10 +2186,19 @@ class WebSocketHandler:
                 scalar = float(value)
             except (TypeError, ValueError):
                 return {"status": "error", "message": "Invalid value type"}
-            ok = self.state_manager.push_ws_input(sheet_id, input_id, scalar)
+            # Absorb now, evaluate on the coalescing tick. Evaluating here
+            # cost ~19 ms per message and capped this path at ~53 msg/s,
+            # while the controller alone re-emits 7 bindings every 150 ms
+            # (46.7/s) plus up to 50/s per *moving* axis. The excess queued
+            # in the websockets receive buffer and the motors then executed
+            # the whole stale backlog — a measured 3 s rotation took 9 s to
+            # drain, with the release-zero at the back of it. See
+            # docs/LATENCY_REDUCTION.md "Round 5".
+            ok = self.state_manager.stage_ws_input(sheet_id, input_id, scalar)
             if not ok:
                 return {"status": "error",
                         "message": f"No WS input {sheet_id}/{input_id} (or evaluator offline)"}
+            self._schedule_ws_input_flush()
             # No ack on success (see _handle_message): this runs at up
             # to 50 Hz per axis and the controller never reads it —
             # errors above still respond so a mis-bound axis stays
@@ -2182,6 +2206,40 @@ class WebSocketHandler:
             return None
 
         return {"status": "error", "message": f"Unknown router action: {action}"}
+
+    def _schedule_ws_input_flush(self) -> None:
+        """Ensure a coalescing flush runs within WS_INPUT_FLUSH_MS.
+
+        One timer at a time. Every set_input that lands before it fires is
+        collapsed into the same evaluation, so the evaluation rate is
+        bounded by the window instead of by how fast the controller talks —
+        which is what stops a backlog from forming at all. The window is
+        the added latency in exchange, and at 20 ms it is under the node's
+        own ~13 ms loop period, so it costs nothing observable.
+        """
+        if self._ws_flush_handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop (unit tests calling the handler directly): evaluate
+            # inline so behaviour matches the pre-coalescing path.
+            self.state_manager.flush_ws_inputs()
+            return
+        self._ws_flush_handle = loop.call_later(
+            WS_INPUT_FLUSH_MS / 1000.0, self._run_ws_input_flush)
+
+    def _run_ws_input_flush(self) -> None:
+        self._ws_flush_handle = None
+        try:
+            self.state_manager.flush_ws_inputs()
+        except Exception as e:
+            self.log('error', f'[WS] router input flush failed: {e}')
+        # Anything staged while we were evaluating gets its own window
+        # rather than extending this one, so a saturated input stream
+        # still yields to the receive loop between evaluations.
+        if self.state_manager.has_staged_ws_input():
+            self._schedule_ws_input_flush()
 
     async def _handle_control(self, client: WebSocketClient, action: str, params: dict) -> dict:
         """Handle pin control messages with throttling."""

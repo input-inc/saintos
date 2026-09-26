@@ -472,6 +472,33 @@ _SERVER_ONLY_PARAMS: Dict[str, FrozenSet[str]] = {
 }
 
 
+# Channel ids that carry an electrical-current reading. Kept beside the
+# catalog because the catalog is the authority on what a channel means —
+# the dashboard used to hardcode its own copy of this list, which then
+# missed `current_a` (the Servo 2040's aggregate servo draw) and could
+# drift every time a peripheral type was added.
+#
+# Units differ by peripheral and are reported per-source rather than
+# assumed: FAS100 reads amps, RoboClaw reports motor current in amps,
+# the Servo 2040 aggregates its servo rail.
+_CURRENT_CHANNEL_IDS = frozenset({"current", "current_a", "amps"})
+
+
+def current_reading_channels(type_id: str) -> List[Tuple[str, str]]:
+    """(channel_id, label) for every current reading a type exposes.
+
+    Empty for types that sense no current, which is most of them.
+    """
+    ptype = DEFAULT_CATALOG.get(type_id)
+    if not ptype:
+        return []
+    return [
+        (c.id, c.display or c.id)
+        for c in (ptype.channels or [])
+        if c.id in _CURRENT_CHANNEL_IDS and c.dir == "in"
+    ]
+
+
 def strip_server_only_params(type_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """Drop params the firmware provably never reads, for the wire only.
 

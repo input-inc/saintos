@@ -78,21 +78,21 @@ def handler(event_loop, tmp_path):
 
 class TestSetInputAckSuppression:
     def test_successful_set_input_returns_none(self, handler):
-        handler.state_manager.push_ws_input = lambda s, i, v: True
+        handler.state_manager.stage_ws_input = lambda s, i, v: True
         resp = run(handler._handle_router(FakeClient(), "set_input", {
             "sheet_id": "sheet-1", "input_id": "in-1", "value": 0.5,
         }))
         assert resp is None
 
     def test_failed_set_input_still_returns_error(self, handler):
-        handler.state_manager.push_ws_input = lambda s, i, v: False
+        handler.state_manager.stage_ws_input = lambda s, i, v: False
         resp = run(handler._handle_router(FakeClient(), "set_input", {
             "sheet_id": "sheet-1", "input_id": "in-1", "value": 0.5,
         }))
         assert resp is not None and resp["status"] == "error"
 
     def test_handle_message_skips_socket_write_on_none_response(self, handler):
-        handler.state_manager.push_ws_input = lambda s, i, v: True
+        handler.state_manager.stage_ws_input = lambda s, i, v: True
         run(handler._handle_message(FakeClient(), (
             '{"id": "m1", "type": "router", "action": "set_input",'
             ' "params": {"sheet_id": "s", "input_id": "i", "value": 0.25}}'
@@ -115,7 +115,7 @@ class TestSetInputAckSuppression:
 
 class TestRouterHotLogLevel:
     def test_set_input_logs_at_debug(self, handler):
-        handler.state_manager.push_ws_input = lambda s, i, v: True
+        handler.state_manager.stage_ws_input = lambda s, i, v: True
         run(handler._handle_message(FakeClient(), (
             '{"id": "m1", "type": "router", "action": "set_input",'
             ' "params": {"sheet_id": "s", "input_id": "i", "value": 0.25}}'
@@ -323,3 +323,143 @@ class TestPoseDoesNotStompTheOperator:
         clock.advance(MOTOR_REASSERT_MS + 1)
         self.send_as(ev, STREAM, 0.5)
         assert len(sent) == 2
+
+
+# ── set_input coalescing (Round 5) ──────────────────────────────────
+#
+# Measured 2026-09-23: evaluating the owning sheet inside the websocket
+# receive loop cost ~19 ms per message and capped router/set_input at
+# ~53 msg/s. The controller alone re-emits 7 bindings every 150 ms
+# (46.7/s), plus up to 50/s per moving axis, so the excess queued in the
+# websockets receive buffer without bound and the motors then executed
+# the entire stale backlog: a 3 s rotation drained over 9 s, with the
+# operator's release-zero at the back of the queue.
+#
+# These pin the property that fixes it: the number of sheet EVALUATIONS
+# must not scale with the number of messages RECEIVED.
+
+class FakeEvaluator:
+    """Minimal stand-in with the real staging semantics."""
+
+    def __init__(self):
+        self.values = {}
+        self.staged = set()
+        self.evaluations = 0
+        self.evaluated_values = []
+
+    def stage_ws_input(self, sheet_id, input_id, value):
+        self.values[(sheet_id, input_id)] = float(value)
+        self.staged.add(sheet_id)
+        return True
+
+    def has_staged_input(self):
+        return bool(self.staged)
+
+    def flush_staged(self):
+        if not self.staged:
+            return 0
+        n = len(self.staged)
+        self.staged.clear()
+        self.evaluations += n
+        self.evaluated_values.append(dict(self.values))
+        return n
+
+
+@pytest.fixture
+def handler_with_eval(handler):
+    ev = FakeEvaluator()
+    handler.state_manager.set_routing_evaluator(ev)
+    return handler, ev
+
+
+class TestSetInputCoalescing:
+    def test_many_messages_collapse_into_one_evaluation(self, handler_with_eval):
+        h, ev = handler_with_eval
+        for i in range(100):
+            run(h._handle_router(FakeClient(), "set_input", {
+                "sheet_id": "sheet-1", "input_id": "in-1", "value": i / 100.0,
+            }))
+        # Nothing evaluated yet: the window has not elapsed.
+        assert ev.evaluations == 0
+        h._run_ws_input_flush()
+        assert ev.evaluations == 1, (
+            "100 received messages must cost ONE sheet evaluation, not 100 — "
+            "this is the property that stops the backlog forming")
+
+    def test_flush_uses_the_freshest_value(self, handler_with_eval):
+        h, ev = handler_with_eval
+        for v in (0.9, 0.5, -0.3, 0.0):
+            run(h._handle_router(FakeClient(), "set_input", {
+                "sheet_id": "sheet-1", "input_id": "in-1", "value": v,
+            }))
+        h._run_ws_input_flush()
+        assert ev.values[("sheet-1", "in-1")] == 0.0, (
+            "latest-wins: a release-zero must not sit behind stale samples")
+
+    def test_distinct_sheets_each_evaluate(self, handler_with_eval):
+        h, ev = handler_with_eval
+        for sheet in ("left", "right"):
+            for i in range(20):
+                run(h._handle_router(FakeClient(), "set_input", {
+                    "sheet_id": sheet, "input_id": "in-1", "value": i / 20.0,
+                }))
+        h._run_ws_input_flush()
+        assert ev.evaluations == 2, (
+            "coalescing is per sheet — both track sheets must still be driven")
+
+    def test_only_one_timer_is_armed_at_a_time(self, handler_with_eval):
+        h, ev = handler_with_eval
+
+        armed = []
+        real = h._schedule_ws_input_flush
+
+        class FakeLoop:
+            def call_later(self, delay, cb):
+                armed.append(delay)
+                return object()
+
+        import asyncio as _a
+        orig = _a.get_running_loop
+        _a.get_running_loop = lambda: FakeLoop()
+        try:
+            for i in range(50):
+                real()
+        finally:
+            _a.get_running_loop = orig
+        assert len(armed) == 1, (
+            "a second timer per message would reintroduce per-message work")
+
+    def test_staged_during_flush_gets_its_own_window(self, handler_with_eval):
+        h, ev = handler_with_eval
+        run(h._handle_router(FakeClient(), "set_input", {
+            "sheet_id": "sheet-1", "input_id": "in-1", "value": 0.4,
+        }))
+        # Re-stage once from inside the flush, as a message landing mid
+        # evaluation would. It must be picked up in a FOLLOW-UP flush, not
+        # dropped — a stranded newest value is a motor left at a stale
+        # setpoint, which is the whole failure mode being fixed.
+        original_flush = ev.flush_staged
+        restaged = []
+
+        def flush_then_restage():
+            n = original_flush()
+            if not restaged:
+                restaged.append(True)
+                ev.stage_ws_input("sheet-1", "in-1", 0.6)
+            return n
+
+        ev.flush_staged = flush_then_restage
+        h._run_ws_input_flush()
+
+        assert ev.evaluations == 2, "the re-staged value must get its own flush"
+        assert not ev.staged, "re-staged input must not be left unevaluated"
+        assert ev.values[("sheet-1", "in-1")] == 0.6
+
+    def test_failed_stage_does_not_arm_a_flush(self, handler_with_eval):
+        h, ev = handler_with_eval
+        ev.stage_ws_input = lambda s, i, v: False
+        resp = run(h._handle_router(FakeClient(), "set_input", {
+            "sheet_id": "nope", "input_id": "in-1", "value": 0.5,
+        }))
+        assert resp is not None and resp["status"] == "error"
+        assert ev.evaluations == 0

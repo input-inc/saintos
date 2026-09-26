@@ -99,12 +99,14 @@ static uint8_t stub_canned[64];      /* reply staged by the next write() */
 static size_t  stub_canned_n = 0;
 static uint8_t stub_last_tx[64];     /* bytes the driver last wrote      */
 static size_t  stub_last_tx_n = 0;
+static int     stub_tx_calls = 0;    /* how many times write() was called */
 
 static bool stub_open(uint8_t tx, uint8_t rx, uint32_t baud)
 { (void)tx; (void)rx; (void)baud; return stub_open_flag; }
 static bool stub_is_open(void) { return stub_open_flag; }
 static bool stub_write(const uint8_t* d, size_t n)
 {
+    stub_tx_calls++;
     if (n <= sizeof(stub_last_tx)) { memcpy(stub_last_tx, d, n); stub_last_tx_n = n; }
     /* Device "responds": stage the canned reply for subsequent reads. */
     if (stub_canned_n) {
@@ -177,6 +179,7 @@ static void clear_wire(void)
     stub_rx_n = stub_rx_i = 0;
     stub_canned_n = 0;
     stub_last_tx_n = 0;
+    stub_tx_calls = 0;
     rx_look_n = rx_look_i = 0;
 }
 
@@ -1229,6 +1232,72 @@ static int test_clear_estop_when_not_latched_is_a_noop(void)
     return 1;
 }
 
+/* ── Round 4: main-loop cost of the telemetry poll ───────────────
+ *
+ * kangaroo_update()'s round-robin Get blocks the main loop on a
+ * 9600-baud exchange. It used to run on EVERY loop iteration, which is
+ * the shape of defect that stretches an RP2040's loop period past its
+ * 2-12 ms design and starves /control intake (rclc takes one message per
+ * subscription per spin_some, so the loop period caps the setpoint rate).
+ * See docs/LATENCY_REDUCTION.md "Round 4". These pin the gate so a
+ * per-iteration poll cannot come back unnoticed.
+ *
+ * Note these exercise poll_due() rather than kangaroo_update(): this
+ * runner builds with -DSIMULATION=1 and that function's body is inside
+ * `#ifndef SIMULATION`, so it is compiled out here. poll_due() carries
+ * the whole cadence decision, which is the part that regressed.
+ */
+
+static int test_poll_due_respects_interval(void)
+{
+    reset_state();
+    poll_last_ms = 0;
+
+    /* Far past the interval: this one must go. */
+    CHECK(poll_due(100000));
+
+    /* One tick short of the next window: must not. This is the assertion
+     * that fails if the gate is removed — the old code polled here, and
+     * on the robot that meant every single main-loop iteration. */
+    CHECK(!poll_due(poll_last_ms + KANGAROO_POLL_INTERVAL_MS - 1));
+
+    return 1;
+}
+
+static int test_poll_due_resumes_after_interval(void)
+{
+    reset_state();
+    poll_last_ms = 0;
+
+    CHECK(poll_due(100000));
+
+    /* Exactly one interval on: telemetry must resume. Gating is a
+     * cadence limit, not a mute — position has to stay live. */
+    uint32_t next = poll_last_ms + KANGAROO_POLL_INTERVAL_MS;
+    CHECK(poll_due(next));
+    CHECK_EQ(poll_last_ms, next);
+
+    /* And it re-arms from the new stamp, not the old one. */
+    CHECK(!poll_due(next + KANGAROO_POLL_INTERVAL_MS - 1));
+
+    return 1;
+}
+
+static int test_poll_due_survives_millis_wrap(void)
+{
+    reset_state();
+
+    /* PLATFORM_MILLIS() wraps every ~49.7 days. The unsigned subtraction
+     * has to keep working across it: a stamp just before the wrap and a
+     * `now` just after are one tick apart, not 49 days. Getting this
+     * wrong would wedge telemetry off for the rest of the uptime. */
+    poll_last_ms = 0xFFFFFFF0u;
+    CHECK(!poll_due(0xFFFFFFF0u + 1u));
+    CHECK(poll_due(0xFFFFFFF0u + KANGAROO_POLL_INTERVAL_MS));
+
+    return 1;
+}
+
 /* ── Test runner ───────────────────────────────────────────────── */
 
 typedef int (*test_fn)(void);
@@ -1301,6 +1370,10 @@ static const test_entry_t TESTS[] = {
     {"interlock_position_vs_current",       test_interlock_position_compares_against_current},
     {"interlock_never_blocks_a_stop",       test_interlock_never_blocks_a_stop},
     {"interlock_bad_direction_blocks_both", test_interlock_bad_direction_blocks_both},
+
+    {"poll_due_respects_interval",          test_poll_due_respects_interval},
+    {"poll_due_resumes_after_interval",     test_poll_due_resumes_after_interval},
+    {"poll_due_survives_millis_wrap",       test_poll_due_survives_millis_wrap},
 };
 
 int main(void)

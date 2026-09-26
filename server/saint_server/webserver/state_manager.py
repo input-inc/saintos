@@ -55,6 +55,7 @@ from saint_server.peripheral_model import (
     pimoroni_normalize_channels,
     pimoroni_slim_channels_for_wire,
     strip_server_only_params,
+    current_reading_channels,
 )
 from saint_server.board_config import BoardConfigManager, derive_capabilities
 from saint_server.channel_arbiter import BOARD
@@ -2244,6 +2245,43 @@ class StateManager:
     # state in one shot.
     _MAX_PATCH_BYTES = 400
 
+    def list_current_sources(self) -> List[Dict[str, Any]]:
+        """Every current-reading channel across all adopted nodes.
+
+        For calibrating a servo you want to watch what it draws while
+        you dial its extents — and the sensor is very often on a
+        DIFFERENT node than the servo. On this rig the FAS100 sits on
+        the Cradle Base while the Maestro is on the Head, so a
+        same-node-only search (what the dashboard did before) found
+        nothing at all and the indicator stayed blank.
+
+        Which channels read current is decided from the catalog
+        (`current_reading_channels`), not from the dashboard guessing at
+        channel-id spellings — that copy had already drifted, missing
+        the Servo 2040's aggregate `current_a`.
+        """
+        out: List[Dict[str, Any]] = []
+        for node_id, node in self.state.adopted_nodes.items():
+            if not node.peripheral_config:
+                continue
+            for p in node.peripheral_config.peripherals:
+                for ch_id, ch_label in current_reading_channels(p.type):
+                    out.append({
+                        "node_id": node_id,
+                        "node_name": node.display_name or node_id,
+                        "online": bool(node.online),
+                        "peripheral_id": p.id,
+                        "peripheral_label": p.label or p.id,
+                        "peripheral_type": p.type,
+                        "channel_id": ch_id,
+                        "channel_label": ch_label,
+                    })
+        # Stable, human order: node then peripheral, so the picker does
+        # not reshuffle under the operator as nodes come and go.
+        out.sort(key=lambda s: (s["node_name"], s["peripheral_label"],
+                                s["channel_id"]))
+        return out
+
     def record_config_push(self, node_id: str, config_json: str) -> None:
         """Remember what we last sent a node, so the next change can be
         expressed as a delta against it.
@@ -2607,6 +2645,41 @@ class StateManager:
             if self.logger:
                 self.logger.error(f"push_ws_input failed: {e}")
             return False
+
+    def stage_ws_input(self, sheet_id: str, input_id: str,
+                       value: float) -> bool:
+        """Absorb a controller write without evaluating (see
+        RoutingEvaluator.stage_ws_input). Paired with flush_ws_inputs."""
+        if self._routing_evaluator is None:
+            return False
+        try:
+            return bool(self._routing_evaluator.stage_ws_input(
+                sheet_id, input_id, value))
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"stage_ws_input failed: {e}")
+            return False
+
+    def has_staged_ws_input(self) -> bool:
+        """Whether any controller input is absorbed but not yet evaluated."""
+        if self._routing_evaluator is None:
+            return False
+        try:
+            return bool(self._routing_evaluator.has_staged_input())
+        except Exception:
+            return False
+
+    def flush_ws_inputs(self) -> int:
+        """Evaluate sheets with staged controller input. Returns the
+        number of sheets evaluated."""
+        if self._routing_evaluator is None:
+            return 0
+        try:
+            return int(self._routing_evaluator.flush_staged())
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"flush_ws_inputs failed: {e}")
+            return 0
 
     def add_routing_output(self, node_id: str, topic: str, field: str,
                            label: str = "",
