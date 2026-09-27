@@ -9,18 +9,21 @@ import { useSoundsStore } from '@/stores/sounds'
 // that node; the server creates a sound per file and skips any already
 // added (dedupe by node + file path).
 
-const props = defineProps({
-  groups: { type: Array, default: () => [] },
-  defaultGroup: { type: String, default: '' },
-})
+// No grouping field: an item can be in many playlists now. If the
+// operator has a playlist selected in the sidebar when they open this,
+// the whole batch lands in it (views/Animations.vue passes the id);
+// otherwise the sounds arrive ungrouped and get dragged in.
 const emit = defineEmits(['close', 'create'])
 
 const sounds = useSoundsStore()
 
-const group = ref(props.defaultGroup)
 const nodeId = ref('')
 const folder = ref('')
 const outputDevice = ref('default')
+// See NewSoundModal: above 1.0 is software gain, capped at the server's
+// SOUND_VOLUME_MAX. This one sets the starting volume for every file in
+// the batch; individual clips are tuned afterwards from the board list.
+const VOLUME_MAX = 2.0
 const volume = ref(1.0)
 const loop = ref(false)
 const infinite = ref(true)
@@ -74,7 +77,6 @@ function submit () {
     node_id: nodeId.value,
     folder: folder.value,
     output_device: outputDevice.value,
-    group: group.value.trim(),
     volume: Number(volume.value),
     loop: loop.value,
     loop_count: loop.value && !infinite.value ? Math.max(1, Number(loopCount.value)) : 0,
@@ -131,9 +133,22 @@ onMounted(async () => {
       </label>
 
       <label class="block">
-        <span class="block text-fg-muted text-xs mb-1">Volume: {{ Math.round(volume * 100) }}%</span>
-        <input type="range" min="0" max="1" step="0.01" v-model.number="volume"
-               class="w-full accent-cyan-500 cursor-pointer" />
+          <span class="block text-fg-muted text-xs mb-1">
+          Volume: {{ Math.round(volume * 100) }}%
+          <span v-if="volume > 1" class="text-amber-300">· boosted</span>
+        </span>
+        <input type="range" min="0" :max="VOLUME_MAX" step="0.01" v-model.number="volume"
+             class="w-full accent-cyan-500 cursor-pointer" />
+        <!-- 100% is where the clip plays at its own level; past it is
+           software gain, which lifts a quiet recording but clips one
+           that is already near full scale. Mark the boundary so the
+           operator can find it on the slider. -->
+        <div class="flex justify-between text-[10px] text-fg-faint mt-0.5">
+          <span>0%</span>
+          <button type="button" class="hover:text-cyan-300" title="Reset to the clip's own level"
+                @click="volume = 1">100%</button>
+          <span>{{ Math.round(VOLUME_MAX * 100) }}%</span>
+        </div>
       </label>
 
       <div class="space-y-2">
@@ -155,14 +170,6 @@ onMounted(async () => {
         </div>
       </div>
 
-      <label class="block">
-        <span class="block text-fg-muted text-xs mb-1">Group (optional)</span>
-        <input class="input-field w-full" list="add-folder-groups" v-model="group"
-               placeholder="Leave empty for Ungrouped" />
-        <datalist id="add-folder-groups">
-          <option v-for="g in groups" :key="g" :value="g" />
-        </datalist>
-      </label>
     </div>
     <template #actions>
       <button class="btn-secondary" @click="emit('close')">Cancel</button>

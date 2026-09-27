@@ -372,3 +372,67 @@ describe('introspection and wire shape', () => {
     ])
   })
 })
+
+// ─── neutral is the base a pose blends up from ───────────────────────
+//
+// The server player resolves with `neutral_source=rig_neutral`. The
+// editor's Live Preview used to resolve with no neutral at all, so a
+// pose track at any weight below 1 previewed a different joint value
+// than it played. These pin the parameter that closes that gap; the
+// mirror assertions live in server/test/test_frame_resolve.py.
+
+describe('neutral as the pose base', () => {
+  const poseTrack = {
+    id: 'p1', name: 'happy', target_kind: 'pose', target: ['happy'],
+    curve: { keys: [
+      { time: 0, value: 0.5, interp: 1 },
+      { time: 1, value: 0.5, interp: 1 },
+    ] },
+  }
+  const anim = { duration: 1, value_tracks: [poseTrack] }
+  const poseLookup = (id) => POSES[id] || null
+
+  it('blends from zero when no neutral is given', () => {
+    const { joints } = resolveFrame(anim, 0.5, { poseLookup })
+    // 0 + (0.8 - 0) * 0.5
+    expect(joints.brow_l).toBeCloseTo(0.4, 6)
+  })
+
+  it('blends from the neutral pose when one is given', () => {
+    const neutral = { brow_l: 0.2 }
+    const { joints } = resolveFrame(anim, 0.5, { poseLookup, neutral })
+    // 0.2 + (0.8 - 0.2) * 0.5 -- NOT 0.4
+    expect(joints.brow_l).toBeCloseTo(0.5, 6)
+  })
+
+  it('leaves joints the neutral does not name at zero', () => {
+    const { joints } = resolveFrame(anim, 0.5, {
+      poseLookup, neutral: { brow_l: 0.2 },
+    })
+    expect(joints.mouth).toBeCloseTo(0.3, 6)
+  })
+
+  it('agrees with a full-weight pose regardless of neutral', () => {
+    // At weight 1 the base cancels out, which is why the gap only ever
+    // showed on partially-weighted poses.
+    const full = { ...anim, value_tracks: [{
+      ...poseTrack,
+      curve: { keys: [{ time: 0, value: 1, interp: 1 }, { time: 1, value: 1, interp: 1 }] },
+    }] }
+    const a = resolveFrame(full, 0.5, { poseLookup }).joints
+    const b = resolveFrame(full, 0.5, { poseLookup, neutral: { brow_l: 0.2 } }).joints
+    expect(a.brow_l).toBeCloseTo(b.brow_l, 6)
+  })
+
+  it('relaxes to neutral, not to zero', () => {
+    const values = frameToPreviewValues(
+      relaxedFrame(anim, { poseLookup, neutral: { brow_l: 0.2 } }))
+    const brow = values.find(v => v.id === 'brow_l')
+    expect(brow.value).toBeCloseTo(0.2, 6)
+  })
+
+  it('relaxes to zero when there is no neutral', () => {
+    const values = frameToPreviewValues(relaxedFrame(anim, { poseLookup }))
+    expect(values.find(v => v.id === 'brow_l').value).toBe(0)
+  })
+})

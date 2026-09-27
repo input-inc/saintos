@@ -4,13 +4,21 @@ import { useRouter } from 'vue-router'
 import { useAnimationsStore } from '@/stores/animations'
 import { usePosesStore } from '@/stores/poses'
 import { useSoundsStore } from '@/stores/sounds'
+import { usePlaylistsStore } from '@/stores/playlists'
 import { useWsStore } from '@/stores/ws'
 import IconPicker from '@/components/animation/IconPicker.vue'
+import NumberField from '@/components/NumberField.vue'
 
 // Full-screen "Boards" management. Sidebar lists animations, poses, and
-// sounds (each with their groups) and a "New" button per kind opens a
+// sounds, each with their playlists, and a "New" button per kind opens a
 // modal collecting base info; submitting routes into the editor (for
 // animations) or reloads the list (poses/sounds).
+//
+// Grouping is playlists, not a field on the item. An item can be in any
+// number of them and sits at its own slot in each, so there is nowhere
+// on the item to write it -- membership is assigned by dragging a row
+// onto a playlist in the sidebar, and order by dragging rows inside a
+// playlist view. The modals no longer ask for a group at all.
 
 const NewAnimationModal = defineAsyncComponent(
   () => import('@/components/animation/NewAnimationModal.vue'))
@@ -27,12 +35,36 @@ const router = useRouter()
 const animations = useAnimationsStore()
 const poses = usePosesStore()
 const sounds = useSoundsStore()
+const playlists = usePlaylistsStore()
 const ws = useWsStore()
 
-// Sidebar selection: which kind is highlighted, and which group
-// within it. group=null is the "All" bucket for that kind.
-const view = ref({ kind: 'animations', group: null })
-function selectView (kind, group) { view.value = { kind, group } }
+// Sidebar selection: which kind is highlighted, and which playlist
+// within it. playlist=null is the "All" bucket for that kind;
+// UNGROUPED is "in no playlist at all".
+const UNGROUPED = '__ungrouped__'
+const view = ref({ kind: 'animations', playlist: null })
+function selectView (kind, playlist) { view.value = { kind, playlist } }
+
+/** The store list backing a kind. */
+function storeFor (kind) {
+  return kind === 'animations' ? animations : (kind === 'poses' ? poses : sounds)
+}
+
+// Playback gain ceiling, as a percentage for the row editor. Mirrors
+// SOUND_VOLUME_MAX in server/saint_server/animation/models.py — the
+// server clamps on save and the players clamp again before VLC, so this
+// is the UI bound, not the enforcement.
+const VOLUME_MAX_PCT = 200
+
+// Set one clip's volume from the list. Without this the only way to fix
+// a clip that was added too quiet was to delete and re-add it: the new-
+// sound modal sets a volume once and nothing else could change it.
+async function setSoundVolumePct (s, pct) {
+  const clamped = Math.max(0, Math.min(VOLUME_MAX_PCT, Number(pct) || 0))
+  const next = Number((clamped / 100).toFixed(2))
+  if (next === Number(s.volume ?? 1)) return
+  await patchSound(s.id, { volume: next })
+}
 
 // Modals
 const newAnimOpen = ref(false)
@@ -49,56 +81,95 @@ function nodeName (id) {
   return n ? n.name : (id || '—')
 }
 
-// Groups derived from the lists (sorted).
-const animationGroups = computed(() => {
-  const set = new Set()
-  for (const a of animations.list || []) if (a.group) set.add(a.group)
-  return [...set].sort()
-})
-const poseGroups = computed(() => {
-  const set = new Set()
-  for (const p of poses.list || []) if (p.group) set.add(p.group)
-  return [...set].sort()
-})
-const soundGroups = computed(() => {
-  const set = new Set()
-  for (const s of sounds.list || []) if (s.group) set.add(s.group)
-  return [...set].sort()
-})
+// The sidebar's three sections. Collapsed into a descriptor because the
+// markup is identical per kind and the drag-and-drop wiring on it is
+// fiddly enough that three hand-copied versions would drift.
+const SECTIONS = [
+  { kind: 'animations', label: 'Animations', allLabel: 'All Animations', icon: 'animation' },
+  { kind: 'poses', label: 'Poses', allLabel: 'All Poses', icon: 'accessibility' },
+  { kind: 'sounds', label: 'Sounds', allLabel: 'All Sounds', icon: 'volume_up' },
+]
 
-// Filtered lists for the main pane.
-function inGroup (item, g) {
-  if (g === null) return true                     // "All"
-  if (g === '__ungrouped__') return !item.group
-  return (item.group || '') === g
+// Playlists per section, already in sidebar order from the server.
+const animationPlaylists = computed(() => playlists.byKind('animations'))
+const posePlaylists = computed(() => playlists.byKind('poses'))
+const soundPlaylists = computed(() => playlists.byKind('sounds'))
+function playlistsFor (kind) {
+  return kind === 'animations' ? animationPlaylists.value
+       : (kind === 'poses' ? posePlaylists.value : soundPlaylists.value)
 }
+
+// How many items sit in a bucket -- the sidebar counts. A playlist can
+// name an id that no longer resolves (deleted out from under it), so
+// count what actually renders rather than items.length.
+function countIn (kind, playlistId) {
+  return visibleFor(kind, playlistId).length
+}
+
+/** Rows for one (kind, playlist) pair, in the order they should render.
+ *
+ *  Inside a playlist the ORDER IS THE PLAYLIST'S -- that is the whole
+ *  point of the change, and it is why this can't just sort by name.
+ *  Outside one, animations and poses are alphabetical and sounds keep
+ *  their own `position` (the flat drag order of "All Sounds").
+ */
+function visibleFor (kind, playlistId) {
+  const rows = storeFor(kind).list || []
+  if (playlistId === null) {
+    return [...rows].sort(sortFor(kind))
+  }
+  if (playlistId === UNGROUPED) {
+    return rows.filter(r => !(r.playlists || []).length).sort(sortFor(kind))
+  }
+  const order = playlists.itemsOf(playlistId)
+  const byId = new Map(rows.map(r => [r.id, r]))
+  return order.map(id => byId.get(id)).filter(Boolean)
+}
+
+function sortFor (kind) {
+  if (kind === 'sounds') {
+    return (a, b) => (a.position || 0) - (b.position || 0)
+                     || (a.name || '').localeCompare(b.name || '')
+  }
+  return (a, b) => (a.name || '').localeCompare(b.name || '')
+}
+
 const visibleAnimations = computed(() =>
-  (animations.list || []).filter(a => inGroup(a, view.value.group))
-                          .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-)
+  visibleFor('animations', view.value.kind === 'animations' ? view.value.playlist : null))
 const visiblePoses = computed(() =>
-  (poses.list || []).filter(p => inGroup(p, view.value.group))
-                    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-)
-// Sounds keep the operator's explicit order (position); the store
-// already returns them sorted by (group, position, name).
+  visibleFor('poses', view.value.kind === 'poses' ? view.value.playlist : null))
 const visibleSounds = computed(() =>
-  (sounds.list || []).filter(s => inGroup(s, view.value.group))
-                     .sort((a, b) => (a.position || 0) - (b.position || 0)
-                                     || (a.name || '').localeCompare(b.name || ''))
-)
+  visibleFor('sounds', view.value.kind === 'sounds' ? view.value.playlist : null))
+
+/** The playlist record currently being viewed, or null. */
+const currentPlaylist = computed(() => {
+  const p = view.value.playlist
+  if (!p || p === UNGROUPED) return null
+  return playlists.get(p)
+})
 
 // Title for the main toolbar.
 const viewTitle = computed(() => {
   const kindLabel = view.value.kind === 'animations'
     ? 'Animations' : (view.value.kind === 'poses' ? 'Poses' : 'Sounds')
-  const g = view.value.group
-  if (g === null) return `All ${kindLabel}`
-  if (g === '__ungrouped__') return `${kindLabel} / Ungrouped`
-  return `${kindLabel} / ${g}`
+  const p = view.value.playlist
+  if (p === null) return `All ${kindLabel}`
+  if (p === UNGROUPED) return `${kindLabel} / Ungrouped`
+  return `${kindLabel} / ${currentPlaylist.value?.name || p}`
 })
 
 // ── CRUD via the WS layer ───────────────────────────────────────────
+
+// When a playlist is the current view, anything created from here
+// joins it. That is context, not a form field -- the operator is
+// looking at the list they want it in.
+async function joinCurrentPlaylist (kind, itemId) {
+  if (!itemId) return
+  if (view.value.kind !== kind) return
+  const p = view.value.playlist
+  if (!p || p === UNGROUPED) return
+  await playlists.addItem(p, itemId)
+}
 
 async function onCreateAnimation (payload) {
   newAnimOpen.value = false
@@ -107,6 +178,7 @@ async function onCreateAnimation (payload) {
   })
   await animations.reload()
   const id = r?.animation?.id
+  await joinCurrentPlaylist('animations', id)
   if (id) router.push({ name: 'animation-editor', params: { id } })
 }
 
@@ -117,31 +189,38 @@ async function onCreatePose (payload) {
   })
   await poses.reload()
   if (r?.pose?.id) {
-    // Load it for inline editing; switch sidebar to the right group.
+    await joinCurrentPlaylist('poses', r.pose.id)
+    // Load it for inline editing, staying on whatever list we're on.
     await poses.load(r.pose.id)
-    selectView('poses', payload.group || '__ungrouped__')
+    if (view.value.kind !== 'poses') selectView('poses', null)
     editingPoseId.value = r.pose.id
   }
 }
 
 async function onCreateSound (payload) {
   newSoundOpen.value = false
-  await sounds.save({ id: '', position: 0, ...payload })
-  selectView('sounds', payload.group || '__ungrouped__')
+  const saved = await sounds.save({ id: '', position: 0, ...payload })
+  await joinCurrentPlaylist('sounds', saved?.id)
+  if (view.value.kind !== 'sounds') selectView('sounds', null)
 }
 
 async function onCreateSoundFolder (payload) {
   newSoundFolderOpen.value = false
   soundError.value = ''
   soundInfo.value = 'Adding sounds from folder…'
+  // A batch add lands in the playlist being viewed, in file order.
+  const target = view.value.kind === 'sounds'
+              && view.value.playlist && view.value.playlist !== UNGROUPED
+    ? view.value.playlist : ''
   const r = await sounds.bulkAddFromFolder(payload.node_id, payload.folder, {
     output_device: payload.output_device,
-    group: payload.group,
+    playlist_id: target,
     volume: payload.volume,
     loop: payload.loop,
     loop_count: payload.loop_count,
   })
-  selectView('sounds', payload.group || '__ungrouped__')
+  await playlists.reload()
+  if (view.value.kind !== 'sounds') selectView('sounds', null)
   if (r) {
     soundInfo.value = `Added ${r.added} sound${r.added === 1 ? '' : 's'}`
       + (r.skipped ? `, skipped ${r.skipped} already added` : '')
@@ -210,57 +289,151 @@ async function stopSound (s) {
   await sounds.stop(s.node_id)
 }
 
-// Reorder sounds by drag-and-drop. Sounds are contiguous per group in the
-// store's (group, position, name) sort, so we only reorder WITHIN a group
-// (dragging across groups is ignored, matching the old up/down behavior)
-// and re-send every id so global positions stay consistent.
+// ── drag and drop ───────────────────────────────────────────────────
+//
+// Two gestures, one drag source:
+//   * row → sidebar playlist   = add to that playlist (append)
+//   * row → another row        = place it there
+//
+// The second means different things in different views, and the
+// difference is the point of playlists. Inside a playlist we rewrite
+// THAT playlist's order and nothing else, so an item's slot in one list
+// is independent of its slot in every other. In the flat "All Sounds"
+// view there is no playlist to reorder, so we fall back to the sound's
+// own `position` -- the pre-playlist behaviour, kept because that view
+// still needs an order.
 //
 // Handle-gated: a row is only `draggable` while the operator is pressing
-// its drag handle, so clicking the name/group inputs and the action
-// buttons still works normally.
-const dragSoundId = ref(null)     // id currently being dragged
-const dragOverSoundId = ref(null) // id of the row under the cursor
-const dragHandleSoundId = ref(null) // gates :draggable to handle presses
+// its drag handle, so clicking the name field and the action buttons
+// still works normally.
+const drag = ref({ kind: null, id: null })   // what is in flight
+const dragOverId = ref(null)                 // row under the cursor
+const dragOverPlaylist = ref(null)           // sidebar target under it
+const dragHandleId = ref(null)               // gates :draggable
 
-function draggedSoundGroup () {
-  const d = (sounds.list || []).find(x => x.id === dragSoundId.value)
-  return d ? (d.group || '') : null
-}
-function onSoundDragStart (s, e) {
-  dragSoundId.value = s.id
+function onRowDragStart (kind, item, e) {
+  drag.value = { kind, id: item.id }
   if (e.dataTransfer) {
     e.dataTransfer.effectAllowed = 'move'
-    try { e.dataTransfer.setData('text/plain', s.id) } catch { /* IE guard */ }
+    // Some browsers refuse to start a drag with no payload.
+    try { e.dataTransfer.setData('text/plain', item.id) } catch { /* no-op */ }
   }
 }
-function onSoundDragOver (s) {
-  if (dragSoundId.value == null || s.id === dragSoundId.value) return
-  if ((s.group || '') !== draggedSoundGroup()) return   // same group only
-  dragOverSoundId.value = s.id
+
+function onRowDragEnd () {
+  drag.value = { kind: null, id: null }
+  dragOverId.value = null
+  dragOverPlaylist.value = null
+  dragHandleId.value = null
 }
-function onSoundDragEnd () {
-  dragSoundId.value = null
-  dragOverSoundId.value = null
-  dragHandleSoundId.value = null
+
+function onRowDragOver (kind, item) {
+  if (!drag.value.id || drag.value.kind !== kind) return
+  if (item.id === drag.value.id) return
+  dragOverId.value = item.id
 }
-async function onSoundDrop (target) {
-  const from = dragSoundId.value
-  onSoundDragEnd()
-  if (from == null || from === target.id) return
+
+/** Drop a row onto another row: place it at the target's index. */
+async function onRowDrop (kind, target) {
+  const from = drag.value.id
+  const fromKind = drag.value.kind
+  onRowDragEnd()
+  if (!from || fromKind !== kind || from === target.id) return
+
+  const pid = view.value.playlist
+  if (pid && pid !== UNGROUPED) {
+    // Reordering within a playlist -- rewrite just this playlist.
+    const order = [...playlists.itemsOf(pid)]
+    const fi = order.indexOf(from)
+    const ti = order.indexOf(target.id)
+    if (fi < 0 || ti < 0) return
+    order.splice(fi, 1)
+    order.splice(ti, 0, from)
+    await playlists.reorderItems(pid, order)
+    return
+  }
+
+  // Flat view. Only sounds carry an order of their own out here.
+  if (kind !== 'sounds') return
   const vis = [...visibleSounds.value]
   const fi = vis.findIndex(x => x.id === from)
   const ti = vis.findIndex(x => x.id === target.id)
   if (fi < 0 || ti < 0) return
-  if ((vis[fi].group || '') !== (vis[ti].group || '')) return   // don't cross groups
   const [moved] = vis.splice(fi, 1)
   vis.splice(ti, 0, moved)
-  // Splice the reordered group slice back into the full list in place:
-  // group members are contiguous, so replacing each group slot in order
-  // with the new sequence reorders within the group and leaves the rest.
+  // Splice the reordered slice back into the full list in place so ids
+  // outside the current view keep their positions.
   const visIds = new Set(vis.map(x => x.id))
   const queue = [...vis]
   const merged = (sounds.list || []).map(it => visIds.has(it.id) ? queue.shift() : it)
   await sounds.reorder(merged.map(x => x.id))
+}
+
+/** Drop a row onto a playlist in the sidebar: join it. */
+function onPlaylistDragOver (kind, playlistId) {
+  if (!drag.value.id || drag.value.kind !== kind) return
+  dragOverPlaylist.value = playlistId
+}
+
+async function onPlaylistDrop (kind, playlistId) {
+  const from = drag.value.id
+  const fromKind = drag.value.kind
+  onRowDragEnd()
+  // Kinds are separate namespaces -- a sound cannot join an animations
+  // playlist. The server enforces it too; this keeps the drop from even
+  // looking like it worked.
+  if (!from || fromKind !== kind) return
+  await playlists.addItem(playlistId, from)
+}
+
+/** Drop onto "Ungrouped": leave every playlist of that kind. */
+async function onUngroupedDrop (kind) {
+  const from = drag.value.id
+  const fromKind = drag.value.kind
+  onRowDragEnd()
+  if (!from || fromKind !== kind) return
+  for (const pl of playlistsFor(kind)) {
+    if ((pl.items || []).includes(from)) await playlists.removeItem(pl.id, from)
+  }
+}
+
+// ── playlist management ─────────────────────────────────────────────
+
+const renamingPlaylistId = ref(null)
+
+async function newPlaylist (kind) {
+  const label = kind === 'animations' ? 'animation'
+              : (kind === 'poses' ? 'pose' : 'sound')
+  const name = prompt(`Name for the new ${label} playlist:`, '')
+  if (name === null) return
+  const trimmed = name.trim()
+  if (!trimmed) return
+  const created = await playlists.create(trimmed, kind)
+  if (created?.id) selectView(kind, created.id)
+}
+
+async function renamePlaylist (pl, name) {
+  renamingPlaylistId.value = null
+  const trimmed = (name || '').trim()
+  if (!trimmed || trimmed === pl.name) return
+  await playlists.patch(pl.id, { name: trimmed })
+}
+
+async function deletePlaylist (pl) {
+  const n = (pl.items || []).length
+  const tail = n
+    ? ` The ${n} item${n === 1 ? '' : 's'} in it will not be deleted.`
+    : ''
+  if (!confirm(`Delete the playlist "${pl.name}"?${tail}`)) return
+  await playlists.remove(pl.id)
+  if (view.value.playlist === pl.id) selectView(view.value.kind, null)
+}
+
+/** Take a row out of the playlist currently being viewed. */
+async function removeFromCurrentPlaylist (item) {
+  const pid = view.value.playlist
+  if (!pid || pid === UNGROUPED) return
+  await playlists.removeItem(pid, item.id)
 }
 
 async function duplicateAnimation (a) {
@@ -399,7 +572,8 @@ async function togglePlayAnimation (a) {
 // transport indicator without hammering the management channel.
 let _playerPoll = null
 onMounted(async () => {
-  await Promise.all([animations.reload(), poses.reload(), sounds.reload(), loadWsInputs()])
+  await Promise.all([animations.reload(), poses.reload(), sounds.reload(),
+                     playlists.reload(), loadWsInputs()])
   animations.refreshPlayers()
   _playerPoll = setInterval(() => animations.refreshPlayers(), 1500)
   sounds.listNodes().then(n => { audioNodes.value = n })
@@ -408,18 +582,18 @@ onBeforeUnmount(() => {
   if (_playerPoll) { clearInterval(_playerPoll); _playerPoll = null }
 })
 
-// If the sidebar selection lands on an empty bucket (e.g. the last
-// item in that group was just deleted), bounce to the "All" view of
-// the same kind so the main pane never looks broken-empty.
-watch([animationGroups, poseGroups, soundGroups], () => {
-  if (view.value.group === null) return
-  const list = view.value.kind === 'animations'
-    ? animationGroups.value
-    : (view.value.kind === 'poses' ? poseGroups.value : soundGroups.value)
-  if (view.value.group !== '__ungrouped__' && !list.includes(view.value.group)) {
-    view.value = { kind: view.value.kind, group: null }
+// If the selected playlist disappears (deleted here or from another
+// session), bounce to the "All" view of the same kind so the main pane
+// never looks broken-empty. An EMPTY playlist is left selected on
+// purpose -- you need to be able to look at one you just made in order
+// to drag things into it.
+watch(() => playlists.list, () => {
+  const p = view.value.playlist
+  if (p === null || p === UNGROUPED) return
+  if (!playlistsFor(view.value.kind).some(x => x.id === p)) {
+    view.value = { kind: view.value.kind, playlist: null }
   }
-})
+}, { deep: true })
 </script>
 
 <template>
@@ -456,90 +630,74 @@ watch([animationGroups, poseGroups, soundGroups], () => {
         </div>
 
         <div class="animations-sidebar-list">
-          <!-- Animations section -->
-          <div class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wide text-fg-faint">Animations</div>
-          <div :class="['animations-sidebar-item', view.kind === 'animations' && view.group === null ? 'active' : '']"
-               @click="selectView('animations', null)">
-            <span class="material-icons icon-sm">animation</span>
-            <span class="flex-1 truncate">All Animations</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">{{ animations.list.length }}</span>
-          </div>
-          <div v-for="g in animationGroups" :key="`a-${g}`"
-               :class="['animations-sidebar-item', view.kind === 'animations' && view.group === g ? 'active' : '']"
-               @click="selectView('animations', g)">
-            <span class="material-icons icon-sm">folder</span>
-            <span class="flex-1 truncate">{{ g }}</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">
-              {{ animations.list.filter(a => a.group === g).length }}
-            </span>
-          </div>
-          <div v-if="(animations.list || []).some(a => !a.group)"
-               :class="['animations-sidebar-item', view.kind === 'animations' && view.group === '__ungrouped__' ? 'active' : '']"
-               @click="selectView('animations', '__ungrouped__')">
-            <span class="material-icons icon-sm">folder_open</span>
-            <span class="flex-1 truncate text-fg-muted italic">Ungrouped</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">
-              {{ animations.list.filter(a => !a.group).length }}
-            </span>
-          </div>
+          <!-- One block per kind. Playlists are drop targets: dragging a
+               row from the main list onto one adds it to that playlist,
+               and onto "Ungrouped" takes it out of all of them. -->
+          <template v-for="(sec, si) in SECTIONS" :key="sec.kind">
+            <div :class="['px-3 pb-1 text-[10px] uppercase tracking-wide text-fg-faint flex items-center gap-1',
+                          si === 0 ? 'pt-3' : 'pt-4 border-t border-line/40 mt-2']">
+              <span class="flex-1">{{ sec.label }}</span>
+              <button class="text-fg-faint hover:text-cyan-300"
+                      :title="`New ${sec.label.toLowerCase()} playlist`"
+                      @click="newPlaylist(sec.kind)">
+                <span class="material-icons icon-sm">playlist_add</span>
+              </button>
+            </div>
 
-          <!-- Poses section -->
-          <div class="px-3 pt-4 pb-1 text-[10px] uppercase tracking-wide text-fg-faint border-t border-line/40 mt-2">
-            Poses
-          </div>
-          <div :class="['animations-sidebar-item', view.kind === 'poses' && view.group === null ? 'active' : '']"
-               @click="selectView('poses', null)">
-            <span class="material-icons icon-sm">accessibility</span>
-            <span class="flex-1 truncate">All Poses</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">{{ poses.list.length }}</span>
-          </div>
-          <div v-for="g in poseGroups" :key="`p-${g}`"
-               :class="['animations-sidebar-item', view.kind === 'poses' && view.group === g ? 'active' : '']"
-               @click="selectView('poses', g)">
-            <span class="material-icons icon-sm">folder</span>
-            <span class="flex-1 truncate">{{ g }}</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">
-              {{ poses.list.filter(p => p.group === g).length }}
-            </span>
-          </div>
-          <div v-if="(poses.list || []).some(p => !p.group)"
-               :class="['animations-sidebar-item', view.kind === 'poses' && view.group === '__ungrouped__' ? 'active' : '']"
-               @click="selectView('poses', '__ungrouped__')">
-            <span class="material-icons icon-sm">folder_open</span>
-            <span class="flex-1 truncate text-fg-muted italic">Ungrouped</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">
-              {{ poses.list.filter(p => !p.group).length }}
-            </span>
-          </div>
+            <div :class="['animations-sidebar-item',
+                          view.kind === sec.kind && view.playlist === null ? 'active' : '']"
+                 @click="selectView(sec.kind, null)">
+              <span class="material-icons icon-sm">{{ sec.icon }}</span>
+              <span class="flex-1 truncate">{{ sec.allLabel }}</span>
+              <span class="text-[10px] text-fg-faint tabular-nums">
+                {{ (storeFor(sec.kind).list || []).length }}
+              </span>
+            </div>
 
-          <!-- Sounds section -->
-          <div class="px-3 pt-4 pb-1 text-[10px] uppercase tracking-wide text-fg-faint border-t border-line/40 mt-2">
-            Sounds
-          </div>
-          <div :class="['animations-sidebar-item', view.kind === 'sounds' && view.group === null ? 'active' : '']"
-               @click="selectView('sounds', null)">
-            <span class="material-icons icon-sm">volume_up</span>
-            <span class="flex-1 truncate">All Sounds</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">{{ sounds.list.length }}</span>
-          </div>
-          <div v-for="g in soundGroups" :key="`s-${g}`"
-               :class="['animations-sidebar-item', view.kind === 'sounds' && view.group === g ? 'active' : '']"
-               @click="selectView('sounds', g)">
-            <span class="material-icons icon-sm">folder</span>
-            <span class="flex-1 truncate">{{ g }}</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">
-              {{ sounds.list.filter(s => s.group === g).length }}
-            </span>
-          </div>
-          <div v-if="(sounds.list || []).some(s => !s.group)"
-               :class="['animations-sidebar-item', view.kind === 'sounds' && view.group === '__ungrouped__' ? 'active' : '']"
-               @click="selectView('sounds', '__ungrouped__')">
-            <span class="material-icons icon-sm">folder_open</span>
-            <span class="flex-1 truncate text-fg-muted italic">Ungrouped</span>
-            <span class="text-[10px] text-fg-faint tabular-nums">
-              {{ sounds.list.filter(s => !s.group).length }}
-            </span>
-          </div>
+            <div v-for="pl in playlistsFor(sec.kind)" :key="pl.id"
+                 :class="['animations-sidebar-item playlist-item',
+                          view.kind === sec.kind && view.playlist === pl.id ? 'active' : '',
+                          dragOverPlaylist === pl.id ? 'playlist-drop-target' : '']"
+                 @click="selectView(sec.kind, pl.id)"
+                 @dragover.prevent="onPlaylistDragOver(sec.kind, pl.id)"
+                 @dragleave="dragOverPlaylist = null"
+                 @drop.prevent="onPlaylistDrop(sec.kind, pl.id)">
+              <span class="material-icons icon-sm">queue_music</span>
+              <input v-if="renamingPlaylistId === pl.id"
+                     class="input-field flex-1 text-xs py-0.5"
+                     :value="pl.name"
+                     autofocus
+                     @click.stop
+                     @blur="e => renamePlaylist(pl, e.target.value)"
+                     @keydown.enter="e => e.target.blur()"
+                     @keydown.escape="renamingPlaylistId = null" />
+              <span v-else class="flex-1 truncate"
+                    @dblclick.stop="renamingPlaylistId = pl.id">{{ pl.name }}</span>
+              <span class="text-[10px] text-fg-faint tabular-nums">
+                {{ countIn(sec.kind, pl.id) }}
+              </span>
+              <button class="playlist-delete text-fg-faint hover:text-red-400"
+                      title="Delete playlist (keeps its items)"
+                      @click.stop="deletePlaylist(pl)">
+                <span class="material-icons icon-sm">close</span>
+              </button>
+            </div>
+
+            <div v-if="countIn(sec.kind, UNGROUPED) || drag.kind === sec.kind"
+                 :class="['animations-sidebar-item',
+                          view.kind === sec.kind && view.playlist === UNGROUPED ? 'active' : '',
+                          dragOverPlaylist === `${sec.kind}:ungrouped` ? 'playlist-drop-target' : '']"
+                 @click="selectView(sec.kind, UNGROUPED)"
+                 @dragover.prevent="onPlaylistDragOver(sec.kind, `${sec.kind}:ungrouped`)"
+                 @dragleave="dragOverPlaylist = null"
+                 @drop.prevent="onUngroupedDrop(sec.kind)">
+              <span class="material-icons icon-sm">folder_open</span>
+              <span class="flex-1 truncate text-fg-muted italic">Ungrouped</span>
+              <span class="text-[10px] text-fg-faint tabular-nums">
+                {{ countIn(sec.kind, UNGROUPED) }}
+              </span>
+            </div>
+          </template>
         </div>
       </aside>
 
@@ -563,11 +721,32 @@ watch([animationGroups, poseGroups, soundGroups], () => {
           <!-- Animations table -->
           <template v-if="view.kind === 'animations'">
             <div v-if="!visibleAnimations.length" class="text-center text-sm text-fg-faint py-10">
-              No animations in this group yet. Click <span class="text-cyan-300">New Animation</span> to start.
+              <template v-if="view.playlist && view.playlist !== UNGROUPED">
+                This playlist is empty. Drag animations here from
+                <span class="text-cyan-300 cursor-pointer"
+                      @click="selectView('animations', null)">All Animations</span>,
+                or create one with <span class="text-cyan-300">New Animation</span>.
+              </template>
+              <template v-else>
+                No animations yet. Click <span class="text-cyan-300">New Animation</span> to start.
+              </template>
             </div>
             <div v-else class="rounded-lg border border-line/50 bg-panel/30 divide-y divide-line/40">
               <div v-for="a in visibleAnimations" :key="a.id"
-                   class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors">
+                   class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors"
+                   :class="{ 'row-dragging': drag.id === a.id,
+                             'row-drop-target': dragOverId === a.id }"
+                   :draggable="dragHandleId === a.id"
+                   @dragstart="onRowDragStart('animations', a, $event)"
+                   @dragover.prevent="onRowDragOver('animations', a)"
+                   @drop.prevent="onRowDrop('animations', a)"
+                   @dragend="onRowDragEnd">
+                <button class="drag-handle"
+                        title="Drag onto a playlist to add it, or onto another row to reorder"
+                        @mousedown="dragHandleId = a.id"
+                        @mouseup="dragHandleId = null">
+                  <span class="material-icons">drag_indicator</span>
+                </button>
                 <IconPicker :model-value="a.icon || ''" fallback="animation"
                             @update:model-value="(v) => patchAnimation(a.id, { icon: v })" />
                 <div class="flex-1 min-w-0">
@@ -585,11 +764,6 @@ watch([animationGroups, poseGroups, soundGroups], () => {
                   </div>
                   <div class="text-xs text-fg-faint truncate font-mono">{{ a.id }}</div>
                 </div>
-                <input class="input-field text-xs py-1 w-32"
-                       list="anim-group-suggest"
-                       :value="a.group || ''"
-                       placeholder="(group)"
-                       @change="(e) => patchAnimation(a.id, { group: e.target.value })" />
                 <div class="text-xs text-fg-muted tabular-nums w-20 text-right shrink-0">
                   {{ Number(a.duration || 0).toFixed(2) }}s
                 </div>
@@ -598,6 +772,12 @@ watch([animationGroups, poseGroups, soundGroups], () => {
                 </div>
                 <div class="text-xs text-fg-faint w-20 text-right shrink-0">{{ fmtTimeAgo(a.modified) }}</div>
                 <div class="flex items-center gap-1 shrink-0">
+                  <button v-if="currentPlaylist"
+                          class="btn-sm bg-surface hover:bg-amber-600 text-fg hover:text-fg-strong"
+                          :title="`Remove from ${currentPlaylist.name} (keeps the item)`"
+                          @click="removeFromCurrentPlaylist(a)">
+                    <span class="material-icons icon-sm">playlist_remove</span>
+                  </button>
                   <button :class="['btn-sm text-fg-strong',
                                    animIsPlaying(a.id)
                                      ? 'bg-red-600/80 hover:bg-red-500'
@@ -630,11 +810,32 @@ watch([animationGroups, poseGroups, soundGroups], () => {
           <!-- Poses table -->
           <template v-else-if="view.kind === 'poses'">
             <div v-if="!visiblePoses.length" class="text-center text-sm text-fg-faint py-10">
-              No poses in this group yet. Click <span class="text-cyan-300">New Pose</span> to start.
+              <template v-if="view.playlist && view.playlist !== UNGROUPED">
+                This playlist is empty. Drag poses here from
+                <span class="text-cyan-300 cursor-pointer"
+                      @click="selectView('poses', null)">All Poses</span>,
+                or create one with <span class="text-cyan-300">New Pose</span>.
+              </template>
+              <template v-else>
+                No poses yet. Click <span class="text-cyan-300">New Pose</span> to start.
+              </template>
             </div>
             <div v-else class="rounded-lg border border-line/50 bg-panel/30 divide-y divide-line/40">
               <template v-for="p in visiblePoses" :key="p.id">
-                <div class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors">
+                <div class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors"
+                     :class="{ 'row-dragging': drag.id === p.id,
+                               'row-drop-target': dragOverId === p.id }"
+                     :draggable="dragHandleId === p.id"
+                     @dragstart="onRowDragStart('poses', p, $event)"
+                     @dragover.prevent="onRowDragOver('poses', p)"
+                     @drop.prevent="onRowDrop('poses', p)"
+                     @dragend="onRowDragEnd">
+                  <button class="drag-handle"
+                          title="Drag onto a playlist to add it, or onto another row to reorder"
+                          @mousedown="dragHandleId = p.id"
+                          @mouseup="dragHandleId = null">
+                    <span class="material-icons">drag_indicator</span>
+                  </button>
                   <IconPicker :model-value="p.icon || ''" fallback="accessibility"
                               @update:model-value="(v) => patchPose(p.id, { icon: v })" />
                   <div class="flex-1 min-w-0">
@@ -649,16 +850,17 @@ watch([animationGroups, poseGroups, soundGroups], () => {
                          @click="renamingId = p.id">{{ p.name || p.id }}</div>
                     <div class="text-xs text-fg-faint truncate">{{ p.description || p.id }}</div>
                   </div>
-                  <input class="input-field text-xs py-1 w-32"
-                         list="pose-group-suggest"
-                         :value="p.group || ''"
-                         placeholder="(group)"
-                         @change="(e) => patchPose(p.id, { group: e.target.value })" />
                   <div class="text-xs text-fg-faint w-24 text-right tabular-nums shrink-0">
                     {{ p.setpoint_count }} track{{ p.setpoint_count === 1 ? '' : 's' }}
                   </div>
                   <div class="text-xs text-fg-faint w-20 text-right shrink-0">{{ fmtTimeAgo(p.modified) }}</div>
                   <div class="flex items-center gap-1 shrink-0">
+                    <button v-if="currentPlaylist"
+                          class="btn-sm bg-surface hover:bg-amber-600 text-fg hover:text-fg-strong"
+                          :title="`Remove from ${currentPlaylist.name} (keeps the item)`"
+                          @click="removeFromCurrentPlaylist(p)">
+                      <span class="material-icons icon-sm">playlist_remove</span>
+                    </button>
                     <button class="btn-sm bg-emerald-500/80 hover:bg-emerald-500 text-fg-strong"
                             title="Apply pose" @click="applyPose(p)">
                       <span class="material-icons icon-sm">play_arrow</span>
@@ -755,20 +957,30 @@ watch([animationGroups, poseGroups, soundGroups], () => {
           <!-- Sounds table -->
           <template v-else>
             <div v-if="!visibleSounds.length" class="text-center text-sm text-fg-faint py-10">
-              No sounds in this group yet. Click <span class="text-violet-300">New Sound</span> to start.
+              <template v-if="view.playlist && view.playlist !== UNGROUPED">
+                This playlist is empty. Drag sounds here from
+                <span class="text-cyan-300 cursor-pointer"
+                      @click="selectView('sounds', null)">All Sounds</span>,
+                or create one with <span class="text-violet-300">New Sound</span>.
+              </template>
+              <template v-else>
+                No sounds yet. Click <span class="text-violet-300">New Sound</span> to start.
+              </template>
             </div>
             <div v-else class="rounded-lg border border-line/50 bg-panel/30 divide-y divide-line/40">
               <div v-for="s in visibleSounds" :key="s.id"
                    class="anim-row flex items-center gap-3 px-3 py-2 hover:bg-panel/60 transition-colors"
-                   :class="{ 'sound-dragging': dragSoundId === s.id, 'sound-drop-target': dragOverSoundId === s.id }"
-                   :draggable="dragHandleSoundId === s.id"
-                   @dragstart="onSoundDragStart(s, $event)"
-                   @dragover.prevent="onSoundDragOver(s)"
-                   @drop.prevent="onSoundDrop(s)"
-                   @dragend="onSoundDragEnd">
-                <button class="drag-handle" title="Drag to reorder"
-                        @mousedown="dragHandleSoundId = s.id"
-                        @mouseup="dragHandleSoundId = null">
+                   :class="{ 'row-dragging': drag.id === s.id,
+                             'row-drop-target': dragOverId === s.id }"
+                   :draggable="dragHandleId === s.id"
+                   @dragstart="onRowDragStart('sounds', s, $event)"
+                   @dragover.prevent="onRowDragOver('sounds', s)"
+                   @drop.prevent="onRowDrop('sounds', s)"
+                   @dragend="onRowDragEnd">
+                <button class="drag-handle"
+                        title="Drag onto a playlist to add it, or onto another row to reorder"
+                        @mousedown="dragHandleId = s.id"
+                        @mouseup="dragHandleId = null">
                   <span class="material-icons">drag_indicator</span>
                 </button>
                 <IconPicker :model-value="s.icon || ''" fallback="volume_up"
@@ -787,13 +999,16 @@ watch([animationGroups, poseGroups, soundGroups], () => {
                     {{ nodeName(s.node_id) }} · {{ s.file_path || '(no file)' }}
                   </div>
                 </div>
-                <input class="input-field text-xs py-1 w-32"
-                       list="sound-group-suggest"
-                       :value="s.group || ''"
-                       placeholder="(group)"
-                       @change="(e) => patchSound(s.id, { group: e.target.value })" />
-                <div class="text-xs text-fg-faint w-16 text-right tabular-nums shrink-0">
-                  {{ Math.round((s.volume ?? 1) * 100) }}%
+                <div class="flex items-center gap-0.5 w-24 shrink-0"
+                     :title="(s.volume ?? 1) > 1
+                       ? 'Boosted above the clip\'s own level (software gain)'
+                       : 'Playback volume'">
+                  <NumberField class="input-field text-xs py-1 w-14 text-right"
+                               step="5" :decimals="0" :min="0" :max="VOLUME_MAX_PCT"
+                               :model-value="Math.round((s.volume ?? 1) * 100)"
+                               @commit="v => setSoundVolumePct(s, v)" />
+                  <span class="text-xs"
+                        :class="(s.volume ?? 1) > 1 ? 'text-amber-300' : 'text-fg-faint'">%</span>
                 </div>
                 <div class="text-xs w-16 text-right shrink-0"
                      :class="s.loop ? 'text-cyan-300' : 'text-fg-faint'">
@@ -802,6 +1017,12 @@ watch([animationGroups, poseGroups, soundGroups], () => {
                   <span v-else-if="s.loop">∞</span>
                 </div>
                 <div class="flex items-center gap-1 shrink-0">
+                  <button v-if="currentPlaylist"
+                          class="btn-sm bg-surface hover:bg-amber-600 text-fg hover:text-fg-strong"
+                          :title="`Remove from ${currentPlaylist.name} (keeps the sound)`"
+                          @click="removeFromCurrentPlaylist(s)">
+                    <span class="material-icons icon-sm">playlist_remove</span>
+                  </button>
                   <button class="btn-sm bg-emerald-500/80 hover:bg-emerald-500 text-fg-strong"
                           title="Play" @click="playSound(s)">
                     <span class="material-icons icon-sm">play_arrow</span>
@@ -824,34 +1045,20 @@ watch([animationGroups, poseGroups, soundGroups], () => {
       </div>
     </div>
 
-    <datalist id="anim-group-suggest">
-      <option v-for="g in animationGroups" :key="g" :value="g" />
-    </datalist>
-    <datalist id="pose-group-suggest">
-      <option v-for="g in poseGroups" :key="g" :value="g" />
-    </datalist>
-    <datalist id="sound-group-suggest">
-      <option v-for="g in soundGroups" :key="g" :value="g" />
-    </datalist>
-
+    <!-- The group-name datalists went with the group fields: there is no
+         single group to type any more. Membership is a drag onto a
+         playlist in the sidebar; a new item joins whichever playlist is
+         being viewed when it is created. -->
     <NewAnimationModal v-if="newAnimOpen"
-                       :groups="animationGroups"
-                       :default-group="view.kind === 'animations' && view.group && view.group !== '__ungrouped__' ? view.group : ''"
                        @close="newAnimOpen = false"
                        @create="onCreateAnimation" />
     <NewPoseModal v-if="newPoseOpen"
-                  :groups="poseGroups"
-                  :default-group="view.kind === 'poses' && view.group && view.group !== '__ungrouped__' ? view.group : ''"
                   @close="newPoseOpen = false"
                   @create="onCreatePose" />
     <NewSoundModal v-if="newSoundOpen"
-                   :groups="soundGroups"
-                   :default-group="view.kind === 'sounds' && view.group && view.group !== '__ungrouped__' ? view.group : ''"
                    @close="newSoundOpen = false"
                    @create="onCreateSound" />
     <AddSoundsFromFolderModal v-if="newSoundFolderOpen"
-                   :groups="soundGroups"
-                   :default-group="view.kind === 'sounds' && view.group && view.group !== '__ungrouped__' ? view.group : ''"
                    @close="newSoundFolderOpen = false"
                    @create="onCreateSoundFolder" />
     <MaestroImportModal v-if="importOpen" @close="importOpen = false" />
@@ -876,6 +1083,18 @@ watch([animationGroups, poseGroups, soundGroups], () => {
 
 .anim-row { transition: background-color 0.1s, box-shadow 0.1s, opacity 0.1s; }
 /* The row being dragged fades; the row under the cursor shows a drop line. */
-.anim-row.sound-dragging { opacity: 0.4; }
-.anim-row.sound-drop-target { box-shadow: inset 0 2px 0 0 var(--color-cyan-400); }
+.anim-row.row-dragging { opacity: 0.4; }
+.anim-row.row-drop-target { box-shadow: inset 0 2px 0 0 var(--color-cyan-400); }
+
+/* Sidebar playlists double as drop targets. The outline has to read as
+   "let go here" against the `active` background, so it's a ring rather
+   than a fill. */
+.animations-sidebar-item.playlist-drop-target {
+  box-shadow: inset 0 0 0 2px var(--color-cyan-400);
+}
+/* The delete affordance stays out of the way until the row is hovered --
+   a playlist is cheap to remake, but not mid-drag by accident. */
+.animations-sidebar-item .playlist-delete { opacity: 0; transition: opacity 0.12s; }
+.animations-sidebar-item:hover .playlist-delete,
+.animations-sidebar-item.active .playlist-delete { opacity: 1; }
 </style>

@@ -3,14 +3,12 @@ import { computed, ref } from 'vue'
 import AppModal from '@/components/AppModal.vue'
 import IconPicker from './IconPicker.vue'
 
-const props = defineProps({
-  groups: { type: Array, default: () => [] },
-  defaultGroup: { type: String, default: '' },
-})
+// No grouping field: an item can be in many playlists now, and
+// membership is assigned by dragging the row onto one in the board
+// sidebar. See views/Animations.vue.
 const emit = defineEmits(['close', 'create'])
 
 const name = ref('')
-const group = ref(props.defaultGroup)
 const icon = ref('accessibility')
 const description = ref('')
 
@@ -20,7 +18,6 @@ function submit () {
   if (!canSubmit.value) return
   emit('create', {
     name: name.value.trim(),
-    group: group.value.trim(),
     icon: icon.value,
     description: description.value.trim(),
   })
@@ -31,7 +28,7 @@ function submit () {
   <AppModal title="New pose" width="max-w-md" @close="emit('close')">
     <div class="space-y-3">
       <p class="text-xs text-fg-muted">
-        Set up the pose's name and grouping — you'll add WS-input setpoints in the editor.
+        Name the pose — you'll add WS-input setpoints in the editor, and drag it onto a playlist in the sidebar to group it.
       </p>
 
       <div class="flex items-center gap-2">
@@ -45,17 +42,6 @@ function submit () {
                  @keydown.enter="submit" />
         </label>
       </div>
-
-      <label class="block">
-        <span class="block text-fg-muted text-xs mb-1">Group (optional)</span>
-        <input class="input-field w-full"
-               list="new-pose-groups"
-               v-model="group"
-               placeholder="Leave empty for Ungrouped" />
-        <datalist id="new-pose-groups">
-          <option v-for="g in groups" :key="g" :value="g" />
-        </datalist>
-      </label>
 
       <label class="block">
         <span class="block text-fg-muted text-xs mb-1">Description (optional)</span>

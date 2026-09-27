@@ -407,6 +407,20 @@ class Pose:
         self.modified = now
 
 
+#: Ceiling for a soundboard entry's ``volume``. 1.0 is the clip's own
+#: level (0 dB); above that VLC applies software gain, which is how a
+#: quiet clip is brought up to match the rest of a board.
+#:
+#: 2.0 rather than "unbounded" because gain cannot invent headroom: a
+#: clip already near full scale just clips harder the further past 1.0 it
+#: goes, so a bigger number would only buy distortion. It matches what
+#: VLC's own UI offers by default.
+#:
+#: MIRRORED in firmware/raspberrypi/saint_node/soundboard.py — the node
+#: is a separate deployable and cannot import this. Change both.
+SOUND_VOLUME_MAX = 2.0
+
+
 @dataclass
 class Sound:
     """A soundboard entry: an audio file that a specific node plays.
@@ -424,7 +438,10 @@ class Sound:
     node_id: str = ""         # which node plays this sound
     file_path: str = ""       # absolute path on that node
     output_device: str = ""   # ALSA device id ("" → node default)
-    volume: float = 1.0       # 0.0–1.0
+    # 0.0 … SOUND_VOLUME_MAX. 1.0 is the file's own level; above it the
+    # player applies software gain so a quiet clip can sit level with a
+    # loud one on the same board.
+    volume: float = 1.0
     start_time: float = 0.0   # seek offset in seconds at play
     loop: bool = False
     loop_count: int = 0       # repeats when loop on; 0 → infinite
@@ -460,7 +477,12 @@ class Sound:
             node_id=str(d.get("node_id", "")),
             file_path=str(d.get("file_path", "")),
             output_device=str(d.get("output_device", "")),
-            volume=float(d.get("volume", 1.0)),
+            # Clamped on the way in: this is the last point before the
+            # value is persisted and handed to a media player, and a
+            # hand-edited file or an old client should not be able to
+            # push an arbitrary gain into it.
+            volume=max(0.0, min(SOUND_VOLUME_MAX,
+                                float(d.get("volume", 1.0)))),
             start_time=float(d.get("start_time", 0.0)),
             loop=bool(d.get("loop", False)),
             loop_count=int(d.get("loop_count", 0)),

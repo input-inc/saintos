@@ -42,6 +42,23 @@ AUDIO_EXTENSIONS = (".wav", ".mp3", ".ogg", ".flac", ".aac", ".m4a", ".opus")
 # unbounded).
 _INFINITE_REPEAT = 65535
 
+# Ceiling for a clip's playback gain. Mirrors
+# saint_server.animation.models.SOUND_VOLUME_MAX; imported rather than
+# redefined so the store and the player can never disagree about what a
+# saved volume means.
+from saint_server.animation.models import SOUND_VOLUME_MAX
+
+
+def _vlc_volume(volume: float) -> int:
+    """Map a 0 … SOUND_VOLUME_MAX gain to libvlc's percent scale.
+
+    libvlc takes a percentage where 100 is 0 dB, and it accepts values
+    above that — which is the whole point here: a clip recorded quiet
+    can be lifted to sit level with the rest of a board. We still clamp,
+    because past the ceiling the only thing extra gain adds is clipping.
+    """
+    return int(round(max(0.0, min(SOUND_VOLUME_MAX, volume)) * 100))
+
 
 def list_directory(path: str) -> Dict[str, Any]:
     """List one directory on the server host filesystem.
@@ -150,7 +167,11 @@ class SoundboardPlayer:
     def play(self, path: str, device: str = "default", volume: float = 1.0,
              start_time_s: float = 0.0, loop: bool = False,
              loop_count: int = 0) -> Tuple[bool, str]:
-        """Play ``path`` on ``device``. Returns ``(ok, message)``."""
+        """Play ``path`` on ``device``. Returns ``(ok, message)``.
+
+        ``volume`` is 0 … SOUND_VOLUME_MAX, where 1.0 is the file's own
+        level. Above 1.0 VLC applies software gain — see _vlc_volume.
+        """
         if not _VLC_AVAILABLE:
             return False, f"python-vlc not available: {_VLC_IMPORT_ERROR!r}"
         if not path or not os.path.isfile(path):
@@ -166,7 +187,7 @@ class SoundboardPlayer:
                 media.add_option(f"input-repeat={repeats}")
             player = inst.media_player_new()
             player.set_media(media)
-            player.audio_set_volume(int(max(0.0, min(1.0, volume)) * 100))
+            player.audio_set_volume(_vlc_volume(volume))
             rc = player.play()
             if rc == -1:
                 return False, f"VLC refused to play {path}"
@@ -177,12 +198,15 @@ class SoundboardPlayer:
             return False, str(e)
 
     def set_volume(self, volume: float) -> None:
-        """Adjust volume of the currently-playing clip (0.0–1.0)."""
+        """Adjust volume of the currently-playing clip.
+
+        Same 0 … SOUND_VOLUME_MAX range as :meth:`play`.
+        """
         player = self._player
         if player is None:
             return
         try:
-            player.audio_set_volume(int(max(0.0, min(1.0, volume)) * 100))
+            player.audio_set_volume(_vlc_volume(volume))
         except Exception:
             pass
 

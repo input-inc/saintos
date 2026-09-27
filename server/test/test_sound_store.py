@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from saint_server.animation.models import Sound
+from saint_server.animation.models import SOUND_VOLUME_MAX, Sound
 from saint_server.animation.store import SoundStore
 
 
@@ -47,6 +47,23 @@ def test_sound_roundtrip_preserves_fields():
     assert back == s
 
 
+def test_volume_above_one_is_kept(tmp_path):
+    # A quiet clip can be boosted past its own level; that is the whole
+    # point of allowing >100%.
+    s = Sound.from_dict({"id": "quiet", "name": "Quiet", "volume": 1.6})
+    assert s.volume == 1.6
+
+
+def test_volume_is_clamped_to_the_ceiling():
+    s = Sound.from_dict({"id": "loud", "name": "Loud", "volume": 12.0})
+    assert s.volume == SOUND_VOLUME_MAX
+
+
+def test_negative_volume_floors_at_mute():
+    s = Sound.from_dict({"id": "neg", "name": "Neg", "volume": -1.0})
+    assert s.volume == 0.0
+
+
 def test_sound_from_dict_defaults():
     s = Sound.from_dict({"id": "beep", "name": "Beep"})
     assert s.volume == 1.0
@@ -61,25 +78,34 @@ def test_sound_from_dict_defaults():
 
 def test_save_assigns_slug_and_auto_position(tmp_path):
     store = SoundStore(str(tmp_path))
-    a = store.save(Sound(id="", name="Hello World", group="G1"))
-    b = store.save(Sound(id="", name="Second", group="G1"))
+    a = store.save(Sound(id="", name="Hello World"))
+    b = store.save(Sound(id="", name="Second"))
     assert a.id == "hello_world"
-    # Auto-position: first in group → 1, second → 2.
+    # Auto-position runs over the whole library now: `position` orders
+    # the flat "All Sounds" view. Order within a playlist belongs to the
+    # playlist, which is why this is no longer per-group.
     assert a.position == 1
     assert b.position == 2
-    # New group starts its own position sequence.
-    c = store.save(Sound(id="", name="Other", group="G2"))
-    assert c.position == 1
+    c = store.save(Sound(id="", name="Other"))
+    assert c.position == 3
 
 
-def test_list_sorted_by_group_position_name(tmp_path):
+def test_list_sorted_by_position_then_name(tmp_path):
     store = SoundStore(str(tmp_path))
-    store.save(Sound(id="", name="Bravo", group="B"))
-    store.save(Sound(id="", name="Alpha", group="A"))
-    store.save(Sound(id="", name="Charlie", group="A"))
+    store.save(Sound(id="", name="Bravo"))
+    store.save(Sound(id="", name="Alpha"))
+    store.save(Sound(id="", name="Charlie"))
     names = [s["name"] for s in store.list()]
-    # Group A (positions 1,2) before group B.
-    assert names == ["Alpha", "Charlie", "Bravo"]
+    # Insertion order, via auto-position -- NOT alphabetical, and no
+    # longer bucketed by group.
+    assert names == ["Bravo", "Alpha", "Charlie"]
+
+
+def test_position_leads_the_sort_over_name(tmp_path):
+    store = SoundStore(str(tmp_path))
+    store.save(Sound(id="", name="Zulu", position=1))
+    store.save(Sound(id="", name="Alpha", position=2))
+    assert [s["name"] for s in store.list()] == ["Zulu", "Alpha"]
 
 
 def test_get_and_delete(tmp_path):

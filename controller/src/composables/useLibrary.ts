@@ -28,9 +28,24 @@ export interface LibraryItem {
     // Animations only: whether the animation loops. Lets the panel apply
     // tap-again-to-stop to loopers and badge them. Absent for poses/sounds.
     loop?: boolean;
-    // Sounds carry a group name; the panel offers a group filter dropdown.
-    // Empty/absent means ungrouped.
-    group?: string;
+    // Ids of the playlists this item belongs to. Many-to-many: an item
+    // can be in several, which is why this replaced the old single
+    // `group` string. Empty/absent means it is in none of them.
+    playlists?: string[];
+}
+
+/** A named, ordered set of board items of one kind.
+ *
+ *  The panel's source list renders one row per playlist of the panel's
+ *  kind; selecting one filters the grid to its members, in ITS order.
+ *  That ordering is per-playlist, so the same item can appear at a
+ *  different slot in each list it belongs to. */
+export interface Playlist {
+    id: string;
+    name: string;
+    kind: 'animations' | 'poses' | 'sounds';
+    /** Ordered member ids. */
+    items: string[];
 }
 
 // One currently-playing animation, from the server's 'animation_state'
@@ -70,9 +85,22 @@ function saveCached(key: string, items: LibraryItem[]): void {
     }
 }
 
+function loadCachedPlaylists(): Playlist[] | null {
+    try {
+        const raw = localStorage.getItem(STORAGE_PREFIX + 'playlists');
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? (parsed as Playlist[]) : null;
+    } catch (e) {
+        console.error('[useLibrary] read cache \'playlists\' failed:', e);
+        return null;
+    }
+}
+
 const cachedAnimations = loadCached('animations');
 const cachedPoses = loadCached('poses');
 const cachedSounds = loadCached('sounds');
+const cachedPlaylists = loadCachedPlaylists();
 
 const animationsRef = ref<LibraryItem[]>(cachedAnimations ?? []);
 const posesRef = ref<LibraryItem[]>(cachedPoses ?? []);
@@ -84,6 +112,10 @@ const soundsRef = ref<LibraryItem[]>(cachedSounds ?? []);
 const animationsLoadedRef = ref(cachedAnimations !== null);
 const posesLoadedRef = ref(cachedPoses !== null);
 const soundsLoadedRef = ref(cachedSounds !== null);
+// Playlists are cached the same way so the source list is on screen
+// before the socket is up -- an empty sidebar that then pops in would
+// shift the grid under the operator's thumb.
+const playlistsRef = ref<Playlist[]>(cachedPlaylists ?? []);
 
 // ── Animation playback state ─────────────────────────────────────────
 // Which animations are currently playing, keyed by id, from the server's
@@ -119,7 +151,7 @@ let syncTimeout: ReturnType<typeof setTimeout> | null = null;
 const SYNC_TIMEOUT_MS = 8000;
 
 function beginSync(): void {
-    pendingResponses = 3; // animations + poses + sounds
+    pendingResponses = 4; // animations + poses + sounds + playlists
     syncingRef.value = true;
     if (syncTimeout) clearTimeout(syncTimeout);
     syncTimeout = setTimeout(() => {
@@ -149,7 +181,7 @@ const conn = useConnection();
 let initialized = false;
 const unlistenFns: UnlistenFn[] = [];
 
-// The server summaries carry more than we render (group, duration, …);
+// The server summaries carry more than we render (duration, modified, …);
 // keep just what the panel needs and tolerate missing fields.
 function toItems(raw: unknown): LibraryItem[] {
     if (!Array.isArray(raw)) return [];
@@ -160,9 +192,30 @@ function toItems(raw: unknown): LibraryItem[] {
             name: String(x['name'] ?? x['id'] ?? ''),
             icon: typeof x['icon'] === 'string' && x['icon'] ? x['icon'] : undefined,
             loop: typeof x['loop'] === 'boolean' ? x['loop'] : undefined,
-            group: typeof x['group'] === 'string' && x['group'] ? x['group'] : undefined,
+            playlists: Array.isArray(x['playlists'])
+                ? (x['playlists'] as unknown[]).map(String).filter(Boolean)
+                : undefined,
         }))
         .filter(i => i.id);
+}
+
+const PLAYLIST_KINDS = ['animations', 'poses', 'sounds'] as const;
+
+function toPlaylists(raw: unknown): Playlist[] {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+        .map(x => ({
+            id: String(x['id'] ?? ''),
+            name: String(x['name'] ?? x['id'] ?? ''),
+            kind: String(x['kind'] ?? '') as Playlist['kind'],
+            items: Array.isArray(x['items'])
+                ? (x['items'] as unknown[]).map(String).filter(Boolean)
+                : [],
+        }))
+        // A playlist of an unknown kind can't be rendered against any
+        // panel, so drop it here rather than letting it reach the UI.
+        .filter(p => p.id && (PLAYLIST_KINDS as readonly string[]).includes(p.kind));
 }
 
 async function refresh(): Promise<void> {
@@ -178,6 +231,8 @@ async function refresh(): Promise<void> {
             console.error('[useLibrary] list_poses failed:', e)),
         invoke('list_sounds').catch(e =>
             console.error('[useLibrary] list_sounds failed:', e)),
+        invoke('list_playlists').catch(e =>
+            console.error('[useLibrary] list_playlists failed:', e)),
     ]);
 }
 
@@ -206,6 +261,14 @@ async function ensureInit(): Promise<void> {
             soundsRef.value = toItems(event.payload?.sounds);
             soundsLoadedRef.value = true;
             saveCached('sounds', soundsRef.value);
+            markResponse();
+        }),
+    );
+
+    unlistenFns.push(
+        await listen<{ playlists?: unknown }>('library-playlists', event => {
+            playlistsRef.value = toPlaylists(event.payload?.playlists);
+            saveCached('playlists', playlistsRef.value as unknown as LibraryItem[]);
             markResponse();
         }),
     );
@@ -257,6 +320,8 @@ export function useLibrary() {
         animations: computed(() => animationsRef.value),
         poses: computed(() => posesRef.value),
         sounds: computed(() => soundsRef.value),
+        // Every playlist, all kinds. Callers filter by `kind`.
+        playlists: computed(() => playlistsRef.value),
         animationsLoaded: computed(() => animationsLoadedRef.value),
         posesLoaded: computed(() => posesLoadedRef.value),
         soundsLoaded: computed(() => soundsLoadedRef.value),

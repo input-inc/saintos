@@ -1668,7 +1668,6 @@ class WebSocketHandler:
             return {"status": "ok",
                     "data": self.state_manager.import_group_states(
                         names=names,
-                        group=str(params.get('group') or ''),
                         icon=str(params.get('icon') or ''),
                         overwrite=bool(params.get('overwrite')))}
 
@@ -1706,7 +1705,7 @@ class WebSocketHandler:
                         node_id=node_id,
                         files=files,
                         output_device=params.get('output_device') or 'default',
-                        group=str(params.get('group', '')),
+                        playlist_id=str(params.get('playlist_id', '')),
                         volume=float(params.get('volume', 1.0)),
                         start_time=float(params.get('start_time', 0.0)),
                         loop=bool(params.get('loop', False)),
@@ -1723,6 +1722,65 @@ class WebSocketHandler:
         elif action == 'reorder_sounds':
             return {"status": "ok",
                     "data": self.state_manager.reorder_sounds(
+                        params.get('ordered_ids') or [])}
+
+        # ── playlists ─────────────────────────────────────────────────
+        # Many-to-many replacement for the per-item `group` string. Each
+        # playlist holds one kind ("animations" | "poses" | "sounds") and
+        # owns both its membership and its order.
+        elif action == 'list_playlists':
+            return {"status": "ok",
+                    "data": {"playlists": self.state_manager.list_playlists(
+                        params.get('kind') or None)}}
+
+        elif action == 'save_playlist':
+            payload = params.get('playlist')
+            if not isinstance(payload, dict):
+                return {"status": "error", "message": "Missing playlist payload"}
+            return {"status": "ok",
+                    "data": self.state_manager.save_playlist(payload)}
+
+        elif action == 'delete_playlist':
+            playlist_id = params.get('id')
+            if not playlist_id:
+                return {"status": "error", "message": "Missing id"}
+            return {"status": "ok",
+                    "data": self.state_manager.delete_playlist(playlist_id)}
+
+        elif action == 'playlist_add_item':
+            playlist_id = params.get('playlist_id')
+            item_id = params.get('item_id')
+            if not playlist_id or not item_id:
+                return {"status": "error",
+                        "message": "Missing playlist_id or item_id"}
+            index = params.get('index')
+            return {"status": "ok",
+                    "data": self.state_manager.playlist_add_item(
+                        playlist_id, item_id,
+                        None if index is None else int(index))}
+
+        elif action == 'playlist_remove_item':
+            playlist_id = params.get('playlist_id')
+            item_id = params.get('item_id')
+            if not playlist_id or not item_id:
+                return {"status": "error",
+                        "message": "Missing playlist_id or item_id"}
+            return {"status": "ok",
+                    "data": self.state_manager.playlist_remove_item(
+                        playlist_id, item_id)}
+
+        elif action == 'reorder_playlist_items':
+            playlist_id = params.get('playlist_id')
+            if not playlist_id:
+                return {"status": "error", "message": "Missing playlist_id"}
+            return {"status": "ok",
+                    "data": self.state_manager.reorder_playlist_items(
+                        playlist_id, params.get('ordered_ids') or [])}
+
+        elif action == 'reorder_playlists':
+            return {"status": "ok",
+                    "data": self.state_manager.reorder_playlists(
+                        str(params.get('kind', '')),
                         params.get('ordered_ids') or [])}
 
         elif action == 'sound_list_nodes':

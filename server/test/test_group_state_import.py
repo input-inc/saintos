@@ -210,18 +210,29 @@ def test_import_selected_subset_only(sm_loaded):
 
 
 def test_imported_pose_records_provenance(sm_loaded):
-    sm_loaded.import_group_states(names=["happy"], group="Face", icon="mood")
+    sm_loaded.import_group_states(names=["happy"], icon="mood")
     pose = sm_loaded.pose_store.get("happy")
     assert pose.source == "srdf"
     assert pose.source_ref == "happy"
-    assert pose.group == "Face"
     assert pose.icon == "mood"
     assert "group_state" in pose.description
 
 
-def test_group_defaults_to_the_srdf_group(sm_loaded):
+def test_imported_poses_join_a_playlist_named_after_the_srdf_group(sm_loaded):
+    # The SRDF already says how these poses group up, so the import files
+    # them itself -- this is what replaced the modal's "Pose group" box.
     sm_loaded.import_group_states(names=["happy"])
-    assert sm_loaded.pose_store.get("happy").group == "face"
+    playlists = sm_loaded.list_playlists("poses")
+    assert [p["name"] for p in playlists] == ["face"]
+    assert playlists[0]["items"] == ["happy"]
+
+
+def test_a_second_import_reuses_the_same_playlist(sm_loaded):
+    sm_loaded.import_group_states(names=["happy"])
+    sm_loaded.import_group_states(names=["mad"])
+    playlists = sm_loaded.list_playlists("poses")
+    assert len(playlists) == 1
+    assert sorted(playlists[0]["items"]) == ["happy", "mad"]
 
 
 # ── not destroying operator work ───────────────────────────────────

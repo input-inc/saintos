@@ -828,10 +828,30 @@ class StateManager:
         # immediately usable from disk; the player registry can only
         # start animations once the routing evaluator + bridge are
         # wired (it depends on both for the dispatch fan-out).
-        from saint_server.animation.store import AnimationStore, PoseStore, SoundStore
+        from saint_server.animation.store import (
+            AnimationStore, PlaylistStore, PoseStore, SoundStore,
+        )
         self.animation_store = AnimationStore(self.config_dir, logger=self.logger)
         self.pose_store = PoseStore(self.config_dir, logger=self.logger)
         self.sound_store = SoundStore(self.config_dir, logger=self.logger)
+        # Playlists replaced the per-item `group` string (an item can be
+        # in several now). Migrating here, at construction, means the
+        # first list_* call already sees playlists rather than the UI
+        # having to cope with a half-converted library. It is a no-op
+        # after the first run — see PlaylistStore.migrate_legacy_groups.
+        self.playlist_store = PlaylistStore(self.config_dir, logger=self.logger)
+        try:
+            self.playlist_store.migrate_legacy_groups({
+                "animations": self.animation_store.list(),
+                "poses": self.pose_store.list(),
+                "sounds": self.sound_store.list(),
+            })
+        except Exception as e:
+            # A library that can't be migrated must not stop the server
+            # from booting — the operator just sees no playlists.
+            if self.logger:
+                self.logger.error(
+                    f"Playlist migration failed: {type(e).__name__}: {e}")
         self._animation_registry = None
         # Cached rig evaluator + the pose generation that invalidates it.
         # See _rig_evaluator: rebuilding parses the URDF, so it must not
@@ -2835,7 +2855,23 @@ class StateManager:
     # ── animations & poses ──────────────────────────────────────────
 
     def list_animations(self) -> List[Dict[str, Any]]:
-        return self.animation_store.list()
+        return self._with_playlists("animations", self.animation_store.list())
+
+    def _with_playlists(self, kind: str,
+                        rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Annotate item summaries with the playlists they belong to.
+
+        One reverse-index build per list call rather than a scan per row.
+        `playlists` is ordered the way the sidebar orders them, so a UI
+        showing "first playlist" badges shows a stable one.
+        """
+        try:
+            index = self.playlist_store.memberships(kind)
+        except Exception:
+            index = {}
+        for row in rows:
+            row["playlists"] = list(index.get(row.get("id"), []))
+        return rows
 
     def get_animation(self, animation_id: str) -> Optional[Dict[str, Any]]:
         anim = self.animation_store.get(animation_id)
@@ -2856,6 +2892,9 @@ class StateManager:
         deleted = self.animation_store.delete(animation_id)
         if not deleted:
             return {"success": False, "message": "Animation not found"}
+        # Clear the id out of every playlist, so a later animation that
+        # slugs to the same id can't inherit this one's memberships.
+        self.playlist_store.forget_item("animations", animation_id)
         # Stop any running playback before scrubbing references so the
         # evaluator's animation cache isn't fed by an already-unbound
         # animation in the interim.
@@ -2872,7 +2911,7 @@ class StateManager:
         return {"success": True}
 
     def list_poses(self) -> List[Dict[str, Any]]:
-        return self.pose_store.list()
+        return self._with_playlists("poses", self.pose_store.list())
 
     def get_pose(self, pose_id: str) -> Optional[Dict[str, Any]]:
         pose = self.pose_store.get(pose_id)
@@ -2891,6 +2930,7 @@ class StateManager:
     def delete_pose(self, pose_id: str) -> Dict[str, Any]:
         if not self.pose_store.delete(pose_id):
             return {"success": False, "message": "Pose not found"}
+        self.playlist_store.forget_item("poses", pose_id)
         self.invalidate_rig_cache()
         return {"success": True}
 
@@ -3057,6 +3097,12 @@ class StateManager:
             "rig": rig.to_dict(),
             "defaults": evaluator.control_defaults() if evaluator else {},
             "anchors": anchors,
+            # The resolved neutral pose, not just its name. The animation
+            # editor needs the same base the player blends pose tracks up
+            # from — resolving `settings.neutral_pose` client-side would
+            # be a second implementation of a rule that already lives in
+            # rig_neutral(). See preview_animation_frame.
+            "neutral": self.rig_neutral(),
             "warnings": rig.validate(urdf, srdf, pose_names),
         }
 
@@ -3204,7 +3250,7 @@ class StateManager:
         return {"success": True, "group_states": out}
 
     def import_group_states(self, names: Optional[List[str]] = None,
-                            group: str = "", icon: str = "",
+                            icon: str = "",
                             overwrite: bool = False) -> Dict[str, Any]:
         """Create poses from SRDF ``<group_state>`` definitions.
 
@@ -3218,6 +3264,13 @@ class StateManager:
         Joints the URDF doesn't have are dropped and reported rather than
         passed through — an unconverted radian value one hop from a servo
         is not an acceptable failure mode.
+
+        Each imported pose joins a playlist named after the SRDF group it
+        came from, created on demand. That replaces the import modal's
+        old "Pose group" box: the SRDF already says how these poses group
+        up, so asking the operator to retype it was always redundant, and
+        with many-to-many membership there is no single field to put it
+        in anyway.
         """
         if self.robot_store is None:
             return {"success": False, "message": "Robot model store not ready"}
@@ -3249,7 +3302,6 @@ class StateManager:
 
             pose = Pose(
                 id="", name=gs["name"], icon=icon,
-                group=group or gs.get("group") or "",
                 description=(f"Imported from SRDF group_state "
                              f"'{gs['name']}'"
                              + (f" (group {gs['group']})" if gs.get("group") else "")),
@@ -3274,6 +3326,9 @@ class StateManager:
             saved = self.pose_store.save(pose)
             imported.append({"id": saved.id, "name": saved.name,
                              "joint_count": len(saved.setpoints)})
+            srdf_group = str(gs.get("group") or "").strip()
+            if srdf_group:
+                self._playlist_named(srdf_group, "poses").add_item_id(saved.id)
 
             if gs["unresolved"]:
                 warnings.append(
@@ -3300,7 +3355,21 @@ class StateManager:
     # module stays free of ROS concerns.
 
     def list_sounds(self) -> List[Dict[str, Any]]:
-        return self.sound_store.list()
+        rows = self._with_playlists("sounds", self.sound_store.list())
+        # Legacy `group` compatibility for the Steam Deck controller,
+        # whose panel filter still reads a single group name per sound
+        # (controller/src/composables/useLibrary.ts). It gets the name of
+        # the first playlist the sound belongs to. Drop this once the
+        # controller reads `playlists`.
+        try:
+            names = {p["id"]: p["name"]
+                     for p in self.playlist_store.list("sounds")}
+        except Exception:
+            names = {}
+        for row in rows:
+            pls = row.get("playlists") or []
+            row["group"] = names.get(pls[0], "") if pls else ""
+        return rows
 
     def get_sound(self, sound_id: str) -> Optional[Dict[str, Any]]:
         snd = self.sound_store.get(sound_id)
@@ -3316,7 +3385,7 @@ class StateManager:
         return {"success": True, "sound": saved.to_dict()}
 
     def bulk_add_sounds(self, node_id: str, files: List[str],
-                        output_device: str = "default", group: str = "",
+                        output_device: str = "default", playlist_id: str = "",
                         volume: float = 1.0, start_time: float = 0.0,
                         loop: bool = False, loop_count: int = 0,
                         icon: str = "volume_up") -> Dict[str, Any]:
@@ -3335,6 +3404,7 @@ class StateManager:
         used_ids = {s.get("id") for s in existing}
 
         added: List[str] = []
+        added_ids: List[str] = []
         skipped: List[str] = []
         for raw in files or []:
             path = str(raw).strip()
@@ -3352,7 +3422,7 @@ class StateManager:
                 sid = f"{root}-{n}"
                 n += 1
             saved = self.sound_store.save(Sound(
-                id=sid, name=name, icon=icon, group=group,
+                id=sid, name=name, icon=icon,
                 node_id=node_id, file_path=path,
                 output_device=output_device or "default",
                 volume=float(volume), start_time=float(start_time),
@@ -3360,17 +3430,128 @@ class StateManager:
             used_ids.add(saved.id)
             have_paths.add((node_id, path))
             added.append(path)
+            added_ids.append(saved.id)
+        # Optionally drop the whole batch into a playlist, in the order
+        # the files were given. Replaces the old `group` argument — with
+        # many-to-many membership there is nothing to set on the sound.
+        if playlist_id and added_ids:
+            for sid in added_ids:
+                self.playlist_store.add_item(playlist_id, sid)
         return {"success": True, "added": len(added),
-                "skipped": len(skipped), "sounds": self.sound_store.list()}
+                "skipped": len(skipped), "sounds": self.list_sounds()}
 
     def delete_sound(self, sound_id: str) -> Dict[str, Any]:
         if not self.sound_store.delete(sound_id):
             return {"success": False, "message": "Sound not found"}
+        self.playlist_store.forget_item("sounds", sound_id)
         return {"success": True}
 
     def reorder_sounds(self, ordered_ids: List[str]) -> Dict[str, Any]:
         return {"success": True,
                 "sounds": self.sound_store.reorder(ordered_ids or [])}
+
+    # ── playlists ───────────────────────────────────────────────────
+    #
+    # Playlists are the many-to-many replacement for the per-item
+    # `group` string. They are per-kind (an animations playlist holds
+    # animation ids only) and they own both membership and order, so an
+    # item can sit at a different slot in each playlist it belongs to.
+    # See saint_server.animation.models.Playlist.
+
+    def list_playlists(self, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.playlist_store.list(kind)
+
+    def save_playlist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Create or update a playlist (name / icon / members / order)."""
+        from saint_server.animation.models import Playlist
+        try:
+            pl = Playlist.from_dict(payload)
+        except (KeyError, ValueError, TypeError) as e:
+            return {"success": False, "message": f"Invalid playlist payload: {e}"}
+        saved = self.playlist_store.save(pl)
+        return {"success": True, "playlist": saved.to_dict()}
+
+    def delete_playlist(self, playlist_id: str) -> Dict[str, Any]:
+        """Delete the playlist. Its members are NOT deleted — they just
+        stop being in it, and fall back to Ungrouped if this was their
+        only playlist."""
+        if not self.playlist_store.delete(playlist_id):
+            return {"success": False, "message": "Playlist not found"}
+        return {"success": True}
+
+    def playlist_add_item(self, playlist_id: str, item_id: str,
+                          index: Optional[int] = None) -> Dict[str, Any]:
+        """Add (or move, if already a member) an item at `index`.
+
+        The item is validated against its playlist's kind so a drag can't
+        land a sound in an animations playlist — the UI keeps them in
+        separate sections, but the WS action is reachable directly.
+        """
+        pl = self.playlist_store.get(playlist_id)
+        if pl is None:
+            return {"success": False, "message": "Playlist not found"}
+        if not self._item_exists(pl.kind, item_id):
+            return {"success": False,
+                    "message": f"No {pl.kind[:-1]} with id {item_id!r}"}
+        updated = self.playlist_store.add_item(playlist_id, item_id, index)
+        return {"success": True, "playlist": updated.to_dict()}
+
+    def playlist_remove_item(self, playlist_id: str,
+                             item_id: str) -> Dict[str, Any]:
+        updated = self.playlist_store.remove_item(playlist_id, item_id)
+        if updated is None:
+            return {"success": False, "message": "Playlist not found"}
+        return {"success": True, "playlist": updated.to_dict()}
+
+    def reorder_playlist_items(self, playlist_id: str,
+                               ordered_ids: List[str]) -> Dict[str, Any]:
+        updated = self.playlist_store.reorder_items(playlist_id,
+                                                    ordered_ids or [])
+        if updated is None:
+            return {"success": False, "message": "Playlist not found"}
+        return {"success": True, "playlist": updated.to_dict()}
+
+    def reorder_playlists(self, kind: str,
+                          ordered_ids: List[str]) -> Dict[str, Any]:
+        from saint_server.animation.models import PLAYLIST_KINDS
+        if kind not in PLAYLIST_KINDS:
+            return {"success": False, "message": f"Unknown kind {kind!r}"}
+        return {"success": True,
+                "playlists": self.playlist_store.reorder(kind, ordered_ids or [])}
+
+    def _playlist_named(self, name: str, kind: str):
+        """Find-or-create a playlist by display name within one kind.
+
+        Returns a tiny adapter with ``add_item_id`` so callers that are
+        filing items in a loop don't re-resolve the playlist each pass.
+        Matching is case-insensitive on the name: an operator who already
+        has a "Base" playlist should not end up with a second "base".
+        """
+        from saint_server.animation.models import Playlist
+
+        wanted = name.strip().lower()
+        found = next((p for p in self.playlist_store.list(kind)
+                      if p["name"].strip().lower() == wanted), None)
+        playlist_id = found["id"] if found else self.playlist_store.save(
+            Playlist(id="", name=name.strip(), kind=kind)).id
+
+        store = self.playlist_store
+
+        class _Filer:
+            def add_item_id(self, item_id: str) -> None:
+                store.add_item(playlist_id, item_id)
+
+        return _Filer()
+
+    def _item_exists(self, kind: str, item_id: str) -> bool:
+        store = {
+            "animations": self.animation_store,
+            "poses": self.pose_store,
+            "sounds": self.sound_store,
+        }.get(kind)
+        if store is None:
+            return False
+        return store.get(item_id) is not None
 
     def list_audio_nodes(self) -> List[Dict[str, Any]]:
         """Nodes that can play soundboard entries.
@@ -3449,14 +3630,15 @@ class StateManager:
         scrubs the timeline or edits a keyframe at the playhead, the
         client samples every value track at the current time and sends
         the frame here, plus any trigger keyframes crossed since the
-        last frame. We fan each out through the SAME callables the
-        AnimationPlayer uses (routing evaluator + ROS bridge +
-        peripheral sender), so a previewed frame is wire-identical to a
-        played one. Nothing is persisted and no player is created.
+        last frame. Values go through ``apply_animation_frame`` — the
+        same batched call the player uses — and triggers through the
+        same ROS bridge and peripheral sender, so a previewed frame is
+        wire-identical to a played one. Nothing is persisted and no
+        player is created.
 
         ``values`` entries: ``{target_kind, value, id?, target?}``
-          * ``urdf_joint`` → ``set_urdf_joint_value(id, value)``
-          * ``ws_input``   → ``set_ws_input(target[0], target[1], value)``
+          * ``urdf_joint`` → keyed by ``id`` (the joint name)
+          * ``ws_input``   → keyed by ``(target[0], target[1])``
         ``triggers`` entries: ``{target_kind, target, value}`` —
         ws_input / topic / peripheral_command, mirroring
         AnimationPlayer._dispatch_trigger.
@@ -3466,24 +3648,44 @@ class StateManager:
         ev = self._routing_evaluator
         applied = 0
 
+        # Collect the whole frame first, then apply it in ONE batch —
+        # the same thing the player and the pose fan-out do.
+        #
+        # Applying per value instead re-evaluated every touched sheet and
+        # rebuilt the UI snapshot once per setpoint, so an N-track frame
+        # cost N evaluations. Two things went wrong with that. Each
+        # intermediate evaluation saw this tick's values for the tracks
+        # already applied and the PREVIOUS tick's for the rest, so every
+        # channel a sheet computes from more than one track was briefly
+        # driven with a blend of two frames that never existed. And at
+        # the editor's ~30 Hz preview rate the evaluation count ran well
+        # past what the per-setpoint path sustains, so frames queued and
+        # the rig lagged behind the playhead.
+        joint_values: Dict[str, float] = {}
+        ws_values: Dict[Tuple[str, str], float] = {}
         for v in values or []:
             kind = v.get("target_kind", "urdf_joint")
             try:
                 val = float(v.get("value") or 0.0)
             except (TypeError, ValueError):
                 val = 0.0
+            if kind == "ws_input":
+                tgt = v.get("target") or []
+                if len(tgt) >= 2:
+                    ws_values[(tgt[0], tgt[1])] = val
+            else:  # urdf_joint
+                jid = v.get("id")
+                if jid:
+                    joint_values[jid] = val
+
+        if joint_values or ws_values:
             try:
-                if kind == "ws_input":
-                    tgt = v.get("target") or []
-                    if len(tgt) >= 2 and ev.set_ws_input(tgt[0], tgt[1], val):
-                        applied += 1
-                else:  # urdf_joint
-                    jid = v.get("id")
-                    if jid and ev.set_urdf_joint_value(jid, val):
-                        applied += 1
+                if ev.apply_animation_frame(joint_values, ws_values):
+                    applied = len(joint_values) + len(ws_values)
             except Exception as e:
                 if self.logger:
-                    self.logger.warn(f"preview_animation_frame value failed: {e}")
+                    self.logger.warn(
+                        f"preview_animation_frame apply failed: {e}")
 
         for t in triggers or []:
             kind = t.get("target_kind", "ws_input")

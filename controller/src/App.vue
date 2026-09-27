@@ -10,7 +10,6 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { RouterLink, RouterView } from 'vue-router';
 import PresetPanel from './components/PresetPanel.vue';
 import VirtualKeyboard from './components/VirtualKeyboard.vue';
-import SaintSelect from './components/SaintSelect.vue';
 import { useConnection, ConnectionStatus } from './composables/useConnection';
 import { useInput, type ButtonEvent } from './composables/useInput';
 import { useBindings, type DigitalInput, type DigitalAction } from './composables/useBindings';
@@ -45,19 +44,12 @@ const buttonMap: Record<string, DigitalInput> = {
 // ─── Connection dropdown + active-panel header state ─────────────────
 const connMenuOpen = ref(false);
 
-// The preset panel currently open drives the header's icon/name/color,
-// group filter, and page indicator (the panel no longer has its own header).
+// The preset panel currently open drives the header's icon/name/color.
+// The group dropdown that used to live here is gone: choosing a source
+// is the panel's own source list now (PresetPanel), which can show every
+// playlist at once with its item count instead of hiding them behind a
+// closed select.
 const headerPanel = computed(() => bindings.activePanel.value);
-const headerGroups = computed(() => bindings.activePanelGroups.value);
-const headerHasGroups = computed(() => headerGroups.value.length > 0);
-const headerGroupOptions = computed(() => [
-    { value: 'All', label: 'All' },
-    ...headerGroups.value.map(g => ({ value: g, label: g })),
-]);
-const headerSelectedGroup = computed<string>({
-    get: () => bindings.activePanelSelectedGroup.value,
-    set: (v) => bindings.setActiveGroup(v),
-});
 
 function connDotClass(): string {
     switch (conn.status.value) {
@@ -217,12 +209,6 @@ onBeforeUnmount(() => {
                     <span v-if="headerPanel" class="material-symbols-outlined text-2xl shrink-0">{{ headerPanel.icon }}</span>
                     <h1 v-if="headerPanel" class="text-lg font-semibold truncate">{{ headerPanel.name }}</h1>
                 </template>
-            </div>
-
-            <!-- Center: group filter (panel open only). Page count lives
-                 in the panel's footer nav. -->
-            <div v-if="presetPanelActive && headerHasGroups" class="flex items-center gap-3 shrink-0">
-                <SaintSelect v-model="headerSelectedGroup" :options="headerGroupOptions" />
             </div>
 
             <!-- Right: sync spinner, connection icon+dropdown, E-Stop -->

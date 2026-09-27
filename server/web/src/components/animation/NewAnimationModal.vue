@@ -3,14 +3,14 @@ import { computed, ref } from 'vue'
 import AppModal from '@/components/AppModal.vue'
 import IconPicker from './IconPicker.vue'
 
-const props = defineProps({
-  groups: { type: Array, default: () => [] },     // suggested group names
-  defaultGroup: { type: String, default: '' },
-})
+// Grouping is no longer set here. Items belong to any number of
+// playlists, and membership is assigned by dragging the row onto a
+// playlist in the board sidebar — see views/Animations.vue. A single
+// "Group" box could only ever express one of those memberships, and
+// asking for it at create time put it in the way of naming the thing.
 const emit = defineEmits(['close', 'create'])
 
 const name = ref('')
-const group = ref(props.defaultGroup)
 const icon = ref('animation')
 const duration = ref(5.0)
 const fps = ref(60)
@@ -22,7 +22,6 @@ function submit () {
   if (!canSubmit.value) return
   emit('create', {
     name: name.value.trim(),
-    group: group.value.trim(),
     icon: icon.value,
     duration: Math.max(0.1, Number(duration.value) || 5),
     fps: Math.max(1, Math.min(240, Number(fps.value) || 60)),
@@ -49,17 +48,6 @@ function submit () {
                  @keydown.enter="submit" />
         </label>
       </div>
-
-      <label class="block">
-        <span class="block text-fg-muted text-xs mb-1">Group (optional)</span>
-        <input class="input-field w-full"
-               list="new-anim-groups"
-               v-model="group"
-               placeholder="Leave empty for Ungrouped" />
-        <datalist id="new-anim-groups">
-          <option v-for="g in groups" :key="g" :value="g" />
-        </datalist>
-      </label>
 
       <div class="grid grid-cols-2 gap-2">
         <label class="block">

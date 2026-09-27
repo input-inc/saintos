@@ -88,7 +88,10 @@ export const useSoundsStore = defineStore('sounds', () => {
         node_id: nodeId,
         files,
         output_device: opts.output_device || 'default',
-        group: opts.group || '',
+        // Optional: drop the whole batch straight into a playlist. The
+        // modal has no grouping field any more -- this is the playlist
+        // the operator already had selected in the sidebar, if any.
+        playlist_id: opts.playlist_id || '',
         volume: opts.volume ?? 1.0,
         loop: !!opts.loop,
         loop_count: opts.loop_count || 0,

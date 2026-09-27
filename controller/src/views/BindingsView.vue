@@ -198,13 +198,15 @@ const channelOptionsDigital = computed(() => {
 });
 const panelOptions = computed(() =>
     presetPanels.value.map(p => ({ value: p.id, label: p.name })));
-// Groups available for the panel currently selected in the show_panel
-// form — populates the "default group" dropdown. Empty when the panel
-// has no groups (then the toggle is hidden).
+// Playlists available for the panel currently selected in the show_panel
+// form — populates the "opens on" dropdown. Empty when the panel's kind
+// has no playlists (then the toggle is hidden). The value saved is the
+// playlist ID, so renaming a playlist on the server doesn't break the
+// binding the way the old stored group NAME did.
 const defaultGroupOptions = computed(() =>
-    bindings.groupsForPanel(digitalForm.panelId).map(g => ({ value: g, label: g })));
-// When the operator flips the toggle on, pre-select the first group so
-// the dropdown isn't blank (empty would silently save as "All").
+    bindings.groupsForPanel(digitalForm.panelId).map(p => ({ value: p.id, label: p.name })));
+// When the operator flips the toggle on, pre-select the first playlist
+// so the dropdown isn't blank (empty would silently save as "All").
 watch(() => digitalForm.useDefaultGroup, (on) => {
     if (on && !digitalForm.defaultGroup) {
         digitalForm.defaultGroup = defaultGroupOptions.value[0]?.value ?? '';
@@ -934,12 +936,12 @@ onMounted(() => {
                         <label class="block text-sm text-saint-text-muted mb-1">Panel</label>
                         <SaintSelect v-model="digitalForm.panelId" :options="panelOptions" />
 
-                        <!-- Default group: only offered when the chosen
-                             panel actually has groups (e.g. sounds). -->
+                        <!-- Opens on: only offered when the chosen panel's
+                             kind actually has playlists. -->
                         <template v-if="defaultGroupOptions.length > 0">
                             <label class="flex items-center gap-2 mt-3 text-sm text-saint-text cursor-pointer">
                                 <input type="checkbox" v-model="digitalForm.useDefaultGroup">
-                                Open in a specific group
+                                Open on a specific playlist
                             </label>
                             <SaintSelect v-if="digitalForm.useDefaultGroup"
                                          v-model="digitalForm.defaultGroup"

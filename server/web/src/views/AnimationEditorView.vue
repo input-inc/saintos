@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useRobotModelStore } from '@/stores/robotModel'
 import { useAnimationsStore } from '@/stores/animations'
 import { usePosesStore } from '@/stores/poses'
+import { usePlaylistsStore } from '@/stores/playlists'
 import { useWsStore } from '@/stores/ws'
 import {
   frameToPreviewValues,
@@ -32,6 +33,7 @@ const router = useRouter()
 const robot = useRobotModelStore()
 const animations = useAnimationsStore()
 const poses = usePosesStore()
+const playlists = usePlaylistsStore()
 const ws = useWsStore()
 
 // ── Shared state (provided to descendants) ─────────────────────────
@@ -65,6 +67,32 @@ const unboundJoints = computed(() => jointNames.value.filter(n => !trackIds.valu
 // reloads, which is what makes editing a pose show up in the viewport
 // without a page refresh.
 const poseJoints = ref({})          // pose id → { joint: normalized }
+
+// The rig's neutral pose, resolved to joint values — the base a pose
+// track blends UP FROM on joints nothing else has touched.
+//
+// This has to come from the server: the player resolves frames with
+// `neutral_source=rig_neutral` (state_manager), so previewing without it
+// blends from implicit zeros and every pose track at weight < 1 lands
+// somewhere the played animation never goes. Empty is correct when
+// there's no rig or no declared neutral_pose — then zero IS the base.
+// playlist id → name, for the timeline's + Pose menu. Poses carry
+// playlist ids; the names live on the playlists themselves.
+const posePlaylistNames = computed(() => {
+  const out = {}
+  for (const p of playlists.byKind('poses')) out[p.id] = p.name
+  return out
+})
+
+const rigNeutral = ref({})
+async function loadRigNeutral () {
+  try {
+    const r = await ws.management('get_rig', {})
+    rigNeutral.value = r?.neutral || {}
+  } catch {
+    rigNeutral.value = {}   // no rig → zeros, same as the server
+  }
+}
 
 async function ensurePosesLoaded (ids) {
   const missing = ids.filter(id => !(id in poseJoints.value))
@@ -241,7 +269,8 @@ function driveUrdfFromPlayhead () {
   // Shared resolver — same layering rules the server player uses, so
   // the viewport can't disagree with the robot. Pose tracks layer in
   // list order over the joint tracks below them.
-  const { joints } = resolveFrame(anim.value, playerPos.value, { poseLookup })
+  const { joints } = resolveFrame(anim.value, playerPos.value,
+                                  { poseLookup, neutral: rigNeutral.value })
   // Kept for the timeline: a joint disclosed under a pose track shows
   // its POST-layering value, so a track above the pose overriding it is
   // visible rather than confusing.
@@ -311,7 +340,9 @@ async function runCollisionScan () {
     // Non-blocking: scanTimeline runs on the viewer's hidden clone and yields
     // between slices; interaction aborts it (returns null) via cancelScan.
     res = await v.scanTimeline(
-      (t) => resolveFrame(a, t, { poseLookup }).joints, dur, steps)
+      (t) => resolveFrame(a, t,
+                          { poseLookup, neutral: rigNeutral.value }).joints,
+      dur, steps)
   } catch (_) {
     res = []
   }
@@ -399,7 +430,8 @@ function livePreviewActive () {
 // place that knows how pose layering works on each side.
 function buildPreviewValues (t) {
   return frameToPreviewValues(
-    resolveFrame(anim.value || {}, t, { poseLookup }))
+    resolveFrame(anim.value || {}, t,
+                 { poseLookup, neutral: rigNeutral.value }))
 }
 // Triggers whose time falls in the (prev, now] window — forward only,
 // matching the player so a backward scrub doesn't re-fire events.
@@ -443,7 +475,7 @@ function sendLivePreview (t, triggers) {
 // collects them explicitly.
 function relaxLivePreview () {
   const values = frameToPreviewValues(
-    relaxedFrame(anim.value || {}, { poseLookup }))
+    relaxedFrame(anim.value || {}, { poseLookup, neutral: rigNeutral.value }))
   if (values.length) animations.previewFrame(values, [])
 }
 watch(livePreview, (on) => {
@@ -957,7 +989,8 @@ onMounted(async () => {
   document.addEventListener('keydown', onActivity, true)
   document.addEventListener('input', onActivity, true)
   document.addEventListener('change', onActivity, true)
-  await Promise.all([robot.refresh(), animations.reload(), poses.reload()])
+  await Promise.all([robot.refresh(), animations.reload(), poses.reload(),
+                     playlists.reload(), loadRigNeutral()])
   // Load the WS-input catalog up front so the timeline's "+ Input"
   // dropdown is populated immediately — value tracks can bind a
   // controller sheet input even when no URDF is installed.
@@ -1016,7 +1049,6 @@ onBeforeUnmount(() => {
             </h2>
             <p class="text-xs text-fg-muted truncate">
               <template v-if="anim">
-                <span v-if="anim.group" class="text-fg">{{ anim.group }} ·</span>
                 {{ anim.value_tracks?.length || 0 }} value ·
                 {{ anim.trigger_tracks?.length || 0 }} trigger ·
                 {{ Number(anim.duration || 0).toFixed(2) }}s ·
@@ -1135,7 +1167,6 @@ onBeforeUnmount(() => {
           <div class="editor-props-body">
             <PropsPanel :animation="anim"
                         :selection="selection"
-                        :animations="animations.list"
                         @dirty="animations.markDirty()"
                         @select="onPropsSelect"
                         @delete-keyframe="onDeleteKeyframe"
@@ -1155,6 +1186,7 @@ onBeforeUnmount(() => {
                         :unbound-joints="unboundJoints"
                         :ws-inputs="wsInputCatalog"
                         :poses="poses.list"
+                        :pose-playlists="posePlaylistNames"
                         :pose-joints="poseJoints"
                         :resolved-joints="resolvedJoints"
                         @update:player-pos="onTimelineScrub"

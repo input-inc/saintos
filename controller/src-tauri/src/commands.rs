@@ -319,6 +319,14 @@ pub fn list_sounds(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.ws_client.request_list_sounds()
 }
 
+/// Request the playlist list. The response arrives asynchronously on the
+/// `library-playlists` event (same pattern as the three list_* commands
+/// above). Playlists are what the board panels' source list renders.
+#[tauri::command]
+pub fn list_playlists(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.ws_client.request_list_playlists()
+}
+
 /// Play a saved animation by id.
 #[tauri::command]
 pub fn start_animation(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {

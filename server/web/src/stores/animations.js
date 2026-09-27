@@ -114,7 +114,6 @@ export const useAnimationsStore = defineStore('animations', () => {
       fps: 60,
       loop: false,
       icon: '',
-      group: '',
       value_tracks: [],
       trigger_tracks: [],
       created: '',

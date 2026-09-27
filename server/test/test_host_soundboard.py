@@ -118,6 +118,49 @@ def test_play_applies_options(sb, tmp_path):
     assert "input-repeat=2" in opts     # loop_count 3 → 2 repeats
 
 
+# ── playback gain ───────────────────────────────────────────────────
+#
+# Above 1.0 the player asks VLC for software gain, which is how a clip
+# recorded quiet is lifted to sit level with the rest of a board. libvlc
+# takes a percentage where 100 is 0 dB and accepts more than that.
+
+
+def test_volume_above_one_is_passed_through_as_gain(sb, tmp_path):
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"\0\0")
+    player = sb.SoundboardPlayer()
+    player.play(str(clip), volume=1.5)
+    assert ("volume", 150) in player._player.calls
+
+
+def test_volume_is_clamped_at_the_ceiling(sb, tmp_path):
+    # Past the ceiling extra gain only buys clipping, and a hand-edited
+    # config should not be able to point an arbitrary multiplier at the
+    # speakers.
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"\0\0")
+    player = sb.SoundboardPlayer()
+    player.play(str(clip), volume=99.0)
+    assert ("volume", int(sb.SOUND_VOLUME_MAX * 100)) in player._player.calls
+
+
+def test_negative_volume_floors_at_mute(sb, tmp_path):
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"\0\0")
+    player = sb.SoundboardPlayer()
+    player.play(str(clip), volume=-3.0)
+    assert ("volume", 0) in player._player.calls
+
+
+def test_set_volume_on_a_live_clip_allows_gain(sb, tmp_path):
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"\0\0")
+    player = sb.SoundboardPlayer()
+    player.play(str(clip), volume=1.0)
+    player.set_volume(1.8)
+    assert ("volume", 180) in player._player.calls
+
+
 def test_play_infinite_loop_uses_sentinel(sb, tmp_path):
     clip = tmp_path / "loop.wav"
     clip.write_bytes(b"\0\0")

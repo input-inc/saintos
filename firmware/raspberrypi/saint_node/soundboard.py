@@ -46,6 +46,27 @@ AUDIO_EXTENSIONS = (".wav", ".mp3", ".ogg", ".flac", ".aac", ".m4a", ".opus")
 # unbounded).
 _INFINITE_REPEAT = 65535
 
+# Ceiling for a clip's playback gain. 1.0 is the file's own level; above
+# that VLC applies software gain so a quiet clip can be brought up to
+# match a loud one on the same board. Clamped because past this the only
+# thing more gain adds is clipping.
+#
+# MIRRORS server/saint_server/animation/models.py SOUND_VOLUME_MAX. The
+# node is a separate deployable and can't import from the server, so the
+# two are kept in step by hand — change both. If they ever drift, the
+# server is the one that decides what gets stored; this one only decides
+# what a stale or hand-edited value can do to the speakers.
+SOUND_VOLUME_MAX = 2.0
+
+
+def _vlc_volume(volume: float) -> int:
+    """Map a 0 … SOUND_VOLUME_MAX gain to libvlc's percent scale.
+
+    libvlc takes a percentage where 100 is 0 dB and accepts values above
+    it, which is what lets a quiet clip be lifted.
+    """
+    return int(round(max(0.0, min(SOUND_VOLUME_MAX, volume)) * 100))
+
 
 def list_directory(path: str) -> Dict[str, Any]:
     """List one directory on the node filesystem.
@@ -158,7 +179,11 @@ class SoundboardPlayer:
     def play(self, path: str, device: str = "default", volume: float = 1.0,
              start_time_s: float = 0.0, loop: bool = False,
              loop_count: int = 0) -> Tuple[bool, str]:
-        """Play ``path`` on ``device``. Returns ``(ok, message)``."""
+        """Play ``path`` on ``device``. Returns ``(ok, message)``.
+
+        ``volume`` is 0 … SOUND_VOLUME_MAX, where 1.0 is the file's own
+        level and above it is software gain.
+        """
         if not _VLC_AVAILABLE:
             return False, f"python-vlc not available: {_VLC_IMPORT_ERROR!r}"
         if not path or not os.path.isfile(path):
@@ -176,7 +201,7 @@ class SoundboardPlayer:
                 media.add_option(f"input-repeat={repeats}")
             player = inst.media_player_new()
             player.set_media(media)
-            player.audio_set_volume(int(max(0.0, min(1.0, volume)) * 100))
+            player.audio_set_volume(_vlc_volume(volume))
             rc = player.play()
             if rc == -1:
                 return False, f"VLC refused to play {path}"

@@ -27,19 +27,26 @@ const m = vi.hoisted(() => ({
     animLoaded: { value: true },
     posesLoaded: { value: true },
     soundsLoaded: { value: true },
-    groups: { value: [] as string[] },
+    groups: { value: [] as any[] },
     selectedGroup: { value: 'All' },
     setGroup: vi.fn(),
+    itemsRaw: { value: [] as any[] },
+    displayPrefs: { value: { layout: 'horizontal', columns: 4, sourceListSide: 'left' } },
+    setPrefs: vi.fn(),
     playing: { value: {} as Record<string, unknown> },
     itemsPerPage: { value: 8 },
     setItemsPerPage: vi.fn(),
 }));
 
 vi.mock('../../composables/useBindings', () => ({
+    // The panel imports this constant alongside the composable; the mock
+    // has to supply it or the "All" row renders undefined.
+    ALL_SOURCES: 'All',
     useBindings: () => ({
         activePanel: m.panel,
         activePanelState: m.state,
         activePanelItems: m.items,
+        activePanelItemsRaw: m.itemsRaw,
         activePanelSource: m.source,
         activePanelGroups: m.groups,
         activePanelSelectedGroup: m.selectedGroup,
@@ -53,6 +60,12 @@ vi.mock('../../composables/useBindings', () => ({
 }));
 vi.mock('../../composables/useConnection', () => ({
     useConnection: () => ({ isConnected: m.connected }),
+}));
+vi.mock('../../composables/useDisplayPrefs', () => ({
+    useDisplayPrefs: () => ({
+        prefsFor: () => m.displayPrefs.value,
+        setPrefs: m.setPrefs,
+    }),
 }));
 vi.mock('../../composables/useLibrary', () => ({
     useLibrary: () => ({
@@ -75,10 +88,18 @@ describe('PresetPanel', () => {
             id: 'sounds', name: 'Sounds', icon: 'volume_up', color: '#22c55e',
             columns: 4, itemsPerPage: 8, presets: [],
         };
-        m.state.value = { activePanelId: 'sounds', selectedIndex: 1, currentPage: 0 };
+        m.state.value = {
+            activePanelId: 'sounds', selectedIndex: 1, currentPage: 0,
+            selectedGroup: 'All', keepOpen: false,
+        };
         m.items.value = [{ id: 'a', name: 'Alpha' }, { id: 'b', name: 'Bravo' }, { id: 'c', name: 'Charlie' }];
+        m.itemsRaw.value = m.items.value;
         m.source.value = null;
         m.connected.value = true;
+        m.groups.value = [];
+        m.selectedGroup.value = 'All';
+        m.setGroup.mockClear();
+        m.displayPrefs.value = { layout: 'horizontal', columns: 4, sourceListSide: 'left' };
     });
 
     it('renders one button per visible item with its name', () => {
@@ -131,5 +152,115 @@ describe('PresetPanel', () => {
         expect(next).toBeTruthy();
         await next!.trigger('click');
         expect(m.nav).toHaveBeenCalledWith('next_page');
+    });
+});
+
+// ─── Source list ─────────────────────────────────────────────────────
+//
+// The rail of playlists beside the grid. It replaced the group dropdown
+// that used to sit in the app header, so these pin the two rules that
+// dropdown didn't have: it hides itself when there is nothing to choose
+// between, and which side it sits on is a per-panel preference.
+
+describe('PresetPanel source list', () => {
+    const PLAYLISTS = [
+        { id: 'pl_quiet', name: 'Quiet', kind: 'sounds', items: ['a', 'b'] },
+        { id: 'pl_loud', name: 'Loud', kind: 'sounds', items: ['c'] },
+    ];
+
+    // The hoisted holders are module-scoped and shared, and the other
+    // describe's beforeEach doesn't reach in here -- reset explicitly or
+    // one test's playlists leak into the next.
+    beforeEach(() => {
+        m.panel.value = {
+            id: 'sounds', name: 'Sounds', icon: 'volume_up', color: '#22c55e',
+            columns: 4, itemsPerPage: 8, presets: [],
+        };
+        m.state.value = {
+            activePanelId: 'sounds', selectedIndex: 0, currentPage: 0,
+            selectedGroup: 'All', keepOpen: false,
+        };
+        m.items.value = [
+            { id: 'a', name: 'Alpha' }, { id: 'b', name: 'Bravo' }, { id: 'c', name: 'Charlie' },
+        ];
+        m.itemsRaw.value = m.items.value;
+        m.groups.value = [];
+        m.selectedGroup.value = 'All';
+        m.setGroup.mockClear();
+        m.displayPrefs.value = { layout: 'horizontal', columns: 4, sourceListSide: 'left' };
+    });
+
+    it('is not rendered when the panel has no playlists', () => {
+        const w = mount(PresetPanel);
+        expect(w.find('.source-list').exists()).toBe(false);
+    });
+
+    it('renders a row per playlist plus All', () => {
+        m.groups.value = PLAYLISTS;
+        const w = mount(PresetPanel);
+        const rows = w.findAll('.source-row');
+        expect(rows).toHaveLength(3);
+        expect(rows[0].text()).toContain('All');
+        expect(rows[1].text()).toContain('Quiet');
+        expect(rows[2].text()).toContain('Loud');
+    });
+
+    it('counts what each source would actually show', () => {
+        m.groups.value = PLAYLISTS;
+        const w = mount(PresetPanel);
+        const rows = w.findAll('.source-row');
+        expect(rows[0].text()).toContain('3');   // All
+        expect(rows[1].text()).toContain('2');   // Quiet: a, b
+        expect(rows[2].text()).toContain('1');   // Loud: c
+    });
+
+    it('does not count playlist members the library no longer has', () => {
+        m.groups.value = [{ id: 'pl_x', name: 'X', kind: 'sounds', items: ['a', 'ghost'] }];
+        const w = mount(PresetPanel);
+        expect(w.findAll('.source-row')[1].text()).toContain('1');
+    });
+
+    it('marks the selected source', () => {
+        m.groups.value = PLAYLISTS;
+        m.selectedGroup.value = 'pl_loud';
+        const w = mount(PresetPanel);
+        const rows = w.findAll('.source-row');
+        expect(rows[0].classes()).not.toContain('source-selected');
+        expect(rows[2].classes()).toContain('source-selected');
+    });
+
+    it('dispatches the selection back through useBindings', async () => {
+        m.groups.value = PLAYLISTS;
+        const w = mount(PresetPanel);
+        await w.findAll('.source-row')[1].trigger('click');
+        expect(m.setGroup).toHaveBeenCalledWith('pl_quiet');
+    });
+
+    it('sits on the left by default', () => {
+        m.groups.value = PLAYLISTS;
+        const w = mount(PresetPanel);
+        expect(w.find('.source-list').classes()).toContain('order-0');
+    });
+
+    it('moves to the right when the panel prefers it', () => {
+        m.groups.value = PLAYLISTS;
+        m.displayPrefs.value = { layout: 'horizontal', columns: 4, sourceListSide: 'right' };
+        const w = mount(PresetPanel);
+        const rail = w.find('.source-list');
+        expect(rail.classes()).toContain('order-2');
+        expect(rail.classes()).not.toContain('order-0');
+    });
+
+    it('offers the side choice in display options only when a rail exists', async () => {
+        const w = mount(PresetPanel);
+        (w.vm as any).showDisplayModal = true;
+        await w.vm.$nextTick();
+        expect(w.text()).not.toContain('Source list');
+
+        m.groups.value = PLAYLISTS;
+        const w2 = mount(PresetPanel);
+        (w2.vm as any).showDisplayModal = true;
+        await w2.vm.$nextTick();
+        expect(w2.text()).toContain('Source list');
     });
 });

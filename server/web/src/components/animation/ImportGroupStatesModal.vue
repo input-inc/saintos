@@ -22,14 +22,11 @@ const props = defineProps({
   // [{ name, group, joint_values, normalized, unresolved, joint_count,
   //    pose_id, exists, locally_edited }]
   states: { type: Array, default: () => [] },
-  // Existing pose group names, for the datalist.
-  poseGroups: { type: Array, default: () => [] },
   busy: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close', 'import'])
 
 const selected = ref(new Set())
-const group = ref('')
 const icon = ref('accessibility')
 const overwrite = ref(false)
 const showValues = ref(null)      // name of the row whose joints are expanded
@@ -81,7 +78,6 @@ function submit () {
   if (!chosen.value.length) return
   emit('import', {
     names: chosen.value.map(s => s.name),
-    group: group.value.trim(),
     icon: icon.value,
     overwrite: overwrite.value,
   })
@@ -127,16 +123,6 @@ function jointRows (s) {
         <div class="flex flex-wrap items-end gap-3">
           <div class="flex items-center gap-2">
             <IconPicker v-model="icon" fallback="accessibility" />
-            <label class="block">
-              <span class="block text-fg-muted text-xs mb-1">Pose group</span>
-              <input class="input-field w-48"
-                     list="import-pose-groups"
-                     v-model="group"
-                     placeholder="Leave empty for Ungrouped" />
-              <datalist id="import-pose-groups">
-                <option v-for="g in poseGroups" :key="g" :value="g" />
-              </datalist>
-            </label>
           </div>
           <div class="flex items-center gap-1 ml-auto">
             <button class="btn-sm bg-surface hover:bg-surface-2 text-fg-strong"

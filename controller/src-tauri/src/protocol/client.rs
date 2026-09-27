@@ -716,6 +716,17 @@ impl WebSocketClient {
             .map_err(|e| format!("Failed to send list_sounds: {}", e))
     }
 
+    /// Request the playlist list. Response forwarded on `library-playlists`.
+    pub fn request_list_playlists(&self) -> Result<(), String> {
+        let tx = self
+            .command_tx
+            .read()
+            .clone()
+            .ok_or_else(|| "Not connected".to_string())?;
+        tx.blocking_send(OutgoingMessage::list_playlists())
+            .map_err(|e| format!("Failed to send list_playlists: {}", e))
+    }
+
     /// Play a saved animation by id (fire-and-forget).
     pub fn start_animation(&self, id: &str) -> Result<(), String> {
         let tx = self
@@ -1077,6 +1088,13 @@ async fn handle_connection<R: Runtime>(
                                     if data.get("sounds").is_some() {
                                         if let Err(e) = app_handle.emit("library-sounds", data) {
                                             log::error!("Failed to emit library-sounds: {}", e);
+                                        }
+                                    }
+                                    // Response to list_playlists —
+                                    // { playlists: [{id, name, kind, items, …}] }.
+                                    if data.get("playlists").is_some() {
+                                        if let Err(e) = app_handle.emit("library-playlists", data) {
+                                            log::error!("Failed to emit library-playlists: {}", e);
                                         }
                                     }
                                     // Response to our get_estop_state bootstrap.

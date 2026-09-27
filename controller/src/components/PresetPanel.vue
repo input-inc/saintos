@@ -7,10 +7,10 @@
 -->
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue';
-import { useBindings, type PanelItem } from '../composables/useBindings';
+import { useBindings, ALL_SOURCES, type PanelItem } from '../composables/useBindings';
 import { useConnection } from '../composables/useConnection';
 import { useLibrary } from '../composables/useLibrary';
-import { useDisplayPrefs, type IconLayout } from '../composables/useDisplayPrefs';
+import { useDisplayPrefs, type IconLayout, type SourceListSide } from '../composables/useDisplayPrefs';
 
 const bindings = useBindings();
 const conn = useConnection();
@@ -26,6 +26,39 @@ function setLayout(layout: IconLayout): void {
 }
 function setColumns(columns: number): void {
     if (panel.value) displayPrefs.setPrefs(panel.value.id, { columns });
+}
+function setSourceListSide(sourceListSide: SourceListSide): void {
+    if (panel.value) displayPrefs.setPrefs(panel.value.id, { sourceListSide });
+}
+
+// ── Source list ──────────────────────────────────────────────────────
+// The playlists this panel's kind has, rendered as a rail beside the
+// grid. Selecting one filters the grid to its members AND puts them in
+// that playlist's order.
+//
+// It is shown only when there is something to choose between: a panel
+// whose kind has no playlists gets no rail at all rather than a lone
+// "All" row taking a fifth of the screen. Static (non-server) panels
+// never have playlists, so they never get one either.
+const sources = computed(() => bindings.activePanelGroups.value);
+const hasSources = computed(() => sources.value.length > 0);
+const selectedSource = computed(() => bindings.activePanelSelectedGroup.value);
+const sourceListSide = computed(() => prefs.value.sourceListSide);
+
+function selectSource(id: string): void {
+    bindings.setActiveGroup(id);
+}
+
+// How many items each source would show, for the rail's counts. A
+// playlist can name an item the server no longer has, so this counts
+// what would actually render.
+function sourceCount(playlistId: string): number {
+    const all = bindings.activePanelItemsRaw.value;
+    if (playlistId === ALL_SOURCES) return all.length;
+    const pl = sources.value.find(p => p.id === playlistId);
+    if (!pl) return 0;
+    const ids = new Set(all.map(i => i.id));
+    return pl.items.filter(id => ids.has(id)).length;
 }
 
 // The panel's title/icon, group filter, and page indicator now live in
@@ -161,8 +194,39 @@ watch(() => [prefs.value.layout, prefs.value.columns], () => scheduleRecompute()
     <div v-if="panel" class="h-full flex flex-col"
          :style="{ '--panel-color': panel.color }">
 
-        <!-- Grid Content (title/group live in the app header now) -->
-        <div ref="contentEl" class="panel-content flex-1 bg-saint-background p-6 overflow-auto">
+        <!-- Body: source rail + grid. The rail's side is a per-panel
+             display preference; `order` moves it without duplicating the
+             markup, so there is one source list, not a left one and a
+             right one that can drift. -->
+        <div class="flex-1 flex min-h-0 bg-saint-background">
+            <nav v-if="hasSources"
+                 class="source-list shrink-0 w-44 overflow-y-auto bg-saint-surface"
+                 :class="sourceListSide === 'right'
+                     ? 'order-2 border-l border-saint-surface-light'
+                     : 'order-0 border-r border-saint-surface-light'">
+                <button class="source-row"
+                        :class="{ 'source-selected': selectedSource === ALL_SOURCES }"
+                        @click="selectSource(ALL_SOURCES)">
+                    <span class="material-symbols-outlined text-lg shrink-0">apps</span>
+                    <span class="flex-1 truncate text-left">All</span>
+                    <span class="text-xs text-saint-text-muted tabular-nums">
+                        {{ sourceCount(ALL_SOURCES) }}
+                    </span>
+                </button>
+                <button v-for="src in sources" :key="src.id"
+                        class="source-row"
+                        :class="{ 'source-selected': selectedSource === src.id }"
+                        @click="selectSource(src.id)">
+                    <span class="material-symbols-outlined text-lg shrink-0">queue_music</span>
+                    <span class="flex-1 truncate text-left">{{ src.name }}</span>
+                    <span class="text-xs text-saint-text-muted tabular-nums">
+                        {{ sourceCount(src.id) }}
+                    </span>
+                </button>
+            </nav>
+
+            <!-- Grid Content (title lives in the app header) -->
+            <div ref="contentEl" class="panel-content order-1 flex-1 min-w-0 p-6 overflow-auto">
             <div class="grid gap-3"
                  :style="{ gridTemplateColumns: `repeat(${prefs.columns}, minmax(0, 1fr))` }">
                 <button v-for="(preset, i) in visiblePresets" :key="preset.id"
@@ -201,6 +265,7 @@ watch(() => [prefs.value.layout, prefs.value.columns], () => scheduleRecompute()
                 <span class="material-symbols-outlined text-4xl mb-2"
                       :class="{ 'animate-spin': emptyState.icon === 'sync' }">{{ emptyState.icon }}</span>
                 <p>{{ emptyState.text }}</p>
+            </div>
             </div>
         </div>
 
@@ -281,6 +346,25 @@ watch(() => [prefs.value.layout, prefs.value.columns], () => scheduleRecompute()
                     </div>
                 </div>
 
+                <!-- Source list side. Hidden when this panel's kind has no
+                     playlists: there is no rail to place, and offering the
+                     choice would imply one exists. -->
+                <div v-if="hasSources">
+                    <div class="text-sm text-saint-text-muted mb-2">Source list</div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <button class="px-3 py-2 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors"
+                                :class="sourceListSide === 'left' ? 'bg-saint-primary text-white' : 'bg-saint-surface-light hover:bg-saint-surface text-saint-text'"
+                                @click="setSourceListSide('left')">
+                            <span class="material-symbols-outlined text-lg">left_panel_open</span> Left
+                        </button>
+                        <button class="px-3 py-2 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors"
+                                :class="sourceListSide === 'right' ? 'bg-saint-primary text-white' : 'bg-saint-surface-light hover:bg-saint-surface text-saint-text'"
+                                @click="setSourceListSide('right')">
+                            <span class="material-symbols-outlined text-lg">right_panel_open</span> Right
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Columns -->
                 <div>
                     <div class="text-sm text-saint-text-muted mb-2">Columns</div>
@@ -299,6 +383,29 @@ watch(() => [prefs.value.layout, prefs.value.columns], () => scheduleRecompute()
 </template>
 
 <style scoped>
+/* Source rail. Rows are touch-sized because this is reached with a thumb
+   on a Deck, not a mouse pointer. */
+.source-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.625rem 0.75rem;
+    font-size: 0.875rem;
+    color: var(--saint-text, #e2e8f0);
+    border-left: 3px solid transparent;
+    transition: background-color 0.12s;
+}
+.source-row:hover {
+    background: var(--saint-surface-light, #334155);
+}
+/* The selected source is marked with the panel's own colour so the rail
+   reads as part of this board rather than generic chrome. */
+.source-selected {
+    background: color-mix(in srgb, var(--panel-color) 18%, transparent);
+    border-left-color: var(--panel-color);
+}
+
 .preset-item {
     background: var(--saint-surface, #1e293b);
     border: 1px solid var(--saint-surface-light, #334155);

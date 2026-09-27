@@ -1,5 +1,6 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { denormJoint, jointLimits, normJoint } from '@/composables/useJointNormalization'
 import * as THREE from 'three'
 import { useDisplayStore } from '@/stores/display'
 
@@ -788,43 +789,12 @@ async function loadUrdf () {
   }
 }
 
-// ── Control-value normalization (home-centered, convention C) ────────
+// ── Control-value normalization ─────────────────────────────────────
 //
-// SaintOS drives joints in a −1..+1 control range (the same range the
-// servos use). We map that range onto each joint's URDF <limit>, pinned
-// so the URDF home (θ=0) is control 0:
-//
-//   −1 → lower limit      0 → home (θ=0)      +1 → upper limit
-//
-// Each side is scaled independently (θ = n·upper for n≥0, n·|lower| for
-// n<0), so asymmetric joints keep 0 at home — at the cost of a different
-// gain per side. One-sided joints (lower=0) have no negative travel, so
-// negative control just holds at home. All derived from the URDF limits;
-// no extra metadata. Joints without a finite limit pass through as-is.
-function jointLimits (joint) {
-  const lim = joint?.limit
-  const lo = lim ? Number(lim.lower) : NaN
-  const hi = lim ? Number(lim.upper) : NaN
-  return Number.isFinite(lo) && Number.isFinite(hi) ? { lo, hi } : null
-}
-
-// control (−1..+1) → joint value (radians / metres)
-function denormJoint (joint, n) {
-  const L = jointLimits(joint)
-  if (!L) return n
-  const c = Math.max(-1, Math.min(1, Number(n) || 0))
-  const theta = c >= 0 ? c * L.hi : c * Math.abs(L.lo)
-  return Math.max(L.lo, Math.min(L.hi, theta))
-}
-
-// joint value (radians / metres) → control (−1..+1)
-function normJoint (joint, theta) {
-  const L = jointLimits(joint)
-  if (!L) return theta
-  const t = Number(theta) || 0
-  if (t >= 0) return L.hi > 0 ? Math.min(1, t / L.hi) : 0
-  return L.lo < 0 ? Math.max(-1, t / Math.abs(L.lo)) : 0
-}
+// Moved to composables/useJointNormalization.js so the mapping is
+// testable — it was unreachable in here, which is how a joint whose
+// travel sits wholly on one side of home came to show the whole
+// positive control range collapsed onto one limit. See that file.
 
 // Public-ish API: parent calls setJointValue from a ref with a −1..+1
 // control value; we denormalize to the joint's native units for display.

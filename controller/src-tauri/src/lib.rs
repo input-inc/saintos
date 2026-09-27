@@ -377,6 +377,7 @@ pub fn run() {
             commands::list_animations,
             commands::list_poses,
             commands::list_sounds,
+            commands::list_playlists,
             commands::start_animation,
             commands::stop_animation,
             commands::apply_pose,

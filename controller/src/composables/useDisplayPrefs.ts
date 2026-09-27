@@ -11,13 +11,24 @@
 import { computed, ref } from 'vue';
 
 export type IconLayout = 'horizontal' | 'vertical';
+/** Which edge the panel's source list sits against. */
+export type SourceListSide = 'left' | 'right';
 
 export interface PanelDisplayPrefs {
     layout: IconLayout;
     columns: number; // 2, 3, or 4
+    // Side for the source list (the playlists of the panel's kind).
+    // Left by default because that is where a list of sources is
+    // conventionally read from; right exists because on a Deck held in
+    // two hands, which thumb reaches the list matters more than
+    // convention. The list hides itself when the panel's kind has no
+    // playlists, so this only takes effect when there is one to place.
+    sourceListSide: SourceListSide;
 }
 
-const DEFAULTS: PanelDisplayPrefs = { layout: 'horizontal', columns: 4 };
+const DEFAULTS: PanelDisplayPrefs = {
+    layout: 'horizontal', columns: 4, sourceListSide: 'left',
+};
 const STORAGE_KEY = 'saint.panelDisplayPrefs';
 
 function load(): Record<string, PanelDisplayPrefs> {
@@ -51,6 +62,9 @@ function setPrefs(panelId: string, patch: Partial<PanelDisplayPrefs>): void {
     const next = { ...prefsFor(panelId), ...patch };
     // Clamp columns to the supported 2–4 range.
     next.columns = Math.max(2, Math.min(4, Math.round(next.columns)));
+    // Anything but 'right' means left -- a stored value from a future or
+    // corrupted build must not leave the list unrendered.
+    next.sourceListSide = next.sourceListSide === 'right' ? 'right' : 'left';
     prefsRef.value = { ...prefsRef.value, [panelId]: next };
     save();
 }

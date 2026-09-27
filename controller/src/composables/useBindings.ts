@@ -20,7 +20,7 @@
 
 import { computed, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { useLibrary } from './useLibrary';
+import { useLibrary, type Playlist } from './useLibrary';
 import { useConnection } from './useConnection';
 import { useDisplayPrefs } from './useDisplayPrefs';
 
@@ -205,9 +205,10 @@ export interface PanelItem {
     name: string;
     icon?: string;
     color?: string;
-    // Server-library items may carry a group (sounds) used by the panel's
-    // group filter. Absent for local presets.
-    group?: string;
+    // Ids of the playlists this item belongs to -- what the panel's
+    // source list filters on. Many-to-many, so it is a list rather than
+    // the single `group` string it replaced. Absent for local presets.
+    playlists?: string[];
 }
 
 // ─── Profile + settings ──────────────────────────────────────────────
@@ -256,8 +257,11 @@ export interface PanelState {
     activePanelId: string | null;
     selectedIndex: number;
     currentPage: number;
-    // Group filter for server-backed panels (currently sounds). 'All'
-    // shows everything; otherwise only items whose group matches.
+    // Source-list filter for server-backed panels: the id of the selected
+    // playlist, or ALL_SOURCES for "everything in this panel". Selecting
+    // a playlist also reorders the grid into THAT playlist's order --
+    // which is the point of them, and why this is an id rather than the
+    // group name it replaced.
     selectedGroup: string;
     // When true, selecting an item does NOT close the panel — lets the
     // operator fire several presets (e.g. sounds) in a row. Comes from the
@@ -467,30 +471,29 @@ function startPanelPoll(): void {
 }
 
 // Where the highlight should land when (re)opening a panel: the last
-// item the operator activated, if it's still in the current group-filtered
+// item the operator activated, if it's still in the current filtered
 // list; otherwise the top. panelState isn't set yet here, so filter with
-// the `group` we're about to apply rather than reading panelStateRef.
-function restoreSelection(panelId: string, group: string): { index: number; page: number } {
+// the source we're about to apply rather than reading panelStateRef.
+function restoreSelection(panelId: string, source: string): { index: number; page: number } {
     const profile = profilesRef.value.find(p => p.id === activeProfileIdRef.value);
     const panel = profile?.presetPanels.find(p => p.id === panelId);
     const lastId = lastSelectedByPanel.value[panelId];
     if (!panel || !lastId) return { index: 0, page: 0 };
 
-    let items = panelItemsRaw(panel);
-    if (group && group !== 'All') items = items.filter(it => (it.group ?? '') === group);
+    const items = applySource(panelItemsRaw(panel), source);
     const idx = items.findIndex(it => it.id === lastId);
     if (idx < 0) return { index: 0, page: 0 };
     return { index: idx, page: Math.floor(idx / effectiveItemsPerPage(panel)) };
 }
 
 function showPanel(panelId: string, defaultGroup?: string, keepOpen = false): void {
-    const group = defaultGroup || 'All';
+    const group = resolveDefaultSource(panelId, defaultGroup);
     const restored = restoreSelection(panelId, group);
     panelStateRef.value = {
         activePanelId: panelId,
         selectedIndex: restored.index,
         currentPage: restored.page,
-        // Start on the button's configured group, or 'All' when unset.
+        // Start on the button's configured source, or all of them.
         selectedGroup: group,
         // Sticky panels stay open after each selection.
         keepOpen,
@@ -519,7 +522,7 @@ function togglePanel(panelId: string, defaultGroup?: string, keepOpen = false): 
     else showPanel(panelId, defaultGroup, keepOpen);
 }
 
-// Change the active panel's group filter (from the header dropdown).
+// Change the active panel's source (from the panel's source list).
 // Resets selection/page since the visible set changes.
 function setActiveGroup(group: string): void {
     panelStateRef.value = {
@@ -643,31 +646,71 @@ function panelItemsRaw(panel: PresetPanel): PanelItem[] {
     return panel.presets;
 }
 
-// Items shown for a panel, after the active group filter. Only one panel
-// is open at a time, so the global panelState.selectedGroup applies to it.
+// The source list's "show everything" row. Not a playlist id -- kept as
+// the literal 'All' the old group filter used so profiles and persisted
+// panel state written by an older build still mean the same thing.
+export const ALL_SOURCES = 'All';
+
+/** Apply a source selection to a raw item list.
+ *
+ *  Selecting a playlist does two things, and the second is the one that
+ *  matters: it filters to the members AND puts them in the PLAYLIST'S
+ *  order. An item's slot is per-playlist, so ordering by the playlist is
+ *  the only way to show the operator what they arranged on the board.
+ *  Members the server no longer has (deleted out from under the
+ *  playlist) are dropped rather than rendered as empty tiles.
+ */
+function applySource(items: PanelItem[], source: string): PanelItem[] {
+    if (!source || source === ALL_SOURCES) return items;
+    const playlist = library.playlists.value.find(p => p.id === source);
+    if (!playlist) return items;
+    const byId = new Map(items.map(it => [it.id, it]));
+    return playlist.items
+        .map(id => byId.get(id))
+        .filter((it): it is PanelItem => !!it);
+}
+
+// Items shown for a panel, after the active source selection. Only one
+// panel is open at a time, so the global panelState.selectedGroup
+// applies to it.
 function panelItems(panel: PresetPanel): PanelItem[] {
-    const items = panelItemsRaw(panel);
-    const group = panelStateRef.value.selectedGroup;
-    if (!group || group === 'All') return items;
-    return items.filter(it => (it.group ?? '') === group);
+    return applySource(panelItemsRaw(panel), panelStateRef.value.selectedGroup);
 }
 
-// Distinct, sorted group names present in a panel's items (unfiltered).
-// Drives the header group dropdown; empty when nothing is grouped.
-function panelGroups(panel: PresetPanel): string[] {
-    const groups = new Set<string>();
-    for (const it of panelItemsRaw(panel)) {
-        if (it.group) groups.add(it.group);
-    }
-    return Array.from(groups).sort();
+// Playlists available to a panel: those matching the panel's server
+// source kind, in the order the server (and so the dashboard sidebar)
+// lists them. Empty for static panels and for a kind with no playlists,
+// which is what hides the source list entirely.
+function panelGroups(panel: PresetPanel): Playlist[] {
+    const source = panelSource(panel);
+    if (!source) return [];
+    return library.playlists.value.filter(p => p.kind === source);
 }
 
-// Groups available for a panel by id — used by the bindings editor to
-// populate the "default group" dropdown for a show_panel button.
-function groupsForPanel(panelId: string): string[] {
+// Playlists available for a panel by id — used by the bindings editor to
+// populate the "opens on" dropdown for a show_panel button.
+function groupsForPanel(panelId: string): Playlist[] {
     const profile = profilesRef.value.find(p => p.id === activeProfileIdRef.value);
     const panel = profile?.presetPanels.find(p => p.id === panelId);
     return panel ? panelGroups(panel) : [];
+}
+
+/** Resolve a show_panel button's saved default to a source id.
+ *
+ *  Profiles written before playlists stored a group NAME here, so an
+ *  exact id match is tried first and a case-insensitive name match
+ *  second. An unresolvable value falls back to "everything" rather than
+ *  opening the panel on an empty list -- a stale binding should look
+ *  unconfigured, not broken.
+ */
+function resolveDefaultSource(panelId: string, saved?: string): string {
+    const wanted = (saved ?? '').trim();
+    if (!wanted || wanted === ALL_SOURCES) return ALL_SOURCES;
+    const available = groupsForPanel(panelId);
+    if (available.some(p => p.id === wanted)) return wanted;
+    const byName = available.find(
+        p => p.name.trim().toLowerCase() === wanted.toLowerCase());
+    return byName ? byName.id : ALL_SOURCES;
 }
 
 // Fire the right action for a selected item: play/apply for the
@@ -791,13 +834,19 @@ export function useBindings() {
         // the source-aware trigger the panel UI calls on select.
         activePanelItems: computed<PanelItem[]>(() =>
             activePanel.value ? panelItems(activePanel.value) : []),
+        // The same items BEFORE the source filter -- the source list needs
+        // them to count what each playlist would actually show.
+        activePanelItemsRaw: computed<PanelItem[]>(() =>
+            activePanel.value ? panelItemsRaw(activePanel.value) : []),
         // 'animations' | 'poses' | 'sounds' | null — lets the panel UI
         // show the right loading/empty message for server-backed panels.
         activePanelSource: computed(() =>
             activePanel.value ? panelSource(activePanel.value) : null),
-        // Group filter for the active panel: available groups, the current
-        // selection, and a setter for the header dropdown.
-        activePanelGroups: computed<string[]>(() =>
+        // Source list for the active panel: the playlists it can show,
+        // the current selection, and a setter the sidebar calls. Empty
+        // when the panel's kind has no playlists -- the source list hides
+        // itself rather than rendering a one-row "All".
+        activePanelGroups: computed<Playlist[]>(() =>
             activePanel.value ? panelGroups(activePanel.value) : []),
         activePanelSelectedGroup: computed(() => panelStateRef.value.selectedGroup),
         // Total pages for the active panel's (group-filtered) items — used

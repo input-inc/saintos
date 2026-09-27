@@ -33,9 +33,6 @@ const meta = computed(() => robot.metadata || null)
 const showImport = ref(false)
 const importStates = ref([])
 const importing = ref(false)
-const poseGroups = computed(() =>
-  [...new Set((poses.list || []).map(p => p.group).filter(Boolean))].sort())
-
 async function openImport () {
   // Go through the management channel rather than the HTTP endpoint:
   // this one annotates each candidate with whether a pose already
@@ -378,7 +375,6 @@ onMounted(async () => {
 
     <ImportGroupStatesModal v-if="showImport"
                             :states="importStates"
-                            :pose-groups="poseGroups"
                             :busy="importing"
                             @close="showImport = false"
                             @import="doImport" />

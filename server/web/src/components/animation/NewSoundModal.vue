@@ -9,20 +9,23 @@ import { useSoundsStore } from '@/stores/sounds'
 // browse that node's filesystem for the file, then pick that node's audio
 // output. Volume / start-time / loop options mirror the play command.
 
-const props = defineProps({
-  groups: { type: Array, default: () => [] },
-  defaultGroup: { type: String, default: '' },
-})
+// No grouping field: an item can be in many playlists now, and
+// membership is assigned by dragging the row onto one in the board
+// sidebar. See views/Animations.vue.
 const emit = defineEmits(['close', 'create'])
 
 const sounds = useSoundsStore()
 
 const name = ref('')
-const group = ref(props.defaultGroup)
 const icon = ref('volume_up')
 const nodeId = ref('')
 const filePath = ref('')
 const outputDevice = ref('default')
+// Above 1.0 the player applies software gain, so a clip recorded quiet
+// can be lifted to sit level with the rest of a board. Mirrors
+// SOUND_VOLUME_MAX in server/saint_server/animation/models.py, which
+// clamps on save and is what the players enforce.
+const VOLUME_MAX = 2.0
 const volume = ref(1.0)
 const startTime = ref(0.0)
 const loop = ref(false)
@@ -88,7 +91,6 @@ function submit () {
   if (!canSubmit.value) return
   emit('create', {
     name: name.value.trim(),
-    group: group.value.trim(),
     icon: icon.value,
     node_id: nodeId.value,
     file_path: filePath.value,
@@ -155,9 +157,22 @@ onMounted(async () => {
 
       <div class="grid grid-cols-2 gap-3">
         <label class="block">
-          <span class="block text-fg-muted text-xs mb-1">Volume: {{ Math.round(volume * 100) }}%</span>
-          <input type="range" min="0" max="1" step="0.01" v-model.number="volume"
+          <span class="block text-fg-muted text-xs mb-1">
+            Volume: {{ Math.round(volume * 100) }}%
+            <span v-if="volume > 1" class="text-amber-300">· boosted</span>
+          </span>
+          <input type="range" min="0" :max="VOLUME_MAX" step="0.01" v-model.number="volume"
                  class="w-full accent-cyan-500 cursor-pointer" />
+          <!-- 100% is where the clip plays at its own level; past it is
+               software gain, which lifts a quiet recording but clips one
+               that is already near full scale. Mark the boundary so the
+               operator can find it on the slider. -->
+          <div class="flex justify-between text-[10px] text-fg-faint mt-0.5">
+            <span>0%</span>
+            <button type="button" class="hover:text-cyan-300" title="Reset to the clip's own level"
+                    @click="volume = 1">100%</button>
+            <span>{{ Math.round(VOLUME_MAX * 100) }}%</span>
+          </div>
         </label>
         <label class="block">
           <span class="block text-fg-muted text-xs mb-1">Start time (s)</span>
@@ -185,14 +200,6 @@ onMounted(async () => {
         </div>
       </div>
 
-      <label class="block">
-        <span class="block text-fg-muted text-xs mb-1">Group (optional)</span>
-        <input class="input-field w-full" list="new-sound-groups" v-model="group"
-               placeholder="Leave empty for Ungrouped" />
-        <datalist id="new-sound-groups">
-          <option v-for="g in groups" :key="g" :value="g" />
-        </datalist>
-      </label>
     </div>
     <template #actions>
       <button class="btn-secondary" @click="emit('close')">Cancel</button>

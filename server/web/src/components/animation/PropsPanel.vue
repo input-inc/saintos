@@ -19,9 +19,6 @@ const animations = useAnimationsStore()
 const props = defineProps({
   animation: { type: Object, required: true },
   selection: { type: Object, default: () => ({ kind: null }) },
-  // List of all known animations (for the group autocomplete list).
-  // Optional — falls back to "no suggestions" if not provided.
-  animations: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits([
@@ -255,17 +252,6 @@ function makeJointActive (name) {
 // slider and the keyframe-value slider run −1..+1 regardless of joint
 // type (revolute radians vs prismatic metres — the viewer converts).
 const JOINT_RANGE = 1
-
-// Existing group names across all animations — fed into the group
-// field's <datalist> so the operator gets autocomplete instead of
-// having to retype names.
-const groupSuggestions = computed(() => {
-  const set = new Set()
-  for (const a of props.animations || []) {
-    if (a.group) set.add(a.group)
-  }
-  return [...set].sort()
-})
 
 function onIconChange (value) {
   if (!props.animation) return
@@ -572,18 +558,6 @@ function onIconChange (value) {
         <input class="input-field flex-1" placeholder="Name"
                v-model="animation.name" @input="onChange" />
       </div>
-
-      <label class="block">
-        <span class="block text-fg-muted text-xs mb-1">Group</span>
-        <input class="input-field w-full"
-               list="animation-group-suggestions"
-               placeholder="Ungrouped"
-               v-model="animation.group"
-               @input="onChange" />
-        <datalist id="animation-group-suggestions">
-          <option v-for="g in groupSuggestions" :key="g" :value="g" />
-        </datalist>
-      </label>
 
       <div class="grid grid-cols-2 gap-2">
         <label class="block">

@@ -257,6 +257,23 @@ impl OutgoingMessage {
         }
     }
 
+    /// List playlists — the named, ordered sets that group board items.
+    /// Server replies with `{ playlists: [{id, name, kind, items, …}] }`.
+    /// Forwarded on `library-playlists`.
+    ///
+    /// One call covers all three kinds; the frontend splits by `kind`.
+    /// These replaced the single `group` string each item used to carry,
+    /// so an item can be in several at once.
+    pub fn list_playlists() -> Self {
+        Self {
+            id: next_id(),
+            msg_type: "management".to_string(),
+            action: "list_playlists".to_string(),
+            params: None,
+            password: None,
+        }
+    }
+
     /// Start (play) a saved animation by id.
     pub fn start_animation(id: &str) -> Self {
         Self {

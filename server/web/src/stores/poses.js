@@ -43,7 +43,6 @@ export const usePosesStore = defineStore('poses', () => {
     editing.value = {
       id: '', name: '',
       icon: '',
-      group: '',
       description: '',
       setpoints: [],
       created: '',
