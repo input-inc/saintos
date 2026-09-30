@@ -117,7 +117,21 @@ pub enum DigitalAction {
     /// Hide the current panel
     HidePanel,
     /// Activate a specific preset
+    /// Legacy: fire a preset stored on a static panel. Static panels can
+    /// no longer be created (the boards are the server's), so nothing
+    /// writes this any more — it stays so profiles that already contain
+    /// one still load instead of failing to deserialize.
     ActivatePreset { preset_id: String },
+    /// Fire one item on a board, by board id and item id. `playlist_id`
+    /// is only remembered so the editor can reopen on the same filtered
+    /// list; firing goes by item id, so a deleted playlist doesn't break
+    /// the binding.
+    ActivateBoardItem {
+        panel_id: String,
+        item_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        playlist_id: Option<String>,
+    },
     /// Navigate within an open panel
     NavigatePanel { direction: NavigateDirection },
     /// Select the current item in a panel

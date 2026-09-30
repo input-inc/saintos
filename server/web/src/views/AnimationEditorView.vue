@@ -5,6 +5,7 @@ import { useRobotModelStore } from '@/stores/robotModel'
 import { useAnimationsStore } from '@/stores/animations'
 import { usePosesStore } from '@/stores/poses'
 import { usePlaylistsStore } from '@/stores/playlists'
+import { useSoundsStore } from '@/stores/sounds'
 import { useWsStore } from '@/stores/ws'
 import {
   frameToPreviewValues,
@@ -34,6 +35,9 @@ const robot = useRobotModelStore()
 const animations = useAnimationsStore()
 const poses = usePosesStore()
 const playlists = usePlaylistsStore()
+// Board libraries for the + Board Item menu and the length bars it
+// draws. Sounds carry a measured `duration`; animations carry their own.
+const sounds = useSoundsStore()
 const ws = useWsStore()
 
 // ── Shared state (provided to descendants) ─────────────────────────
@@ -78,9 +82,12 @@ const poseJoints = ref({})          // pose id → { joint: normalized }
 // there's no rig or no declared neutral_pose — then zero IS the base.
 // playlist id → name, for the timeline's + Pose menu. Poses carry
 // playlist ids; the names live on the playlists themselves.
+// playlist id → name for every board kind. The + Board Item menu labels
+// playlists across poses, sounds and animations from one map; ids are
+// unique per kind on the server, so a single map is unambiguous.
 const posePlaylistNames = computed(() => {
   const out = {}
-  for (const p of playlists.byKind('poses')) out[p.id] = p.name
+  for (const p of playlists.list || []) out[p.id] = p.name
   return out
 })
 
@@ -98,24 +105,53 @@ async function ensurePosesLoaded (ids) {
   const missing = ids.filter(id => !(id in poseJoints.value))
   if (!missing.length) return
   const fetched = {}
+  const fetchedSetpoints = {}
   for (const id of missing) {
     try {
       const r = await ws.management('get_pose', { id })
       const setpoints = r?.pose?.setpoints || []
+      // Joint setpoints only: this map feeds resolveFrame, and pose
+      // layering is joint-space. A ws_input setpoint has no joint to
+      // blend.
       const joints = {}
       for (const s of setpoints) {
         if (s.target_kind === 'joint' && s.joint) joints[s.joint] = s.value
       }
+      // ALL setpoints, for the track's disclosure. Kept separate from
+      // `joints` on purpose: a pose authored in the dashboard's pose
+      // editor is made of ws_input setpoints, so filtering to joints
+      // left those poses disclosing nothing at all — the pose worked,
+      // the disclosure just looked broken.
+      fetchedSetpoints[id] = r?.pose ? setpoints.map(toPoseTarget) : null
       // Cache the miss too (as null), so a track pointing at a deleted
       // pose doesn't re-request on every frame.
       fetched[id] = r?.pose ? joints : null
     } catch (e) {
       console.warn(`get_pose(${id}) failed:`, e)
       fetched[id] = null
+      fetchedSetpoints[id] = null
     }
   }
   poseJoints.value = { ...poseJoints.value, ...fetched }
+  poseSetpoints.value = { ...poseSetpoints.value, ...fetchedSetpoints }
 }
+
+// One disclosed row per pose setpoint, whatever address space it uses.
+// `joint` is set only for joint setpoints — the timeline uses it to show
+// the live resolved value, which only exists for joints.
+function toPoseTarget (s) {
+  if (s.target_kind === 'joint' && s.joint) {
+    return { key: `joint:${s.joint}`, label: s.joint, joint: s.joint,
+             kind: 'joint', value: Number(s.value) || 0 }
+  }
+  const sheet = s.sheet_id || ''
+  const input = s.ws_input_id || ''
+  return { key: `ws:${sheet}/${input}`, label: `${sheet}/${input}`,
+           joint: '', kind: 'ws_input', value: Number(s.value) || 0 }
+}
+
+// pose id → [{key, label, joint, kind, value}] for the disclosure.
+const poseSetpoints = ref({})
 
 const poseLookup = (id) => poseJoints.value[id] || null
 
@@ -219,6 +255,34 @@ function addTriggerKeyframeAt (trackId, time) {
   else track.keyframes.splice(insertAt, 0, kf)
   animations.markDirty()
 }
+// A sound or animation chosen from the + Board Item menu. It becomes a
+// trigger keyframe at the playhead, on its own track named after the
+// item — one lane per board item, so their length bars can't overlap
+// into an unreadable stack.
+//
+// `duration: 0` means "the item's own length"; the timeline fills the
+// bar from the library. Only a looping item's bar can then be dragged,
+// which is what writes a non-zero duration here.
+function addBoardItemTrack (payload) {
+  if (!anim.value || !payload?.id) return
+  const kind = payload.kind
+  if (kind !== 'sound' && kind !== 'animation') return
+  const trackId = addTriggerTrack(payload.label || payload.id)
+  if (!trackId) return
+  const track = anim.value.trigger_tracks.find(t => t.id === trackId)
+  if (!track) return
+  track.keyframes.push({
+    time: Math.max(0, Number(playerPos.value) || 0),
+    target_kind: kind,
+    target: [payload.id],
+    value: null,
+    label: payload.label || payload.id,
+    duration: 0,
+  })
+  animations.markDirty()
+  selection.value = { kind: 'trigger-keyframe', trackId, kfIdx: 0 }
+}
+
 provide('add-trigger-track', addTriggerTrack)
 provide('add-trigger-keyframe-at', addTriggerKeyframeAt)
 
@@ -990,7 +1054,7 @@ onMounted(async () => {
   document.addEventListener('input', onActivity, true)
   document.addEventListener('change', onActivity, true)
   await Promise.all([robot.refresh(), animations.reload(), poses.reload(),
-                     playlists.reload(), loadRigNeutral()])
+                     playlists.reload(), sounds.reload(), loadRigNeutral()])
   // Load the WS-input catalog up front so the timeline's "+ Input"
   // dropdown is populated immediately — value tracks can bind a
   // controller sheet input even when no URDF is installed.
@@ -1186,8 +1250,11 @@ onBeforeUnmount(() => {
                         :unbound-joints="unboundJoints"
                         :ws-inputs="wsInputCatalog"
                         :poses="poses.list"
+                        :sounds="sounds.list"
+                        :animations="animations.list"
                         :pose-playlists="posePlaylistNames"
                         :pose-joints="poseJoints"
+                        :pose-setpoints="poseSetpoints"
                         :resolved-joints="resolvedJoints"
                         @update:player-pos="onTimelineScrub"
                         @select="onTimelineSelect"
@@ -1202,6 +1269,7 @@ onBeforeUnmount(() => {
                         @add-joint="addJointTrack"
                         @add-ws-input="addWsInputTrack"
                         @add-pose="addPoseTrack"
+                        @add-board-item="addBoardItemTrack"
                         @add-override-key="addOverrideKey"
                         @move-override-key="moveOverrideKey"
                         @remove-override-key="removeOverrideKey" />

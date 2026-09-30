@@ -94,6 +94,11 @@ function executeDigitalAction(action: DigitalAction): void {
         case 'navigate_panel':   bindings.navigatePanel(action.direction); break;
         case 'select_panel_item': bindings.selectCurrentItem(); break;
         case 'activate_preset':  void bindings.activatePreset(action.preset_id); break;
+        case 'activate_board_item':
+            // Routed by the board's kind — start_animation / apply_pose /
+            // play_sound — the same path selecting it in the panel takes.
+            bindings.triggerBoardItem(action.panel_id, action.item_id);
+            break;
         case 'e_stop':           void emergencyStop(); break;
         case 'toggle_output':    console.log('Toggle output:', action.target_id); break;
         case 'cycle_output':     console.log('Cycle output:', action.target_id, action.values); break;

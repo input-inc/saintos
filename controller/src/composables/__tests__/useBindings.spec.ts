@@ -47,6 +47,9 @@ vi.mock('../useLibrary', () => {
 
 import {
     useBindings,
+    BINDABLE_DIGITAL_INPUTS,
+    DIGITAL_INPUTS,
+    digitalInputLabel,
     targetDisplayName,
     isWsInputTarget,
     type ControlTarget,
@@ -206,5 +209,178 @@ describe('panel source list', () => {
         b.showPanel('sounds', 'Deleted Playlist');
         expect(b.activePanelSelectedGroup.value).toBe('All');
         expect(b.activePanelItems.value).toHaveLength(6);
+    });
+});
+
+// ─── The digital-input catalog ───────────────────────────────────────
+//
+// The bindings editor used to keep its own hand-written list of buttons
+// and it simply never mentioned the Steam Deck's back buttons — L4, L5,
+// R4 and R5 were read over HID, carried through the mapper, and
+// impossible to bind because no dropdown offered them. The catalog is
+// now the single source and `DigitalInput` is derived from it, so a
+// button cannot exist in the type without a label. These guard the
+// contents against the Rust enum it mirrors.
+
+describe('digital input catalog', () => {
+    // src-tauri/src/bindings/config.rs DigitalInput, after serde renames.
+    const RUST_NAMES = [
+        'a', 'b', 'x', 'y', 'lb', 'rb',
+        'd_pad_up', 'd_pad_down', 'd_pad_left', 'd_pad_right',
+        'start', 'select', 'left_stick', 'right_stick',
+        'l4', 'r4', 'l5', 'r5', 'steam',
+    ];
+
+    it('covers every input the Rust mapper can read', () => {
+        expect([...DIGITAL_INPUTS].map(i => i.value).sort())
+            .toEqual([...RUST_NAMES].sort());
+    });
+
+    it('offers the Steam Deck back buttons for binding', () => {
+        const offered = BINDABLE_DIGITAL_INPUTS.map(i => i.value);
+        for (const b of ['l4', 'r4', 'l5', 'r5']) expect(offered).toContain(b);
+    });
+
+    it('does not offer the Steam button', () => {
+        // It opens the Steam overlay at the OS level; a binding on it
+        // would fire an action and leave the overlay up.
+        expect(BINDABLE_DIGITAL_INPUTS.map(i => i.value)).not.toContain('steam');
+        expect(DIGITAL_INPUTS.map(i => i.value)).toContain('steam');
+    });
+
+    it('gives every input a label distinct from its key', () => {
+        for (const i of DIGITAL_INPUTS) {
+            expect(i.label.length).toBeGreaterThan(0);
+            expect(i.label).not.toBe(i.value);
+        }
+    });
+
+    it('has no duplicate values or labels', () => {
+        const values = DIGITAL_INPUTS.map(i => i.value);
+        const labels = DIGITAL_INPUTS.map(i => i.label);
+        expect(new Set(values).size).toBe(values.length);
+        expect(new Set(labels).size).toBe(labels.length);
+    });
+
+    it('labels the back buttons by their hardware markings', () => {
+        expect(digitalInputLabel('l4')).toContain('L4');
+        expect(digitalInputLabel('r5')).toContain('R5');
+    });
+
+    it('falls back to the raw key for something unknown', () => {
+        // An older profile naming a button we no longer have must still
+        // render as a row the operator can delete.
+        expect(digitalInputLabel('paddle9')).toBe('paddle9');
+    });
+});
+
+// ─── Boards ──────────────────────────────────────────────────────────
+//
+// The Bindings → Boards tab browses the server's boards instead of
+// letting the operator invent panels. The three boards mirror what the
+// server's Boards page manages; a panel with no server source has no
+// items to show, so it is not a board.
+
+describe('boards', () => {
+    it('exposes the three server-backed boards', () => {
+        const b = useBindings();
+        expect(b.boards.value.map(x => x.id)).toEqual(['animations', 'poses', 'sounds']);
+    });
+
+    it('carries the board kind through for the item lookup', () => {
+        const b = useBindings();
+        expect(b.boards.value.map(x => x.kind)).toEqual(['animations', 'poses', 'sounds']);
+    });
+
+    it('lists a board\'s whole library under All', () => {
+        const b = useBindings();
+        expect(b.boardItems('sounds', 'All').map(i => i.id))
+            .toEqual(['s0', 's1', 's2', 's3', 's4', 's5']);
+    });
+
+    it('filters and reorders a board by playlist', () => {
+        // Same resolution the panel overlay uses, so what is browsed here
+        // is what the panel will show.
+        const b = useBindings();
+        expect(b.boardItems('sounds', 'pl_loud').map(i => i.id)).toEqual(['s4', 's0']);
+    });
+
+    it('returns nothing for a board that is not in the profile', () => {
+        const b = useBindings();
+        expect(b.boardItems('nope', 'All')).toEqual([]);
+    });
+
+    it('offers only that board\'s playlists', () => {
+        const b = useBindings();
+        expect(b.groupsForPanel('sounds').map(p => p.id)).toEqual(['pl_quiet', 'pl_loud']);
+        expect(b.groupsForPanel('animations').map(p => p.id)).toEqual(['pl_anim']);
+    });
+
+    it('no longer offers a way to create a panel', () => {
+        // Panels are the server's. The button that used to make one here
+        // produced an empty panel with no editor to fill it.
+        const b = useBindings() as Record<string, unknown>;
+        expect(b['addPresetPanel']).toBeUndefined();
+    });
+
+    it('firing a board item does not open a panel', () => {
+        const b = useBindings();
+        b.hidePanel();
+        b.triggerBoardItem('sounds', 's1');
+        expect(b.activePanelState.value.activePanelId).toBeNull();
+    });
+
+    it('remembers a fired item as that board\'s last selection', () => {
+        // Browsing and firing from this tab should leave the panel
+        // highlight where the operator last acted.
+        const b = useBindings();
+        b.triggerBoardItem('sounds', 's3');
+        b.showPanel('sounds');
+        const items = b.activePanelItems.value;
+        expect(items[b.activePanelState.value.selectedIndex].id).toBe('s3');
+    });
+});
+
+// ─── Activate Board Item ─────────────────────────────────────────────
+//
+// Replaces the old "Activate Preset", which fired a preset stored on a
+// static panel — and static panels can no longer be created, so it had
+// become unreachable. The binding now names a board and an item on it.
+//
+// The playlist the operator picked while choosing is remembered for the
+// editor's benefit only: firing goes by item id, so renaming or deleting
+// the playlist afterwards must not break the binding.
+
+describe('activate_board_item', () => {
+    it('fires the named item on the named board', () => {
+        const b = useBindings();
+        b.hidePanel();
+        b.triggerBoardItem('sounds', 's2');
+        // Recorded as that board's last selection — the same bookkeeping
+        // selecting it in the panel overlay does.
+        b.showPanel('sounds');
+        const items = b.activePanelItems.value;
+        expect(items[b.activePanelState.value.selectedIndex].id).toBe('s2');
+    });
+
+    it('fires an item that is in a playlist the binding never named', () => {
+        // The stored playlist is picker scope, not a filter on firing.
+        const b = useBindings();
+        b.triggerBoardItem('sounds', 's4');
+        b.showPanel('sounds');
+        expect(b.activePanelItems.value[b.activePanelState.value.selectedIndex].id)
+            .toBe('s4');
+    });
+
+    it('ignores an item on a board the profile does not have', () => {
+        const b = useBindings();
+        expect(() => b.triggerBoardItem('nope', 's0')).not.toThrow();
+    });
+
+    it('narrowing by playlist is what shortens the pickable list', () => {
+        // What the editor's Item dropdown is built from.
+        const b = useBindings();
+        expect(b.boardItems('sounds', 'All')).toHaveLength(6);
+        expect(b.boardItems('sounds', 'pl_quiet').map(i => i.id)).toEqual(['s1', 's3']);
     });
 });

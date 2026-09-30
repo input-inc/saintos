@@ -61,6 +61,10 @@ pub enum ActionEvent {
     SelectPanelItem,
     /// Activate a specific preset
     ActivatePreset { preset_id: String },
+    /// Fire one item on a board. The frontend routes it by the board's
+    /// kind (start_animation / apply_pose / play_sound) — the same path
+    /// selecting the item in the panel overlay takes.
+    ActivateBoardItem { panel_id: String, item_id: String },
     /// Toggle an output
     ToggleOutput { target_id: String },
     /// Cycle through output values
@@ -725,6 +729,14 @@ impl InputMapper {
                 DigitalAction::ActivatePreset { preset_id } => {
                     events.push(ActionEvent::ActivatePreset {
                         preset_id: preset_id.clone(),
+                    });
+                }
+                DigitalAction::ActivateBoardItem {
+                    panel_id, item_id, ..
+                } => {
+                    events.push(ActionEvent::ActivateBoardItem {
+                        panel_id: panel_id.clone(),
+                        item_id: item_id.clone(),
                     });
                 }
                 DigitalAction::ToggleOutput { target_id } => {

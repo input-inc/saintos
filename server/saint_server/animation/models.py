@@ -156,12 +156,33 @@ class TriggerKeyframe:
         publishes the same JSON action as a websocket-issued
         peripheral_command — i.e. an animation-fired play_file is
         wire-indistinguishable from one a UI button sent.
+
+    Board items — an entry from one of the server's boards, fired at
+    this time:
+      * ``"sound"`` — target is ``[sound_id]``; plays that soundboard
+        entry on whichever node owns it.
+      * ``"animation"`` — target is ``[animation_id]``; starts that
+        animation. An animation cannot trigger itself, and nesting is
+        depth-limited (see AnimationPlayer._dispatch_board_item).
+    Poses are NOT board-item triggers: a pose is a weighted clip with
+    blending and per-joint overrides, which a one-shot fire cannot
+    express, so it stays a value track. The editor presents all three
+    under one "Board Item" affordance regardless.
     """
     time: float
     target_kind: str
     target: List[str]
     value: Any
     label: str = ""
+    # How long a board item should run, in seconds. 0 = its own natural
+    # length (the sound's duration, the animation's duration).
+    #
+    # Only LOOPING items can outlast their natural length, and this is
+    # the operator-dragged bar on the timeline: the player stops the item
+    # at ``time + duration``. For a non-looping item it is display only —
+    # the clip ends when it ends, and cutting it short is a different
+    # feature from choosing how long to repeat.
+    duration: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -170,6 +191,7 @@ class TriggerKeyframe:
             "target": list(self.target),
             "value": self.value,
             "label": self.label,
+            "duration": self.duration,
         }
 
     @classmethod
@@ -180,6 +202,7 @@ class TriggerKeyframe:
             target=[str(p) for p in (d.get("target") or [])],
             value=d.get("value"),
             label=str(d.get("label", "")),
+            duration=max(0.0, float(d.get("duration", 0.0) or 0.0)),
         )
 
 
@@ -446,6 +469,13 @@ class Sound:
     loop: bool = False
     loop_count: int = 0       # repeats when loop on; 0 → infinite
     position: int = 0         # explicit order within the list/group
+    # Length of the audio file in seconds; 0.0 = not known yet.
+    #
+    # Measured from the file on the server (animation.audio_probe), not
+    # authored, so it must never be edited by hand — it is what the
+    # animation timeline draws a sound board-item's bar from. 0.0 means
+    # "unknown" and renders as a marker, NOT a zero-length clip.
+    duration: float = 0.0
     created: str = ""
     modified: str = ""
 
@@ -463,6 +493,7 @@ class Sound:
             "loop": self.loop,
             "loop_count": self.loop_count,
             "position": self.position,
+            "duration": self.duration,
             "created": self.created,
             "modified": self.modified,
         }
@@ -487,6 +518,7 @@ class Sound:
             loop=bool(d.get("loop", False)),
             loop_count=int(d.get("loop_count", 0)),
             position=int(d.get("position", 0)),
+            duration=max(0.0, float(d.get("duration", 0.0) or 0.0)),
             created=str(d.get("created", "")),
             modified=str(d.get("modified", "")),
         )

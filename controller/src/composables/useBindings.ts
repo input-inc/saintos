@@ -43,13 +43,67 @@ export type AnalogInput =
     | 'gyro_roll'
     | 'gyro_yaw';
 
-export type DigitalInput =
-    | 'a' | 'b' | 'x' | 'y'
-    | 'lb' | 'rb'
-    | 'd_pad_up' | 'd_pad_down' | 'd_pad_left' | 'd_pad_right'
-    | 'start' | 'select'
-    | 'left_stick' | 'right_stick'
-    | 'l4' | 'r4' | 'l5' | 'r5' | 'steam';
+// Every digital input the mapper can read, with the label the bindings
+// editor shows for it. Order is the order the editor offers them in.
+//
+// This is the SINGLE source: `DigitalInput` is derived from it below, so
+// a button cannot exist in the type without having a label here. It used
+// to be the other way round — the type listed the Steam Deck's back
+// buttons and the editor kept its own hand-written list, which simply
+// never mentioned them. They were readable, mappable, and impossible to
+// bind because nothing offered them.
+//
+// Names match `DigitalInput` in src-tauri/src/bindings/config.rs, whose
+// serde renames produce exactly these strings.
+const DIGITAL_INPUT_CATALOG = [
+    { value: 'a', label: 'A Button' },
+    { value: 'b', label: 'B Button' },
+    { value: 'x', label: 'X Button' },
+    { value: 'y', label: 'Y Button' },
+    { value: 'lb', label: 'Left Bumper' },
+    { value: 'rb', label: 'Right Bumper' },
+    { value: 'd_pad_up', label: 'D-Pad Up' },
+    { value: 'd_pad_down', label: 'D-Pad Down' },
+    { value: 'd_pad_left', label: 'D-Pad Left' },
+    { value: 'd_pad_right', label: 'D-Pad Right' },
+    { value: 'start', label: 'Start' },
+    { value: 'select', label: 'Select' },
+    { value: 'left_stick', label: 'Left Stick Press' },
+    { value: 'right_stick', label: 'Right Stick Press' },
+    // Steam Deck back buttons. Read over raw HID (input/steamdeck_hid.rs)
+    // rather than the gamepad API, which cannot see them.
+    { value: 'l4', label: 'L4 Back Button' },
+    { value: 'r4', label: 'R4 Back Button' },
+    { value: 'l5', label: 'L5 Back Button' },
+    { value: 'r5', label: 'R5 Back Button' },
+    // Not offered for binding: pressing Steam opens the Steam overlay at
+    // the OS level, which we cannot suppress, so a binding on it would
+    // fire an action AND leave the operator staring at the overlay. It
+    // stays in the type because App.vue maps the hardware name and the
+    // mapper can read it.
+    { value: 'steam', label: 'Steam Button', bindable: false },
+] as const;
+
+export type DigitalInput = (typeof DIGITAL_INPUT_CATALOG)[number]['value'];
+
+export interface DigitalInputSpec {
+    value: DigitalInput;
+    label: string;
+    /** Absent means bindable. */
+    bindable?: boolean;
+}
+
+/** Every digital input, including ones the editor will not offer. */
+export const DIGITAL_INPUTS: ReadonlyArray<DigitalInputSpec> = DIGITAL_INPUT_CATALOG;
+
+/** The inputs the bindings editor offers. */
+export const BINDABLE_DIGITAL_INPUTS: ReadonlyArray<DigitalInputSpec> =
+    DIGITAL_INPUT_CATALOG.filter(i => (i as DigitalInputSpec).bindable !== false);
+
+/** Display label for a digital input; falls back to the raw key. */
+export function digitalInputLabel(input: DigitalInput | string): string {
+    return DIGITAL_INPUTS.find(x => x.value === input)?.label ?? String(input);
+}
 
 export type ButtonTrigger = 'press' | 'release' | 'hold' | 'double_tap' | 'long_press';
 
@@ -111,7 +165,14 @@ export type AnalogAction =
 export type DigitalAction =
     | { type: 'show_panel'; panel_id: string; default_group?: string; keep_open?: boolean }
     | { type: 'hide_panel' }
+    // Legacy: a preset on a static panel. Static panels can no longer be
+    // created, so nothing writes this — it stays so existing profiles
+    // keep loading.
     | { type: 'activate_preset'; preset_id: string }
+    // Fire one item on a board. `playlist_id` is remembered only so the
+    // editor reopens on the same filtered list; firing goes by item id,
+    // so deleting the playlist doesn't break the binding.
+    | { type: 'activate_board_item'; panel_id: string; item_id: string; playlist_id?: string }
     | { type: 'navigate_panel'; direction: NavigateDirection }
     | { type: 'select_panel_item' }
     | { type: 'toggle_output'; target_id: string }
@@ -249,6 +310,7 @@ export type ActionEvent =
     | { type: 'navigate_panel'; direction: NavigateDirection }
     | { type: 'select_panel_item' }
     | { type: 'activate_preset'; preset_id: string }
+    | { type: 'activate_board_item'; panel_id: string; item_id: string }
     | { type: 'toggle_output'; target_id: string }
     | { type: 'cycle_output'; target_id: string; value: string }
     | { type: 'e_stop' };
@@ -713,6 +775,55 @@ function resolveDefaultSource(panelId: string, saved?: string): string {
     return byName ? byName.id : ALL_SOURCES;
 }
 
+// ─── Boards ──────────────────────────────────────────────────────────
+//
+// A "board" is a server-backed panel: Animations, Poses or Sounds. The
+// three are fixed — they mirror what the server's Boards page manages,
+// and the controller deliberately cannot create more. A panel with no
+// server source has no items to show and nothing to browse, so the
+// boards list simply excludes it.
+
+export interface Board {
+    id: string;
+    name: string;
+    icon: string;
+    color: string;
+    kind: 'animations' | 'poses' | 'sounds';
+}
+
+function boardsOf(profile: BindingProfile | undefined): Board[] {
+    const out: Board[] = [];
+    for (const panel of profile?.presetPanels ?? []) {
+        const kind = panelSource(panel);
+        if (!kind) continue;
+        out.push({
+            id: panel.id, name: panel.name,
+            icon: panel.icon, color: panel.color, kind,
+        });
+    }
+    return out;
+}
+
+/** Items on a board, filtered and ordered by `playlistId`.
+ *
+ *  ALL_SOURCES gives the board's whole library in its natural order;
+ *  a playlist id gives that playlist's members in ITS order. Same
+ *  resolution the panel overlay uses, so what the operator browses here
+ *  is what the panel will show. */
+function boardItems(panelId: string, playlistId: string): PanelItem[] {
+    const profile = profilesRef.value.find(p => p.id === activeProfileIdRef.value);
+    const panel = profile?.presetPanels.find(p => p.id === panelId);
+    if (!panel) return [];
+    return applySource(panelItemsRaw(panel), playlistId);
+}
+
+/** Activate one item from the boards browser, without opening a panel. */
+function triggerBoardItem(panelId: string, itemId: string): void {
+    const profile = profilesRef.value.find(p => p.id === activeProfileIdRef.value);
+    const panel = profile?.presetPanels.find(p => p.id === panelId);
+    if (panel) triggerPanelItem(panel, itemId);
+}
+
 // Fire the right action for a selected item: play/apply for the
 // server-backed panels, the local preset path otherwise.
 //
@@ -789,9 +900,6 @@ function removeDigitalBinding(index: number): void {
     }));
 }
 
-function addPresetPanel(panel: PresetPanel): void {
-    mutateActive(p => ({ ...p, presetPanels: [...p.presetPanels, panel] }));
-}
 
 function updatePresetPanel(panelId: string, panel: PresetPanel): void {
     mutateActive(p => ({
@@ -890,9 +998,17 @@ export function useBindings() {
         removeDigitalBinding,
 
         // Preset panel mutators
-        addPresetPanel,
+        // Panels are NOT created from the controller: the three boards
+        // mirror the server's, and a locally-made panel had no editor to
+        // fill it. updatePresetPanel/removePresetPanel stay for profile
+        // maintenance; there is deliberately no add.
         updatePresetPanel,
         removePresetPanel,
+        // Boards browser (Bindings → Boards).
+        boards: computed<Board[]>(() => boardsOf(
+            profilesRef.value.find(p => p.id === activeProfileIdRef.value))),
+        boardItems,
+        triggerBoardItem,
 
         // Settings
         updateProfileSettings,

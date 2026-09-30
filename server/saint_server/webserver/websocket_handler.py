@@ -346,8 +346,16 @@ class WebSocketHandler:
 
     def set_soundboard_callback(
             self, callback: Callable[[str, str, dict, str], None]):
-        """Register the node soundboard-command sender."""
+        """Register the node soundboard-command sender.
+
+        Also mirrored onto the StateManager: an animation firing a sound
+        board-item runs inside a player, which never sees this handler.
+        One registration point keeps the two from disagreeing about
+        whether the soundboard is reachable.
+        """
         self._soundboard_callback = callback
+        if self.state_manager is not None:
+            self.state_manager._soundboard_dispatch = callback
 
     def set_ble_scan_callback(
             self, callback: Callable[[str, float, bool, str], None]):
@@ -1711,6 +1719,15 @@ class WebSocketHandler:
                         loop=bool(params.get('loop', False)),
                         loop_count=int(params.get('loop_count', 0)),
                         icon=str(params.get('icon', 'volume_up')))}
+
+        elif action == 'reprobe_sound':
+            # Re-measure a clip after its audio file was replaced on
+            # disk. Normal saves keep the stored duration.
+            sound_id = params.get('id')
+            if not sound_id:
+                return {"status": "error", "message": "Missing id"}
+            return {"status": "ok",
+                    "data": self.state_manager.reprobe_sound(sound_id)}
 
         elif action == 'delete_sound':
             sound_id = params.get('id')

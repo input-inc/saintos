@@ -707,6 +707,69 @@ def _board_dispatch(ev, tally):
     return dispatch_as(BOARD, tally)
 
 
+class _BoardControl:
+    """Board-item control handed to animation players.
+
+    An animation can fire a sound or start another animation at a
+    keyframe. Those need the soundboard callback and the player registry
+    — both of which live on the StateManager — so this adapts them to
+    the narrow surface AnimationPlayer wants (see BoardControl in
+    animation/player.py) instead of handing players the whole manager.
+
+    Every method degrades rather than raises: a missing sound or an
+    unconfigured callback must not take down a running show.
+    """
+
+    def __init__(self, manager: "StateManager"):
+        self._m = manager
+
+    def play_sound(self, sound_id: str) -> Optional[str]:
+        resolved = self._m.resolve_sound_play(sound_id)
+        if not resolved or not resolved.get("node_id"):
+            return None
+        cb = self._m._soundboard_dispatch
+        if cb is None:
+            return None
+        try:
+            cb(resolved["node_id"], "soundboard_play", resolved["args"], "")
+        except Exception:
+            return None
+        return str(resolved["node_id"])
+
+    def stop_sound(self, node_id: str) -> None:
+        cb = self._m._soundboard_dispatch
+        if cb is None or not node_id:
+            return
+        try:
+            cb(node_id, "soundboard_stop", {}, "")
+        except Exception:
+            pass
+
+    async def start_animation(self, animation_id: str, depth: int) -> bool:
+        registry = self._m._animation_registry
+        if registry is None:
+            return False
+        anim = self._m.animation_store.get(animation_id)
+        if anim is None:
+            return False
+        await registry.start(anim, depth=depth)
+        return True
+
+    async def stop_animation(self, animation_id: str) -> None:
+        registry = self._m._animation_registry
+        if registry is None:
+            return
+        await registry.stop(animation_id)
+
+    def sound_is_looping(self, sound_id: str) -> bool:
+        snd = self._m.sound_store.get(sound_id)
+        return bool(snd and snd.loop)
+
+    def animation_is_looping(self, animation_id: str) -> bool:
+        anim = self._m.animation_store.get(animation_id)
+        return bool(anim and anim.loop)
+
+
 class StateManager:
     """Manages system state and provides data for clients."""
 
@@ -853,6 +916,12 @@ class StateManager:
                 self.logger.error(
                     f"Playlist migration failed: {type(e).__name__}: {e}")
         self._animation_registry = None
+        # Node soundboard sender, mirrored here by
+        # WebSocketHandler.set_soundboard_callback so an animation's
+        # sound board-items can reach a node without the player needing
+        # the websocket handler. None until the server node wires it.
+        self._soundboard_dispatch: Optional[
+            Callable[[str, str, dict, str], None]] = None
         # Cached rig evaluator + the pose generation that invalidates it.
         # See _rig_evaluator: rebuilding parses the URDF, so it must not
         # happen per slider tick.
@@ -3440,6 +3509,19 @@ class StateManager:
         return {"success": True, "added": len(added),
                 "skipped": len(skipped), "sounds": self.list_sounds()}
 
+    def reprobe_sound(self, sound_id: str) -> Dict[str, Any]:
+        """Re-measure a clip whose audio file was replaced on disk.
+
+        A plain save keeps a duration it already has, so that editing a
+        name or volume doesn't re-read the file each time. This is the
+        explicit "the file changed under it" path.
+        """
+        snd = self.sound_store.reprobe(sound_id)
+        if snd is None:
+            return {"success": False, "message": "Sound not found"}
+        return {"success": True, "sound": snd.to_dict(),
+                "duration": snd.duration}
+
     def delete_sound(self, sound_id: str) -> Dict[str, Any]:
         if not self.sound_store.delete(sound_id):
             return {"success": False, "message": "Sound not found"}
@@ -4046,6 +4128,7 @@ class StateManager:
             return bool(getattr(evaluator, "_estop_active", False))
 
         self._animation_registry = AnimationPlayerRegistry(
+            board=_BoardControl(self),
             set_urdf_joint_value=evaluator.set_urdf_joint_value,
             set_ws_input=evaluator.set_ws_input,
             set_topic_channel=bridge.set_topic_channel,

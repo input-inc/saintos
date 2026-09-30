@@ -17,6 +17,7 @@ import shutil
 import threading
 from typing import Dict, List, Optional
 
+from saint_server.animation.audio_probe import probe_duration
 from saint_server.animation.models import (
     PLAYLIST_KINDS, Animation, Playlist, Pose, Sound,
 )
@@ -270,6 +271,7 @@ class SoundStore:
                 "loop": raw.get("loop", False),
                 "loop_count": raw.get("loop_count", 0),
                 "position": raw.get("position", 0),
+                "duration": raw.get("duration", 0.0),
                 "modified": raw.get("modified", ""),
             })
         # Stable order for the flat list: explicit position, then name
@@ -299,9 +301,31 @@ class SoundStore:
         if sound.position == 0 and self.store.read_raw(sound.id) is None:
             peers = self.list()
             sound.position = max((s["position"] for s in peers), default=0) + 1
+        # Measure the clip if we have not, or if the file changed under
+        # an existing entry. Probing is cheap for the common .wav case
+        # (a header read) and bounded for the rest; an unreadable file
+        # just leaves duration at 0 = unknown.
+        prior = self.store.read_raw(sound.id)
+        path_changed = bool(prior) and prior.get("file_path") != sound.file_path
+        if sound.file_path and (sound.duration <= 0 or path_changed):
+            sound.duration = probe_duration(sound.file_path)
         sound.stamp()
         self.store.write_raw(sound.id, sound.to_dict())
         return sound
+
+    def reprobe(self, sound_id: str) -> Optional[Sound]:
+        """Re-measure a clip whose file was replaced on disk.
+
+        Saving alone will not do it: save keeps a duration it already
+        has, so that a normal edit does not re-read the file every time.
+        """
+        snd = self.get(sound_id)
+        if snd is None:
+            return None
+        snd.duration = probe_duration(snd.file_path)
+        snd.stamp()
+        self.store.write_raw(snd.id, snd.to_dict())
+        return snd
 
     def delete(self, sound_id: str) -> bool:
         return self.store.delete(sound_id)

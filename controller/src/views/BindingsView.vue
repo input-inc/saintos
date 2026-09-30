@@ -19,10 +19,12 @@ import {
     type DigitalBinding,
     type AnalogInput,
     type DigitalInput,
+    BINDABLE_DIGITAL_INPUTS,
+    ALL_SOURCES,
+    digitalInputLabel,
     type ButtonTrigger,
     type DigitalAction,
     type AnalogAction,
-    type PresetPanel,
     type NavigateDirection,
     type ControlTarget,
     type ModifierEffect,
@@ -47,23 +49,6 @@ const ANALOG_INPUTS: { value: AnalogInput; label: string }[] = [
     { value: 'gyro_yaw', label: 'Gyro Yaw' },
 ];
 
-const DIGITAL_INPUTS: { value: DigitalInput; label: string }[] = [
-    { value: 'a', label: 'A Button' },
-    { value: 'b', label: 'B Button' },
-    { value: 'x', label: 'X Button' },
-    { value: 'y', label: 'Y Button' },
-    { value: 'lb', label: 'Left Bumper' },
-    { value: 'rb', label: 'Right Bumper' },
-    { value: 'd_pad_up', label: 'D-Pad Up' },
-    { value: 'd_pad_down', label: 'D-Pad Down' },
-    { value: 'd_pad_left', label: 'D-Pad Left' },
-    { value: 'd_pad_right', label: 'D-Pad Right' },
-    { value: 'start', label: 'Start' },
-    { value: 'select', label: 'Select' },
-    { value: 'left_stick', label: 'Left Stick Press' },
-    { value: 'right_stick', label: 'Right Stick Press' },
-];
-
 const BUTTON_TRIGGERS: { value: ButtonTrigger; label: string }[] = [
     { value: 'press', label: 'Press' },
     { value: 'release', label: 'Release' },
@@ -73,10 +58,10 @@ const BUTTON_TRIGGERS: { value: ButtonTrigger; label: string }[] = [
 ];
 
 const DIGITAL_ACTION_TYPES = [
-    { value: 'show_panel', label: 'Show Panel' },
-    { value: 'hide_panel', label: 'Hide Panel' },
-    { value: 'activate_preset', label: 'Activate Preset' },
-    { value: 'navigate_panel', label: 'Navigate Panel' },
+    { value: 'show_panel', label: 'Show Board' },
+    { value: 'hide_panel', label: 'Hide Board' },
+    { value: 'activate_board_item', label: 'Activate Board Item' },
+    { value: 'navigate_panel', label: 'Navigate Board' },
     { value: 'select_panel_item', label: 'Select Panel Item' },
     { value: 'toggle_output', label: 'Toggle Output' },
     { value: 'cycle_output', label: 'Cycle Output' },
@@ -99,7 +84,7 @@ const NAVIGATE_DIRECTIONS: { value: NavigateDirection; label: string }[] = [
 const tabs: { id: TabId; label: string; icon: string }[] = [
     { id: 'analog', label: 'Analog', icon: 'joystick' },
     { id: 'digital', label: 'Buttons', icon: 'gamepad' },
-    { id: 'panels', label: 'Preset Panels', icon: 'dashboard' },
+    { id: 'panels', label: 'Boards', icon: 'dashboard' },
     { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
 
@@ -140,12 +125,15 @@ const digitalForm = reactive({
     trigger: 'press' as ButtonTrigger,
     actionType: 'show_panel',
     panelId: '',
-    // show_panel: optionally open the panel filtered to a group.
-    useDefaultGroup: false,
+    // show_panel: which playlist the board opens on ('' = all items).
     defaultGroup: '',
     // show_panel (press trigger): keep the panel up after selecting an item.
     keepPanelOpen: false,
-    presetId: '',
+    // activate_board_item: which board, which playlist (picker scope
+    // only), which item.
+    itemBoardId: '',
+    itemPlaylistId: '',
+    itemId: '',
     direction: 'next_item' as NavigateDirection,
     targetId: '',
     cycleValues: '',
@@ -162,8 +150,6 @@ const analogBindings = computed<AnalogBinding[]>(() =>
     bindings.activeProfile.value?.analogBindings ?? []);
 const digitalBindings = computed<DigitalBinding[]>(() =>
     bindings.activeProfile.value?.digitalBindings ?? []);
-const presetPanels = computed<PresetPanel[]>(() =>
-    bindings.activeProfile.value?.presetPanels ?? []);
 
 // Headless-UI-friendly options.
 const profileOptions = computed(() =>
@@ -196,24 +182,88 @@ const channelOptionsDigital = computed(() => {
         discovery.getChannelsForTopic(digitalForm.topic)
             .map(c => ({ value: c.field, label: c.label })));
 });
+// Boards only — a panel with no server source has nothing to show, and
+// the controller can no longer create one.
 const panelOptions = computed(() =>
-    presetPanels.value.map(p => ({ value: p.id, label: p.name })));
-// Playlists available for the panel currently selected in the show_panel
-// form — populates the "opens on" dropdown. Empty when the panel's kind
-// has no playlists (then the toggle is hidden). The value saved is the
-// playlist ID, so renaming a playlist on the server doesn't break the
-// binding the way the old stored group NAME did.
-const defaultGroupOptions = computed(() =>
-    bindings.groupsForPanel(digitalForm.panelId).map(p => ({ value: p.id, label: p.name })));
-// When the operator flips the toggle on, pre-select the first playlist
-// so the dropdown isn't blank (empty would silently save as "All").
-watch(() => digitalForm.useDefaultGroup, (on) => {
-    if (on && !digitalForm.defaultGroup) {
-        digitalForm.defaultGroup = defaultGroupOptions.value[0]?.value ?? '';
+    bindings.boards.value.map(b => ({ value: b.id, label: b.name })));
+
+function boardName(panelId: string): string {
+    return bindings.boards.value.find(b => b.id === panelId)?.name ?? panelId;
+}
+
+function playlistName(panelId: string, playlistId: string): string {
+    return bindings.groupsForPanel(panelId).find(p => p.id === playlistId)?.name
+        ?? playlistId;
+}
+// Which playlist the board opens on. "All items" is the default and is
+// a real option rather than a checkbox to un-tick — choosing the scope
+// is part of choosing the board, not an advanced extra.
+//
+// The value saved is the playlist ID, so renaming a playlist on the
+// server doesn't break the binding the way the old stored group NAME
+// did. Empty when the board's kind has no playlists, and then the whole
+// row is hidden: there is nothing to choose between.
+const defaultGroupOptions = computed(() => [
+    { value: '', label: 'All items' },
+    ...bindings.groupsForPanel(digitalForm.panelId)
+        .map(p => ({ value: p.id, label: p.name })),
+]);
+
+// Switching board invalidates the playlist: they are per-board, so a
+// carried-over id would filter the new board to a list that isn't its
+// own — and silently, since the select would show a stale name.
+watch(() => digitalForm.panelId, () => { digitalForm.defaultGroup = ''; });
+
+// ── Activate Board Item: board → playlist → item ─────────────────────
+//
+// The playlist is a picker scope, not part of the action: narrowing to
+// "Greetings" just shortens the item list. What gets stored and fired is
+// the item id, so the binding survives the playlist being renamed or
+// deleted.
+
+const itemPlaylistOptions = computed(() => [
+    { value: '', label: 'All items' },
+    ...bindings.groupsForPanel(digitalForm.itemBoardId)
+        .map(p => ({ value: p.id, label: p.name })),
+]);
+
+const itemOptions = computed(() =>
+    bindings.boardItems(digitalForm.itemBoardId,
+                        digitalForm.itemPlaylistId || ALL_SOURCES)
+        .map(i => ({ value: i.id, label: i.name })));
+
+function itemName(panelId: string, itemId: string): string {
+    return bindings.boardItems(panelId, ALL_SOURCES)
+        .find(i => i.id === itemId)?.name ?? itemId;
+}
+
+// Changing board clears the playlist AND the item — both belong to the
+// board that was selected before.
+watch(() => digitalForm.itemBoardId, () => {
+    digitalForm.itemPlaylistId = '';
+    digitalForm.itemId = '';
+});
+
+// Narrowing the playlist can exclude the chosen item. Leaving it set
+// would save a binding whose item the operator can no longer see in the
+// form — so drop it rather than keep an invisible selection.
+watch(() => digitalForm.itemPlaylistId, () => {
+    if (!itemOptions.value.some(o => o.value === digitalForm.itemId)) {
+        digitalForm.itemId = '';
+    }
+});
+
+// Keep a valid item selected once the board's library arrives: the list
+// streams in from the server, so it is often empty when the form opens.
+watch(itemOptions, (options) => {
+    if (!digitalForm.itemId && options.length) {
+        digitalForm.itemId = options[0].value;
     }
 });
 const analogInputOptions = ANALOG_INPUTS;
-const digitalInputOptions = DIGITAL_INPUTS;
+// From the catalog in useBindings, not a copy of it — a hand-written
+// list here is what left the Steam Deck's L4/L5/R4/R5 unbindable.
+const digitalInputOptions = BINDABLE_DIGITAL_INPUTS;
 const buttonTriggerOptions = BUTTON_TRIGGERS;
 const digitalActionTypeOptions = DIGITAL_ACTION_TYPES;
 const navigateDirectionOptions = NAVIGATE_DIRECTIONS;
@@ -224,7 +274,7 @@ function getAnalogInputLabel(i: AnalogInput): string {
     return ANALOG_INPUTS.find(x => x.value === i)?.label ?? i;
 }
 function getDigitalInputLabel(i: DigitalInput): string {
-    return DIGITAL_INPUTS.find(x => x.value === i)?.label ?? i;
+    return digitalInputLabel(i);
 }
 
 /** Friendly target name. For WS inputs, resolve sheet_id to the
@@ -258,9 +308,11 @@ function formatAnalogAction(action: AnalogAction): string {
 
 function formatDigitalAction(action: DigitalAction): string {
     switch (action.type) {
-        case 'show_panel':        return `Show Panel: ${action.panel_id}`;
-        case 'hide_panel':        return 'Hide Panel';
-        case 'activate_preset':   return `Activate Preset: ${action.preset_id}`;
+        case 'show_panel':        return `Show Board: ${boardName(action.panel_id)}` + (action.default_group ? ` / ${playlistName(action.panel_id, action.default_group)}` : '');
+        case 'hide_panel':        return 'Hide Board';
+        case 'activate_board_item':
+            return `Activate: ${boardName(action.panel_id)} / ${itemName(action.panel_id, action.item_id)}`;
+        case 'activate_preset':   return `Activate Preset: ${action.preset_id} (legacy)`;
         case 'navigate_panel':    return `Navigate: ${action.direction}`;
         case 'select_panel_item': return 'Select Panel Item';
         case 'toggle_output':     return `Toggle: ${action.target_id}`;
@@ -424,15 +476,17 @@ function saveAnalogBinding(): void {
 }
 
 function resetDigitalForm(): void {
-    const panels = presetPanels.value;
+    // Default to the first BOARD, not the first panel: a show_panel
+    // binding pointed at a sourceless panel would open an empty overlay.
     digitalForm.input = 'a';
     digitalForm.trigger = 'press';
     digitalForm.actionType = 'show_panel';
-    digitalForm.panelId = panels[0]?.id ?? '';
-    digitalForm.useDefaultGroup = false;
+    digitalForm.panelId = bindings.boards.value[0]?.id ?? '';
     digitalForm.defaultGroup = '';
     digitalForm.keepPanelOpen = false;
-    digitalForm.presetId = '';
+    digitalForm.itemBoardId = bindings.boards.value[0]?.id ?? '';
+    digitalForm.itemPlaylistId = '';
+    digitalForm.itemId = '';
     digitalForm.direction = 'next_item';
     digitalForm.targetId = '';
     digitalForm.cycleValues = '';
@@ -449,11 +503,18 @@ function loadDigitalForm(binding: DigitalBinding): void {
     switch (binding.action.type) {
         case 'show_panel':
             digitalForm.panelId = binding.action.panel_id;
-            digitalForm.useDefaultGroup = !!binding.action.default_group;
             digitalForm.defaultGroup = binding.action.default_group ?? '';
             digitalForm.keepPanelOpen = !!binding.action.keep_open;
             break;
-        case 'activate_preset': digitalForm.presetId = binding.action.preset_id; break;
+        case 'activate_board_item':
+            digitalForm.itemBoardId = binding.action.panel_id;
+            digitalForm.itemPlaylistId = binding.action.playlist_id ?? '';
+            digitalForm.itemId = binding.action.item_id;
+            break;
+        case 'activate_preset':
+            // Legacy binding from before boards. Nothing can create one
+            // now; it stays editable only so it can be replaced.
+            break;
         case 'navigate_panel':  digitalForm.direction = binding.action.direction; break;
         case 'toggle_output':   digitalForm.targetId = binding.action.target_id; break;
         case 'cycle_output':
@@ -485,7 +546,7 @@ function saveDigitalBinding(): void {
                 panel_id: digitalForm.panelId,
                 // Only persist a default group when toggled on and set;
                 // otherwise the panel opens on "All".
-                ...(digitalForm.useDefaultGroup && digitalForm.defaultGroup
+                ...(digitalForm.defaultGroup
                     ? { default_group: digitalForm.defaultGroup }
                     : {}),
                 // keep_open only applies to press-trigger panels; don't
@@ -497,8 +558,16 @@ function saveDigitalBinding(): void {
             break;
         case 'hide_panel':
             action = { type: 'hide_panel' }; break;
-        case 'activate_preset':
-            action = { type: 'activate_preset', preset_id: digitalForm.presetId }; break;
+        case 'activate_board_item':
+            action = {
+                type: 'activate_board_item',
+                panel_id: digitalForm.itemBoardId,
+                item_id: digitalForm.itemId,
+                ...(digitalForm.itemPlaylistId
+                    ? { playlist_id: digitalForm.itemPlaylistId }
+                    : {}),
+            };
+            break;
         case 'navigate_panel':
             action = { type: 'navigate_panel', direction: digitalForm.direction }; break;
         case 'select_panel_item':
@@ -541,25 +610,53 @@ function cancelEdit(): void {
     isNewBinding.value = false;
 }
 
-// ─── Preset panel ────────────────────────────────────────────────────
+// ─── Boards browser ──────────────────────────────────────────────────
+//
+// The three boards are the server's — Animations, Poses, Sounds — and
+// this tab browses them: pick a board, pick one of its playlists, tap an
+// item to fire it. There is deliberately no way to create a panel here:
+// the boards mirror what the server's Boards page manages, and the
+// "+ Add Panel" button that used to sit here made an empty panel with no
+// editor to fill it.
 
-function addPresetPanel(): void {
-    const panel: PresetPanel = {
-        id: `panel_${Date.now()}`,
-        name: 'New Panel',
-        icon: 'folder',
-        color: '#8b5cf6',
-        presets: [],
-        layout: 'grid',
-        columns: 4,
-        itemsPerPage: 8,
-    };
-    bindings.addPresetPanel(panel);
+const boards = computed(() => bindings.boards.value);
+const selectedBoardId = ref('');
+const selectedPlaylistId = ref(ALL_SOURCES);
+
+const selectedBoard = computed(() =>
+    boards.value.find(b => b.id === selectedBoardId.value) ?? boards.value[0] ?? null);
+
+// Default to the first board, and never leave a board selected that the
+// profile no longer has.
+watch(boards, (list) => {
+    if (!list.some(b => b.id === selectedBoardId.value)) {
+        selectedBoardId.value = list[0]?.id ?? '';
+        selectedPlaylistId.value = ALL_SOURCES;
+    }
+}, { immediate: true });
+
+function selectBoard(id: string): void {
+    selectedBoardId.value = id;
+    // Playlists are per-board, so carrying one across would filter the
+    // new board to a list that isn't its own.
+    selectedPlaylistId.value = ALL_SOURCES;
 }
 
-function editPresetPanel(panel: PresetPanel): void {
-    // TODO: panel editor modal — parity with the Angular TODO.
-    console.log('Edit panel:', panel);
+const boardPlaylists = computed(() =>
+    selectedBoard.value ? bindings.groupsForPanel(selectedBoard.value.id) : []);
+
+const boardItems = computed(() =>
+    selectedBoard.value
+        ? bindings.boardItems(selectedBoard.value.id, selectedPlaylistId.value)
+        : []);
+
+function countOnBoard(playlistId: string): number {
+    if (!selectedBoard.value) return 0;
+    return bindings.boardItems(selectedBoard.value.id, playlistId).length;
+}
+
+function activateBoardItem(itemId: string): void {
+    if (selectedBoard.value) bindings.triggerBoardItem(selectedBoard.value.id, itemId);
 }
 
 function updatePanelActivation(mode: 'press' | 'hold'): void {
@@ -700,44 +797,74 @@ onMounted(() => {
             </p>
         </div>
 
-        <!-- Panels tab -->
+        <!-- Boards tab: browse the server's boards and fire items. -->
         <div v-if="activeTab === 'panels'" class="space-y-4">
-            <div class="flex justify-between items-center">
-                <h3 class="text-lg font-medium">Preset Panels</h3>
-                <button class="btn btn-primary text-sm" @click="addPresetPanel">+ Add Panel</button>
-            </div>
-            <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
-                <div v-for="panel in presetPanels" :key="panel.id"
-                     class="card cursor-pointer hover:border-saint-primary transition-colors"
-                     @click="editPresetPanel(panel)">
-                    <div class="flex items-center gap-3 mb-3">
-                        <span class="material-symbols-outlined text-2xl" :style="{ color: panel.color }">
-                            {{ panel.icon }}
-                        </span>
-                        <div>
-                            <div class="font-medium">{{ panel.name }}</div>
-                            <div class="text-sm text-saint-text-muted">{{ panel.presets.length }} presets</div>
-                        </div>
-                    </div>
-                    <div class="flex flex-wrap gap-1">
-                        <span v-for="preset in panel.presets.slice(0, 4)" :key="preset.id"
-                              class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-saint-surface-light">
-                            <span class="material-symbols-outlined text-sm"
-                                  :style="{ color: preset.color || panel.color }">
-                                {{ preset.icon }}
-                            </span>
-                            {{ preset.name }}
-                        </span>
-                        <span v-if="panel.presets.length > 4"
-                              class="px-2 py-1 rounded-full text-xs bg-saint-surface-light text-saint-text-muted">
-                            +{{ panel.presets.length - 4 }} more
-                        </span>
-                    </div>
-                </div>
-                <p v-if="presetPanels.length === 0" class="text-saint-text-muted text-center py-8 col-span-full">
-                    No preset panels configured
+            <div>
+                <h3 class="text-lg font-medium">Boards</h3>
+                <p class="text-sm text-saint-text-muted">
+                    Animations, poses and sounds live on the robot. Add and
+                    organise them on the server's Boards page — here you can
+                    browse them and fire one to check it.
                 </p>
             </div>
+
+            <!-- Board picker -->
+            <div class="flex flex-wrap gap-2">
+                <button v-for="b in boards" :key="b.id"
+                        class="board-chip"
+                        :class="{ 'board-chip-active': selectedBoard?.id === b.id }"
+                        :style="selectedBoard?.id === b.id ? { borderColor: b.color } : {}"
+                        @click="selectBoard(b.id)">
+                    <span class="material-symbols-outlined text-lg" :style="{ color: b.color }">
+                        {{ b.icon }}
+                    </span>
+                    {{ b.name }}
+                </button>
+            </div>
+
+            <template v-if="selectedBoard">
+                <!-- Playlists for this board. Hidden when the board has
+                     none: a lone "All" row is just a row. -->
+                <div v-if="boardPlaylists.length" class="flex flex-wrap gap-2">
+                    <button class="playlist-chip"
+                            :class="{ 'playlist-chip-active': selectedPlaylistId === ALL_SOURCES }"
+                            @click="selectedPlaylistId = ALL_SOURCES">
+                        All
+                        <span class="text-xs text-saint-text-muted">{{ countOnBoard(ALL_SOURCES) }}</span>
+                    </button>
+                    <button v-for="pl in boardPlaylists" :key="pl.id"
+                            class="playlist-chip"
+                            :class="{ 'playlist-chip-active': selectedPlaylistId === pl.id }"
+                            @click="selectedPlaylistId = pl.id">
+                        {{ pl.name }}
+                        <span class="text-xs text-saint-text-muted">{{ countOnBoard(pl.id) }}</span>
+                    </button>
+                </div>
+
+                <!-- Items -->
+                <div v-if="boardItems.length" class="grid grid-cols-2 lg:grid-cols-3 gap-2">
+                    <button v-for="item in boardItems" :key="item.id"
+                            class="board-item"
+                            @click="activateBoardItem(item.id)">
+                        <span class="material-symbols-outlined text-xl shrink-0"
+                              :style="{ color: selectedBoard.color }">
+                            {{ item.icon || 'radio_button_unchecked' }}
+                        </span>
+                        <span class="flex-1 truncate text-left">{{ item.name }}</span>
+                        <span class="material-symbols-outlined text-lg text-saint-text-muted">
+                            play_arrow
+                        </span>
+                    </button>
+                </div>
+                <p v-else class="text-saint-text-muted text-center py-8">
+                    {{ selectedPlaylistId === ALL_SOURCES
+                        ? `No ${selectedBoard.name.toLowerCase()} on the server yet`
+                        : 'This playlist is empty' }}
+                </p>
+            </template>
+            <p v-else class="text-saint-text-muted text-center py-8">
+                No boards available
+            </p>
         </div>
 
         <!-- Settings tab -->
@@ -933,20 +1060,18 @@ onMounted(() => {
                     </div>
 
                     <div v-if="digitalForm.actionType === 'show_panel'">
-                        <label class="block text-sm text-saint-text-muted mb-1">Panel</label>
+                        <label class="block text-sm text-saint-text-muted mb-1">Board</label>
                         <SaintSelect v-model="digitalForm.panelId" :options="panelOptions" />
 
-                        <!-- Opens on: only offered when the chosen panel's
-                             kind actually has playlists. -->
-                        <template v-if="defaultGroupOptions.length > 0">
-                            <label class="flex items-center gap-2 mt-3 text-sm text-saint-text cursor-pointer">
-                                <input type="checkbox" v-model="digitalForm.useDefaultGroup">
-                                Open on a specific playlist
+                        <!-- Which playlist the board opens on. Only shown
+                             when the board's kind actually has playlists —
+                             otherwise the only choice is "All items". -->
+                        <template v-if="defaultGroupOptions.length > 1">
+                            <label class="block text-sm text-saint-text-muted mb-1 mt-3">
+                                Opens on
                             </label>
-                            <SaintSelect v-if="digitalForm.useDefaultGroup"
-                                         v-model="digitalForm.defaultGroup"
-                                         :options="defaultGroupOptions"
-                                         class="mt-2" />
+                            <SaintSelect v-model="digitalForm.defaultGroup"
+                                         :options="defaultGroupOptions" />
                         </template>
 
                         <!-- Keep-open: only meaningful for a press (toggle)
@@ -957,6 +1082,31 @@ onMounted(() => {
                             Keep panel open after selecting
                         </label>
                     </div>
+                    <div v-if="digitalForm.actionType === 'activate_board_item'" class="space-y-3">
+                        <div>
+                            <label class="block text-sm text-saint-text-muted mb-1">Board</label>
+                            <SaintSelect v-model="digitalForm.itemBoardId" :options="panelOptions" />
+                        </div>
+                        <!-- Playlist narrows the item list. It is a picker
+                             scope, not part of what fires: the binding
+                             stores the item id, so deleting the playlist
+                             later doesn't break it. -->
+                        <div v-if="itemPlaylistOptions.length > 1">
+                            <label class="block text-sm text-saint-text-muted mb-1">Playlist</label>
+                            <SaintSelect v-model="digitalForm.itemPlaylistId"
+                                         :options="itemPlaylistOptions" />
+                        </div>
+                        <div>
+                            <label class="block text-sm text-saint-text-muted mb-1">Item</label>
+                            <SaintSelect v-model="digitalForm.itemId" :options="itemOptions" />
+                            <p v-if="itemOptions.length === 0"
+                               class="text-xs text-saint-text-muted mt-1">
+                                Nothing on this board yet — add items on the
+                                server's Boards page.
+                            </p>
+                        </div>
+                    </div>
+
                     <div v-if="digitalForm.actionType === 'activate_preset'">
                         <label class="block text-sm text-saint-text-muted mb-1">Preset ID</label>
                         <input type="text" class="input w-full" v-model="digitalForm.presetId">
@@ -1009,3 +1159,43 @@ onMounted(() => {
         </div>
     </div>
 </template>
+
+<style scoped>
+/* Boards browser. Chips and rows are touch-sized: this is reached with
+   a thumb on a Deck, not a pointer. */
+.board-chip,
+.playlist-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.875rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--saint-surface-light, #334155);
+    background: var(--saint-surface, #1e293b);
+    color: var(--saint-text, #e2e8f0);
+    font-size: 0.875rem;
+    transition: background-color 0.12s;
+}
+.board-chip:hover,
+.playlist-chip:hover { background: var(--saint-surface-light, #334155); }
+/* The active board keeps its own colour on the border, so the chips read
+   as the same three boards the panel overlay uses. */
+.board-chip-active { border-width: 2px; }
+.playlist-chip-active {
+    background: var(--saint-surface-light, #334155);
+    border-color: var(--saint-primary, #8b5cf6);
+}
+.board-item {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    padding: 0.625rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--saint-surface-light, #334155);
+    background: var(--saint-surface, #1e293b);
+    color: var(--saint-text, #e2e8f0);
+    min-width: 0;
+    transition: background-color 0.12s;
+}
+.board-item:hover { background: var(--saint-surface-light, #334155); }
+</style>

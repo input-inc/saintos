@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Protocol, Tuple
 
 from saint_server.animation.frame import (
     PoseLookup,
@@ -63,6 +63,43 @@ EstopGate = Callable[[], bool]   # returns True iff estop is engaged
 _MIN_TICK_SLEEP = 0.001
 
 
+#: How many animations may nest before we refuse to start another.
+#: An animation triggering an animation is a legitimate way to build a
+#: show out of parts, but the graph is authored, not validated — a cycle
+#: that self-reference checks miss (A → B → A) would otherwise spawn
+#: players until the process died. Four is deeper than any real show and
+#: shallow enough to stay debuggable.
+MAX_ANIMATION_NESTING = 4
+
+
+class BoardControl(Protocol):
+    """What a player needs to fire board items.
+
+    Kept as one object rather than four loose callables because the
+    registry supplies all of them together, and a partially-wired set is
+    a worse failure than none.
+    """
+
+    def play_sound(self, sound_id: str) -> Optional[str]:
+        """Play a soundboard entry. Returns the node it plays on (so it
+        can be stopped again), or None if it could not be resolved."""
+
+    def stop_sound(self, node_id: str) -> None:
+        ...
+
+    async def start_animation(self, animation_id: str, depth: int) -> bool:
+        """Start a nested animation. Returns False if it was refused."""
+
+    async def stop_animation(self, animation_id: str) -> None:
+        ...
+
+    def sound_is_looping(self, sound_id: str) -> bool:
+        ...
+
+    def animation_is_looping(self, animation_id: str) -> bool:
+        ...
+
+
 class AnimationPlayer:
     """Plays back a single Animation.
 
@@ -84,9 +121,22 @@ class AnimationPlayer:
         on_finished: Optional[Callable[[str], None]] = None,
         pose_lookup: Optional[PoseLookup] = None,
         neutral: Optional[Dict[str, float]] = None,
+        board: Optional["BoardControl"] = None,
+        depth: int = 0,
         logger=None,
     ):
         self.anim = anim
+        # Board-item control (play a sound, start a nested animation).
+        # Absent = those triggers log and are skipped rather than failing
+        # the whole animation.
+        self._board = board
+        # How many animations deep this one is. Guards runaway nesting —
+        # see _dispatch_board_item.
+        self._depth = depth
+        # Board items this animation started that must be stopped again,
+        # as (at_time, kind, key). Only looping items land here: a
+        # one-shot ends on its own.
+        self._pending_stops: List[Tuple[float, str, str]] = []
         self._set_urdf_joint_value = set_urdf_joint_value
         self._set_ws_input = set_ws_input
         self._set_topic_channel = set_topic_channel
@@ -211,6 +261,7 @@ class AnimationPlayer:
                 # downstream operators).
                 self._tick_value_tracks(self._t)
                 self._fire_triggers(last_t, self._t)
+                self._fire_pending_stops(last_t, self._t)
 
                 last_t = self._t
                 self._t += dt
@@ -228,6 +279,8 @@ class AnimationPlayer:
                 sleep = max(_MIN_TICK_SLEEP, next_tick - loop.time())
                 await asyncio.sleep(sleep)
         finally:
+            # Whatever this animation started, it owns until it ends.
+            self._stop_all_board_items()
             if self._on_finished is not None:
                 try:
                     self._on_finished(self.anim.id)
@@ -312,12 +365,126 @@ class AnimationPlayer:
                 )
             elif kf.target_kind == "peripheral_command":
                 self._dispatch_peripheral_command(kf)
+            elif kf.target_kind in ("sound", "animation"):
+                self._dispatch_board_item(kf)
             else:
                 self._log("warn",
                           f"Unknown trigger target_kind: {kf.target_kind}")
         except Exception as e:
             self._log("error",
                       f"Trigger dispatch failed at t={kf.time}: {e}")
+
+    def _dispatch_board_item(self, kf: TriggerKeyframe) -> None:
+        """Fire a board item — a sound or another animation.
+
+        Poses are deliberately not here: a pose is a weighted clip with
+        blending and per-joint overrides, which a one-shot fire cannot
+        express, so it stays a value track. The editor still presents all
+        three under one "Board Item" affordance.
+
+        A LOOPING item is stopped again at ``time + duration`` (the bar
+        the operator dragged on the timeline). A one-shot ends on its
+        own, so `duration` is display only and no stop is scheduled —
+        otherwise dragging a non-looping bar would silently truncate the
+        clip, which is a different feature.
+        """
+        if not kf.target:
+            self._log("warn", f"{kf.target_kind} trigger at t={kf.time} "
+                              f"has no item id")
+            return
+        item_id = str(kf.target[0])
+        if self._board is None:
+            self._log("warn",
+                      f"{kf.target_kind} trigger at t={kf.time} but no board "
+                      f"control wired; dropping")
+            return
+
+        if kf.target_kind == "sound":
+            node_id = self._board.play_sound(item_id)
+            if node_id and kf.duration > 0 \
+                    and self._board.sound_is_looping(item_id):
+                self._pending_stops.append(
+                    (kf.time + kf.duration, "sound", node_id))
+            return
+
+        # animation
+        if item_id == self.anim.id:
+            # Self-reference is the one cycle we can name precisely, so
+            # say so rather than letting the depth limit swallow it.
+            self._log("warn",
+                      f"Animation '{self.anim.id}' triggers itself at "
+                      f"t={kf.time}; skipped")
+            return
+        if self._depth + 1 >= MAX_ANIMATION_NESTING:
+            self._log("warn",
+                      f"Animation '{self.anim.id}' nests deeper than "
+                      f"{MAX_ANIMATION_NESTING} at t={kf.time}; "
+                      f"'{item_id}' not started")
+            return
+        # start_animation is async and we are on the tick path, so hand
+        # it to the loop rather than blocking the frame.
+        self._spawn(self._start_nested(item_id, kf))
+
+    async def _start_nested(self, item_id: str, kf: TriggerKeyframe) -> None:
+        if self._board is None:
+            return
+        try:
+            started = await self._board.start_animation(item_id, self._depth + 1)
+        except Exception as e:
+            self._log("error", f"start_animation({item_id}) failed: {e}")
+            return
+        if started and kf.duration > 0 \
+                and self._board.animation_is_looping(item_id):
+            self._pending_stops.append(
+                (kf.time + kf.duration, "animation", item_id))
+
+    def _spawn(self, coro) -> None:
+        """Run a coroutine off the tick path, never blocking a frame."""
+        try:
+            asyncio.get_event_loop().create_task(coro)
+        except RuntimeError:
+            # No running loop (unit test calling _fire_triggers directly).
+            coro.close()
+
+    def _fire_pending_stops(self, t_prev: float, t_now: float) -> None:
+        """Stop looping board items whose dragged length has elapsed.
+
+        Uses the same (t_prev, t_now] window the triggers do, so a pause
+        can't drop a stop and a loop-around can't fire it twice.
+        """
+        if not self._pending_stops:
+            return
+        due = [p for p in self._pending_stops if t_prev < p[0] <= t_now]
+        if not due:
+            return
+        self._pending_stops = [p for p in self._pending_stops if p not in due]
+        for _at, kind, key in due:
+            try:
+                if kind == "sound":
+                    self._board.stop_sound(key)
+                else:
+                    self._spawn(self._board.stop_animation(key))
+            except Exception as e:
+                self._log("error", f"stopping {kind} '{key}' failed: {e}")
+
+    def _stop_all_board_items(self) -> None:
+        """Stop everything this animation started that is still running.
+
+        Called when the animation itself stops. A nested looping
+        animation outliving its parent is the kind of thing an operator
+        discovers as a robot that will not stop moving.
+        """
+        pending, self._pending_stops = self._pending_stops, []
+        if self._board is None:
+            return
+        for _at, kind, key in pending:
+            try:
+                if kind == "sound":
+                    self._board.stop_sound(key)
+                else:
+                    self._spawn(self._board.stop_animation(key))
+            except Exception as e:
+                self._log("error", f"stopping {kind} '{key}' failed: {e}")
 
     def _dispatch_peripheral_command(self, kf: TriggerKeyframe) -> None:
         """Fire a peripheral_command trigger — the path animations use
@@ -388,6 +555,7 @@ class AnimationPlayerRegistry:
         apply_frame: Optional[ApplyFrame] = None,
         pose_source: Optional[Callable[[], PoseLookup]] = None,
         neutral_source: Optional[Callable[[], Dict[str, float]]] = None,
+        board: Optional[BoardControl] = None,
         logger=None,
     ):
         self._set_urdf_joint_value = set_urdf_joint_value
@@ -401,10 +569,15 @@ class AnimationPlayerRegistry:
         # between runs take effect on the next start.
         self._pose_source = pose_source
         self._neutral_source = neutral_source
+        # Board-item control. The registry is also what a nested
+        # animation trigger comes back through, so the object it hands
+        # players routes start_animation back here.
+        self._board = board
         self.logger = logger
         self._players: Dict[str, AnimationPlayer] = {}
 
-    async def start(self, anim: Animation, loop: Optional[bool] = None) -> AnimationPlayer:
+    async def start(self, anim: Animation, loop: Optional[bool] = None,
+                    depth: int = 0) -> AnimationPlayer:
         # Stop any prior instance — start means "start from t=0".
         if anim.id in self._players:
             await self._players[anim.id].stop()
@@ -419,6 +592,8 @@ class AnimationPlayerRegistry:
             apply_frame=self._apply_frame,
             estop_active=self._estop_active,
             on_finished=self._on_player_finished,
+            board=self._board,
+            depth=depth,
             pose_lookup=self._pose_source() if self._pose_source else None,
             neutral=self._neutral_source() if self._neutral_source else None,
             logger=self.logger,
