@@ -186,11 +186,26 @@ class TestShippedConfigs:
         view = derive_capabilities(chip, board)
         gpios = {p["gpio"] for p in view["pins"]}
         # The header-pad pins the operator should see.
-        assert {0, 1, 2, 3, 5, 6, 9, 12, 13, 24, 25, 26, 27, 28, 29}.issubset(gpios)
+        # Per Adafruit's pinout: D4/D5/D6 are GP6/GP7/GP8 and D11 is GP11.
+        assert gpios == {0, 1, 2, 3, 6, 7, 8, 9, 11, 12, 25, 26, 27, 28, 29}
+        # D24 is the W5500's alternate chip select, probed at every boot.
+        assert 24 in view["reserved_pins"]
+        names = {p["gpio"]: p["name"] for p in view["pins"]}
+        assert (names[6], names[7], names[8]) == ("D4", "D5", "D6")
+        # GP11 is a plain header pad — the W5500 is reset over SPI, so
+        # nothing on the FeatherWing claims it.
+        assert 11 not in view["reserved_pins"]
+        # D13 is the onboard red LED, not an operator pin. Offering it let
+        # a servo be assigned there, and the firmware's status LED took
+        # the pin back on every boot until the next Sync.
+        assert 13 not in gpios
+        assert 13 in view["reserved_pins"]   # ONBOARD_LED
+        assert not any(13 in (p["tx"], p["rx"]) for p in view["uart_pairs"])
         # Reserved should include the W5500 wing + NeoPixel.
         assert 10 in view["reserved_pins"]   # ETH_CS
         assert 16 in view["reserved_pins"]   # NEOPIXEL
         assert 18 in view["reserved_pins"]   # SPI_SCK
-        # NeoPixel should be a builtin
+        # NeoPixel and the red LED are builtins
         ids = [b["id"] for b in view["builtin_peripherals"]]
         assert "onboard_neopixel" in ids
+        assert "onboard_led" in ids

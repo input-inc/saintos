@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import yaml
 import psutil
@@ -769,6 +770,10 @@ class _BoardControl:
         anim = self._m.animation_store.get(animation_id)
         return bool(anim and anim.loop)
 
+    def sound_length(self, sound_id: str) -> float:
+        snd = self._m.sound_store.get(sound_id)
+        return float(snd.duration) if snd and snd.duration > 0 else 0.0
+
 
 class StateManager:
     """Manages system state and provides data for clients."""
@@ -897,6 +902,12 @@ class StateManager:
         self.animation_store = AnimationStore(self.config_dir, logger=self.logger)
         self.pose_store = PoseStore(self.config_dir, logger=self.logger)
         self.sound_store = SoundStore(self.config_dir, logger=self.logger)
+        # Sounds saved before duration probing existed have no length,
+        # so the animation timeline can't draw their clip bars. Measure
+        # them in the background — one ffprobe per file is too slow to
+        # hold up startup on a large library.
+        threading.Thread(target=self.sound_store.backfill_durations,
+                         name="sound-duration-backfill", daemon=True).start()
         # Playlists replaced the per-item `group` string (an item can be
         # in several now). Migrating here, at construction, means the
         # first list_* call already sees playlists rather than the UI
@@ -3509,6 +3520,15 @@ class StateManager:
         return {"success": True, "added": len(added),
                 "skipped": len(skipped), "sounds": self.list_sounds()}
 
+    def measure_sound(self, sound_id: str) -> Dict[str, Any]:
+        """A clip's length, measured now if it was never measured. Used
+        when a sound is added to an animation timeline so the keyframe can
+        record the length its bar is drawn from."""
+        seconds = self.sound_store.measure(sound_id)
+        if seconds is None:
+            return {"success": False, "message": "Sound not found"}
+        return {"success": True, "duration": seconds}
+
     def reprobe_sound(self, sound_id: str) -> Dict[str, Any]:
         """Re-measure a clip whose audio file was replaced on disk.
 
@@ -3798,10 +3818,31 @@ class StateManager:
         return {"success": True, "applied": applied}
 
     async def start_animation(self, animation_id: str,
-                              loop: Optional[bool] = None) -> Dict[str, Any]:
+                              loop: Optional[bool] = None,
+                              draft: Optional[Dict[str, Any]] = None
+                              ) -> Dict[str, Any]:
+        """Play an animation.
+
+        ``draft`` is the editor's current, possibly unsaved, copy. When
+        given, it is played instead of the saved one, so Play reflects the
+        timeline the operator is looking at. It is not written to disk;
+        saving stays an explicit act. Nested animations it triggers still
+        load from disk, since those are other animations.
+        """
         if self._animation_registry is None:
             return {"success": False, "message": "Animation engine not ready"}
-        anim = self.animation_store.get(animation_id)
+        if draft is not None:
+            from saint_server.animation.models import Animation
+            try:
+                anim = Animation.from_dict(draft)
+            except Exception as e:
+                return {"success": False,
+                        "message": f"Unreadable animation draft: {e}"}
+            if anim.id != animation_id:
+                return {"success": False,
+                        "message": "Animation draft id does not match"}
+        else:
+            anim = self.animation_store.get(animation_id)
         if anim is None:
             return {"success": False, "message": "Animation not found"}
         await self._animation_registry.start(anim, loop=loop)

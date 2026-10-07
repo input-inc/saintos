@@ -1550,7 +1550,8 @@ class WebSocketHandler:
             if not anim_id:
                 return {"status": "error", "message": "Missing id"}
             result = await self.state_manager.start_animation(
-                anim_id, loop=params.get('loop')
+                anim_id, loop=params.get('loop'),
+                draft=params.get('animation'),
             )
             return {"status": "ok", "data": result}
 
@@ -1719,6 +1720,16 @@ class WebSocketHandler:
                         loop=bool(params.get('loop', False)),
                         loop_count=int(params.get('loop_count', 0)),
                         icon=str(params.get('icon', 'volume_up')))}
+
+        elif action == 'measure_sound':
+            # Look up a clip's length, measuring it first if it never was.
+            # The animation editor calls this when a sound is added to the
+            # timeline. Unlike reprobe_sound it is not an edit.
+            sound_id = params.get('id')
+            if not sound_id:
+                return {"status": "error", "message": "Missing id"}
+            return {"status": "ok",
+                    "data": self.state_manager.measure_sound(sound_id)}
 
         elif action == 'reprobe_sound':
             # Re-measure a clip after its audio file was replaced on

@@ -29,14 +29,17 @@
 #define NEOPIXEL_PIN    16
 #define NEOPIXEL_COUNT  1
 
-// Available GPIO for peripherals (after ethernet)
+// Header pads by silkscreen name. D4-D6 are NOT GP4-GP6 — see
+// https://learn.adafruit.com/adafruit-feather-rp2040-pico/pinouts
 #define GPIO_A0         26
 #define GPIO_A1         27
 #define GPIO_A2         28
 #define GPIO_A3         29
-#define GPIO_D5         5
-#define GPIO_D6         6
+#define GPIO_D4         6
+#define GPIO_D5         7
+#define GPIO_D6         8
 #define GPIO_D9         9
+#define GPIO_D11        11
 #define GPIO_D12        12
 #define GPIO_D13        13
 #define GPIO_D24        24

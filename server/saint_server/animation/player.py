@@ -99,6 +99,12 @@ class BoardControl(Protocol):
     def animation_is_looping(self, animation_id: str) -> bool:
         ...
 
+    def sound_length(self, sound_id: str) -> float:
+        """The clip's length in seconds, 0 if unknown. Optional: a board
+        without it makes every started sound count as still playing when
+        the animation stops."""
+        ...
+
 
 class AnimationPlayer:
     """Plays back a single Animation.
@@ -137,6 +143,14 @@ class AnimationPlayer:
         # as (at_time, kind, key). Only looping items land here: a
         # one-shot ends on its own.
         self._pending_stops: List[Tuple[float, str, str]] = []
+        # Everything this animation started, so stopping the animation
+        # (Stop, or reaching its end) stops it too. Sounds are keyed by
+        # node, since playback is stop-and-replace per node, and carry the
+        # wall-clock time the clip ends (None = loops, or length unknown).
+        # A sound already past its end is left alone at stop: stopping its
+        # node then would cut off whatever the operator played since.
+        self._started_sounds: Dict[str, Optional[float]] = {}
+        self._started_animations: set = set()
         self._set_urdf_joint_value = set_urdf_joint_value
         self._set_ws_input = set_ws_input
         self._set_topic_channel = set_topic_channel
@@ -243,6 +257,9 @@ class AnimationPlayer:
         loop = asyncio.get_event_loop()
         next_tick = loop.time()
         last_t = self._t
+        # True while last_t has not been played yet, so a trigger sitting
+        # exactly on it still fires. See TriggerTrack.fires_in.
+        include_start = True
 
         try:
             while not self._stop_requested:
@@ -253,6 +270,7 @@ class AnimationPlayer:
                     # Resume — drop the carry-forward so triggers from
                     # the pause window don't all fire at resume.
                     last_t = self._t
+                    include_start = True
                     next_tick = loop.time()
 
                 # Sample value tracks first so the routing graph sees
@@ -260,8 +278,9 @@ class AnimationPlayer:
                 # may rely on the same animation's value tracks via
                 # downstream operators).
                 self._tick_value_tracks(self._t)
-                self._fire_triggers(last_t, self._t)
+                self._fire_triggers(last_t, self._t, include_start)
                 self._fire_pending_stops(last_t, self._t)
+                include_start = False
 
                 last_t = self._t
                 self._t += dt
@@ -269,6 +288,7 @@ class AnimationPlayer:
                     if self.anim.loop:
                         self._t = 0.0
                         last_t = 0.0
+                        include_start = True
                     else:
                         # Land one final frame at duration so the value
                         # tracks reach their last keyframe before we stop.
@@ -329,8 +349,9 @@ class AnimationPlayer:
                 self._log("warn",
                           f"set_ws_input {sheet_id}/{input_id} failed: {e}")
 
-    def _fire_triggers(self, t_prev: float, t_now: float) -> None:
-        if t_now <= t_prev:
+    def _fire_triggers(self, t_prev: float, t_now: float,
+                       include_start: bool = False) -> None:
+        if t_now < t_prev or (t_now == t_prev and not include_start):
             return
         estop = False
         try:
@@ -345,7 +366,7 @@ class AnimationPlayer:
             return
 
         for track in self.anim.trigger_tracks:
-            for kf in track.fires_in(t_prev, t_now):
+            for kf in track.fires_in(t_prev, t_now, include_start):
                 self._dispatch_trigger(kf)
 
     def _dispatch_trigger(self, kf: TriggerKeyframe) -> None:
@@ -401,8 +422,12 @@ class AnimationPlayer:
 
         if kf.target_kind == "sound":
             node_id = self._board.play_sound(item_id)
-            if node_id and kf.duration > 0 \
-                    and self._board.sound_is_looping(item_id):
+            if not node_id:
+                return
+            looping = self._board.sound_is_looping(item_id)
+            self._started_sounds[node_id] = self._sound_deadline(
+                item_id, kf, looping)
+            if kf.duration > 0 and looping:
                 self._pending_stops.append(
                     (kf.time + kf.duration, "sound", node_id))
             return
@@ -433,10 +458,29 @@ class AnimationPlayer:
         except Exception as e:
             self._log("error", f"start_animation({item_id}) failed: {e}")
             return
+        if started:
+            self._started_animations.add(item_id)
         if started and kf.duration > 0 \
                 and self._board.animation_is_looping(item_id):
             self._pending_stops.append(
                 (kf.time + kf.duration, "animation", item_id))
+
+    def _sound_deadline(self, sound_id: str, kf: TriggerKeyframe,
+                        looping: bool) -> Optional[float]:
+        """Wall-clock time a one-shot clip started now will end, or None
+        when it loops or its length isn't known."""
+        if looping:
+            return None
+        length = float(kf.clip_length or 0)
+        if length <= 0:
+            lookup = getattr(self._board, "sound_length", None)
+            try:
+                length = float(lookup(sound_id) or 0) if lookup else 0.0
+            except Exception:
+                length = 0.0
+        if length <= 0:
+            return None
+        return time.monotonic() + length
 
     def _spawn(self, coro) -> None:
         """Run a coroutine off the tick path, never blocking a frame."""
@@ -459,6 +503,11 @@ class AnimationPlayer:
             return
         self._pending_stops = [p for p in self._pending_stops if p not in due]
         for _at, kind, key in due:
+            # Already stopped: don't stop it again when the animation ends.
+            if kind == "sound":
+                self._started_sounds.pop(key, None)
+            else:
+                self._started_animations.discard(key)
             try:
                 if kind == "sound":
                     self._board.stop_sound(key)
@@ -470,14 +519,26 @@ class AnimationPlayer:
     def _stop_all_board_items(self) -> None:
         """Stop everything this animation started that is still running.
 
-        Called when the animation itself stops. A nested looping
-        animation outliving its parent is the kind of thing an operator
-        discovers as a robot that will not stop moving.
+        Called when the animation itself stops, by Stop or by reaching its
+        end. A clip that runs past the end of the timeline is cut there,
+        and a nested looping animation outliving its parent is the kind of
+        thing an operator discovers as a robot that will not stop moving.
         """
         pending, self._pending_stops = self._pending_stops, []
+        sounds, self._started_sounds = self._started_sounds, {}
+        animations, self._started_animations = self._started_animations, set()
         if self._board is None:
             return
+        now = time.monotonic()
+        to_stop = set()
         for _at, kind, key in pending:
+            to_stop.add((kind, key))
+        for node_id, ends_at in sounds.items():
+            if ends_at is None or now < ends_at:
+                to_stop.add(("sound", node_id))
+        for animation_id in animations:
+            to_stop.add(("animation", animation_id))
+        for kind, key in sorted(to_stop):
             try:
                 if kind == "sound":
                     self._board.stop_sound(key)

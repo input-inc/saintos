@@ -146,3 +146,127 @@ def test_reorder_skips_unknown_ids(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ── duration backfill ───────────────────────────────────────────────
+#
+# save() only measures a clip when it is written, so a library saved
+# before probing existed had no lengths at all and the animation
+# timeline drew every sound as a start marker instead of a clip bar.
+
+
+def _write_wav(path, seconds, rate=8000):
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(1)
+        w.setframerate(rate)
+        w.writeframes(b"\x80" * int(seconds * rate))
+
+
+def _legacy_entry(store, sid, file_path, **extra):
+    """An entry as written before duration probing: no `duration` key."""
+    raw = {"id": sid, "name": sid, "node_id": "host_controller",
+           "file_path": file_path, "modified": "2026-05-25T02:51:35Z"}
+    raw.update(extra)
+    store.store.write_raw(sid, raw)
+
+
+def test_backfill_measures_entries_saved_without_a_duration(tmp_path):
+    store = SoundStore(str(tmp_path))
+    wav = tmp_path / "clip.wav"
+    _write_wav(wav, 2.0)
+    _legacy_entry(store, "clip", str(wav))
+
+    assert store.backfill_durations() == 1
+    entry = {s["id"]: s for s in store.list()}["clip"]
+    assert entry["duration"] == pytest.approx(2.0, abs=0.01)
+
+
+def test_backfill_does_not_count_as_an_operator_edit(tmp_path):
+    store = SoundStore(str(tmp_path))
+    wav = tmp_path / "clip.wav"
+    _write_wav(wav, 1.0)
+    _legacy_entry(store, "clip", str(wav))
+
+    store.backfill_durations()
+    assert store.store.read_raw("clip")["modified"] == "2026-05-25T02:51:35Z"
+
+
+def test_backfill_leaves_measured_and_unmeasurable_entries_alone(tmp_path):
+    store = SoundStore(str(tmp_path))
+    wav = tmp_path / "clip.wav"
+    _write_wav(wav, 3.0)
+    # Already measured: kept even though the file now says otherwise.
+    _legacy_entry(store, "known", str(wav), duration=9.5)
+    # File isn't on this machine (e.g. it lives on another node).
+    _legacy_entry(store, "elsewhere", "/nonexistent/clip.mp3")
+
+    assert store.backfill_durations() == 0
+    by_id = {s["id"]: s for s in store.list()}
+    assert by_id["known"]["duration"] == 9.5
+    assert by_id["elsewhere"]["duration"] == 0.0
+
+
+def test_backfill_does_not_clobber_a_save_made_while_probing(tmp_path, monkeypatch):
+    store = SoundStore(str(tmp_path))
+    old, new = tmp_path / "old.wav", tmp_path / "new.wav"
+    _write_wav(old, 1.0)
+    _write_wav(new, 4.0)
+    _legacy_entry(store, "clip", str(old))
+
+    import saint_server.animation.store as store_mod
+    real_probe = store_mod.probe_duration
+
+    def probe_while_operator_repoints(path):
+        # The operator re-points the sound mid-probe; their save measures
+        # the new file itself.
+        if path == str(old):
+            snd = store.get("clip")
+            snd.file_path = str(new)
+            store.save(snd)
+        return real_probe(path)
+
+    monkeypatch.setattr(store_mod, "probe_duration", probe_while_operator_repoints)
+    assert store.backfill_durations() == 0
+    entry = store.store.read_raw("clip")
+    assert entry["file_path"] == str(new)
+    assert entry["duration"] == pytest.approx(4.0, abs=0.01)
+
+
+# ── measure (called when a sound is added to a timeline) ────────────
+
+
+def test_measure_fills_and_stores_a_missing_length(tmp_path):
+    store = SoundStore(str(tmp_path))
+    wav = tmp_path / "clip.wav"
+    _write_wav(wav, 1.5)
+    _legacy_entry(store, "clip", str(wav))
+
+    assert store.measure("clip") == pytest.approx(1.5, abs=0.01)
+    raw = store.store.read_raw("clip")
+    assert raw["duration"] == pytest.approx(1.5, abs=0.01)
+    assert raw["modified"] == "2026-05-25T02:51:35Z"   # a lookup, not an edit
+
+
+def test_measure_returns_a_stored_length_without_probing(tmp_path, monkeypatch):
+    store = SoundStore(str(tmp_path))
+    _legacy_entry(store, "clip", "/nonexistent.mp3", duration=7.25)
+    import saint_server.animation.store as store_mod
+    monkeypatch.setattr(store_mod, "probe_duration",
+                        lambda p: pytest.fail("should not probe"))
+    assert store.measure("clip") == 7.25
+
+
+def test_measure_unknown_sound_is_none(tmp_path):
+    assert SoundStore(str(tmp_path)).measure("nope") is None
+
+
+def test_keyframe_clip_length_survives_a_save():
+    from saint_server.animation.models import TriggerKeyframe
+    kf = TriggerKeyframe(time=2.0, target_kind="sound", target=["fanfare"],
+                         value=None, clip_length=3.25)
+    assert TriggerKeyframe.from_dict(kf.to_dict()).clip_length == 3.25
+    # Older animations without the field load as "not recorded".
+    legacy = {"time": 1.0, "target_kind": "sound", "target": ["x"]}
+    assert TriggerKeyframe.from_dict(legacy).clip_length == 0.0

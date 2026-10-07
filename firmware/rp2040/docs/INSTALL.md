@@ -228,8 +228,8 @@ The pin definitions in `include/saint_node.h` match the Feather RP2040 + Etherne
 // Available GPIO for peripherals
 #define GPIO_A0         26  // ADC0
 #define GPIO_A1         27  // ADC1
-#define GPIO_D5         5
-#define GPIO_D6         6
+#define GPIO_D5         7   // silk D5 is GPIO7, not GPIO5
+#define GPIO_D6         8
 // ... etc
 ```
 
@@ -413,40 +413,49 @@ The onboard NeoPixel indicates node state:
 
 ### Feather RP2040 Pinout
 
-```
-                    USB-C
-              ┌───────────────┐
-       RESET ─┤ RST       BAT ├─ Battery+
-         3V3 ─┤ 3V3       GND ├─ Ground
-        AREF ─┤ AREF       EN ├─ Enable
-   ADC0  A0  ─┤ A0   ┌─┐  USB ├─ USB 5V
-   ADC1  A1  ─┤ A1   │ │  D13 ├─ GPIO13 (LED)
-   ADC2  A2  ─┤ A2   │ │  D12 ├─ GPIO12
-   ADC3  A3  ─┤ A3   │ │  D11 ├─ GPIO11 (ETH_RST) ←
-         D24 ─┤ D24  │ │  D10 ├─ GPIO10 (ETH_CS)  ←
-         D25 ─┤ D25  └─┘   D9 ├─ GPIO9
-         SCK ─┤ SCK        D6 ├─ GPIO6            (ETH) →
-        MOSI ─┤ MO         D5 ├─ GPIO5            (ETH) →
-        MISO ─┤ MI         TX ├─ GPIO0 (UART TX)  (ETH) →
-          RX ─┤ RX         RX ├─ GPIO1 (UART RX)
-              └───────────────┘
+| Silkscreen | GPIO | Use |
+|---|---|---|
+| TX / RX | 0 / 1 | UART0 — available |
+| SDA / SCL | 2 / 3 | I2C1 (also STEMMA QT) — available |
+| D4 | 6 | available |
+| D5 | 7 | available |
+| D6 | 8 | available |
+| D9 | 9 | available |
+| D10 | 10 | **W5500 chip select** (Ethernet FeatherWing) |
+| D11 | 11 | available |
+| D12 | 12 | available |
+| D13 | 13 | **onboard red LED** |
+| D24 | 24 | **W5500 alternate chip select** (probed at boot) |
+| D25 | 25 | available |
+| SCK / MO / MI | 18 / 19 / 20 | **W5500 SPI** (Ethernet FeatherWing) |
+| A0–A3 | 26–29 | ADC0–3 — available |
+| — | 16 | onboard NeoPixel (not broken out) |
 
-← = Used by Ethernet FeatherWing
-→ = Reserved for SPI (ETH)
-```
+Source: [Adafruit Feather RP2040 pinouts](https://learn.adafruit.com/adafruit-feather-rp2040-pico/pinouts).
+The silkscreen D-numbers do **not** all match GPIO numbers:
+D4 = GPIO6, D5 = GPIO7, D6 = GPIO8. GPIO4 (BOOTSEL on rev D+) and GPIO5
+are not broken out. TX/RX are GPIO0/GPIO1.
 
 **Reserved for Ethernet FeatherWing:**
 - SCK (GPIO18) - SPI Clock
 - MOSI (GPIO19) - SPI Data Out
 - MISO (GPIO20) - SPI Data In
 - D10 (GPIO10) - Chip Select
-- D11 (GPIO11) - Reset
+- D24 (GPIO24) - Alternate chip select, probed at every boot
+
+The W5500 has no reset line here — it is reset in software over SPI, so
+D11 is free.
+
+**Reserved onboard:**
+- D13 (GPIO13) - red LED
+- GPIO16 - NeoPixel (not broken out)
 
 **Available for role-specific hardware:**
 - A0-A3 (GPIO26-29) - Analog inputs / Digital I/O
-- D5, D6, D9, D12, D13 - Digital I/O / PWM
-- D24, D25 - Digital I/O
+- D4, D5, D6, D9, D11, D12 - Digital I/O / PWM
+- D25 - Digital I/O
 - TX/RX (GPIO0/1) - UART
+- SDA/SCL (GPIO2/3) - I2C (shared with the STEMMA QT connector)
 
 ---
 

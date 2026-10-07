@@ -367,3 +367,166 @@ def test_mixed_targets_fan_out_to_correct_callbacks():
     assert len(ws_spy.calls) == 1
     assert audio_spy.calls[0][0][2] == "play_file"
     assert ws_spy.calls[0][0] == ("sheet1", "wsin_brake", 1.0)
+
+
+# ── 5. Triggers at the very start of the timeline ──────────────────
+#
+# The trigger window is (t_prev, t_now]. Playback started with
+# t_prev == t_now == 0, so the first tick was skipped as an empty window
+# and every later window excluded 0: a sound placed at t=0 never played,
+# and was skipped again on every loop. These run the real playback loop,
+# because that's where the bug was.
+
+
+class _FakeBoard:
+    def __init__(self, lengths=None):
+        self.played = []
+        self.stopped_sounds = []
+        self.started_animations = []
+        self.stopped_animations = []
+        self.lengths = lengths or {}
+
+    def play_sound(self, sound_id):
+        self.played.append(sound_id)
+        return "host_controller"
+
+    def stop_sound(self, node_id):
+        self.stopped_sounds.append(node_id)
+
+    async def start_animation(self, animation_id, depth):
+        self.started_animations.append(animation_id)
+        return True
+
+    async def stop_animation(self, animation_id):
+        self.stopped_animations.append(animation_id)
+
+    def sound_length(self, sound_id):
+        return self.lengths.get(sound_id, 0.0)
+
+    def sound_is_looping(self, sound_id):
+        return False
+
+    def animation_is_looping(self, animation_id):
+        return False
+
+
+def _sound_at(time, loop=False, duration=0.1):
+    return Animation(
+        id="sound_at_zero", name="sound at zero", duration=duration,
+        fps=100, loop=loop,
+        trigger_tracks=[TriggerTrack(id="t0", name="Board", keyframes=[
+            TriggerKeyframe(time=time, target_kind="sound",
+                            target=["fanfare"], value=None)])],
+    )
+
+
+def _run_player(anim, seconds, board=None):
+    import asyncio
+
+    board = board or _FakeBoard()
+
+    async def go():
+        # Built inside the loop, as the server does: on Python 3.9 the
+        # player's asyncio.Event binds to the loop current at creation.
+        player = AnimationPlayer(
+            anim,
+            set_urdf_joint_value=_CallSpy(),
+            set_ws_input=_CallSpy(),
+            set_topic_channel=_CallSpy(),
+            estop_active=lambda: False,
+            board=board,
+        )
+        await player.start()
+        await asyncio.sleep(seconds)
+        await player.stop()
+        if player._task is not None:
+            await player._task
+
+    # A private loop, not asyncio.run(), which leaves no current event
+    # loop behind on Python 3.9 and breaks later tests.
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(go())
+    finally:
+        loop.close()
+    return board.played
+
+
+def test_sound_at_time_zero_plays_once():
+    assert _run_player(_sound_at(0.0), seconds=0.3) == ["fanfare"]
+
+
+def test_sound_at_time_zero_replays_on_every_loop():
+    # 0.1 s loop run for ~0.35 s: at least the first pass and one wrap.
+    played = _run_player(_sound_at(0.0, loop=True), seconds=0.35)
+    assert len(played) >= 2
+
+
+def test_sound_after_zero_still_plays_exactly_once():
+    assert _run_player(_sound_at(0.05), seconds=0.3) == ["fanfare"]
+
+
+def test_fires_in_excludes_start_unless_asked():
+    track = TriggerTrack(id="t", name="t", keyframes=[
+        TriggerKeyframe(time=0.0, target_kind="sound", target=["x"], value=None)])
+    assert track.fires_in(0.0, 0.016) == []
+    assert len(track.fires_in(0.0, 0.0, include_start=True)) == 1
+
+
+
+# ── 6. Stopping the animation stops what it started ────────────────
+#
+# Only looping items with a dragged length used to be tracked, so a
+# one-shot sound kept playing after Stop and past the end of the
+# timeline, and a nested animation outlived its parent.
+
+
+def _board_run(anim, seconds, board):
+    _run_player(anim, seconds, board=board)
+    return board
+
+
+def test_stop_cuts_a_sound_that_is_still_playing():
+    # 10 s timeline, 5 s clip at t=0, Stop after ~0.1 s.
+    board = _board_run(_sound_at(0.0, duration=10.0), 0.1,
+                       _FakeBoard(lengths={"fanfare": 5.0}))
+    assert board.played == ["fanfare"]
+    assert board.stopped_sounds == ["host_controller"]
+
+
+def test_end_of_timeline_cuts_a_clip_that_runs_past_it():
+    # 0.1 s timeline, 5 s clip: the animation ends on its own first.
+    board = _board_run(_sound_at(0.0, duration=0.1), 0.3,
+                       _FakeBoard(lengths={"fanfare": 5.0}))
+    assert board.stopped_sounds == ["host_controller"]
+
+
+def test_a_clip_that_already_finished_is_left_alone():
+    # Stopping its node now would cut whatever the operator played since.
+    board = _board_run(_sound_at(0.0, duration=10.0), 0.15,
+                       _FakeBoard(lengths={"fanfare": 0.02}))
+    assert board.stopped_sounds == []
+
+
+def test_clip_length_on_the_keyframe_is_used_when_the_library_has_none():
+    anim = _sound_at(0.0, duration=10.0)
+    anim.trigger_tracks[0].keyframes[0].clip_length = 0.02
+    board = _board_run(anim, 0.15, _FakeBoard())
+    assert board.stopped_sounds == []
+
+
+def test_a_sound_of_unknown_length_is_stopped():
+    board = _board_run(_sound_at(0.0, duration=10.0), 0.1, _FakeBoard())
+    assert board.stopped_sounds == ["host_controller"]
+
+
+def test_stop_stops_a_nested_animation():
+    anim = Animation(
+        id="parent", name="parent", duration=10.0, fps=100,
+        trigger_tracks=[TriggerTrack(id="t0", name="Board", keyframes=[
+            TriggerKeyframe(time=0.0, target_kind="animation",
+                            target=["child"], value=None)])],
+    )
+    board = _board_run(anim, 0.1, _FakeBoard())
+    assert board.started_animations == ["child"]
+    assert board.stopped_animations == ["child"]

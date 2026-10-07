@@ -251,6 +251,10 @@ class SoundStore:
         self.config_dir = config_dir
         self.store = _JSONStore(os.path.join(config_dir, "sounds"), logger=logger)
         self.logger = logger
+        # Serializes read-modify-write of one entry, so the startup
+        # duration backfill can't overwrite an operator save that lands
+        # between its read and its write.
+        self._write_lock = threading.Lock()
 
     def list(self) -> List[Dict]:
         out = []
@@ -305,13 +309,77 @@ class SoundStore:
         # an existing entry. Probing is cheap for the common .wav case
         # (a header read) and bounded for the rest; an unreadable file
         # just leaves duration at 0 = unknown.
-        prior = self.store.read_raw(sound.id)
-        path_changed = bool(prior) and prior.get("file_path") != sound.file_path
-        if sound.file_path and (sound.duration <= 0 or path_changed):
-            sound.duration = probe_duration(sound.file_path)
-        sound.stamp()
-        self.store.write_raw(sound.id, sound.to_dict())
+        with self._write_lock:
+            prior = self.store.read_raw(sound.id)
+            path_changed = bool(prior) and prior.get("file_path") != sound.file_path
+            if sound.file_path and (sound.duration <= 0 or path_changed):
+                sound.duration = probe_duration(sound.file_path)
+            sound.stamp()
+            self.store.write_raw(sound.id, sound.to_dict())
         return sound
+
+    def measure(self, sound_id: str) -> Optional[float]:
+        """The clip's length in seconds, measuring and storing it first if
+        the entry has none yet. None when there is no such sound; 0.0 when
+        it can't be measured (file missing, or it lives on another node).
+
+        Unlike reprobe(), a length already stored is returned as is and
+        `modified` is not stamped: this is a lookup, not an edit.
+        """
+        raw = self.store.read_raw(sound_id)
+        if not raw:
+            return None
+        if float(raw.get("duration") or 0) > 0:
+            return float(raw["duration"])
+        return self._fill_duration(sound_id, raw)
+
+    def _fill_duration(self, sound_id: str, raw: Dict) -> float:
+        """Probe an unmeasured entry and store the result. Returns the
+        length, or 0.0 if it couldn't be measured or the entry changed
+        while probing (that save measured its own file)."""
+        path = raw.get("file_path") or ""
+        if not path:
+            return 0.0
+        seconds = probe_duration(path)
+        if seconds <= 0:
+            return 0.0
+        with self._write_lock:
+            # Re-read: the operator may have saved or re-pointed this
+            # sound while ffprobe ran. Only fill a duration that is still
+            # missing for the file we actually measured.
+            current = self.store.read_raw(sound_id)
+            if (not current
+                    or float(current.get("duration") or 0) > 0
+                    or (current.get("file_path") or "") != path):
+                return 0.0
+            current["duration"] = seconds
+            self.store.write_raw(sound_id, current)
+        return seconds
+
+    def backfill_durations(self) -> int:
+        """Measure every entry that has no duration yet. Returns how many
+        were filled in.
+
+        save() only probes when a sound is written, so a library saved
+        before probing existed stays unmeasured forever, and the timeline
+        can only draw those clips as a start marker, not a length bar.
+        Meant to run once at startup, off the main thread: an ffprobe
+        per file adds up on a large library.
+
+        An entry that still can't be measured (file missing, or it lives
+        on another node) is left at 0 and simply tried again next start.
+        `modified` is not stamped: measuring is not an operator edit.
+        """
+        filled = 0
+        for sid in self.store.list_ids():
+            raw = self.store.read_raw(sid)
+            if not raw or float(raw.get("duration") or 0) > 0:
+                continue
+            if self._fill_duration(sid, raw) > 0:
+                filled += 1
+        if filled:
+            self._log("info", f"Measured {filled} sound(s) with no stored duration")
+        return filled
 
     def reprobe(self, sound_id: str) -> Optional[Sound]:
         """Re-measure a clip whose file was replaced on disk.
@@ -324,7 +392,8 @@ class SoundStore:
             return None
         snd.duration = probe_duration(snd.file_path)
         snd.stamp()
-        self.store.write_raw(snd.id, snd.to_dict())
+        with self._write_lock:
+            self.store.write_raw(snd.id, snd.to_dict())
         return snd
 
     def delete(self, sound_id: str) -> bool:

@@ -161,11 +161,14 @@ export const useAnimationsStore = defineStore('animations', () => {
     } catch { /* non-fatal */ }
   }
 
-  async function start (id, loop = null) {
+  // `draft` is the editor's unsaved copy: the server plays it instead of
+  // the saved file, so Play matches what's on the timeline.
+  async function start (id, loop = null, draft = null) {
     error.value = ''
     try {
       const payload = { id }
       if (loop !== null) payload.loop = loop
+      if (draft) payload.animation = draft
       await ws.management('start_animation', payload)
       await refreshPlayers()
     } catch (e) {

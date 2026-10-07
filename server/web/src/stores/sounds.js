@@ -172,9 +172,24 @@ export const useSoundsStore = defineStore('sounds', () => {
     }
   }
 
+  // A clip's length in seconds, measured server-side now if it never was.
+  // 0 when it can't be measured. Updates the cached list entry too, so
+  // anything else drawing this sound sees the length without a reload.
+  async function measure (id) {
+    try {
+      const r = await ws.management('measure_sound', { id })
+      const seconds = Number(r?.duration) || 0
+      const entry = list.value.find(s => s.id === id)
+      if (entry && seconds > 0) entry.duration = seconds
+      return seconds
+    } catch (e) {
+      return 0
+    }
+  }
+
   return {
     list, loading, error,
     reload, save, remove, reorder, listNodes, bulkAddFromFolder,
-    browseDir, listDevices, play, stop,
+    browseDir, listDevices, play, stop, measure,
   }
 })

@@ -263,7 +263,13 @@ function addTriggerKeyframeAt (trackId, time) {
 // `duration: 0` means "the item's own length"; the timeline fills the
 // bar from the library. Only a looping item's bar can then be dragged,
 // which is what writes a non-zero duration here.
-function addBoardItemTrack (payload) {
+//
+// `clip_length` records that own length on the keyframe when the item
+// is added, so the bar can be drawn even when the library loaded in this
+// editor has no length for it (e.g. the editor was opened before the
+// server measured the clip). A sound the library hasn't measured is
+// measured on the server first.
+async function addBoardItemTrack (payload) {
   if (!anim.value || !payload?.id) return
   const kind = payload.kind
   if (kind !== 'sound' && kind !== 'animation') return
@@ -271,16 +277,25 @@ function addBoardItemTrack (payload) {
   if (!trackId) return
   const track = anim.value.trigger_tracks.find(t => t.id === trackId)
   if (!track) return
-  track.keyframes.push({
+  const kf = {
     time: Math.max(0, Number(playerPos.value) || 0),
     target_kind: kind,
     target: [payload.id],
     value: null,
     label: payload.label || payload.id,
     duration: 0,
-  })
+    clip_length: 0,
+  }
+  track.keyframes.push(kf)
   animations.markDirty()
   selection.value = { kind: 'trigger-keyframe', trackId, kfIdx: 0 }
+
+  const library = kind === 'sound' ? sounds.list : animations.list
+  let length = Number(library.find(x => x.id === payload.id)?.duration) || 0
+  if (length <= 0 && kind === 'sound') length = await sounds.measure(payload.id)
+  // Write through the reactive track: `kf` is the raw object we pushed.
+  const added = track.keyframes.find(k => k === kf || k.target?.[0] === payload.id)
+  if (added && length > 0) added.clip_length = length
 }
 
 provide('add-trigger-track', addTriggerTrack)
@@ -961,7 +976,10 @@ function onDeleteKeyframe (trackId, kfIdx) {
 
 async function play () {
   if (!anim.value?.id) return
-  await animations.start(anim.value.id, anim.value.loop)
+  // Unsaved edits ride along so playback matches the timeline on screen
+  // rather than the last save. The server plays the copy without saving.
+  const draft = animations.dirty ? anim.value : null
+  await animations.start(anim.value.id, anim.value.loop, draft)
 }
 async function stopPlayback () {
   if (!anim.value?.id) return

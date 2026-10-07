@@ -202,3 +202,22 @@ describe('+ Board Item menu', () => {
       .toMatchObject({ kind: 'sound', id: 'fanfare' })
   })
 })
+
+describe('length recorded on the keyframe', () => {
+  // The editor records a board item's length on its keyframe when it is
+  // added (clip_length), so the bar doesn't depend on the library loaded
+  // in this editor having measured the clip yet.
+  const withClip = (id, clip, time = 1) => ({ ...kf('sound', id, time), clip_length: clip })
+
+  it('draws the bar from clip_length when the library has no length', () => {
+    const w = mountWith([withClip('unmeasured', 2.5)])
+    const bar = w.find('.board-item-bar')
+    expect(bar.exists()).toBe(true)
+    expect(bar.attributes('style')).toContain('width: 25%')
+  })
+
+  it('prefers the library length, which follows a replaced file', () => {
+    const w = mountWith([withClip('fanfare', 9)])
+    expect(w.find('.board-item-bar').attributes('style')).toContain('width: 30%')
+  })
+})

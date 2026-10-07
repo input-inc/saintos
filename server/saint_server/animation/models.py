@@ -183,6 +183,11 @@ class TriggerKeyframe:
     # the clip ends when it ends, and cutting it short is a different
     # feature from choosing how long to repeat.
     duration: float = 0.0
+    # The board item's own length in seconds, measured when the item was
+    # added to the timeline and saved with it. Display only: it lets the
+    # timeline draw the clip's bar even when the library in the editor
+    # hasn't (yet) got a length for that item. 0 = not recorded.
+    clip_length: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -192,6 +197,7 @@ class TriggerKeyframe:
             "value": self.value,
             "label": self.label,
             "duration": self.duration,
+            "clip_length": self.clip_length,
         }
 
     @classmethod
@@ -203,6 +209,7 @@ class TriggerKeyframe:
             value=d.get("value"),
             label=str(d.get("label", "")),
             duration=max(0.0, float(d.get("duration", 0.0) or 0.0)),
+            clip_length=max(0.0, float(d.get("clip_length", 0.0) or 0.0)),
         )
 
 
@@ -212,8 +219,17 @@ class TriggerTrack:
     name: str
     keyframes: List[TriggerKeyframe] = field(default_factory=list)
 
-    def fires_in(self, t_prev: float, t_now: float) -> List[TriggerKeyframe]:
-        """Keyframes whose ``time`` is in (t_prev, t_now]."""
+    def fires_in(self, t_prev: float, t_now: float,
+                 include_start: bool = False) -> List[TriggerKeyframe]:
+        """Keyframes whose ``time`` is in (t_prev, t_now].
+
+        ``include_start`` closes the window on the left, [t_prev, t_now],
+        for the one tick where t_prev itself has never been played (the
+        start of playback, a loop wrapping to 0, a resume). Without it a
+        keyframe at exactly t=0 could never fire.
+        """
+        if include_start:
+            return [k for k in self.keyframes if t_prev <= k.time <= t_now]
         return [
             k for k in self.keyframes
             if t_prev < k.time <= t_now

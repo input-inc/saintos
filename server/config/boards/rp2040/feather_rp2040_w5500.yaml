@@ -13,18 +13,32 @@ builtin: true        # shipped with SAINT.OS — UI marks uneditable
 # Pins broken out to header pads, in the order Adafruit silkscreens
 # them. The operator picks from these in the Peripherals tab. Names
 # override default_name from the chip's global.yaml so the UI shows
-# "D5" / "TX" / "A0" instead of "GP5" / "GP0" / "GP26".
+# "D5" / "TX" / "A0" instead of "GP7" / "GP0" / "GP26".
+#
+# Source: https://learn.adafruit.com/adafruit-feather-rp2040-pico/pinouts
+# The silkscreen D-numbers do NOT match GPIO numbers on the left edge:
+# D4 = GP6, D5 = GP7, D6 = GP8. GP4 (BOOTSEL on rev D+) and GP5 are
+# not broken out. D10 (GP10) is the W5500 chip select, reserved below.
+# D24 is also reserved: the firmware probes it as an alternate W5500
+# chip select at boot (ETH_PIN_CS_ALT, transport/wizchip_port.c), after
+# saved pin config is applied, which would knock a peripheral there
+# off its pin until the next Sync.
+#
+# D13 is NOT in this list: it is hardwired to the Feather's red
+# onboard LED (https://www.adafruit.com/product/4884), which the
+# firmware's led_status owns. It's reserved below and exposed as the
+# onboard_led built-in peripheral, matching the Teensy 4.1 board.
 available_pins:
   - {gpio:  0, name: "TX"}
   - {gpio:  1, name: "RX"}
   - {gpio:  2, name: "SDA"}
   - {gpio:  3, name: "SCL"}
-  - {gpio:  5, name: "D5"}
-  - {gpio:  6, name: "D6"}
+  - {gpio:  6, name: "D4"}
+  - {gpio:  7, name: "D5"}
+  - {gpio:  8, name: "D6"}
   - {gpio:  9, name: "D9"}
+  - {gpio: 11, name: "D11"}
   - {gpio: 12, name: "D12"}
-  - {gpio: 13, name: "D13"}
-  - {gpio: 24, name: "D24"}
   - {gpio: 25, name: "D25"}
   - {gpio: 26, name: "A0"}
   - {gpio: 27, name: "A1"}
@@ -35,7 +49,8 @@ available_pins:
 # cannot route peripherals to these.
 reserved_pins:
   - {gpio: 10, name: "ETH_CS",   reason: "W5500 chip select (Ethernet FeatherWing)"}
-  - {gpio: 11, name: "ETH_RST",  reason: "W5500 reset (Ethernet FeatherWing)"}
+  - {gpio: 13, name: "ONBOARD_LED", reason: "Onboard red LED (built-in)"}
+  - {gpio: 24, name: "ETH_CS_ALT", reason: "W5500 alternate chip select, probed at every boot"}
   - {gpio: 16, name: "NEOPIXEL", reason: "Onboard WS2812 NeoPixel"}
   - {gpio: 18, name: "SPI_SCK",  reason: "W5500 SPI clock"}
   - {gpio: 19, name: "SPI_MOSI", reason: "W5500 SPI MOSI"}
@@ -51,4 +66,9 @@ builtin_peripherals:
     label: "Onboard NeoPixel"
     pins:
       data: 16
+    params: {}
+  - id: onboard_led
+    type: mono_led
+    label: "Onboard LED"
+    pins: {}
     params: {}
