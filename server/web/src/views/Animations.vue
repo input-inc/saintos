@@ -70,6 +70,8 @@ async function setSoundVolumePct (s, pct) {
 const newAnimOpen = ref(false)
 const newPoseOpen = ref(false)
 const newSoundOpen = ref(false)
+// The full entry being edited in the sound modal (null = closed).
+const editingSound = ref(null)
 const newSoundFolderOpen = ref(false)
 const importOpen = ref(false)
 
@@ -204,6 +206,32 @@ async function onCreateSound (payload) {
   if (view.value.kind !== 'sounds') selectView('sounds', null)
 }
 
+// Edit opens the same modal as New Sound, filled in. The list row only
+// carries a summary, so load the whole entry first.
+async function openEditSound (s) {
+  const r = await ws.management('get_sound', { id: s.id })
+  if (r?.sound) editingSound.value = r.sound
+}
+async function onEditSound (payload) {
+  const base = editingSound.value
+  editingSound.value = null
+  if (!base) return
+  // Keep everything the modal doesn't edit (id, position, measured
+  // duration). A changed file is re-measured by the server on save.
+  await sounds.save({ ...base, ...payload })
+}
+
+// A clip's length for the list: seconds under a minute, m:ss above.
+// 0 is "not measured", shown as a dash rather than 0s.
+function fmtClipLength (seconds) {
+  const t = Number(seconds) || 0
+  if (t <= 0) return '—'
+  if (t < 60) return `${t.toFixed(1)}s`
+  const m = Math.floor(t / 60)
+  const sec = Math.floor(t % 60)
+  return `${m}:${String(sec).padStart(2, '0')}`
+}
+
 async function onCreateSoundFolder (payload) {
   newSoundFolderOpen.value = false
   soundError.value = ''
@@ -232,7 +260,27 @@ async function onCreateSoundFolder (payload) {
 }
 
 // Inline editing for the row name field — click name to flip to input.
+//
+// The typed text lives in `renameDraft`, not in the input's DOM value.
+// Rows re-render every 1.5 s (the player poll below), and Vue re-applies
+// a bound `:value` on every render, so binding the saved name reset the
+// box to the old title mid-typing.
 const renamingId = ref(null)
+const renameDraft = ref('')
+function startRename (item) {
+  renameDraft.value = item.name || ''
+  renamingId.value = item.id
+}
+function cancelRename () {
+  renamingId.value = null
+}
+// Blur commits, but only for the row still being renamed: Escape clears
+// renamingId first, so a blur that follows it saves nothing.
+function commitRename (id, patchFn) {
+  if (renamingId.value !== id) return
+  renamingId.value = null
+  patchFn(id, { name: renameDraft.value })
+}
 async function patchAnimation (id, patch) {
   const r = await ws.management('get_animation', { id })
   const anim = r?.animation
@@ -752,14 +800,14 @@ watch(() => playlists.list, () => {
                 <div class="flex-1 min-w-0">
                   <input v-if="renamingId === a.id"
                          class="input-field w-full text-sm py-1"
-                         :value="a.name"
+                         v-model="renameDraft"
                          autofocus
-                         @blur="(e) => { patchAnimation(a.id, { name: e.target.value }); renamingId = null }"
+                         @blur="commitRename(a.id, patchAnimation)"
                          @keydown.enter="(e) => e.target.blur()"
-                         @keydown.escape="renamingId = null" />
+                         @keydown.escape="cancelRename" />
                   <div v-else
                        class="text-sm font-medium text-fg-strong truncate cursor-text"
-                       @click="renamingId = a.id">
+                       @click="startRename(a)">
                     {{ a.name || a.id }}
                   </div>
                   <div class="text-xs text-fg-faint truncate font-mono">{{ a.id }}</div>
@@ -841,13 +889,13 @@ watch(() => playlists.list, () => {
                   <div class="flex-1 min-w-0">
                     <input v-if="renamingId === p.id"
                            class="input-field w-full text-sm py-1"
-                           :value="p.name"
+                           v-model="renameDraft"
                            autofocus
-                           @blur="(e) => { patchPose(p.id, { name: e.target.value }); renamingId = null }"
+                           @blur="commitRename(p.id, patchPose)"
                            @keydown.enter="(e) => e.target.blur()"
-                           @keydown.escape="renamingId = null" />
+                           @keydown.escape="cancelRename" />
                     <div v-else class="text-sm font-medium text-fg-strong truncate cursor-text"
-                         @click="renamingId = p.id">{{ p.name || p.id }}</div>
+                         @click="startRename(p)">{{ p.name || p.id }}</div>
                     <div class="text-xs text-fg-faint truncate">{{ p.description || p.id }}</div>
                   </div>
                   <div class="text-xs text-fg-faint w-24 text-right tabular-nums shrink-0">
@@ -988,22 +1036,26 @@ watch(() => playlists.list, () => {
                 <div class="flex-1 min-w-0">
                   <input v-if="renamingId === s.id"
                          class="input-field w-full text-sm py-1"
-                         :value="s.name"
+                         v-model="renameDraft"
                          autofocus
-                         @blur="(e) => { patchSound(s.id, { name: e.target.value }); renamingId = null }"
+                         @blur="commitRename(s.id, patchSound)"
                          @keydown.enter="(e) => e.target.blur()"
-                         @keydown.escape="renamingId = null" />
+                         @keydown.escape="cancelRename" />
                   <div v-else class="text-sm font-medium text-fg-strong truncate cursor-text"
-                       @click="renamingId = s.id">{{ s.name || s.id }}</div>
+                       @click="startRename(s)">{{ s.name || s.id }}</div>
                   <div class="text-xs text-fg-faint truncate font-mono" :title="s.file_path">
                     {{ nodeName(s.node_id) }} · {{ s.file_path || '(no file)' }}
                   </div>
+                </div>
+                <div class="text-xs text-fg-muted tabular-nums w-14 text-right shrink-0"
+                     :title="s.duration > 0 ? `${Number(s.duration).toFixed(2)} s` : 'Length not measured'">
+                  {{ fmtClipLength(s.duration) }}
                 </div>
                 <div class="flex items-center gap-0.5 w-24 shrink-0"
                      :title="(s.volume ?? 1) > 1
                        ? 'Boosted above the clip\'s own level (software gain)'
                        : 'Playback volume'">
-                  <NumberField class="input-field text-xs py-1 w-14 text-right"
+                  <NumberField class="input-field text-xs py-1 px-2 w-[4.5rem] text-right"
                                step="5" :decimals="0" :min="0" :max="VOLUME_MAX_PCT"
                                :model-value="Math.round((s.volume ?? 1) * 100)"
                                @commit="v => setSoundVolumePct(s, v)" />
@@ -1030,6 +1082,10 @@ watch(() => playlists.list, () => {
                   <button class="btn-sm bg-surface hover:bg-red-600/80 text-fg-strong"
                           title="Stop this node" @click="stopSound(s)">
                     <span class="material-icons icon-sm">stop</span>
+                  </button>
+                  <button class="btn-sm bg-surface hover:bg-cyan-600 text-fg-strong hover:text-fg-strong"
+                          title="Edit" @click="openEditSound(s)">
+                    <span class="material-icons icon-sm">edit</span>
                   </button>
                   <button class="btn-sm bg-surface hover:bg-red-600 text-fg hover:text-fg-strong"
                           title="Delete" @click="deleteSound(s)">
@@ -1058,6 +1114,10 @@ watch(() => playlists.list, () => {
     <NewSoundModal v-if="newSoundOpen"
                    @close="newSoundOpen = false"
                    @create="onCreateSound" />
+    <NewSoundModal v-if="editingSound"
+                   :sound="editingSound"
+                   @close="editingSound = null"
+                   @create="onEditSound" />
     <AddSoundsFromFolderModal v-if="newSoundFolderOpen"
                    @close="newSoundFolderOpen = false"
                    @create="onCreateSoundFolder" />

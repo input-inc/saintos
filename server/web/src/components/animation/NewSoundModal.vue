@@ -5,32 +5,42 @@ import IconPicker from './IconPicker.vue'
 import NodeFilePicker from './NodeFilePicker.vue'
 import { useSoundsStore } from '@/stores/sounds'
 
-// Create a soundboard entry. A sound is bound to one node: pick the node,
-// browse that node's filesystem for the file, then pick that node's audio
-// output. Volume / start-time / loop options mirror the play command.
+// Create a soundboard entry, or edit one when `sound` is passed. A sound
+// is bound to one node: pick the node, browse that node's filesystem for
+// the file, then pick that node's audio output. Volume / start-time /
+// loop options mirror the play command.
 
 // No grouping field: an item can be in many playlists now, and
 // membership is assigned by dragging the row onto one in the board
 // sidebar. See views/Animations.vue.
+const props = defineProps({
+  // An existing entry to edit. Absent = creating a new sound.
+  sound: { type: Object, default: null },
+})
 const emit = defineEmits(['close', 'create'])
 
 const sounds = useSoundsStore()
+const editing = computed(() => !!props.sound)
+const initial = props.sound || {}
 
-const name = ref('')
-const icon = ref('volume_up')
-const nodeId = ref('')
-const filePath = ref('')
-const outputDevice = ref('default')
+// Seeded straight from the entry being edited. They must start with these
+// values rather than be assigned after setup: the nodeId watcher below
+// clears the file and device whenever the node changes.
+const name = ref(initial.name || '')
+const icon = ref(initial.icon || 'volume_up')
+const nodeId = ref(initial.node_id || '')
+const filePath = ref(initial.file_path || '')
+const outputDevice = ref(initial.output_device || 'default')
 // Above 1.0 the player applies software gain, so a clip recorded quiet
 // can be lifted to sit level with the rest of a board. Mirrors
 // SOUND_VOLUME_MAX in server/saint_server/animation/models.py, which
 // clamps on save and is what the players enforce.
 const VOLUME_MAX = 2.0
-const volume = ref(1.0)
-const startTime = ref(0.0)
-const loop = ref(false)
-const infinite = ref(true)
-const loopCount = ref(2)
+const volume = ref(initial.volume ?? 1.0)
+const startTime = ref(initial.start_time ?? 0.0)
+const loop = ref(!!initial.loop)
+const infinite = ref(!(initial.loop_count > 0))
+const loopCount = ref(initial.loop_count > 0 ? initial.loop_count : 2)
 
 const nodes = ref([])
 const devices = ref([{ id: 'default', name: 'Node default output', is_default: true }])
@@ -104,12 +114,18 @@ function submit () {
 
 onMounted(async () => {
   nodes.value = await sounds.listNodes()
+  if (editing.value) {
+    // The node was seeded, so the watcher that loads devices never fired.
+    loadDevices()
+    return
+  }
   if (nodes.value.length === 1) nodeId.value = nodes.value[0].node_id
 })
 </script>
 
 <template>
-  <AppModal title="New sound" width="max-w-md" @close="emit('close')">
+  <AppModal :title="editing ? 'Edit sound' : 'New sound'" width="max-w-md"
+            @close="emit('close')">
     <div class="space-y-3">
       <div class="flex items-center gap-2">
         <IconPicker v-model="icon" fallback="volume_up" />
@@ -203,7 +219,9 @@ onMounted(async () => {
     </div>
     <template #actions>
       <button class="btn-secondary" @click="emit('close')">Cancel</button>
-      <button class="btn-primary" :disabled="!canSubmit" @click="submit">Create</button>
+      <button class="btn-primary" :disabled="!canSubmit" @click="submit">
+        {{ editing ? 'Save' : 'Create' }}
+      </button>
     </template>
 
     <NodeFilePicker v-if="pickerOpen" :node-id="nodeId"

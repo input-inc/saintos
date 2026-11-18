@@ -25,8 +25,16 @@
  * Unparseable or empty input is simply not emitted: leaving a field
  * blank keeps the last good value rather than writing 0 or "" into the
  * animation.
+ *
+ * Freezing has one trap: the model can change under a focused field for
+ * reasons that aren't the typist, e.g. the editor's timeline selects a
+ * different keyframe on mousedown with preventDefault(), which keeps
+ * focus here. The frozen text then showed the old keyframe's number,
+ * and the eventual blur committed it onto the newly selected one. So a
+ * model change we didn't emit ourselves unfreezes the field to show the
+ * new value, and the pending commit is dropped.
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
   modelValue: { type: [Number, String], default: 0 },
@@ -44,6 +52,25 @@ const emit = defineEmits(['update:modelValue', 'commit'])
 // started with keeps the bound value stable across re-renders, which is
 // what stops Vue from clobbering the caret.
 const frozen = ref(null)
+// The last value this field put out while focused. A model change that
+// doesn't match it came from somewhere else.
+let lastEmitted = null
+// Set when such an outside change unfroze the field: the text in the
+// box is no longer an edit to commit.
+let stale = false
+
+function sameNumber (a, b) {
+  const x = Number(a)
+  const y = Number(b)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return Object.is(x, y)
+  return Math.abs(x - y) < 1e-9
+}
+
+watch(() => props.modelValue, (v) => {
+  if (frozen.value === null || sameNumber(v, lastEmitted)) return
+  frozen.value = null
+  stale = true
+})
 
 const display = computed(() => {
   if (frozen.value !== null) return frozen.value
@@ -62,18 +89,24 @@ function clamp (v) {
 
 function onFocus (e) {
   frozen.value = e.target.value
+  lastEmitted = Number(props.modelValue)
+  stale = false
 }
 
 function onInput (e) {
   // Track what the box holds so `display` keeps matching it — if these
   // ever diverge Vue will patch the DOM and eat the caret.
   frozen.value = e.target.value
+  // Typing again after an outside change is a fresh edit of the new value.
+  stale = false
+  if (lastEmitted === null) lastEmitted = Number(props.modelValue)
   // "" is a partially-typed number, not a zero. Wait for the rest.
   if (e.target.value === '') return
   const v = Number(e.target.value)
   if (!Number.isFinite(v)) return
   // Live, un-rounded and un-clamped: the operator is still typing and
   // "0.0" on the way to "0.05" must not be snapped to a step boundary.
+  lastEmitted = v
   emit('update:modelValue', v)
 }
 
@@ -81,6 +114,14 @@ function onCommit (e) {
   const raw = e.target.value
   // Hand the display back to the model, reformatted.
   frozen.value = null
+  lastEmitted = null
+  if (stale) {
+    // The value moved under us (another keyframe was selected). What's
+    // in the box is that value, not an edit; committing it would only
+    // round or clamp something nobody typed.
+    stale = false
+    return
+  }
   if (raw === '') { emit('commit', Number(props.modelValue)); return }
   let v = Number(raw)
   if (!Number.isFinite(v)) { emit('commit', Number(props.modelValue)); return }

@@ -153,6 +153,56 @@ describe('NumberField', () => {
     await nextTick()
     expect(w.find('input').element.value).toBe('4.50')
   })
+
+  // The animation editor selects keyframes on mousedown with
+  // preventDefault(), so focus stays in this field while the value it is
+  // bound to switches to a different keyframe.
+  describe('when the model changes under a focused field', () => {
+    async function focusedOn (value) {
+      const w = mount(NumberField, { props: { modelValue: value, decimals: 2 } })
+      const input = w.find('input')
+      input.element.focus()
+      await input.trigger('focus')
+      return { w, input }
+    }
+
+    it('shows the new value instead of the old one', async () => {
+      const { w, input } = await focusedOn(1)
+      await w.setProps({ modelValue: 4.5 })
+      await nextTick()
+      expect(input.element.value).toBe('4.50')
+    })
+
+    it('does not commit the old text onto the new value on blur', async () => {
+      const { w, input } = await focusedOn(1)
+      await typeInto(input, '3', { clear: true })
+      const before = w.emitted('update:modelValue')?.length || 0
+      await w.setProps({ modelValue: 4.5 })   // another keyframe selected
+      await nextTick()
+      await input.trigger('blur')
+      expect((w.emitted('update:modelValue') || []).length).toBe(before)
+      expect(w.emitted('commit')).toBeUndefined()
+    })
+
+    it('edits the new value when typing resumes', async () => {
+      const { w, input } = await focusedOn(1)
+      await w.setProps({ modelValue: 4.5 })
+      await nextTick()
+      input.element.value = '7'
+      await input.trigger('input')
+      await input.trigger('blur')
+      expect(w.emitted('commit').at(-1)).toEqual([7])
+    })
+
+    it('still ignores its own value echoed back while typing', async () => {
+      const { w, input } = await focusedOn(1)
+      input.element.value = '2.'
+      await input.trigger('input')
+      await w.setProps({ modelValue: 2 })   // parent writes our emit back
+      await nextTick()
+      expect(input.element.value).toBe('2.')
+    })
+  })
 })
 
 /**
