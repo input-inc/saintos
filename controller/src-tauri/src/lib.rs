@@ -2,6 +2,7 @@ mod bindings;
 mod commands;
 mod discovery;
 mod input;
+mod local_battery;
 mod protocol;
 
 use bindings::mapper::ActionEvent;
@@ -355,6 +356,7 @@ pub fn run() {
             commands::connect,
             commands::disconnect,
             commands::get_connection_status,
+            commands::get_local_battery,
             commands::get_input_state,
             commands::set_gyro_diagnostics,
             commands::get_binding_profiles,

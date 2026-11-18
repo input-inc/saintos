@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -18,6 +19,13 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 const THROTTLE_MS: u64 = 20;
 const RECONNECT_DELAY_MS: u64 = 1000;
 const MAX_RECONNECT_DELAY_MS: u64 = 30000;
+/// Latency probe cadence. Also the liveness check: see LINK_TIMEOUT.
+const PING_INTERVAL: Duration = Duration::from_secs(1);
+/// A link that has answered nothing (no pong, no message) for this long
+/// is treated as dead. Without it a Wi-Fi drop went unnoticed until the
+/// OS gave up on the TCP socket, which can take minutes: writes simply
+/// queue in the kernel buffer, so nothing errors.
+const LINK_TIMEOUT: Duration = Duration::from_secs(3);
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -176,6 +184,44 @@ pub struct WebSocketClient {
     /// Per-target throttle timers (key = "role:function")
     last_command_times: Arc<RwLock<HashMap<String, Instant>>>,
     drop_stats: Arc<RwLock<DropStats>>,
+    /// Bumped by every connect()/disconnect(). Each connection loop
+    /// remembers the value it was started with and may only change the
+    /// shared state while that is still current — see Link.
+    generation: Arc<AtomicU64>,
+}
+
+/// One connection loop's handle on the shared connection state.
+///
+/// Reconnecting starts a new loop while the old one is still winding
+/// down, and both write the same `state`. The old loop used to finish
+/// by writing and emitting `Disconnected` (or `Error`) after the new
+/// one had reported `Connected`, so the header showed red over a link
+/// that was working. A superseded loop now can't touch the status.
+struct Link<R: Runtime> {
+    state: Arc<RwLock<ConnectionState>>,
+    app: AppHandle<R>,
+    generation: Arc<AtomicU64>,
+    id: u64,
+}
+
+impl<R: Runtime> Link<R> {
+    fn is_current(&self) -> bool {
+        self.generation.load(Ordering::SeqCst) == self.id
+    }
+
+    /// Set the status and tell the UI, unless a newer connection owns
+    /// the state now.
+    fn set_status(&self, status: ConnectionStatus, error: Option<String>) {
+        if !self.is_current() {
+            return;
+        }
+        {
+            let mut s = self.state.write();
+            s.status = status;
+            s.error = error;
+        }
+        emit_state(&self.app, &self.state.read());
+    }
 }
 
 impl WebSocketClient {
@@ -188,6 +234,7 @@ impl WebSocketClient {
             shutdown_tx: Arc::new(RwLock::new(None)),
             last_command_times: Arc::new(RwLock::new(HashMap::new())),
             drop_stats: Arc::new(RwLock::new(DropStats::default())),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -275,6 +322,10 @@ impl WebSocketClient {
     ) -> Result<(), String> {
         // Disconnect existing connection
         self.disconnect();
+        // This connection's id. Any loop still winding down from before
+        // now holds a stale one and can no longer change the status.
+        let link_id = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.generation.clone();
 
         let url = build_ws_url(host, port);
         let password = password.to_string();
@@ -312,11 +363,11 @@ impl WebSocketClient {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
+                let link = Link { state, app: app_handle, generation, id: link_id };
                 run_connection_loop(
                     url,
                     password,
-                    state,
-                    app_handle,
+                    link,
                     command_rx,
                     stream_rx,
                     coalescer,
@@ -330,6 +381,9 @@ impl WebSocketClient {
     }
 
     pub fn disconnect(&self) {
+        // Retire the running loop first, so nothing it does on the way
+        // out can overwrite the state set below or a later connect's.
+        self.generation.fetch_add(1, Ordering::SeqCst);
         if let Some(tx) = self.shutdown_tx.write().take() {
             let _ = tx.blocking_send(());
         }
@@ -789,8 +843,7 @@ impl WebSocketClient {
 async fn run_connection_loop<R: Runtime>(
     url: String,
     password: String,
-    state: Arc<RwLock<ConnectionState>>,
-    app_handle: AppHandle<R>,
+    link: Link<R>,
     mut command_rx: mpsc::Receiver<OutgoingMessage>,
     mut stream_rx: mpsc::Receiver<String>,
     coalescer: Arc<StreamCoalescer>,
@@ -799,14 +852,20 @@ async fn run_connection_loop<R: Runtime>(
     let mut reconnect_delay = RECONNECT_DELAY_MS;
 
     loop {
-        match connect_ws(&url, &password, &state, &app_handle).await {
+        // Shutdown must win even mid-connect: a retired loop that kept
+        // going here used to finish connecting, then report its own exit
+        // over the connection that replaced it.
+        let attempt = tokio::select! {
+            r = connect_ws(&url, &password, &link) => r,
+            _ = shutdown_rx.recv() => break,
+        };
+        match attempt {
             Ok(ws_stream) => {
                 reconnect_delay = RECONNECT_DELAY_MS;
 
                 let should_reconnect = handle_connection(
                     ws_stream,
-                    &state,
-                    &app_handle,
+                    &link,
                     &mut command_rx,
                     &mut stream_rx,
                     &coalescer,
@@ -820,38 +879,32 @@ async fn run_connection_loop<R: Runtime>(
             }
             Err(e) => {
                 log::error!("Connection failed: {}", e);
-                {
-                    let mut s = state.write();
-                    s.status = ConnectionStatus::Error;
-                    s.error = Some(e);
-                }
-                emit_state(&app_handle, &state.read());
+                link.set_status(ConnectionStatus::Error, Some(e));
             }
         }
 
-        // Check for shutdown
-        if shutdown_rx.try_recv().is_ok() {
+        if !link.is_current() {
             break;
         }
 
         log::info!("Reconnecting in {}ms", reconnect_delay);
-        tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
+        // The back-off grows to 30 s; a shutdown must not wait it out.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(reconnect_delay)) => {}
+            _ = shutdown_rx.recv() => break,
+        }
         reconnect_delay = next_reconnect_delay(reconnect_delay);
     }
 
-    {
-        let mut s = state.write();
-        s.status = ConnectionStatus::Disconnected;
-        s.error = None;
-    }
-    emit_state(&app_handle, &state.read());
+    // No-op when a newer connection has taken over, which is the case
+    // this used to get wrong.
+    link.set_status(ConnectionStatus::Disconnected, None);
 }
 
 async fn connect_ws<R: Runtime>(
     url: &str,
     password: &str,
-    state: &Arc<RwLock<ConnectionState>>,
-    app_handle: &AppHandle<R>,
+    link: &Link<R>,
 ) -> Result<WsStream, String> {
     log::info!("Connecting to {}", url);
 
@@ -883,11 +936,7 @@ async fn connect_ws<R: Runtime>(
         return Err("Unexpected message type from server".to_string());
     }
 
-    {
-        let mut s = state.write();
-        s.status = ConnectionStatus::Authenticating;
-    }
-    emit_state(app_handle, &state.read());
+    link.set_status(ConnectionStatus::Authenticating, None);
 
     // Now send authentication
     let auth_msg = OutgoingMessage::auth(password);
@@ -909,12 +958,7 @@ async fn connect_ws<R: Runtime>(
 
         if msg.is_auth_success() {
             log::info!("Authentication successful");
-            {
-                let mut s = state.write();
-                s.status = ConnectionStatus::Connected;
-                s.error = None;
-            }
-            emit_state(app_handle, &state.read());
+            link.set_status(ConnectionStatus::Connected, None);
 
             Ok(write.reunite(read).unwrap())
         } else {
@@ -929,13 +973,13 @@ async fn connect_ws<R: Runtime>(
 
 async fn handle_connection<R: Runtime>(
     ws_stream: WsStream,
-    state: &Arc<RwLock<ConnectionState>>,
-    app_handle: &AppHandle<R>,
+    link: &Link<R>,
     command_rx: &mut mpsc::Receiver<OutgoingMessage>,
     stream_rx: &mut mpsc::Receiver<String>,
     coalescer: &Arc<StreamCoalescer>,
     shutdown_rx: &mut mpsc::Receiver<()>,
 ) -> bool {
+    let app_handle = &link.app;
     let (mut write, mut read) = ws_stream.split();
 
     // Bootstrap the e-stop mirror so a controller joining mid-session
@@ -964,16 +1008,23 @@ async fn handle_connection<R: Runtime>(
         log::warn!("Failed to subscribe to animation_state topic: {}", e);
     }
 
-    // Latency probe: send a WebSocket Ping every 2s and time the Pong the
-    // server echoes back (the Python `websockets` server auto-pongs). The
+    // Latency probe: send a WebSocket Ping every PING_INTERVAL and time
+    // the Pong the server echoes back (the server auto-pongs). The
     // round-trip is emitted on `connection-latency` for the UI's ping
     // readout. Only one ping is outstanding at a time.
-    let mut ping_interval = tokio::time::interval(Duration::from_secs(2));
+    //
+    // It doubles as the liveness check: if nothing at all has arrived
+    // for LINK_TIMEOUT while a ping is waiting, the link is dead.
+    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     let mut last_ping_sent: Option<Instant> = None;
+    let mut last_rx = Instant::now();
 
     loop {
         tokio::select! {
             msg = read.next() => {
+                if matches!(msg, Some(Ok(_))) {
+                    last_rx = Instant::now();
+                }
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         // Log incoming messages at info for debugging — but
@@ -1105,7 +1156,7 @@ async fn handle_connection<R: Runtime>(
                                     // controller knows the latched state
                                     // without waiting for the next toggle.
                                     if let Some(active) = data.get("active").and_then(|v| v.as_bool()) {
-                                        update_estop_state(state, app_handle, active);
+                                        update_estop_state(link, active);
                                     }
                                 }
                             }
@@ -1122,7 +1173,7 @@ async fn handle_connection<R: Runtime>(
                                     .and_then(|d| d.get("active"))
                                     .and_then(|v| v.as_bool())
                                 {
-                                    update_estop_state(state, app_handle, active);
+                                    update_estop_state(link, active);
                                 }
                             }
 
@@ -1166,11 +1217,7 @@ async fn handle_connection<R: Runtime>(
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         log::info!("Connection closed by server");
-                        {
-                            let mut s = state.write();
-                            s.status = ConnectionStatus::Disconnected;
-                        }
-                        emit_state(app_handle, &state.read());
+                        link.set_status(ConnectionStatus::Disconnected, None);
                         return true;
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -1188,12 +1235,7 @@ async fn handle_connection<R: Runtime>(
                     }
                     Some(Err(e)) => {
                         log::error!("WebSocket error: {}", e);
-                        {
-                            let mut s = state.write();
-                            s.status = ConnectionStatus::Error;
-                            s.error = Some(e.to_string());
-                        }
-                        emit_state(app_handle, &state.read());
+                        link.set_status(ConnectionStatus::Error, Some(e.to_string()));
                         return true;
                     }
                     _ => {}
@@ -1234,6 +1276,19 @@ async fn handle_connection<R: Runtime>(
             }
 
             _ = ping_interval.tick() => {
+                if let Some(sent) = last_ping_sent {
+                    if link_is_dead(sent, last_rx, Instant::now()) {
+                        log::warn!(
+                            "No response from server for {:?}; treating the link as lost",
+                            LINK_TIMEOUT);
+                        link.set_status(ConnectionStatus::Error,
+                                        Some("Server not responding".to_string()));
+                        return true;
+                    }
+                    // Still waiting on the last probe: don't restart its
+                    // clock, or a dead link would never time out.
+                    continue;
+                }
                 // Fire a latency probe. Stamp the send time first so the
                 // Pong handler can measure the round-trip.
                 last_ping_sent = Some(Instant::now());
@@ -1258,11 +1313,13 @@ async fn handle_connection<R: Runtime>(
 /// while engaged. Called from both the `get_estop_state` response
 /// branch (bootstrap on connect) and the `state/estop` broadcast
 /// branch (subsequent toggles).
-fn update_estop_state<R: Runtime>(
-    state: &Arc<RwLock<ConnectionState>>,
-    app_handle: &AppHandle<R>,
-    active: bool,
-) {
+fn update_estop_state<R: Runtime>(link: &Link<R>, active: bool) {
+    // A retired loop's view of the e-stop is no longer authoritative.
+    if !link.is_current() {
+        return;
+    }
+    let state = &link.state;
+    let app_handle = &link.app;
     let changed;
     {
         let mut s = state.write();
@@ -1278,6 +1335,15 @@ fn update_estop_state<R: Runtime>(
     if let Err(e) = app_handle.emit("estop-state", serde_json::json!({ "active": active })) {
         log::error!("Failed to emit estop-state event: {}", e);
     }
+}
+
+/// True when a link with a ping outstanding since `ping_sent` has
+/// received nothing at all (`last_rx`) for LINK_TIMEOUT. Any frame
+/// counts as a sign of life, not just the pong, so a busy server that is
+/// slow to pong but still sending isn't dropped.
+fn link_is_dead(ping_sent: Instant, last_rx: Instant, now: Instant) -> bool {
+    now.duration_since(ping_sent) >= LINK_TIMEOUT
+        && now.duration_since(last_rx) >= LINK_TIMEOUT
 }
 
 fn emit_state<R: Runtime>(app_handle: &AppHandle<R>, state: &ConnectionState) {
@@ -1300,6 +1366,41 @@ mod tests {
     //! link" behaviour is testable without standing up a real socket.
     use super::*;
     use serde_json::json;
+
+    // ── liveness ───────────────────────────────────────────────────
+
+    #[test]
+    fn link_with_a_fresh_ping_is_alive() {
+        let t0 = Instant::now();
+        assert!(!link_is_dead(t0, t0, t0 + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn link_silent_past_the_timeout_is_dead() {
+        let t0 = Instant::now();
+        assert!(link_is_dead(t0, t0, t0 + LINK_TIMEOUT));
+    }
+
+    #[test]
+    fn any_traffic_keeps_a_slow_to_pong_link_alive() {
+        // Ping unanswered for longer than the timeout, but the server sent
+        // something a moment ago: busy, not gone.
+        let t0 = Instant::now();
+        let now = t0 + LINK_TIMEOUT + Duration::from_secs(1);
+        assert!(!link_is_dead(t0, now - Duration::from_millis(200), now));
+    }
+
+    #[test]
+    fn disconnect_retires_the_running_connection() {
+        // A connection loop may only change the status while the
+        // generation it was started with is current; disconnect() must
+        // move it on so a loop winding down can't report over whatever
+        // comes next.
+        let c = WebSocketClient::new();
+        let before = c.generation.load(Ordering::SeqCst);
+        c.disconnect();
+        assert_ne!(c.generation.load(Ordering::SeqCst), before);
+    }
 
     #[test]
     fn ws_url_has_scheme_host_port_and_path() {

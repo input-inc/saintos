@@ -117,6 +117,13 @@ pub fn get_connection_status(state: State<'_, Arc<AppState>>) -> ConnectionState
     state.ws_client.state()
 }
 
+/// The controller's own battery (the Steam Deck's, or any Linux device's),
+/// or null where there is none. Polled by the dashboard alongside the robot's packs.
+#[tauri::command]
+pub fn get_local_battery() -> Option<crate::local_battery::LocalBattery> {
+    crate::local_battery::read()
+}
+
 /// Get current input state (gamepad + gyro)
 #[tauri::command]
 pub fn get_input_state(state: State<'_, Arc<AppState>>) -> crate::input::manager::InputState {

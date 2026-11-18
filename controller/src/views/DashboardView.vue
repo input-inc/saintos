@@ -1,7 +1,8 @@
 <!--
     Dashboard — the operator's at-a-glance status page (first tab).
-    Holds the battery (BMS) packs and WiFi link/channel tools that used
-    to live in the app's bottom accordion. Both useBatteries and useWifi
+    Holds the battery (BMS) packs, plus this controller's own battery,
+    and the WiFi link/channel tools that used to live in the app's
+    bottom accordion. Both useBatteries and useWifi
     are module-scoped singletons, so the live data is shared with the
     rest of the app.
 -->
@@ -104,7 +105,8 @@ function apCountClass(count: number): string {
                      class="bg-saint-surface-light rounded-lg p-3 flex-1 min-w-[280px] flex flex-col">
                     <div class="flex items-center justify-between mb-3">
                         <div class="flex items-center gap-2 min-w-0">
-                            <span class="material-icons text-2xl" :class="socClass(battery.soc)">
+                            <span class="material-icons text-2xl" :class="socClass(battery.soc)"
+                                  :title="battery.kind === 'local' ? 'This controller' : undefined">
                                 {{
                                     battery.chargeOn ? 'battery_charging_full' :
                                     battery.soc === null ? 'battery_unknown' :
@@ -147,7 +149,13 @@ function apCountClass(count: number): string {
                         </div>
                     </div>
 
-                    <div class="flex items-center gap-2 text-xs mb-2">
+                    <div v-if="battery.kind === 'local'" class="flex items-center gap-2 text-xs mb-2">
+                        <span class="px-2 py-0.5 rounded-full"
+                              :class="battery.chargeOn ? 'bg-green-500/20 text-green-500' : 'bg-saint-surface text-saint-text-muted'">
+                            {{ battery.status || 'Unknown' }}
+                        </span>
+                    </div>
+                    <div v-else class="flex items-center gap-2 text-xs mb-2">
                         <span class="px-2 py-0.5 rounded-full"
                               :class="battery.chargeOn ? 'bg-green-500/20 text-green-500' : 'bg-saint-surface text-saint-text-muted'">
                             CHG {{ battery.chargeOn ? 'ON' : 'OFF' }}

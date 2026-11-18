@@ -61,6 +61,41 @@ const pingMsRef = ref<number | null>(null);
 let initialized = false;
 const unlistenFns: UnlistenFn[] = [];
 
+/** How often the shown status is re-checked against the Rust client.
+ *  Events alone can leave it wrong: one missed, or arriving out of order
+ *  across a reconnect, and the header stayed red over a working link. */
+const STATUS_RESYNC_MS = 2000;
+
+/** Apply a status from the Rust client, from either the event or the
+ *  periodic re-check. */
+function applyState(state: ConnectionState): void {
+    statusRef.value = state.status;
+    errorRef.value = state.error;
+    // Clear the local estop mirror on disconnect so the banner doesn't
+    // linger after the WS drops. The bootstrap on the next connect
+    // re-sets it from the authoritative server-side value.
+    if (state.status === ConnectionStatus.Disconnected) {
+        estopActiveRef.value = false;
+        pingMsRef.value = null;
+    }
+}
+
+/** Re-read the status from the Rust client and show it if it differs. */
+async function resyncStatus(): Promise<void> {
+    try {
+        const state = await invoke<ConnectionState>('get_connection_status');
+        if (state && (state.status !== statusRef.value || state.error !== errorRef.value)) {
+            if (state.status !== statusRef.value) {
+                console.log('[useConnection] status re-check corrected',
+                    statusRef.value, '→', state.status);
+            }
+            applyState(state);
+        }
+    } catch {
+        // Bridge not ready yet, or tearing down; the next tick retries.
+    }
+}
+
 async function ensureInit(): Promise<void> {
     if (initialized) return;
     initialized = true;
@@ -69,18 +104,11 @@ async function ensureInit(): Promise<void> {
         await listen<ConnectionState>('connection-status', event => {
             const state = event.payload;
             console.log('[useConnection] Connection status changed:', state.status, state.error || '');
-            statusRef.value = state.status;
-            errorRef.value = state.error;
-            // Clear the local estop mirror on disconnect so the
-            // banner doesn't linger after the WS drops. The
-            // bootstrap on the next connect re-sets it from the
-            // authoritative server-side value.
-            if (state.status === ConnectionStatus.Disconnected) {
-                estopActiveRef.value = false;
-                pingMsRef.value = null;
-            }
+            applyState(state);
         }),
     );
+
+    setInterval(() => { void resyncStatus(); }, STATUS_RESYNC_MS);
 
     // Round-trip latency probe results from the Rust WS client (~2s cadence).
     unlistenFns.push(

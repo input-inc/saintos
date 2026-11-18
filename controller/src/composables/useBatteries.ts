@@ -16,9 +16,15 @@
  *
  * Module-scoped singleton (same pattern as useConnection) so every
  * caller shares one subscription and one reactive pack list.
+ *
+ * The controller's own battery (a Steam Deck, or whatever Linux device
+ * the app runs on) is listed first. It
+ * isn't robot telemetry, so it doesn't come over the WS: the Rust side
+ * reads it from the OS (`get_local_battery`), polled slowly and only
+ * while something is showing batteries.
  */
 
-import { computed, ref, watch } from 'vue';
+import { computed, getCurrentScope, onScopeDispose, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useConnection } from './useConnection';
@@ -41,6 +47,10 @@ const PROTECTION_LABELS = [
 ];
 
 export interface BmsPack {
+    /** 'bms' = a robot pack from pin_state telemetry; 'local' = this
+     *  controller's own battery. The card shows BMS FET chips for the
+     *  first and the OS charging status for the second. */
+    kind: 'bms' | 'local';
     key: string;            // `${nodeId}/${peripheralId}` — stable v-for key
     nodeId: string;
     peripheralId: string;
@@ -54,6 +64,18 @@ export interface BmsPack {
     chargeOn: boolean;
     dischargeOn: boolean;
     faults: string[];
+    /** OS status word for the local battery ("Charging", "Full", …). */
+    status?: string;
+}
+
+/** Shape returned by the Rust `get_local_battery` command. */
+interface LocalBattery {
+    device_name: string;
+    percent: number | null;
+    status: string;
+    charging: boolean;
+    voltage: number | null;
+    current: number | null;
 }
 
 interface Channel {
@@ -78,6 +100,64 @@ const framesRef = ref<Record<string, Channel[]>>({});
 
 let initialized = false;
 const unlistenFns: UnlistenFn[] = [];
+
+// ─── The controller's own battery ────────────────────────────────────
+//
+// Works on any Linux device the app runs on (Steam Deck, other handhelds,
+// laptops); elsewhere the command returns null and no card is shown.
+//
+// A charge level moves slowly, and this app is careful about its own
+// battery draw, so the OS is read once when a battery view appears and
+// then every LOCAL_POLL_MS, only while at least one view holds it.
+const LOCAL_POLL_MS = 15000;
+const localRef = ref<LocalBattery | null>(null);
+let localHolders = 0;
+let localTimer: ReturnType<typeof setInterval> | null = null;
+
+async function pollLocalBattery(): Promise<void> {
+    try {
+        localRef.value = await invoke<LocalBattery | null>('get_local_battery');
+    } catch (err) {
+        // A build without the command, or no Tauri bridge: no card.
+        localRef.value = null;
+        console.warn('[useBatteries] get_local_battery failed:', err);
+    }
+}
+
+function holdLocalBattery(): void {
+    if (localHolders++ === 0) {
+        void pollLocalBattery();
+        localTimer = setInterval(() => { void pollLocalBattery(); }, LOCAL_POLL_MS);
+    }
+    if (getCurrentScope()) {
+        onScopeDispose(() => {
+            if (--localHolders === 0 && localTimer !== null) {
+                clearInterval(localTimer);
+                localTimer = null;
+            }
+        });
+    }
+}
+
+function localPack(b: LocalBattery): BmsPack {
+    return {
+        kind: 'local',
+        key: 'local/controller',
+        nodeId: 'local',
+        peripheralId: 'controller',
+        name: b.device_name || 'This controller',
+        soc: b.percent,
+        voltage: b.voltage,
+        current: b.current,
+        temp: null,
+        protection: 0,
+        fetStatus: 0,
+        chargeOn: b.charging,
+        dischargeOn: !b.charging,
+        faults: [],
+        status: b.status,
+    };
+}
 
 // Ref-counted so the pin_state stream stops when no component is
 // rendering batteries. Topics are whatever the adopted-node list turns
@@ -169,6 +249,7 @@ const batteries = computed<BmsPack[]>(() => {
             const protection = (chanVal(channels, pid, 'protection') ?? 0) | 0;
             const fetStatus = (chanVal(channels, pid, 'fet_status') ?? 0) | 0;
             out.push({
+                kind: 'bms',
                 key: `${nodeId}/${pid}`,
                 nodeId,
                 peripheralId: pid,
@@ -186,12 +267,16 @@ const batteries = computed<BmsPack[]>(() => {
         }
     }
     // Stable order so cards don't reshuffle as frames arrive.
-    return out.sort((a, b) => a.key.localeCompare(b.key));
+    out.sort((a, b) => a.key.localeCompare(b.key));
+    // The handheld first: it's the one the operator is holding.
+    if (localRef.value) out.unshift(localPack(localRef.value));
+    return out;
 });
 
 export function useBatteries() {
     void ensureInit();
     // Hold the pin_state stream only while the calling component lives.
     holdWhileInScope('useBatteries', subscription);
+    holdLocalBattery();
     return { batteries };
 }
