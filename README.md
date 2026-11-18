@@ -78,15 +78,16 @@ controller.** (To build from source instead, see [BUILD.md](docs/BUILD.md).)
 
 ### 1. Install the server (Raspberry Pi)
 
-Download the latest server dist tarball —
-`saint-os_<version>_arm64_kilted.tar.zst` — from the
-[**Releases**](https://github.com/input-inc/saintos/releases) page, copy it
-to the Pi, and install:
+Download the latest server dist tarball for the Pi's OS from the
+[**Releases**](https://github.com/input-inc/saintos/releases) page —
+`saint-os_<version>_arm64_kilted_trixie.tar.zst` for Raspberry Pi OS Trixie,
+`saint-os_<version>_arm64_kilted.tar.zst` for Bookworm or Ubuntu 24.04 (see
+[INSTALL.md](docs/INSTALL.md)) — copy it to the Pi, and install:
 
 ```bash
-# On the Pi
-tar --zstd -xf saint-os_<version>_arm64_kilted.tar.zst
-cd saint-os_<version>_arm64_kilted
+# On the Pi (Trixie shown; drop _trixie for Bookworm / Ubuntu)
+tar --zstd -xf saint-os_<version>_arm64_kilted_trixie.tar.zst
+cd saint-os_<version>_arm64_kilted_trixie
 sudo ./install.sh            # installs deps offline, enables + starts the service
 ```
 

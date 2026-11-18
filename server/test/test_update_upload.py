@@ -28,6 +28,14 @@ def _run(coro):
 VALID_NAME = "saint-os_2.0.1_arm64_kilted.tar.zst"
 
 
+@pytest.fixture(autouse=True)
+def _bookworm_host(monkeypatch):
+    """Pin the host's Debian release so VALID_NAME (the unsuffixed bookworm
+    build) fits regardless of which OS runs the tests."""
+    import saint_server.update_manager as um
+    monkeypatch.setattr(um, "host_debian_release", lambda: "bookworm")
+
+
 # ── register_uploaded_tarball ──────────────────────────────────────────
 
 def test_register_uploaded_flips_to_downloaded(tmp_path):
@@ -166,6 +174,30 @@ def test_upload_route_rejects_bad_name(tmp_path):
 
     _run(scenario())
 
+
+def test_upload_route_rejects_other_variant(tmp_path, monkeypatch):
+    """A tarball built for another Debian release is a 400 before any bytes
+    land in staging — e.g. the bookworm build uploaded to a trixie host."""
+    pytest.importorskip("aiohttp.test_utils")
+    from aiohttp.test_utils import TestClient, TestServer
+    from aiohttp import FormData
+    import saint_server.update_manager as um
+
+    monkeypatch.setattr(um, "host_debian_release", lambda: "trixie")
+    mgr = UpdateManager()
+    app, staging, _ = _make_webserver(tmp_path, mgr)
+
+    async def scenario():
+        async with TestClient(TestServer(app)) as client:
+            form = FormData()
+            form.add_field("file", b"x" * 100, filename=VALID_NAME,
+                           content_type="application/octet-stream")
+            resp = await client.post("/api/update/upload", data=form)
+            assert resp.status == 400
+            assert "trixie tarball" in (await resp.json())["error"]
+            assert list(staging.iterdir()) == []
+
+    _run(scenario())
 
 def test_upload_route_503_without_manager(tmp_path):
     """No update manager wired yet → 503, not a crash."""

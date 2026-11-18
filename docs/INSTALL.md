@@ -59,10 +59,15 @@ for the operator-facing access point.
 
 ### OS image
 
-Either works — both 64-bit arm64:
+Any of these — all 64-bit arm64:
 
-- **Raspberry Pi OS Bookworm (64-bit, Lite)** — minimal, no desktop. Recommended.
+- **Raspberry Pi OS Trixie (64-bit, Lite)** — the current Raspberry Pi Imager
+  default. Minimal, no desktop.
+- **Raspberry Pi OS Bookworm (64-bit, Lite)** — "Legacy" in the imager.
 - **Ubuntu 24.04 Server (arm64)**.
+
+Each release ships **one server tarball per Debian release** (step 2): pick the
+one matching the OS you flash. The installer refuses a mismatched tarball.
 
 Flash with the Raspberry Pi Imager. In the imager's advanced settings:
 
@@ -87,16 +92,25 @@ devices (laptop, Steam Deck).
 
 ## 2. Download the release
 
-Grab the latest server dist tarball from the
-[**Releases**](https://github.com/input-inc/saintos/releases) page —
-`saint-os_<version>_arm64_kilted.tar.zst` (~80 MB compressed).
+Grab the latest server dist tarball for your OS from the
+[**Releases**](https://github.com/input-inc/saintos/releases) page:
 
-With the GitHub CLI:
+| OS on the Pi | Tarball |
+|--------------|---------|
+| Raspberry Pi OS **Trixie** (Debian 13) | `saint-os_<version>_arm64_kilted_trixie.tar.zst` |
+| Raspberry Pi OS **Bookworm** (Debian 12) | `saint-os_<version>_arm64_kilted.tar.zst` |
+| Ubuntu 24.04 | `saint-os_<version>_arm64_kilted.tar.zst` |
+
+Not sure which you have? `grep VERSION_CODENAME /etc/os-release` on the Pi.
+
+With the GitHub CLI (Trixie shown; drop `_trixie` for Bookworm / Ubuntu):
 
 ```bash
 gh release download --repo input-inc/saintos \
-    --pattern 'saint-os_*_arm64_kilted.tar.zst'
+    --pattern 'saint-os_*_arm64_kilted_trixie.tar.zst'
 ```
+
+The self-updater (dashboard → Updates) picks the right variant automatically.
 
 ---
 
@@ -105,16 +119,16 @@ gh release download --repo input-inc/saintos \
 ### Copy to the Pi
 
 ```bash
-scp saint-os_*_arm64_kilted.tar.zst pi@opensaint.local:/tmp/
+scp saint-os_*_arm64_kilted*.tar.zst pi@opensaint.local:/tmp/
 ssh pi@opensaint.local
 cd /tmp
-tar --zstd -xf saint-os_*_arm64_kilted.tar.zst
+tar --zstd -xf saint-os_*_arm64_kilted*.tar.zst
 ```
 
 ### Run the installer
 
 ```bash
-sudo saint-os_*_arm64_kilted/install.sh
+sudo saint-os_*_arm64_kilted*/install.sh
 ```
 
 `install.sh` is **idempotent** — re-running it updates in place. It:

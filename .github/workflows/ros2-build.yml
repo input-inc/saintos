@@ -1,7 +1,7 @@
 name: ros2-build
 
 # Source-builds ROS2 (ros_base subset) plus the micro-ROS agent inside a
-# Debian Bookworm container on an arm64 runner. The resulting install/ tree
+# Debian container (one per release in the matrix) on an arm64 runner. The resulting install/ tree
 # is published as a GitHub Release tagged with a content hash, so the dist
 # workflow can pull a pre-built copy in seconds instead of re-building it
 # (45-90 minutes cold).
@@ -190,8 +190,8 @@ jobs:
           gh release create "${{ steps.hash.outputs.tag }}" \
             --title "ROS2 ${{ env.ROS_DISTRO }} (${{ env.ARCH }}, ${{ env.DEBIAN_RELEASE }})" \
             --notes "Source-built ROS2 ${{ env.ROS_DISTRO }} ros_base + micro_ros_agent. \
-            Built against Debian ${{ env.DEBIAN_RELEASE }} (glibc 2.36, libpython3.11). \
-            Compatible with Raspberry Pi OS Bookworm natively, and Ubuntu 24.04 with libpython3.11 installed. \
+            Built against Debian ${{ env.DEBIAN_RELEASE }} (${{ env.DEBIAN_RELEASE == 'bookworm' && 'glibc 2.36, libpython3.11' || 'glibc 2.41, libpython3.13' }}). \
+            Compatible with Raspberry Pi OS ${{ env.DEBIAN_RELEASE }}${{ env.DEBIAN_RELEASE == 'bookworm' && ', and Ubuntu 24.04 with libpython3.11 installed' || '' }}. \
             \
             micro_ros_setup branch: ${{ env.MICRO_ROS_REF }} @ ${{ steps.hash.outputs.micro_sha }}" \
             ros2-install.tar.gz

@@ -1,0 +1,19 @@
+# Debian 13 (trixie) runtime deps whose names differ per release. Merged
+# with runtime-deps.txt — see the header there.
+#
+# Trixie finished the 64-bit time_t transition, so libssl3 / libcurl4 are
+# libssl3t64 / libcurl4t64 (which Breaks: the old names — bundling the
+# bookworm libssl3 is what broke 0.2.3 installs on trixie).
+
+libssl3t64
+libtinyxml2-11
+libcurl4t64
+
+# LTTng tracing runtime: rcl / rclpy in the bundled ROS 2 tree link
+# liblttng-ust.so.1 (the tree is built with tracing enabled), so rclpy fails
+# to import without it on an image that doesn't happen to carry it.
+liblttng-ust1t64
+
+# Python 3.13: the trixie ROS 2 tree was built against libpython3.13.
+libpython3.13
+python3.13

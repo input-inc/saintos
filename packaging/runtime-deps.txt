@@ -1,7 +1,13 @@
 # SAINT.OS server runtime apt dependencies — SINGLE SOURCE OF TRUTH.
 #
+# This file holds the packages whose names are the same on every supported
+# Debian release. Packages whose names differ per release (t64 renames,
+# versioned sonames, the Python minor) live in runtime-deps.<release>.txt
+# next to it; the full set for a build is this file + that one.
+#
 # Consumed by all three of:
-#   - packaging/install.sh          installs these on the target
+#   - scripts/make-dist.sh          merges both into the dist's runtime-deps.txt,
+#                                   which packaging/install.sh installs on the target
 #   - scripts/build-local-dist.sh   bundles them into a local dist
 #   - .github/workflows/dist.yml    bundles them into the CI release
 #
@@ -11,16 +17,14 @@
 # here — is what stops the three consumers from drifting, which once
 # shipped a release missing the whole audio stack (229 MB vs ~600 MB).
 #
-# Names must resolve on Debian Bookworm (the target + the bundling
-# container) and, where install.sh runs on Ubuntu noble, there too.
+# Names must resolve on Debian Bookworm AND Trixie (the targets + the
+# bundling containers) and, where install.sh runs on Ubuntu noble, there too.
 
 # Core C / Python libraries the ROS 2 + server runtime link or import.
-libssl3
-libtinyxml2-9
+# (libssl / libtinyxml2 / libcurl are per-release — see runtime-deps.<release>.txt.)
 libyaml-0-2
 libxml2
 libacl1
-libcurl4
 python3
 python3-yaml
 python3-numpy
@@ -35,6 +39,7 @@ python3-empy
 python3-catkin-pkg
 python3-importlib-metadata
 python3-argcomplete
+python3-typing-extensions
 
 # bleak: BLE client for host_controller's in-process BMS driver. Imports
 # lazily, so a host without it still starts (the BLE path just goes dark).
@@ -65,8 +70,3 @@ network-manager
 wireless-regdb
 rfkill
 iw
-
-# Python 3.11: the bundled ROS 2 was built against libpython3.11. Default on
-# Bookworm; on Ubuntu noble apt pulls it from universe alongside.
-libpython3.11
-python3.11

@@ -6,8 +6,9 @@
 # and extracted to /opt/ros/<distro>/ — no apt repos to configure.
 #
 # Supported targets (arm64):
-#   - Raspberry Pi OS Bookworm (Pi 4 / Pi 5)
-#   - Ubuntu 24.04 noble
+#   - Raspberry Pi OS Bookworm (Pi 4 / Pi 5)   saint-os_<v>_arm64_<ros>.tar.zst
+#   - Raspberry Pi OS Trixie   (Pi 4 / Pi 5)   saint-os_<v>_arm64_<ros>_trixie.tar.zst
+#   - Ubuntu 24.04 noble                       the bookworm tarball
 #
 # Usage:
 #   sudo ./install.sh                 # install + enable + start (+ WiFi AP)
@@ -90,32 +91,58 @@ die() { printf '\033[1;31m[install]\033[0m %s\n' "$*" >&2; exit 1; }
 VERSION=$(python3 -c "import json,sys; print(json.load(open('${PAYLOAD_DIR}/manifest.json'))['version'])")
 ARCH=$(python3 -c "import json,sys; print(json.load(open('${PAYLOAD_DIR}/manifest.json'))['arch'])")
 ROS_DISTRO=$(python3 -c "import json,sys; print(json.load(open('${PAYLOAD_DIR}/manifest.json'))['ros_distro'])")
+# Debian release the bundle was built for. Manifests from before per-release
+# builds (≤ 0.2.3) lack the key; those were all bookworm.
+BUNDLE_RELEASE=$(python3 -c "import json,sys; print(json.load(open('${PAYLOAD_DIR}/manifest.json')).get('debian_release', 'bookworm'))")
 
 HOST_ARCH=$(dpkg --print-architecture)
 if [[ "$HOST_ARCH" != "$ARCH" ]]; then
     die "Architecture mismatch: package is ${ARCH}, host is ${HOST_ARCH}"
 fi
 
-# Detect target distro family. The bundled ROS2 was built against Debian
-# Bookworm (libstdc++ from gcc-12, libpython3.11, glibc 2.36), which is
-# binary-compatible with Pi OS Bookworm directly, and with Ubuntu 24.04
-# noble after libpython3.11 is installed from universe.
-. /etc/os-release
-OS_ID="${ID:-unknown}"
-OS_VERSION_ID="${VERSION_ID:-unknown}"
-OS_PRETTY="${PRETTY_NAME:-${OS_ID} ${OS_VERSION_ID}}"
+# Detect target distro family. Each dist tarball is built for ONE Debian
+# release (manifest debian_release): the bundled ROS2 links that release's
+# libstdc++ / libpython (3.11 on bookworm, 3.13 on trixie) and deps/ holds
+# that release's debs. The bookworm build also serves Ubuntu 24.04 noble
+# after libpython3.11 is installed from universe.
+#
+# os-release is read in a subshell: sourcing it directly defines VERSION
+# (e.g. "12 (bookworm)"), clobbering the package VERSION from manifest.json —
+# which is then written to ${PREFIX}/VERSION, where the updater reads the
+# installed version and can't parse it.
+os_release() { ( . /etc/os-release && eval "printf '%s' \"\${$1:-}\"" ); }
+OS_ID="$(os_release ID)";                 OS_ID="${OS_ID:-unknown}"
+OS_VERSION_ID="$(os_release VERSION_ID)"; OS_VERSION_ID="${OS_VERSION_ID:-unknown}"
+OS_CODENAME="$(os_release VERSION_CODENAME)"
+OS_CODENAME="${OS_CODENAME:-unknown}"
+OS_PRETTY="$(os_release PRETTY_NAME)";    OS_PRETTY="${OS_PRETTY:-${OS_ID} ${OS_VERSION_ID}}"
 case "${OS_ID}" in
     debian|raspbian)
-        OS_FAMILY=debian ;;
+        OS_FAMILY=debian
+        HOST_RELEASE="${OS_CODENAME}" ;;
     ubuntu)
-        OS_FAMILY=ubuntu ;;
+        OS_FAMILY=ubuntu
+        HOST_RELEASE=bookworm ;;
     *)
         OS_FAMILY=unknown
+        HOST_RELEASE=""
         warn "Unsupported OS: ${OS_PRETTY} — proceeding, but YMMV"
         ;;
 esac
 
-log "Installing SAINT.OS ${VERSION} (${ARCH}, ros-${ROS_DISTRO}) on ${OS_PRETTY}"
+# Refuse the wrong variant up front. Installing e.g. the bookworm build on
+# trixie gets as far as apt and then dies on libssl3 vs libssl3t64 — an
+# error that reads like a broken bundle rather than the wrong download.
+if [[ -n "${HOST_RELEASE}" && "${HOST_RELEASE}" != "${BUNDLE_RELEASE}" ]]; then
+    if [[ "${HOST_RELEASE}" == "bookworm" ]]; then
+        want="saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}.tar.zst"
+    else
+        want="saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}_${HOST_RELEASE}.tar.zst"
+    fi
+    die "This package is the Debian ${BUNDLE_RELEASE} build, but this host (${OS_PRETTY}) needs the ${HOST_RELEASE} build. Use ${want} instead."
+fi
+
+log "Installing SAINT.OS ${VERSION} (${ARCH}, ros-${ROS_DISTRO}, ${BUNDLE_RELEASE}) on ${OS_PRETTY}"
 
 # --- Runtime apt dependencies -----------------------------------------------
 
@@ -139,8 +166,8 @@ done < <(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "${_deps_file}")
 # Air-gapped installs: the dist tarball ships a deps/ directory containing
 # .deb files for every runtime dependency plus a Packages index. install.sh
 # wires it up as a temporary local apt source so apt can satisfy deps
-# without internet access. Used only on Debian/Pi OS hosts (where the
-# bundled debs match the target ABI).
+# without internet access. Used only on Debian/Pi OS hosts, whose release
+# the check above has already matched to the bundle's.
 
 LOCAL_APT_LIST="/etc/apt/sources.list.d/saint-os-local.list"
 LOCAL_APT_CONF="/etc/apt/apt.conf.d/00saint-os-install"
@@ -198,20 +225,87 @@ trap teardown_local_apt_repo EXIT
 
 setup_local_apt_repo
 
+# Lockstep families. Debian binary packages built from one source pin each
+# other to the exact version — libpython3.13 needs libpython3.13-stdlib
+# (= same version), which python3.13 also pins; udev pins libsystemd-shared;
+# and so on. When the image is a newer point release than this bundle, it may
+# already have part of such a family at the newer version while we must add
+# a missing member, and offline only the bundle's older build exists:
+#   libpython3.13 : Depends: libpython3.13-stdlib (= 3.13.5-2)
+#                   but 3.13.5-2+deb13u5 is to be installed
+# Everything else keeps the image's newer version. For just these families,
+# simulate the install; for each unmet `(= V)` that would mean downgrading an
+# installed package, move EVERY installed package built from that Debian
+# source to the bundle's build — a family has to move together (downgrading
+# libpython3.13-stdlib alone breaks the image's own python3.13). It stays the
+# same upstream release and loses only Debian point-release patches until the
+# robot is next updated online. Repeats because one family can pin into the
+# next; appends to INSTALL_OPTS / RUNTIME_DEPS.
+resolve_lockstep_downgrades() {
+    (( DRY_RUN )) && return
+    local -A want=()
+    local round sim added name ver inst src pkg pkgsrc bver
+    local -a extra=()
+    for round in 1 2 3 4 5 6 7 8; do
+        extra=()
+        for name in "${!want[@]}"; do extra+=("${name}=${want[$name]}"); done
+        if sim=$(apt-get install -s -y "${INSTALL_OPTS[@]}" --allow-downgrades \
+                    "${RUNTIME_DEPS[@]}" "${extra[@]}" 2>&1); then
+            break
+        fi
+        added=0
+        while read -r name ver; do
+            # Only pins that would DOWNGRADE something the image has.
+            inst=$(dpkg-query -W -f='${Version}' "$name" 2>/dev/null) || continue
+            [[ -n "$inst" ]] && dpkg --compare-versions "$ver" lt "$inst" || continue
+            src=$(dpkg-query -W -f='${source:Package}' "$name" 2>/dev/null)
+            src=${src:-$name}
+            while read -r pkg pkgsrc; do
+                [[ "$pkgsrc" == "$src" && -z "${want[$pkg]:-}" ]] || continue
+                bver=$(apt-cache madison "${APT_UPDATE_OPTS[@]}" "$pkg" 2>/dev/null \
+                    | awk -F'|' 'NR==1 { gsub(/ /, "", $2); print $2 }')
+                [[ -n "$bver" && "$bver" != "$(dpkg-query -W -f='${Version}' "$pkg")" ]] || continue
+                want[$pkg]=$bver
+                added=1
+            done < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package} ${source:Package}\n' \
+                        | awk '$1 == "ii" { print $2, $3 }')
+        done < <(printf '%s\n' "$sim" \
+            | sed -nE 's/.*Depends: ([^ :]+)(:[a-z0-9]+)? \(= ([^)]+)\) but [^ ]+ is (to be )?installed.*/\1 \3/p' \
+            | sort -u)
+        # Nothing family-shaped left to move — a real problem; let the actual
+        # install below report it in full.
+        (( added )) || break
+    done
+    (( ${#want[@]} )) || return 0
+    warn "This image is newer than the bundled packages for some lockstep families; moving only these to the bundled build:"
+    for name in "${!want[@]}"; do
+        warn "  ${name}: $(dpkg-query -W -f='${Version}' "$name") -> ${want[$name]}"
+    done
+    INSTALL_OPTS+=(--allow-downgrades)
+    for name in "${!want[@]}"; do RUNTIME_DEPS+=("${name}=${want[$name]}"); done
+}
+
 log "Installing runtime dependencies via apt"
-# On the offline (bundled-repo) path, only install MISSING deps — never
-# upgrade ones already present. Without --no-upgrade, `apt-get install`
-# still sees the host's cached online source lists and will try to pull a
-# newer version of an already-installed package (e.g. VLC 3.0.18 → 3.0.23
-# from archive.raspberrypi.com, which also drags in new transitive deps
-# not in our bundle). On an air-gapped robot that fetch fails and aborts
-# the whole install. We only need these deps *present*, not latest, so
-# skip upgrades. The online path keeps normal upgrade behavior.
+# On the offline (bundled-repo) path apt sees ONLY the bundled repo
+# (APT_UPDATE_OPTS) for the install as well as the update. Pi OS images ship
+# package lists from the image build; left visible, apt picks their newer
+# candidates (e.g. VLC 3.0.18 → 3.0.23 from archive.raspberrypi.com, plus new
+# transitive deps not in our bundle) and then can't download them — the
+# server hosts its own network and has no internet.
+#
+# With only the bundle visible, installed packages are still candidates, so
+# anything the image already has at a newer version than the bundle is KEPT;
+# apt never downgrades on its own. (No --no-upgrade: with the online lists
+# hidden it no longer guards anything, and it would also block the explicit
+# lockstep downgrades resolve_lockstep_downgrades requests.) The online path
+# keeps normal upgrade behavior.
 INSTALL_OPTS=()
 if (( LOCAL_REPO_ENABLED )); then
     log "Using bundled .deb repo (no internet required)"
     run apt-get update "${APT_UPDATE_OPTS[@]}"
-    INSTALL_OPTS=(--no-upgrade)
+    # --no-remove: abort rather than uninstall anything of the image's.
+    INSTALL_OPTS=(--no-remove "${APT_UPDATE_OPTS[@]}")
+    resolve_lockstep_downgrades
 else
     run apt-get update
     if [[ "${OS_FAMILY}" == "ubuntu" ]]; then

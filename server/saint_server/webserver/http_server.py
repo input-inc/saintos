@@ -502,7 +502,8 @@ class WebServer:
         does. On success the update manager flips to 'downloaded' so the
         existing Install flow (WS update.install) takes over unchanged.
         """
-        from saint_server.update_manager import TARBALL_RE, UPDATE_STAGING
+        from saint_server.update_manager import (
+            TARBALL_RE, UPDATE_STAGING, tarball_debian_release, tarball_fits_host)
 
         manager = getattr(self.ws_handler, '_update_manager', None)
         if manager is None:
@@ -521,10 +522,18 @@ class WebServer:
 
         # basename() defends against path-traversal in the multipart name.
         filename = os.path.basename((field.filename or '').strip())
-        if not filename or not TARBALL_RE.match(filename):
+        match = TARBALL_RE.match(filename) if filename else None
+        if not match:
             return web.json_response(
                 {'error': 'Filename must be a SAINT.OS dist tarball '
-                          '(saint-os_<version>_<arch>_<ros>.tar.zst)'},
+                          '(saint-os_<version>_<arch>_<ros>[_<release>].tar.zst)'},
+                status=400)
+        # Reject a wrong-OS build before streaming hundreds of MB to disk.
+        if not tarball_fits_host(match, manager.host_release):
+            return web.json_response(
+                {'error': f'{filename} is the {tarball_debian_release(match)} '
+                          f'build; this server runs {manager.host_release}. '
+                          f'Upload the {manager.host_release} tarball.'},
                 status=400)
 
         UPDATE_STAGING.mkdir(parents=True, exist_ok=True)

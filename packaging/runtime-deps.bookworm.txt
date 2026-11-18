@@ -1,0 +1,17 @@
+# Debian 12 (bookworm) runtime deps whose names differ per release. Merged
+# with runtime-deps.txt — see the header there. Also the set install.sh uses
+# on Ubuntu noble, which runs the bookworm build.
+
+libssl3
+libtinyxml2-9
+libcurl4
+
+# LTTng tracing runtime: rcl / rclpy in the bundled ROS 2 tree link
+# liblttng-ust.so.1 (the tree is built with tracing enabled), so rclpy fails
+# to import without it on an image that doesn't happen to carry it.
+liblttng-ust1
+
+# Python 3.11: the bookworm ROS 2 tree was built against libpython3.11.
+# Default on Bookworm; on Ubuntu noble apt pulls it from universe alongside.
+libpython3.11
+python3.11

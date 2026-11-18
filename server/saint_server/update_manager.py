@@ -51,16 +51,57 @@ APPLY_WRAPPER_TIMEOUT = 60
 USB_HELPER = INSTALL_PREFIX / "bin" / "usb-helper.sh"
 
 # Tarballs published by the dist workflow look like:
-#   saint-os_0.5.1_arm64_jazzy.tar.zst         (current)
+#   saint-os_0.5.1_arm64_kilted.tar.zst          (Debian 12 bookworm)
+#   saint-os_0.5.1_arm64_kilted_trixie.tar.zst   (Debian 13 trixie)
 #   saint-os_v0.5.1_arm64_jazzy.tar.zst
-#   saint-os_0.5.1_arm64_jazzy.tar.gz          (legacy, pre-zstd switch)
+#   saint-os_0.5.1_arm64_jazzy.tar.gz            (legacy, pre-zstd switch)
+#
+# The bookworm build keeps the unsuffixed name on purpose: servers already
+# in the field (≤ 0.2.3) parse with a regex that has no release group, so
+# they keep finding bookworm updates and can never match a trixie tarball.
 TARBALL_RE = re.compile(
     r"^saint-os_v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:[-+][^_]+)?)"
-    r"_(?P<arch>[a-z0-9]+)_(?P<ros>[a-z0-9]+)\.tar\.(?:gz|zst)$"
+    r"_(?P<arch>[a-z0-9]+)_(?P<ros>[a-z0-9]+)(?:_(?P<release>[a-z]+))?"
+    r"\.tar\.(?:gz|zst)$"
 )
+# Release a tarball without a `_<release>` suffix was built for.
+DEFAULT_DEBIAN_RELEASE = "bookworm"
 # File-extension suffix accepted by the on-disk scanner (sorted longest-first
 # so endswith() over the tuple works without false-positive prefixes).
 TARBALL_EXTS = (".tar.zst", ".tar.gz")
+
+
+def tarball_debian_release(match: "re.Match") -> str:
+    """Debian release a TARBALL_RE match was built for."""
+    return match.group("release") or DEFAULT_DEBIAN_RELEASE
+
+
+def host_debian_release(os_release: str = "/etc/os-release") -> Optional[str]:
+    """Which dist variant this host needs, or None when it can't be told.
+
+    Debian / Pi OS → VERSION_CODENAME. Ubuntu runs the bookworm build
+    (install.sh pulls libpython3.11 from universe), so it maps there.
+    """
+    fields = {}
+    try:
+        with open(os_release) as f:
+            for line in f:
+                key, sep, value = line.strip().partition("=")
+                if sep:
+                    fields[key] = value.strip('"')
+    except OSError:
+        return None
+    os_id = fields.get("ID", "")
+    if os_id in ("debian", "raspbian"):
+        return fields.get("VERSION_CODENAME") or None
+    if os_id == "ubuntu":
+        return DEFAULT_DEBIAN_RELEASE
+    return None
+
+
+def tarball_fits_host(match: "re.Match", host_release: Optional[str]) -> bool:
+    """True if the tarball was built for host_release (or the host is unknown)."""
+    return host_release is None or tarball_debian_release(match) == host_release
 
 
 @dataclass
@@ -168,6 +209,9 @@ class UpdateManager:
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
         self.state = UpdateState(installed_version=_read_installed_version())
+        # Debian release this host runs; only same-release tarballs are
+        # offered (a bookworm build can't install on trixie, and vice versa).
+        self.host_release = host_debian_release()
         self._listeners: List[Callable[[UpdateState], None]] = []
         self._lock = asyncio.Lock()
         # Reusable HTTP request for the API check; GitHub recommends UA.
@@ -298,7 +342,8 @@ class UpdateManager:
         asset_name = None
         for asset in data.get("assets", []):
             name = asset.get("name", "")
-            if TARBALL_RE.match(name):
+            m = TARBALL_RE.match(name)
+            if m and tarball_fits_host(m, self.host_release):
                 asset_url = asset.get("browser_download_url")
                 asset_size = asset.get("size")
                 asset_name = name
@@ -367,7 +412,7 @@ class UpdateManager:
                 continue
             name = os.path.basename(path)
             m = TARBALL_RE.match(name)
-            if not m:
+            if not m or not tarball_fits_host(m, self.host_release):
                 continue
             version = m.group("version")
             if not _version_newer(version, self.state.installed_version):
@@ -397,7 +442,7 @@ class UpdateManager:
                 continue
             for entry in self._walk_mounts(root):
                 m = TARBALL_RE.match(os.path.basename(entry))
-                if not m:
+                if not m or not tarball_fits_host(m, self.host_release):
                     continue
                 version = m.group("version")
                 if not _version_newer(version, self.state.installed_version):
@@ -582,6 +627,10 @@ class UpdateManager:
         m = TARBALL_RE.match(name)
         if not m:
             raise ValueError(f"not a valid dist tarball name: {name}")
+        if not tarball_fits_host(m, self.host_release):
+            raise ValueError(
+                f"{name} is the {tarball_debian_release(m)} build; this host "
+                f"runs {self.host_release} — use the {self.host_release} tarball")
         if not os.path.isfile(dest_path):
             raise FileNotFoundError(f"uploaded tarball not found: {dest_path}")
 

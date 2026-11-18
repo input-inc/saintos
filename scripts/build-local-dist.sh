@@ -7,7 +7,8 @@
 # ~/.cache/saint-os/ so iteration loops just rebuild the saint_os colcon
 # install — typically 2-4 minutes per run after the first.
 #
-# Output: dist/saint-os_<version>_arm64_jazzy.tar.gz
+# Output: dist/saint-os_<version>_arm64_kilted.tar.zst          (--debian-release bookworm, default)
+#         dist/saint-os_<version>_arm64_kilted_trixie.tar.zst   (--debian-release trixie)
 #
 # Usage:
 #   scripts/build-local-dist.sh [options]
@@ -29,6 +30,9 @@
 #
 # Options:
 #   --version VER            Override version string (default: <VERSION>-local.<sha7>)
+#   --debian-release REL     Target Debian release: bookworm (default) or trixie.
+#                            Selects the ROS2 tree (_ros2/ or _ros2_<rel>/), the
+#                            .deb bundle, the builder image and the tarball name.
 #   --rebundle-debs          Re-download the bundled .deb cache (slow; usually unneeded)
 #   --refetch-ros2           Force re-download of the bundled ROS2 install tree
 #   --fetch-firmware         Pull the latest CI firmware + controller artifacts from
@@ -59,7 +63,7 @@ cd "$REPO_ROOT"
 
 ROS_DISTRO="kilted"
 ARCH="arm64"
-DEBIAN_RELEASE="bookworm"
+DEBIAN_RELEASE="bookworm"   # --debian-release overrides
 # Upstream pins — must match the same-named env vars in
 # .github/workflows/ros2-build.yml and .github/workflows/dist.yml or
 # the local hash will diverge from CI's and we won't find the cached
@@ -86,6 +90,7 @@ CLEAN=0
 while (( "$#" )); do
     case "$1" in
         --version) VERSION="$2"; shift 2 ;;
+        --debian-release) DEBIAN_RELEASE="$2"; shift 2 ;;
         --rebundle-debs) REBUNDLE_DEBS=1; shift ;;
         --refetch-ros2) REFETCH_ROS2=1; shift ;;
         --fetch-firmware) FETCH_FIRMWARE=1; shift ;;
@@ -94,7 +99,7 @@ while (( "$#" )); do
         --skip-controller-build) SKIP_CONTROLLER_BUILD=1; shift ;;
         --skip-web-build) SKIP_WEB_BUILD=1; shift ;;
         --clean) CLEAN=1; shift ;;
-        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,49p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -102,6 +107,20 @@ done
 log() { printf '\033[1;36m[build]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[build]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[build]\033[0m %s\n' "$*" >&2; exit 1; }
+
+[[ -f "${REPO_ROOT}/packaging/runtime-deps.${DEBIAN_RELEASE}.txt" ]] \
+    || die "Unsupported --debian-release '${DEBIAN_RELEASE}' (no packaging/runtime-deps.${DEBIAN_RELEASE}.txt)"
+# Bookworm's ROS2 tree lives at the legacy _ros2/; other releases at
+# _ros2_<release>/ (the layout firmware/raspberrypi/scripts/package.sh and
+# make-dist.sh expect). Release tags follow ros2-build.yml: bookworm keeps
+# the bare ros2-<distro>-<arch>-<hash>, others insert -<release>.
+if [[ "$DEBIAN_RELEASE" == "bookworm" ]]; then
+    ROS2_TREE="_ros2"
+    ROS_TAG_RELEASE=""
+else
+    ROS2_TREE="_ros2_${DEBIAN_RELEASE}"
+    ROS_TAG_RELEASE="${DEBIAN_RELEASE}-"
+fi
 
 # --- preflight --------------------------------------------------------------
 
@@ -183,16 +202,16 @@ fi
 # ROS_TAG and stale local caches don't mask the upstream rebuild.
 ROS_HASH=$(cat _ros2_src/ros2.repos _ros2_src/micro_ros.txt \
     "${REPO_ROOT}/scripts/build-ros2-in-container.sh" | $SHA256 | cut -c1-12)
-ROS_TAG="ros2-${ROS_DISTRO}-${ARCH}-${ROS_HASH}"
+ROS_TAG="ros2-${ROS_DISTRO}-${ARCH}-${ROS_TAG_RELEASE}${ROS_HASH}"
 ROS_CACHE_TARBALL="${CACHE_ROOT}/${ROS_TAG}.tar.gz"
 
 # Local-iteration fast path: if we already have a working extracted
-# install tree at _ros2/, trust it and skip the download/extract dance.
+# install tree at ${ROS2_TREE}/, trust it and skip the download/extract dance.
 # This decouples local iteration from CI: the operator can edit
 # build-ros2-in-container.sh (which the hash includes) without first
 # having to push and re-run the ros2-build workflow to publish a tarball
 # under the new hash. Pass --refetch-ros2 to override.
-EXTRACTED_INSTALL="_ros2/opt/ros/${ROS_DISTRO}/install"
+EXTRACTED_INSTALL="${ROS2_TREE}/opt/ros/${ROS_DISTRO}/install"
 if (( REFETCH_ROS2 )); then
     log "Forcing ROS2 re-fetch (--refetch-ros2) — wiping ${EXTRACTED_INSTALL}"
     rm -rf "$EXTRACTED_INSTALL"
@@ -218,14 +237,14 @@ else
         curl -fL --progress-bar \
           "https://github.com/${REPO_SLUG}/releases/download/${ROS_TAG}/ros2-install.tar.gz" \
           -o "$ROS_CACHE_TARBALL" \
-          || die "ROS2 release ${ROS_TAG} not found. Run the ros2-build workflow first, or re-extract a prior tarball under _ros2/opt/ros/${ROS_DISTRO}/install/."
+          || die "ROS2 release ${ROS_TAG} not found. Run the ros2-build workflow first, or re-extract a prior tarball under ${EXTRACTED_INSTALL}/."
     else
         log "Using cached ROS2 tarball ($(du -h "$ROS_CACHE_TARBALL" | cut -f1))"
     fi
     log "Extracting ROS2 install tree (wiping any partial prior extract)"
-    rm -rf "_ros2/opt/ros/${ROS_DISTRO}"
-    mkdir -p "_ros2/opt/ros/${ROS_DISTRO}"
-    tar -xzf "$ROS_CACHE_TARBALL" -C "_ros2/opt/ros/${ROS_DISTRO}"
+    rm -rf "${ROS2_TREE}/opt/ros/${ROS_DISTRO}"
+    mkdir -p "${ROS2_TREE}/opt/ros/${ROS_DISTRO}"
+    tar -xzf "$ROS_CACHE_TARBALL" -C "${ROS2_TREE}/opt/ros/${ROS_DISTRO}"
 fi
 [[ -f "${EXTRACTED_INSTALL}/setup.bash" ]] \
     || die "ROS2 setup.bash missing after extract"
@@ -440,14 +459,17 @@ fi
 DEB_CACHE_DIR="${CACHE_ROOT}/debs-${DEBIAN_RELEASE}-${ARCH}"
 
 # The runtime deb list is the single source of truth in
-# packaging/runtime-deps.txt (shared with packaging/install.sh and
-# .github/workflows/dist.yml so the three can't drift). Strip comment /
-# blank lines into a space-separated list; it's expanded UNQUOTED into
-# `apt-get install ... ${RUNTIME_DEB_LIST}` in the container below, and
-# hashed so the cache invalidates automatically when the file changes.
+# packaging/runtime-deps.txt + runtime-deps.<release>.txt (shared with
+# packaging/install.sh and .github/workflows/dist.yml so the three can't
+# drift). Strip comment / blank lines into a space-separated list; it's
+# expanded UNQUOTED into `apt-get install ... ${RUNTIME_DEB_LIST}` in the
+# container below, and hashed so the cache invalidates automatically when
+# either file changes.
 RUNTIME_DEPS_FILE="${REPO_ROOT}/packaging/runtime-deps.txt"
+RUNTIME_DEPS_RELEASE_FILE="${REPO_ROOT}/packaging/runtime-deps.${DEBIAN_RELEASE}.txt"
 [[ -f "$RUNTIME_DEPS_FILE" ]] || die "runtime-deps.txt not found at $RUNTIME_DEPS_FILE"
-RUNTIME_DEB_LIST=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$RUNTIME_DEPS_FILE" | tr '\n' ' ')
+RUNTIME_DEB_LIST=$(grep -vhE '^[[:space:]]*#|^[[:space:]]*$' \
+    "$RUNTIME_DEPS_FILE" "$RUNTIME_DEPS_RELEASE_FILE" | tr '\n' ' ')
 
 DEB_LIST_HASH=$(printf '%s' "$RUNTIME_DEB_LIST" | shasum -a 256 | awk '{print $1}' | cut -c1-12)
 CACHE_SENTINEL="$DEB_CACHE_DIR/.deb-list.sha256"
@@ -570,7 +592,9 @@ fi
 # sync with CI is the `colcon build` invocation further down (keep them
 # identical). The toolchain list here mirrors what that container
 # installed before.
-BUILDER_APT="ca-certificates curl gnupg build-essential cmake git pkg-config python3 python3-dev python3-pip python3-numpy python3-yaml libpython3.11 libssl3 libtinyxml2-dev libxml2-dev libyaml-dev"
+# The release-specific runtime libs (libpython3.x, libssl, …) come from
+# the same per-release list the .deb bundle uses.
+BUILDER_APT="ca-certificates curl gnupg build-essential cmake git pkg-config python3 python3-dev python3-pip python3-numpy python3-yaml libtinyxml2-dev libxml2-dev libyaml-dev $(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$RUNTIME_DEPS_RELEASE_FILE" | tr '\n' ' ')"
 BUILDER_PIP="colcon-common-extensions empy==3.3.4 lark"
 BUILDER_HASH=$(printf 'base:debian:%s\napt:%s\npip:%s\n' \
     "$DEBIAN_RELEASE" "$BUILDER_APT" "$BUILDER_PIP" | $SHA256 | cut -c1-12)
@@ -590,15 +614,31 @@ DOCKERFILE
     # The builder tag is content-hashed, so a spec change mints a NEW
     # tag and leaves the previous saint-os-builder:<oldhash> behind —
     # still tagged (not dangling), so `docker image prune` won't reap it.
-    # Drop every other saint-os-builder tag now that the current one is
-    # built, so stale toolchain images don't accumulate ~825MB apiece.
-    docker images --filter=reference='saint-os-builder:*' --format '{{.Repository}}:{{.Tag}}' \
-        | grep -vxF "$BUILDER_IMAGE" \
+    # Drop every other saint-os-builder tag for THIS release/arch now that
+    # the current one is built, so stale toolchain images don't accumulate
+    # ~825MB apiece. Other releases' builders are kept — alternating
+    # bookworm and trixie builds would otherwise rebuild each time.
+    docker images --filter=reference="saint-os-builder:${DEBIAN_RELEASE}-${ARCH}-*" --format '{{.Repository}}:{{.Tag}}' \
+        | { grep -vxF "$BUILDER_IMAGE" || true; } \
         | while read -r stale; do
             log "Removing superseded builder image ${stale}"
             docker image rm "$stale" >/dev/null 2>&1 || true
           done
 fi
+
+# build/ and install/ persist for incremental colcon, but only within one
+# Debian release: CMake caches the Python it configured with, so switching
+# release on top of them installs saint_server under the OTHER release's
+# lib/python3.X (a trixie tarball shipped lib/python3.11, invisible to
+# trixie's 3.13). Wipe them when the release changes.
+COLCON_RELEASE_STAMP="build/.saint-debian-release"
+if [[ -d build || -d install ]] \
+   && [[ "$(cat "$COLCON_RELEASE_STAMP" 2>/dev/null)" != "$DEBIAN_RELEASE" ]]; then
+    log "colcon build/ + install/ are not from a ${DEBIAN_RELEASE} build — wiping for a clean rebuild"
+    rm -rf build install log
+fi
+mkdir -p build
+printf '%s' "$DEBIAN_RELEASE" > "$COLCON_RELEASE_STAMP"
 
 # Mount the extracted ROS2 install tree READ-ONLY straight to /opt/ros
 # so the prebuilt setup.bash's baked /opt/ros paths resolve — no
@@ -609,7 +649,7 @@ fi
 log "Building saint_os in ${BUILDER_IMAGE} (incremental colcon; install/ persists)"
 docker run --rm -i --platform "linux/${ARCH}" \
   -v "${PWD}:/work" \
-  -v "${PWD}/_ros2/opt/ros/${ROS_DISTRO}:/opt/ros/${ROS_DISTRO}:ro" \
+  -v "${PWD}/${ROS2_TREE}/opt/ros/${ROS_DISTRO}:/opt/ros/${ROS_DISTRO}:ro" \
   -w /work \
   -e ROS_DISTRO="${ROS_DISTRO}" \
   "$BUILDER_IMAGE" \
@@ -655,9 +695,13 @@ CONTAINER_EOF
 # --- assemble tarball -------------------------------------------------------
 
 log "Assembling dist tarball"
-scripts/make-dist.sh "${VERSION}" "${ARCH}" "${ROS_DISTRO}"
+scripts/make-dist.sh "${VERSION}" "${ARCH}" "${ROS_DISTRO}" "${DEBIAN_RELEASE}"
 
-TARBALL=$(ls -t dist/saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}.tar.zst 2>/dev/null | head -n1)
+if [[ "$DEBIAN_RELEASE" == "bookworm" ]]; then
+    TARBALL="dist/saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}.tar.zst"
+else
+    TARBALL="dist/saint-os_${VERSION}_${ARCH}_${ROS_DISTRO}_${DEBIAN_RELEASE}.tar.zst"
+fi
 [[ -f "$TARBALL" ]] || die "make-dist.sh did not produce a tarball"
 
 log "Done."

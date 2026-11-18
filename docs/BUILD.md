@@ -12,7 +12,7 @@ the component's own deep-dive doc.
 
 | Component | From | Command | Output |
 |-----------|------|---------|--------|
-| **Server dist** (the release artifact) | repo root | `scripts/build-local-dist.sh` | `dist/saint-os_<version>_arm64_kilted.tar.zst` |
+| **Server dist** (the release artifact) | repo root | `scripts/build-local-dist.sh [--debian-release trixie]` | `dist/saint-os_<version>_arm64_kilted[_trixie].tar.zst` |
 | **Server dev workspace** | `server/` | `colcon build --symlink-install` | `install/` (run in place) |
 | **RP2040 firmware** | `firmware/rp2040/` | `./build.sh hw` \| `sim` | `.uf2` |
 | **Teensy 4.1 firmware** | `firmware/teensy41/` | `./build.sh hw` \| `sim` | `.hex` |
@@ -50,7 +50,18 @@ required on the build host.
 cd SaintOS/source
 scripts/build-local-dist.sh
 # → dist/saint-os_<version>_arm64_kilted.tar.zst (prints SHA-256 + scp/install hint)
+
+scripts/build-local-dist.sh --debian-release trixie
+# → dist/saint-os_<version>_arm64_kilted_trixie.tar.zst
 ```
+
+A dist targets **one Debian release**: its ROS 2 tree links that release's
+libpython (3.11 bookworm / 3.13 trixie) and its offline debs are that release's,
+so Pi OS Trixie needs the `_trixie` build and Bookworm / Ubuntu 24.04 the
+unsuffixed one (`install.sh` refuses a mismatch). The apt deps are
+`packaging/runtime-deps.txt` (names shared by both releases) plus
+`packaging/runtime-deps.<release>.txt` (t64 renames, sonames, Python minor).
+CI's `dist.yml` builds both variants for every release.
 
 Install the result per [INSTALL.md](INSTALL.md) / the
 [operator guide](../server/docs/SERVER_GUIDE.md).

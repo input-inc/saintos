@@ -335,6 +335,12 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
+  # One server tarball per Debian release. The bundled ROS2 tree links the
+  # release's libpython (3.11 bookworm / 3.13 trixie) and deps/ holds that
+  # release's debs, so a single tarball can't serve both — 0.2.3 shipped
+  # bookworm-only and its libssl3 broke installs on trixie (libssl3t64).
+  # Bookworm keeps the unsuffixed asset name (servers ≤ 0.2.3 only parse
+  # that form); other releases append `_<release>` — see scripts/make-dist.sh.
   package-server:
     needs: [meta, firmware-rp2040, firmware-teensy41, firmware-raspberrypi, appimage-controller]
     strategy:
@@ -351,6 +357,14 @@ jobs:
             ros2_repos_ref: release-kilted-20250728
             micro_ros_ref: 6.0.1
             debian_release: bookworm
+            name_suffix: ''
+          - runs-on: ubuntu-22.04-arm
+            arch: arm64
+            ros: kilted
+            ros2_repos_ref: release-kilted-20250728
+            micro_ros_ref: 6.0.1
+            debian_release: trixie
+            name_suffix: _trixie
     runs-on: ${{ matrix.runs-on }}
     env:
       ROS_DISTRO: ${{ matrix.ros }}
@@ -358,6 +372,8 @@ jobs:
       MICRO_ROS_REF: ${{ matrix.micro_ros_ref }}
       ARCH: ${{ matrix.arch }}
       DEBIAN_RELEASE: ${{ matrix.debian_release }}
+      # Where make-dist.sh looks for this release's ROS2 tree.
+      ROS2_TREE: ${{ matrix.debian_release == 'bookworm' && '_ros2' || format('_ros2_{0}', matrix.debian_release) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -393,7 +409,13 @@ jobs:
           # produces a new tag that points at a freshly-built release.
           BUILD_SCRIPT="${GITHUB_WORKSPACE}/scripts/build-ros2-in-container.sh"
           HASH=$(cat ros2.repos micro_ros.txt "${BUILD_SCRIPT}" | sha256sum | cut -c1-12)
-          TAG="ros2-${ROS_DISTRO}-${ARCH}-${HASH}"
+          # Bookworm keeps the bare tag; other releases carry a -<release>
+          # segment (same scheme as ros2-build.yml).
+          if [[ "${DEBIAN_RELEASE}" == "bookworm" ]]; then
+            TAG="ros2-${ROS_DISTRO}-${ARCH}-${HASH}"
+          else
+            TAG="ros2-${ROS_DISTRO}-${ARCH}-${DEBIAN_RELEASE}-${HASH}"
+          fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Looking up release: ${TAG}"
           if ! gh release view "${TAG}" >/dev/null 2>&1; then
@@ -409,10 +431,10 @@ jobs:
           gh release download "${{ steps.ros2_release.outputs.tag }}" \
             --pattern 'ros2-install.tar.gz' \
             --output ros2-install.tar.gz
-          mkdir -p _ros2/opt/ros/${ROS_DISTRO}
-          tar -xzf ros2-install.tar.gz -C _ros2/opt/ros/${ROS_DISTRO}
-          ls _ros2/opt/ros/${ROS_DISTRO}/install/setup.bash >/dev/null
-          echo "ROS2 extracted to _ros2/opt/ros/${ROS_DISTRO}/install/"
+          mkdir -p ${ROS2_TREE}/opt/ros/${ROS_DISTRO}
+          tar -xzf ros2-install.tar.gz -C ${ROS2_TREE}/opt/ros/${ROS_DISTRO}
+          ls ${ROS2_TREE}/opt/ros/${ROS_DISTRO}/install/setup.bash >/dev/null
+          echo "ROS2 extracted to ${ROS2_TREE}/opt/ros/${ROS_DISTRO}/install/"
 
       - name: Download firmware artifacts
         uses: actions/download-artifact@v7
@@ -468,20 +490,23 @@ jobs:
       # Download all runtime apt deps as .deb files into _debs/ so the dist
       # tarball is self-contained — air-gapped targets can install without
       # internet. install.sh will mount this as a local apt repo at install
-      # time. Targets bookworm only; non-bookworm hosts fall back to online
-      # apt in install.sh.
+      # time. Downloaded in a debian:<release> container so the debs match
+      # this matrix entry's release; install.sh refuses a host whose release
+      # differs from the bundle's.
       - name: Bundle runtime apt dependencies
         run: |
           set -eo pipefail
           mkdir -p _debs
-          # Single source of truth: packaging/runtime-deps.txt (shared with
+          # Single source of truth: packaging/runtime-deps.txt plus the
+          # release's runtime-deps.<release>.txt (shared with
           # packaging/install.sh and scripts/build-local-dist.sh, so the
           # bundled set can't drift from the installed set — which once
           # dropped the audio stack: a 229 MB release vs the ~600 MB local
           # build). Strip comment / blank lines and hand the set to the
           # container via -e; the quoted heredoc keeps the runner shell from
           # expanding $DEB_LIST, so the container's bash expands it at runtime.
-          DEB_LIST="$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' packaging/runtime-deps.txt | tr '\n' ' ')"
+          DEB_LIST="$(grep -vhE '^[[:space:]]*#|^[[:space:]]*$' \
+            packaging/runtime-deps.txt "packaging/runtime-deps.${DEBIAN_RELEASE}.txt" | tr '\n' ' ')"
           echo "Bundling: ${DEB_LIST}"
           docker run --rm -i --platform linux/arm64 \
             -v "${PWD}/_debs:/debs" \
@@ -532,10 +557,10 @@ jobs:
           echo "Web build size: $(du -sh dist | cut -f1)"
 
       # ------------------------------------------------------------------------
-      # Build saint_os inside the same Debian Bookworm environment the bundled
-      # ROS2 was built against — this guarantees libstdc++, libpython, and
-      # rosidl typesupport ABIs all match.
-      - name: Build saint_os against bundled ROS2 (in bookworm container)
+      # Build saint_os inside the same Debian release the bundled ROS2 was
+      # built against — this guarantees libstdc++, libpython, and rosidl
+      # typesupport ABIs all match.
+      - name: Build saint_os against bundled ROS2 (in ${{ matrix.debian_release }} container)
         run: |
           set -eo pipefail
           # -i forwards the heredoc as stdin; without it bash inside the
@@ -543,17 +568,20 @@ jobs:
           docker run --rm -i --platform linux/arm64 \
             -v "${PWD}:/work" \
             -w /work \
-            -e ROS_DISTRO \
+            -e ROS_DISTRO -e DEBIAN_RELEASE -e ROS2_TREE \
             "debian:${DEBIAN_RELEASE}" \
             bash -eo pipefail <<'CONTAINER_EOF'
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
+          # The release-specific runtime libs (libpython3.x, libssl, …) come
+          # from the same per-release list the deps bundle uses.
           apt-get install -y --no-install-recommends \
               ca-certificates curl gnupg \
               build-essential cmake git pkg-config \
               python3 python3-dev python3-pip \
               python3-numpy python3-yaml \
-              libpython3.11 libssl3 libtinyxml2-dev libxml2-dev libyaml-dev
+              libtinyxml2-dev libxml2-dev libyaml-dev \
+              $(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "packaging/runtime-deps.${DEBIAN_RELEASE}.txt")
           # ROS2 tooling — Debian has no apt packages for these; install from
           # PyPI per the official ROS2 source-install procedure.
           python3 -m pip install --break-system-packages -U \
@@ -568,7 +596,7 @@ jobs:
           # saint_os install tree — if those paths don't match the deploy
           # location, the systemd unit fails to source on the target.
           mkdir -p /opt/ros/${ROS_DISTRO}
-          cp -a /work/_ros2/opt/ros/${ROS_DISTRO}/install /opt/ros/${ROS_DISTRO}/install
+          cp -a /work/${ROS2_TREE}/opt/ros/${ROS_DISTRO}/install /opt/ros/${ROS_DISTRO}/install
           source /opt/ros/${ROS_DISTRO}/install/setup.bash
 
           # --base-paths server: scope colcon's package discovery to the
@@ -596,11 +624,12 @@ jobs:
           scripts/make-dist.sh \
             "${{ needs.meta.outputs.version }}" \
             "${{ matrix.arch }}" \
-            "${{ matrix.ros }}"
+            "${{ matrix.ros }}" \
+            "${{ matrix.debian_release }}"
 
       - uses: actions/upload-artifact@v6
         with:
-          name: saint-os_${{ needs.meta.outputs.version }}_${{ matrix.arch }}_${{ matrix.ros }}
+          name: saint-os_${{ needs.meta.outputs.version }}_${{ matrix.arch }}_${{ matrix.ros }}${{ matrix.name_suffix }}
           path: dist/*.tar.zst
           if-no-files-found: error
           retention-days: 30
