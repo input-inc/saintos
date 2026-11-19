@@ -259,6 +259,36 @@ fi
 pushd "$CARGO_TARGET_DIR/release/bundle/appimage" >/dev/null
 linuxdeploy --appdir "$APPDIR"
 
+# 2b. Undo tauri's relative-path patch of libwebkit2gtk. When tauri's
+#     own bundling succeeds (native CI, since the AppRun pre-seed above
+#     stopped its download from failing), its linuxdeploy-plugin-gtk.sh
+#     runs `sed -i "s|/usr|././|g"` over libwebkit*, so webkit looks for
+#     "././/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess".
+#     That only resolves under tauri's stock AppRun, which chdirs into
+#     $APPDIR/usr. Ours doesn't, and the path-shim only maps the
+#     absolute /usr path, so the Deck died with "Failed to spawn child
+#     process ././/lib/.../WebKitNetworkProcess". Same-length swap back
+#     to /usr: the library is exactly as the distro shipped it, which is
+#     what the shim expects. Local Docker builds never got the patch
+#     (tauri's linuxdeploy fails under Rosetta), which is why only
+#     CI-built AppImages broke.
+while IFS= read -r -d '' webkit_lib; do
+    perl -pi -e 's#\./\./#/usr#g' "$webkit_lib"
+    if grep -qaF '././' "$webkit_lib"; then
+        echo "ERROR: $webkit_lib still has ././ paths after the un-patch" >&2
+        exit 1
+    fi
+done < <(find "$APPDIR"/usr/lib* -name 'libwebkit*' -type f -print0)
+
+# 2c. Drop the bundled libwayland. The host's Mesa (libEGL, never bundled)
+#     links the host's libwayland, but LD_LIBRARY_PATH put our older copy
+#     (Ubuntu 24.04's 1.22; SteamOS 3.8 ships 1.23, newer images 1.25)
+#     in front of it, and WebKitWebProcess aborted with "Could not create
+#     default EGL display: EGL_BAD_PARAMETER". Found with
+#     steamos-smoke-test.sh. Every system that runs GTK 3 has libwayland,
+#     so use theirs.
+rm -fv "$APPDIR"/usr/lib/libwayland-*.so*
+
 # 3. Install the LD_PRELOAD path-mapping shim that intercepts
 #    execve / posix_spawn / open / stat calls and rewrites
 #    /usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/* (the path baked into
