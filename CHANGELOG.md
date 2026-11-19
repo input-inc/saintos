@@ -1,5 +1,100 @@
 # Changelog
 
+## v0.2.4 — 2026-11-19
+
+Changes since v0.2.3 (2026-10-07): fixes for current Raspberry Pi OS
+(Trixie) and SteamOS installs, plus a few controller and dashboard fixes.
+No firmware changes.
+
+### Upgrade notes — read before installing
+
+- **Pick the server tarball for your Pi's OS.** There are now two:
+  - `saint-os_0.2.4_arm64_kilted_trixie.tar.zst` for Raspberry Pi OS
+    Trixie (Debian 13, the current Pi OS image).
+  - `saint-os_0.2.4_arm64_kilted.tar.zst` for Bookworm (Debian 12) and
+    Ubuntu 24.04.
+
+  `grep VERSION_CODENAME /etc/os-release` tells you which one you have.
+  `install.sh` refuses the wrong one and names the right one. Servers
+  already running v0.2.3 on Bookworm update as before: their self-updater
+  only sees the Bookworm tarball.
+- **Copy the controller AppImage to the Steam Deck by hand this once.** The
+  v0.2.3 AppImage can't start on SteamOS (see below), so it can't
+  self-update. Use `saint_firmware_controller_*.AppImage` from the release
+  or from the server's firmware page. Later updates work over the air again.
+- **No reflash needed.** Firmware is unchanged from v0.2.3.
+
+### Highlights
+
+- **Server installs on Raspberry Pi OS Trixie.** v0.2.3 only installed on
+  older Bookworm images.
+- **The controller starts on SteamOS again.** v0.2.3's AppImage failed with
+  `Failed to spawn child process ././/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess`.
+
+### Server install (Raspberry Pi OS Trixie)
+
+- One server tarball per Debian release. The Trixie build uses Trixie's
+  libraries (Python 3.13, `libssl3t64`) and its own ROS 2 tree. v0.2.3's
+  single Bookworm build carried Debian 12 packages, and its `libssl3`
+  conflicted with Trixie's `libssl3t64`.
+- `install.sh` checks that the tarball matches the host's release before
+  installing anything.
+- The offline install now uses only the bundled packages. It used to also
+  read the image's stale online package lists and could hang for over
+  10 minutes waiting on downloads with no network.
+- Packages that are newer on the Pi OS image are kept. v0.2.3 pinned exact
+  versions (e.g. `systemd`), which failed on any image newer than the
+  bundle. When a package in the bundle requires an exact version that the
+  image has a newer one of, only that family of packages is moved to the
+  bundled version, and the installer says which ones.
+- The installer never removes packages from the image.
+- The server's self-update (GitHub, USB stick or browser upload) only
+  offers or accepts the tarball built for the host's OS.
+
+### Controller
+
+- **SteamOS:** the AppImage starts again.
+  - Tauri's bundler had rewritten WebKit's helper paths to relative
+    `././` paths that only work with Tauri's own launcher, which we
+    replace. AppImages built on CI from v0.2.3 on had them; local builds
+    didn't. The original paths are restored, and the build fails if any
+    are left.
+  - The AppImage no longer bundles `libwayland`. Its older Ubuntu copy
+    replaced the one SteamOS's graphics drivers need, so once the
+    helpers could start, the webview crashed with `Could not create
+    default EGL display: EGL_BAD_PARAMETER`.
+- The dashboard shows the Steam Deck's own battery (or any Linux device's)
+  next to the robot's packs.
+- The connection status no longer stays red over a working link after a
+  reconnect.
+- A Wi-Fi drop is noticed within seconds instead of when TCP gives up,
+  which could take minutes.
+
+### Dashboard
+
+- Sounds can be edited after they're created.
+- Renaming a sound no longer resets to the old name while you type.
+- Animation editor: selecting another keyframe while a number field is
+  focused no longer writes the old keyframe's value onto the new one.
+
+### Build / CI
+
+- CI builds and releases both server tarballs (Bookworm and Trixie).
+- `build-local-dist.sh --debian-release trixie` builds the Trixie tarball
+  locally.
+- Runtime dependencies are split into a shared list and per-release lists
+  (`packaging/runtime-deps*.txt`).
+- New SteamOS smoke test. Every CI build launches the controller AppImage
+  on SteamOS's own libraries, taken from Valve's current recovery image,
+  and checks that the webview and frontend come up. It caught both
+  controller bugs above. See `docs/BUILD.md`.
+
+### Known issues
+
+- The SteamOS smoke test uses the current recovery image (SteamOS 3.8.14)
+  under a virtual display. It doesn't cover gamescope, Steam's launcher or
+  the GPU.
+
 ## v0.2.3 — 2026-10-07
 
 Changes since v0.2.2 (2026-07-21): 17 commits across firmware, server,
