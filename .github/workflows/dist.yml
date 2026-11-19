@@ -335,6 +335,18 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
+  # Launch the AppImage on SteamOS's own userland and check its webview comes
+  # up. Catches what broke on a Deck in 0.2.3: webkit couldn't spawn its
+  # helper processes ("Failed to spawn child process
+  # ././/lib/.../WebKitNetworkProcess"). Doesn't gate the server tarball yet.
+  appimage-smoke-steamos:
+    needs: appimage-controller
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/appimage-steamos-smoke.yml
+
+  # ---------------------------------------------------------------------------
   # One server tarball per Debian release. The bundled ROS2 tree links the
   # release's libpython (3.11 bookworm / 3.13 trixie) and deps/ holds that
   # release's debs, so a single tarball can't serve both — 0.2.3 shipped
