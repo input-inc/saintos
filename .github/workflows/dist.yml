@@ -346,19 +346,6 @@ jobs:
       actions: read
     uses: ./.github/workflows/appimage-steamos-smoke.yml
 
-  # TEMPORARY — remove before merging. Runs the smoke test on the broken
-  # AppImage from run 44240655473 (cb2c38a), which must FAIL, to prove the
-  # test catches the bug. That artifact expires 2026-12-18.
-  appimage-smoke-steamos-known-broken:
-    needs: meta
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/appimage-steamos-smoke.yml
-    with:
-      run_id: '44240655473'
-      expect_failure: true
-
   # ---------------------------------------------------------------------------
   # One server tarball per Debian release. The bundled ROS2 tree links the
   # release's libpython (3.11 bookworm / 3.13 trixie) and deps/ holds that
@@ -562,7 +549,7 @@ jobs:
       # static assets — no reason to drag npm/node into the arm64 colcon
       # container. setup.py globs server/web/dist/ into the install tree,
       # so this has to land before the colcon step below.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'
