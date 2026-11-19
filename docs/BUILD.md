@@ -132,6 +132,27 @@ controller/appimage/build-docker.sh --clean  # from scratch
 For a native dev inner loop (`npm run tauri dev`) and the full Steam Deck story,
 see [controller/README.md](../controller/README.md).
 
+### Testing the AppImage on SteamOS
+
+CI launches every AppImage on SteamOS's own libraries (the root filesystem of
+Valve's current recovery image, imported into Docker) and checks that the
+webview comes up and the frontend runs. To do the same locally:
+
+```bash
+# Once per SteamOS release (3.4 GB download, ~6 GB image):
+curl -fLo steamos.img.bz2 "$(controller/appimage/steamos-rootfs.sh --resolve)"
+controller/appimage/steamos-rootfs.sh steamos.img.bz2 steamos-rootfs.tar
+docker import --platform linux/amd64 steamos-rootfs.tar steamos-rootfs:latest
+
+controller/appimage/steamos-smoke-test.sh path/to/SAINT_Controller.AppImage
+```
+
+It also takes an unpacked AppDir, to try a bundle change without re-sealing.
+It doesn't cover gamescope, Steam's launcher or the GPU. On an Apple Silicon
+Mac it runs under Rosetta and is slower but gives the same verdicts. To test
+an earlier CI build, run the `appimage-steamos-smoke` workflow with that run's
+ID.
+
 ## Continuous integration
 
 `.github/workflows/dist.yml` builds every component above and, on a `v*` tag,

@@ -1,0 +1,98 @@
+name: appimage-steamos-smoke
+
+# Launch the controller AppImage on SteamOS's own userland (the root
+# filesystem of Valve's current recovery image, imported into Docker) and
+# check that its webview comes up. See controller/appimage/steamos-smoke-test.sh.
+#
+# Called by dist.yml for every build; also runnable by hand against the
+# AppImage of any earlier run (e.g. a build a user reports as broken).
+
+on:
+  workflow_call:
+    inputs:
+      run_id:
+        description: 'Run whose appimage-controller artifact to test (default: the calling run)'
+        type: string
+        default: ''
+      expect_failure:
+        description: 'Pass only if the smoke test fails (proves it catches a known-broken build)'
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run whose appimage-controller artifact to test'
+        type: string
+        required: true
+      expect_failure:
+        description: 'Pass only if the smoke test fails'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      # The "latest" link redirects to a versioned name such as
+      # steamdeck-oobe-repair-20260707.10-3.8.14.img.bz2: the cache key, so
+      # a new SteamOS release is picked up automatically.
+      - name: Resolve SteamOS recovery image
+        id: steamos
+        run: |
+          set -euo pipefail
+          URL=$(controller/appimage/steamos-rootfs.sh --resolve)
+          NAME=$(basename "$URL" .img.bz2)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "SteamOS image: $NAME"
+
+      - name: Restore SteamOS rootfs
+        id: cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/steamos-rootfs.tar.zst
+          key: steamos-rootfs-${{ steps.steamos.outputs.name }}
+
+      # Cold path, once per SteamOS release: 3.4 GB download, ~10 GB disk
+      # image, ~5 GB rootfs. The runner's preinstalled SDKs are dropped
+      # first so that fits.
+      - name: Build SteamOS rootfs from the recovery image
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h "$RUNNER_TEMP" | tail -1
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/steamos.img.bz2" "${{ steps.steamos.outputs.url }}"
+          controller/appimage/steamos-rootfs.sh "$RUNNER_TEMP/steamos.img.bz2" "$RUNNER_TEMP/steamos-rootfs.tar"
+          rm -f "$RUNNER_TEMP/steamos.img.bz2"
+          zstd -T0 -q --rm "$RUNNER_TEMP/steamos-rootfs.tar" -o "$RUNNER_TEMP/steamos-rootfs.tar.zst"
+          ls -lh "$RUNNER_TEMP/steamos-rootfs.tar.zst"
+
+      - name: Import SteamOS rootfs into Docker
+        run: |
+          set -euo pipefail
+          # Keep the .tar.zst: actions/cache saves it at the end of the job.
+          zstd -dc "$RUNNER_TEMP/steamos-rootfs.tar.zst" | docker import --platform linux/amd64 - steamos-rootfs:smoke
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: appimage-controller
+          path: ${{ runner.temp }}/appimage
+          run-id: ${{ inputs.run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Smoke-test the AppImage on SteamOS
+        run: |
+          set -euo pipefail
+          APPIMAGE=$(find "$RUNNER_TEMP/appimage" -name '*.AppImage' -print -quit)
+          [[ -n "$APPIMAGE" ]] || { echo "::error::No AppImage in the appimage-controller artifact"; exit 1; }
+          echo "Testing $(basename "$APPIMAGE")"
+          controller/appimage/steamos-smoke-test.sh "$APPIMAGE" --image steamos-rootfs:smoke \
+            ${{ inputs.expect_failure && '--expect-failure' || '' }}
